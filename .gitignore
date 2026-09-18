@@ -1,0 +1,26 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# node / web
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+apps/web/src/routeTree.gen.ts
+pnpm-lock.yaml.bak
+
+# env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# editors / os
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# logs
+*.log
