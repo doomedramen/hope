@@ -2,7 +2,7 @@
 
 **Product and engineering specification**  
 **Status:** Initial implementation plan  
-**Project name:** To be decided  
+**Project name:** hope  
 **Initial audience:** A single trusted homelab operator  
 **Licence:** Open source; exact licence to be chosen before the first public release
 
@@ -1440,7 +1440,7 @@ Vendor-controlled auto-updates, such as appliance firmware, can still be represe
 
 These choices should be recorded as architecture decisions during M0–M2:
 
-1. Final project name and licence.
+1. Licence (project name decided: hope).
 2. Exact Rust framework and job-queue implementation.
 3. WebSocket versus Server-Sent Events for live UI state.
 4. Agent long-lived transport: WebSocket, HTTP/2 streaming, or periodic HTTPS polling.
