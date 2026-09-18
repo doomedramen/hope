@@ -1,0 +1,21 @@
+[package]
+name = "agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "agent"
+path = "src/main.rs"
+
+[dependencies]
+protocol.workspace = true
+
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+figment.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
