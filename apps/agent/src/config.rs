@@ -2,6 +2,10 @@ use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
 
+/// Default on-disk location for the agent's enrolled identity (private
+/// key, signed cert, CA cert) on a monitored host.
+pub const DEFAULT_STATE_DIR: &str = "/var/lib/hope";
+
 /// Agent configuration. No mTLS material is loaded yet (that's the next
 /// slice, per ADR-0007) — this only covers what the version/config-print
 /// stub needs.
