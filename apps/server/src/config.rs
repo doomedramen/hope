@@ -16,6 +16,19 @@ pub struct Config {
     pub bind_addr: String,
     pub database_url: String,
     pub web_dist_dir: String,
+
+    /// Agent gateway (mTLS WebSocket, ADR-0007/0008) and enrollment (TLS,
+    /// server-auth only) listener addresses.
+    pub gateway_bind_addr: String,
+    pub enroll_bind_addr: String,
+
+    /// PKI material paths. Never defaulted to embedded/checked-in key
+    /// material — `server ca init` writes real files here; nothing is
+    /// generated until that command runs.
+    pub ca_cert_path: String,
+    pub ca_key_path: String,
+    pub server_cert_path: String,
+    pub server_key_path: String,
 }
 
 fn defaults() -> Config {
@@ -23,6 +36,12 @@ fn defaults() -> Config {
         bind_addr: "0.0.0.0:8080".to_string(),
         database_url: String::new(),
         web_dist_dir: "apps/web/dist".to_string(),
+        gateway_bind_addr: "0.0.0.0:8443".to_string(),
+        enroll_bind_addr: "0.0.0.0:8444".to_string(),
+        ca_cert_path: "data/pki/ca-cert.pem".to_string(),
+        ca_key_path: "data/pki/ca-key.pem".to_string(),
+        server_cert_path: "data/pki/server-cert.pem".to_string(),
+        server_key_path: "data/pki/server-key.pem".to_string(),
     }
 }
 
