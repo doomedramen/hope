@@ -1,9 +1,9 @@
 # Hope web UI design specification: overview dashboard
 
-**Status:** Approved visual direction; implementation-ready specification  
-**Scope:** Light-theme web application shell and overview dashboard  
-**Primary route:** `/`  
-**Implementation stack:** React, TanStack Router, Tailwind CSS v4, shadcn components, Lucide icons, Recharts  
+**Status:** Approved visual direction; implementation-ready specification
+**Scope:** Light-theme web application shell and overview dashboard
+**Primary route:** `/`
+**Implementation stack:** React, TanStack Router, Tailwind CSS v4, shadcn components, Lucide icons, Recharts
 **Source of truth:** shadcn CSS variables in `apps/web/src/index.css`; Tailwind utilities compose layout and spacing
 
 This document translates the approved Hope dashboard concept into a buildable UI system. It describes the visual language, information hierarchy, component composition, semantic tokens, chart rules, responsive behavior, and acceptance criteria.
@@ -448,4 +448,3 @@ The implementation is aligned when:
 - Keyboard focus, text contrast, reduced motion, and non-color status cues are preserved.
 - The layout is usable at 375px, 768px, 1024px, 1280px, and 1440px widths.
 - Verification passes at minimum: `pnpm lint`, `pnpm test`, `pnpm build`, and `git diff --check`.
-
