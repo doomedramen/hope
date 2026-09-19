@@ -7,6 +7,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::middleware::from_fn_with_state;
 use axum::routing::post;
 use axum_server::tls_rustls::RustlsConfig;
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,7 @@ use sqlx::PgPool;
 use crate::agents;
 use crate::config::Config;
 use crate::pki::{self, Ca};
+use crate::ratelimit::{self, RateLimitState};
 
 #[derive(Clone)]
 struct EnrollState {
@@ -105,8 +107,16 @@ pub async fn serve(config: Config, pool: PgPool) -> anyhow::Result<()> {
         ca_cert_pem: std::sync::Arc::new(ca_cert_pem),
     };
 
+    // Tokens are already single-use/short-lived, but this still bounds
+    // how fast an attacker can burn through guesses or hammer the
+    // endpoint while a valid token's TTL window is open.
+    let enroll_limiter = RateLimitState::new(20, config.trust_proxy_headers);
+
     let app = Router::new()
-        .route("/enroll", post(enroll))
+        .route(
+            "/enroll",
+            post(enroll).layer(from_fn_with_state(enroll_limiter, ratelimit::enforce)),
+        )
         .with_state(state);
 
     let tls_config =
@@ -115,7 +125,7 @@ pub async fn serve(config: Config, pool: PgPool) -> anyhow::Result<()> {
     let addr: std::net::SocketAddr = config.enroll_bind_addr.parse()?;
     tracing::info!(addr = %addr, "enroll listener starting");
     axum_server::bind_rustls(addr, tls_config)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await?;
 
     Ok(())
