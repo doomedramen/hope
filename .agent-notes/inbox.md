@@ -277,3 +277,12 @@ Branch m1-inventory at 74928eb, not merged. Done: migrations 0004-0008, identity
 - Status: captured
 
 update the logo to be scan-heart
+
+## Top navigation
+- Created: 2026-09-19T17:29:21+01:00
+- Type: preference
+- Area: ui
+- Context: Reviewing the M3 web UI
+- Status: captured
+
+top nav seems pointless, everything needed is in the side nav so far.
