@@ -1,8 +1,7 @@
-# Threat model (Milestone 0)
+# Threat model (Milestones 0–6)
 
-Status: initial, covers what exists at the end of Milestone 0 (repository
-and engineering foundation — spec §17). Revisit at each later milestone as
-discovery, monitoring, and maintenance subsystems land.
+Status: reviewed through Milestone 6. Revisit at each later milestone as
+agent updates, dependency-aware alerting, and maintenance execution land.
 
 Scope: the control-plane server, the agent, the network between them, and
 the operator's browser session. Out of scope for this pass: supply-chain
@@ -13,19 +12,16 @@ Method: STRIDE per component, with current mitigation and honest gaps.
 
 ## 1. Network scanning (discovery/monitoring subsystem)
 
-Not implemented in M0 (spec §17 explicitly excludes it — "Not included:
-real scanning, monitors, or inventory"). Noted here because the scope and
-rate-limit controls in spec §6.1/§6.3 are the primary planned mitigation
-for a compromised or misconfigured scanner causing collateral damage
-(scanning networks outside the approved CIDR, overwhelming fragile
-devices, or triggering IDS/IPS on someone else's network). Threats to
-track when this lands:
+Implemented across M2–M4. The scope and rate-limit controls in spec
+§6.1/§6.3 mitigate a compromised or misconfigured scanner causing
+collateral damage (scanning networks outside the approved CIDR, overwhelming
+fragile devices, or triggering IDS/IPS on someone else's network).
 
 - **Tampering / DoS**: unbounded or unapproved-scope scanning.
-  *Planned mitigation*: explicit scope approval, target-count display
-  before first scan, bounded concurrency/rate limits (§6.1, §6.3).
+  *Mitigation*: explicit scope approval, target-count display before first
+  scan, bounded concurrency/rate limits (§6.1, §6.3), and cancellation.
 - **Repudiation**: scan activity not attributable.
-  *Planned mitigation*: scan duration/source/completeness retained (§6.3).
+  *Mitigation*: scan duration/source/completeness retained (§6.3).
 
 ## 2. Stored credentials
 
@@ -59,7 +55,7 @@ master-key source. Threats and current mitigations:
 
 ## 3. Enrollment (agent bootstrap, ADR-0007)
 
-This is the most security-relevant thing M0 actually implements.
+This is the most security-relevant thing the agent bootstrap path implements.
 
 **Flow**: operator runs `server enroll-token create`, which prints a
 single-use token, the CA's SHA-256 fingerprint, and a combined
@@ -118,17 +114,17 @@ atomically, signs the CSR, and returns a client cert + the CA cert.
 ## 4. Agent privilege and runtime
 
 - **Elevation of privilege**: the agent process, once installed, has
-  whatever OS-level privilege the operator grants it. M0 has no
-  install/systemd-unit story yet — `agent enroll`/`agent run` are run
-  manually.
-  *Gap*: no documented least-privilege recommendation yet (e.g. running as
-  a dedicated non-root user with read access only to what discovery/
-  monitoring actually need). This belongs in the M2+ agent-capabilities
-  work, not M0.
+  whatever OS-level privilege the operator grants it. M6's installer creates
+  a dedicated non-login service account and a `0700` state directory, but
+  host-specific collectors may still need additional read privileges.
+  *Mitigation*: the installer never grants sudo or arbitrary command
+  execution; the service unit uses `NoNewPrivileges`, `ProtectHome`, and
+  `ProtectSystem`.
 - **Tampering (of agent identity)**: agent private key at
   `/var/lib/hope/agent-key.pem` (default state dir) readable only by
   the key's owner (`0600`), but anyone with root or the same UID can read
-  it. No hardware-backed key storage (TPM, secure enclave) in M0.
+  it. No hardware-backed key storage (TPM, secure enclave) is required in
+  this milestone.
 - **Spoofing (revoked agent reconnecting)**: `server revoke-agent`
   marks an agent's cert revoked in the `agents` table.
   *Mitigation*: the gateway checks `revoked_at` on every new connection
@@ -141,16 +137,15 @@ atomically, signs the CSR, and returns a client cert + the CA cert.
 
 ## 5. Update supply chain
 
-Not implemented in M0 (signed-release pipeline is a stated M0 deliverable
-in spec §17 but the CI cross-compile job doesn't yet sign or publish
-artifacts — see `.github/workflows/ci.yml`, which builds but doesn't
-publish agent binaries).
+Centralized signed update distribution is not implemented yet; it is the
+Milestone 7 scope. The current release verification primitives require
+operators to provide verified artifact paths to the M6 installer.
 
 - **Tampering**: a compromised build step or artifact host could serve a
   malicious agent binary as if it were official.
-  *Gap*: no signing key, no checksum publication, no verification step on
-  the agent side. This is explicitly flagged as missing and should block
-  any real-world (non-dev) rollout of agent binaries until addressed.
+  *Mitigation*: the agent and xtask contain Ed25519 release verification
+  primitives, but M7 still needs the repository/cache, rollout policy, and
+  enforcement in the update/repair workflow.
 
 ## 6. Web authentication
 
