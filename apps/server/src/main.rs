@@ -2,6 +2,7 @@ mod agents;
 mod auth_mw;
 mod config;
 mod csrf;
+mod discovery;
 mod enroll;
 mod gateway;
 mod inventory;
