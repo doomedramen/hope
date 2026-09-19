@@ -1,13 +1,16 @@
 mod agents;
+mod auth_mw;
 mod config;
 mod csrf;
 mod enroll;
 mod gateway;
+mod inventory;
 mod jobs_handlers;
 mod pki;
 mod ratelimit;
 mod routes;
 mod scheduler;
+mod seed;
 mod session_store;
 mod state;
 
@@ -64,6 +67,9 @@ enum Role {
     /// connection on its next attempt (existing open connections are not
     /// force-closed in this milestone).
     RevokeAgent { agent_id: uuid::Uuid },
+    /// Seed a demo inventory topology (design docs/design/m1-inventory.md
+    /// §9 slice 11) for trying out M1 without real agents/scans.
+    Seed,
 }
 
 #[derive(Subcommand)]
@@ -122,6 +128,117 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
     let setup_limiter = RateLimitState::new(10, config.trust_proxy_headers);
     let login_limiter = RateLimitState::new(10, config.trust_proxy_headers);
 
+    // M1 inventory: every route is session-authenticated (§12.3) and
+    // subject to the same CSRF custom-header check as every other
+    // mutating `/api/v1` route (see csrf.rs doc comment).
+    let inventory_router = Router::new()
+        .route(
+            "/api/v1/networks",
+            get(inventory::generic::networks::list).post(inventory::generic::networks::create),
+        )
+        .route(
+            "/api/v1/networks/{id}",
+            get(inventory::generic::networks::get).patch(inventory::generic::networks::patch),
+        )
+        .route(
+            "/api/v1/devices",
+            get(inventory::devices::list).post(inventory::devices::create),
+        )
+        .route(
+            "/api/v1/devices/{id}",
+            get(inventory::devices::get).patch(inventory::devices::patch),
+        )
+        .route(
+            "/api/v1/devices/{id}/merge",
+            post(inventory::devices::merge),
+        )
+        .route(
+            "/api/v1/devices/{id}/split",
+            post(inventory::devices::split),
+        )
+        .route(
+            "/api/v1/devices/{id}/undo-merge",
+            post(inventory::devices::undo_merge),
+        )
+        .route(
+            "/api/v1/devices/{id}/identity-rules",
+            post(inventory::devices::pin_identifier),
+        )
+        .route(
+            "/api/v1/devices/reconcile",
+            post(inventory::identity_service::reconcile_handler),
+        )
+        .route(
+            "/api/v1/interfaces",
+            get(inventory::generic::interfaces::list).post(inventory::generic::interfaces::create),
+        )
+        .route(
+            "/api/v1/interfaces/{id}",
+            get(inventory::generic::interfaces::get).patch(inventory::generic::interfaces::patch),
+        )
+        .route(
+            "/api/v1/addresses",
+            get(inventory::addresses::list).post(inventory::addresses::assign),
+        )
+        .route(
+            "/api/v1/workloads",
+            get(inventory::generic::workloads::list).post(inventory::generic::workloads::create),
+        )
+        .route(
+            "/api/v1/workloads/{id}",
+            get(inventory::generic::workloads::get).patch(inventory::generic::workloads::patch),
+        )
+        .route(
+            "/api/v1/services",
+            get(inventory::generic::services::list).post(inventory::generic::services::create),
+        )
+        .route(
+            "/api/v1/services/{id}",
+            get(inventory::generic::services::get).patch(inventory::generic::services::patch),
+        )
+        .route(
+            "/api/v1/endpoints",
+            get(inventory::generic::endpoints::list).post(inventory::generic::endpoints::create),
+        )
+        .route(
+            "/api/v1/endpoints/{id}",
+            get(inventory::generic::endpoints::get).patch(inventory::generic::endpoints::patch),
+        )
+        .route(
+            "/api/v1/dependencies",
+            get(inventory::generic::dependency_edges::list)
+                .post(inventory::generic::dependency_edges::create),
+        )
+        .route(
+            "/api/v1/dependencies/{id}",
+            get(inventory::generic::dependency_edges::get)
+                .patch(inventory::generic::dependency_edges::patch),
+        )
+        .route(
+            "/api/v1/identity-suggestions",
+            get(inventory::identity_service::list_suggestions),
+        )
+        .route(
+            "/api/v1/identity-suggestions/{id}/confirm",
+            post(inventory::identity_service::confirm_suggestion),
+        )
+        .route(
+            "/api/v1/identity-suggestions/{id}/reject",
+            post(inventory::identity_service::reject_suggestion),
+        )
+        .route("/api/v1/changes", get(inventory::changes::list))
+        .route("/api/v1/audit", get(inventory::changes::list_audit))
+        .route(
+            "/api/v1/evidence",
+            get(inventory::evidence::list).post(inventory::evidence::submit),
+        )
+        .route(
+            "/api/v1/evidence/resolve",
+            get(inventory::evidence::resolve_handler),
+        )
+        .layer(from_fn(csrf::require_custom_header))
+        .layer(from_fn(auth_mw::require_session));
+
     let api = Router::new()
         .route("/health/live", get(routes::health::live))
         .route("/health/ready", get(routes::health::ready))
@@ -137,6 +254,7 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
                 .layer(from_fn(csrf::require_custom_header))
                 .layer(from_fn_with_state(login_limiter, ratelimit::enforce)),
         )
+        .merge(inventory_router)
         .with_state(state);
 
     let index = format!("{web_dist_dir}/index.html");
@@ -193,6 +311,11 @@ async fn main() -> anyhow::Result<()> {
             agents::revoke(&pool, agent_id).await?;
             tracing::info!(%agent_id, "agent revoked");
         }
+        Role::Seed => {
+            let pool = build_pool(&config).await?;
+            run_migrations(&pool).await?;
+            seed::run(&pool).await?;
+        }
         Role::Serve => {
             let pool = build_pool(&config).await?;
             run_migrations(&pool).await?;
@@ -223,7 +346,10 @@ async fn main() -> anyhow::Result<()> {
             // jobs (worker role), not a bespoke timer here — see
             // scheduler.rs and jobs_handlers.rs.
             let scheduler_pool = pool.clone();
-            let scheduler_task = tokio::spawn(scheduler::run(scheduler_pool));
+            let scheduler_task = tokio::spawn(scheduler::run(
+                scheduler_pool,
+                config.change_event_retention_days,
+            ));
 
             let api_task = axum::serve(
                 listener,
@@ -381,6 +507,7 @@ mod handshake_tests {
                 .to_string(),
             cookie_secure: false,
             trust_proxy_headers: false,
+            change_event_retention_days: 365,
         }
     }
 

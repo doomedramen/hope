@@ -19,7 +19,14 @@ fn hourly_period_key(prefix: &str) -> String {
     format!("{prefix}-{hour_bucket}")
 }
 
-pub(crate) async fn enqueue_periodic_jobs(pool: &PgPool) {
+/// Which day-long period `now` falls in -- `change_events.retention`
+/// doesn't need to run more than once a day.
+fn daily_period_key(prefix: &str) -> String {
+    let day_bucket = jiff::Timestamp::now().as_second() / 86_400;
+    format!("{prefix}-{day_bucket}")
+}
+
+pub(crate) async fn enqueue_periodic_jobs(pool: &PgPool, change_event_retention_days: i64) {
     let session_cleanup_key = hourly_period_key("hourly");
     if let Err(err) = jobs::enqueue(
         pool,
@@ -43,15 +50,27 @@ pub(crate) async fn enqueue_periodic_jobs(pool: &PgPool) {
     {
         tracing::warn!(error = %err, "failed to enqueue enrollment_token.purge");
     }
+
+    let retention_key = daily_period_key("daily");
+    if let Err(err) = jobs::enqueue(
+        pool,
+        "change_events.retention",
+        &retention_key,
+        serde_json::json!({"retention_days": change_event_retention_days}),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "failed to enqueue change_events.retention");
+    }
 }
 
 /// Runs forever, enqueuing this period's maintenance jobs every
 /// `CHECK_INTERVAL`. Enqueuing immediately on startup means a
 /// short-lived/restarted server doesn't wait a full interval before the
 /// first check-and-enqueue.
-pub async fn run(pool: PgPool) {
+pub async fn run(pool: PgPool, change_event_retention_days: i64) {
     loop {
-        enqueue_periodic_jobs(&pool).await;
+        enqueue_periodic_jobs(&pool, change_event_retention_days).await;
         tokio::time::sleep(CHECK_INTERVAL).await;
     }
 }
@@ -76,14 +95,14 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool).await;
+        enqueue_periodic_jobs(&pool, 365).await;
         let after_first: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
 
-        enqueue_periodic_jobs(&pool).await;
+        enqueue_periodic_jobs(&pool, 365).await;
         let after_second: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
@@ -101,7 +120,7 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool).await;
+        enqueue_periodic_jobs(&pool, 365).await;
 
         let session_cleanup: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")

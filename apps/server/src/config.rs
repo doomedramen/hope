@@ -41,6 +41,11 @@ pub struct Config {
     /// a client can spoof their rate-limit bucket. Defaults to false (use
     /// the TCP peer address).
     pub trust_proxy_headers: bool,
+
+    /// `change_events` retention window (design docs/design/m1-inventory.md
+    /// §5, Decision 5). The `change_events.retention` worker job deletes
+    /// rows older than this many days, in bounded batches.
+    pub change_event_retention_days: i64,
 }
 
 fn defaults() -> Config {
@@ -56,6 +61,7 @@ fn defaults() -> Config {
         server_key_path: "data/pki/server-key.pem".to_string(),
         cookie_secure: true,
         trust_proxy_headers: false,
+        change_event_retention_days: 365,
     }
 }
 

@@ -2419,6 +2419,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-server",
+ "base64",
  "clap",
  "domain",
  "figment",

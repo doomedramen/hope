@@ -11,6 +11,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::agents;
+use crate::inventory::retention;
 use crate::session_store::PgSessionStore;
 
 #[async_trait]
@@ -64,6 +65,29 @@ impl JobHandler for DiagnosticEcho {
     }
 }
 
+/// `change_events` retention (design docs/design/m1-inventory.md §5,
+/// Decision 5): delete rows older than the configured window in bounded
+/// batches. `retention_days` comes from the enqueuing side's payload
+/// (`{"retention_days": N}`), not this handler, so the window stays
+/// operator-configurable (`HOPE_CHANGE_EVENT_RETENTION_DAYS`) without a
+/// worker redeploy.
+struct ChangeEventRetention;
+
+#[async_trait]
+impl JobHandler for ChangeEventRetention {
+    async fn handle(&self, pool: &PgPool, payload: Value) -> anyhow::Result<()> {
+        let retention_days = payload
+            .get("retention_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(365);
+        let deleted = retention::purge_old_change_events(pool, retention_days).await?;
+        if deleted > 0 {
+            tracing::info!(count = deleted, retention_days, "purged old change_events");
+        }
+        Ok(())
+    }
+}
+
 pub struct Registry(HashMap<&'static str, Box<dyn JobHandler>>);
 
 impl Registry {
@@ -72,6 +96,7 @@ impl Registry {
         handlers.insert("session.cleanup", Box::new(SessionCleanup));
         handlers.insert("enrollment_token.purge", Box::new(EnrollmentTokenPurge));
         handlers.insert("diagnostic.echo", Box::new(DiagnosticEcho));
+        handlers.insert("change_events.retention", Box::new(ChangeEventRetention));
         Self(handlers)
     }
 
