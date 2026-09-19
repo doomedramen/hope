@@ -117,3 +117,131 @@ impl SessionStore for PgSessionStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::Duration;
+
+    /// Integration test gated on `DATABASE_URL`; skipped otherwise so
+    /// `cargo test --workspace` never requires a live database.
+    async fn pool_or_skip() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+        Some(pool)
+    }
+
+    fn record_expiring_in(minutes: i64) -> Record {
+        let mut record = Record {
+            id: Id::default(),
+            data: Default::default(),
+            expiry_date: OffsetDateTime::now_utc() + Duration::minutes(minutes),
+        };
+        record.data.insert(
+            "user_id".to_string(),
+            serde_json::Value::String("test-user".to_string()),
+        );
+        record
+    }
+
+    #[tokio::test]
+    async fn save_load_delete_roundtrip() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PgSessionStore::new(pool);
+
+        let mut record = record_expiring_in(10);
+        store.create(&mut record).await.unwrap();
+
+        let loaded = store.load(&record.id).await.unwrap().unwrap();
+        assert_eq!(loaded.data, record.data);
+
+        // save() updates in place (used when session data changes).
+        record
+            .data
+            .insert("extra".to_string(), serde_json::Value::Bool(true));
+        store.save(&record).await.unwrap();
+        let reloaded = store.load(&record.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.data, record.data);
+
+        store.delete(&record.id).await.unwrap();
+        assert!(store.load(&record.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn create_avoids_id_collisions() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PgSessionStore::new(pool);
+
+        let mut first = record_expiring_in(10);
+        store.create(&mut first).await.unwrap();
+
+        // Force a collision: pre-seed a second record with the same id
+        // that `create` would otherwise pick, then verify `create` gives
+        // it a fresh id instead of clobbering the existing row.
+        let mut second = record_expiring_in(10);
+        second.id = first.id;
+        store.create(&mut second).await.unwrap();
+
+        assert_ne!(
+            first.id, second.id,
+            "collision must be retried with a new id"
+        );
+        let still_there = store.load(&first.id).await.unwrap().unwrap();
+        assert_eq!(still_there.data, first.data);
+    }
+
+    #[tokio::test]
+    async fn expired_session_is_not_loaded() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PgSessionStore::new(pool);
+
+        let mut record = record_expiring_in(-1); // already expired
+        store.create(&mut record).await.unwrap();
+
+        assert!(
+            store.load(&record.id).await.unwrap().is_none(),
+            "an expired session must not be returned by load()"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_expired_cleans_up_only_expired_rows() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PgSessionStore::new(pool);
+
+        let mut expired = record_expiring_in(-5);
+        store.create(&mut expired).await.unwrap();
+        let mut live = record_expiring_in(10);
+        store.create(&mut live).await.unwrap();
+
+        let deleted = store.delete_expired().await.unwrap();
+        assert!(deleted >= 1, "should have deleted at least the expired row");
+
+        // The row is gone even from a direct query (not just filtered by
+        // load()'s expiry_date > now() clause) ...
+        let row: Option<(String,)> = sqlx::query_as("select id from sessions where id = $1")
+            .bind(expired.id.to_string())
+            .fetch_optional(&store.pool)
+            .await
+            .unwrap();
+        assert!(row.is_none());
+
+        // ...while the still-live session survives.
+        assert!(store.load(&live.id).await.unwrap().is_some());
+    }
+}
