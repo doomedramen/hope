@@ -789,6 +789,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_threshold_queues_one_matching_notification_delivery() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        isolate_due_monitors(&pool).await;
+        let channel_id: Uuid = sqlx::query_scalar(
+            "insert into notification_channels (name, provider, config) \
+             values ($1, 'webhook', $2) returning id",
+        )
+        .bind(format!(
+            "scheduler-recovery-notification-{}",
+            Uuid::new_v4()
+        ))
+        .bind(json!({"url": "http://127.0.0.1:9/hook"}))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into notification_routes \
+                 (channel_id, min_severity, event_types) \
+             values ($1, 'notice', '[\"incident.recovered\"]'::jsonb)",
+        )
+        .bind(channel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let unavailable = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = unavailable.local_addr().unwrap().port();
+        drop(unavailable);
+        let monitor_id = create_monitor(&pool, port, 1).await;
+        let claimed = claim_due(&pool, "monitor-test")
+            .await
+            .unwrap()
+            .expect("monitor is due");
+        execute_one(&pool, "monitor-test", claimed).await.unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 512];
+                let _ = stream.read(&mut request).await.unwrap();
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await
+                    .unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+
+        for attempt in 0..2 {
+            sqlx::query("update monitors set next_run_at = now() where id = $1")
+                .bind(monitor_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let claimed = claim_due(&pool, "monitor-test")
+                .await
+                .unwrap()
+                .expect("monitor is due");
+            execute_one(&pool, "monitor-test", claimed).await.unwrap();
+            if attempt == 0 {
+                let deliveries: i64 = sqlx::query_scalar(
+                    "select count(*) from notification_deliveries \
+                     where channel_id = $1 and event_type = 'incident.recovered'",
+                )
+                .bind(channel_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(deliveries, 0);
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("test server timed out")
+            .unwrap();
+
+        let row: (String, String, i64, i64) = sqlx::query_as(
+            "select i.state, m.state, \
+                    (select count(*) from notification_deliveries d \
+                     where d.incident_id = i.id and d.channel_id = $2 \
+                       and d.event_type = 'incident.recovered'), \
+                    (select count(*) from jobs \
+                     where job_type = 'notifications.deliver' \
+                       and payload->>'delivery_id' = \
+                           (select d.id::text from notification_deliveries d \
+                            where d.incident_id = i.id and d.channel_id = $2 \
+                              and d.event_type = 'incident.recovered')) \
+             from incidents i \
+             join monitors m on m.id = i.monitor_id \
+             where i.monitor_id = $1 and i.state = 'recovered'",
+        )
+        .bind(monitor_id)
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "recovered");
+        assert_eq!(row.1, "up");
+        assert_eq!(row.2, 1);
+        assert_eq!(row.3, 1);
+    }
+
+    #[tokio::test]
     async fn stale_sweep_preserves_underlying_state() {
         let Some(pool) = pool_or_skip().await else {
             eprintln!("skipping: DATABASE_URL not set");
