@@ -79,10 +79,11 @@ atomically, signs the CSR, and returns a client cert + the CA cert.
   TTL, default 15 minutes). Enrollment doesn't require client auth (the
   agent has no cert yet), so this token is the only enrollment-time
   secret — treat it like a password.
-  *Gap*: no rate limiting on enroll attempts; an attacker who can guess or
-  brute-force a token before it expires isn't currently slowed down beyond
-  network latency. Low risk given token entropy (32 random bytes) but
-  worth a rate limiter later.
+  *Mitigation*: the `/enroll` endpoint is rate limited per client IP (20
+  requests/minute, `apps/server/src/ratelimit.rs`), bounding how many
+  guesses an attacker gets while a token's TTL window is open. Given token
+  entropy (32 random bytes), this is comfortably defense-in-depth rather
+  than the primary control.
 - **Tampering**: a CSR requesting attributes beyond "this is a client
   cert for this key" (e.g. requesting CA:true).
   *Mitigation*: the server ignores/overwrites `is_ca`, key usage, and
@@ -95,9 +96,12 @@ atomically, signs the CSR, and returns a client cert + the CA cert.
   `0600` permissions.
 - **Denial of service**: the enroll listener has no auth prior to a valid
   token, so it's reachable by anyone who can route to it.
-  *Gap*: no request-rate limiting on the enroll endpoint yet (any
-  DATABASE_URL-connected server absorbs a flood of invalid-token POSTs
-  fine functionally, but this hasn't been load-tested).
+  *Mitigation*: per-IP rate limiting (above). *Gap*: the limiter's client-IP
+  determination trusts the raw TCP peer address by default; behind a
+  reverse proxy, `trust_proxy_headers` must be explicitly enabled (and the
+  proxy must strip any client-supplied `X-Forwarded-For`) or every request
+  appears to come from the proxy's IP and shares one bucket. Not yet
+  load-tested at scale.
 
 ## 4. Agent privilege and runtime
 
@@ -142,38 +146,68 @@ publish agent binaries).
   admin account (only when none exists) with an argon2 password hash;
   `/api/v1/login` verifies against it.
   *Mitigation*: argon2 (memory-hard, resistant to GPU cracking) via the
-  `argon2` crate's defaults.
-  *Gap*: no rate limiting or lockout on `/api/v1/login` — brute force is
-  only slowed by argon2's cost, not blocked.
-- **Session handling**: `tower-sessions` with `MemoryStore`.
-  *Gap*: sessions are in-process memory only — they don't survive a
-  server restart (forces re-login, mildly annoying but not a security
-  issue) and don't work across multiple server replicas (not a concern
-  for the M0 single-process deployment shape, but flag before any
-  horizontal scaling). A Postgres-backed session store is the natural
-  fix and isn't hard, just not done yet.
+  `argon2` crate's defaults, plus per-IP rate limiting (10 requests/minute
+  on each of `/api/v1/setup` and `/api/v1/login`, same mechanism as
+  `/enroll` — see `apps/server/src/ratelimit.rs`).
+  *Gap*: rate limiting is per-IP, not per-account, so an attacker
+  distributed across many IPs (or behind carrier-grade NAT sharing one IP
+  with legitimate users) isn't meaningfully slowed. No account lockout.
+- **Session handling**: `tower-sessions` with a hand-rolled Postgres-backed
+  `SessionStore` (`apps/server/src/session_store.rs` — `tower-sessions-sqlx-store`
+  0.15.0 depends on `tower-sessions-core` 0.14, incompatible with our
+  `tower-sessions` 0.15/`tower-sessions-core` 0.15, so it doesn't actually
+  satisfy `SessionManagerLayer`; rolled our own against a `sessions`
+  table instead). An hourly background task deletes expired rows
+  (`Role::Serve`'s `session_cleanup_task` in `main.rs`). The cookie is
+  `HttpOnly`, `SameSite=Lax`, and `Secure` (configurable via
+  `cookie_secure`, defaulting to `true`; set to `false` only for
+  plain-HTTP local dev, where a browser would otherwise silently drop a
+  `Secure` cookie).
+  *Gap*: sessions now survive a restart and work across replicas sharing
+  the DB (previously flagged as a gap; resolved this slice). No
+  session-fixation-specific handling beyond what `tower-sessions` does by
+  default (new session ID issued on login isn't explicitly verified).
 - **Transport**: the main HTTP API (`/api/v1/*`, `/health/*`) currently
   serves plain HTTP, not TLS — unlike the gateway/enroll listeners.
   *Gap*: session cookies and login credentials travel in cleartext unless
-  TLS is terminated in front of the server (e.g. a reverse proxy). This is
+  TLS is terminated in front of the server (e.g. a reverse proxy), and
+  `cookie_secure` must then be left at its default `true` so the browser
+  won't send the cookie over that same plain-HTTP hop by mistake. This is
   a real gap for any non-localhost deployment; documenting the expectation
   that operators front the API with TLS (or that a future milestone adds
   it directly) is necessary before this ships beyond a dev environment.
-- **CSRF**: no CSRF token scheme yet; relies on the API being JSON-only
-  (not form-encoded) as a partial mitigant, which is weak on its own.
-  *Gap*: worth a proper CSRF story (e.g. `SameSite=Strict` cookies, which
-  `tower-sessions` supports but isn't explicitly configured yet) before
-  the UI does more than the current read-only shell.
+- **CSRF**: mitigated via two layers (`apps/server/src/csrf.rs`): the
+  session cookie is `SameSite=Lax` (stops it riding along on most
+  cross-site requests), and a middleware requires a custom
+  `X-Requested-With: hope` header on every unsafe-method (`POST`/`PUT`/
+  `PATCH`/`DELETE`) request under `/api/v1/*` — a plain cross-site
+  form/image/link CSRF attack cannot attach custom headers, and a
+  cross-origin `fetch` that tried to would need a CORS preflight the
+  server doesn't grant.
+  *Gap*: no cookie-authenticated *mutating* route exists yet to actually
+  exercise this against (`/api/v1/setup` and `/api/v1/login` establish a
+  session rather than using one, so classic CSRF's premise doesn't fully
+  apply to them). The mechanism is verified to compile and apply to those
+  two routes, but hasn't been proven end-to-end against a real
+  authenticated mutation — do that as soon as the first such route lands.
 
 ## Summary of open gaps (tracked for follow-up milestones)
 
 1. No secrets-at-rest design for the future `credentials` resource.
-2. No rate limiting on `/enroll` or `/api/v1/login`.
+2. Rate limiting is per-IP only (no per-account lockout, no
+   distributed-attack or shared-NAT mitigation).
 3. Revocation doesn't force-close already-open gateway connections.
 4. No signed-release / checksum pipeline for agent binaries.
-5. Sessions are in-memory only (no persistence, no multi-replica support).
-6. Main API listener has no TLS of its own (assumes a fronting proxy).
-7. No CSRF-specific defenses beyond JSON-only content type.
-8. No least-privilege guidance for the agent's OS-level install.
-9. Agent client cert has a fixed 30-day lifetime with no renewal flow yet
+5. Main API listener has no TLS of its own (assumes a fronting proxy);
+   `cookie_secure` must stay `true` in that setup.
+6. CSRF middleware exists but has no real mutating route to prove itself
+   against yet — verify end-to-end once one lands.
+7. No least-privilege guidance for the agent's OS-level install.
+8. Agent client cert has a fixed 30-day lifetime with no renewal flow yet
    (see `apps/server/src/pki.rs`).
+
+Resolved this slice (previously listed here): sessions were in-memory
+only — now Postgres-backed with expiry cleanup; `/enroll` and
+`/api/v1/login`+`/setup` had no rate limiting — now per-IP limited;
+CSRF had no defenses at all — now has SameSite cookie + custom-header
+middleware (see gap 6 above for what's still unverified about it).
