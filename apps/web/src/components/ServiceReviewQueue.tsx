@@ -35,16 +35,9 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Empty,
-  EmptyDescription,
   EmptyHeader,
   EmptyMedia,
   EmptyTitle,
@@ -107,10 +100,7 @@ export function ServiceReviewQueue() {
             <ShieldQuestionIcon className="size-4" />
           </span>
           <div>
-            <CardTitle>Service identity review</CardTitle>
-            <CardDescription>
-              Decide when a fingerprint should become part of the inventory.
-            </CardDescription>
+            <CardTitle>Pending service reviews</CardTitle>
           </div>
         </div>
         <Badge
@@ -148,11 +138,7 @@ export function ServiceReviewQueue() {
               <EmptyMedia variant="icon">
                 <CheckIcon />
               </EmptyMedia>
-              <EmptyTitle>No service reviews pending</EmptyTitle>
-              <EmptyDescription>
-                New ambiguous fingerprints will appear here with their source
-                evidence.
-              </EmptyDescription>
+              <EmptyTitle>No pending service reviews</EmptyTitle>
             </EmptyHeader>
           </Empty>
         </CardContent>
