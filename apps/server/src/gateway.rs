@@ -253,7 +253,11 @@ async fn handle_connection(
                         // envelope version.
                         if negotiated.protocol_version < protocol::PROTOCOL_VERSION {
                             negotiated.capabilities.retain(|capability| {
-                                *capability != Capability::BoundedObservations
+                                !matches!(
+                                    *capability,
+                                    Capability::InventorySnapshots
+                                        | Capability::BoundedObservations
+                                )
                             });
                         }
                         negotiated_capabilities = Some(negotiated.clone());
@@ -317,6 +321,28 @@ async fn handle_connection(
                     .await?;
             }
             "inventory_snapshot" => {
+                let Some(negotiated) = negotiated_capabilities.as_ref() else {
+                    let response = protocol_error(
+                        message_id,
+                        "capability_not_negotiated",
+                        "inventory snapshots capability was not negotiated",
+                    );
+                    write.send(WsMessage::Text(response)).await?;
+                    continue;
+                };
+                if negotiated.protocol_version != protocol_version
+                    || !negotiated
+                        .capabilities
+                        .contains(&Capability::InventorySnapshots)
+                {
+                    let response = protocol_error(
+                        message_id,
+                        "unsupported_capability",
+                        "inventory snapshots are not available for this protocol session",
+                    );
+                    write.send(WsMessage::Text(response)).await?;
+                    continue;
+                }
                 let snapshot = match agent_inventory::parse_snapshot_value(value) {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
@@ -333,15 +359,16 @@ async fn handle_connection(
                 };
                 match agent_inventory::ingest_snapshot(&pool, agent.id, &snapshot).await {
                     Ok(outcome) => {
-                        let ack = Envelope::new(Message::InventorySnapshotAck(
-                            protocol::InventorySnapshotAck {
+                        let ack = Envelope::with_protocol_version(
+                            negotiated.protocol_version,
+                            Message::InventorySnapshotAck(protocol::InventorySnapshotAck {
                                 snapshot_id: snapshot.snapshot_id,
                                 accepted: true,
                                 sequence: outcome.sequence,
                                 replayed: outcome.replayed,
                                 reason: None,
-                            },
-                        ));
+                            }),
+                        );
                         write
                             .send(WsMessage::Text(serde_json::to_string(&ack)?))
                             .await?;
