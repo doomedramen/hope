@@ -56,7 +56,7 @@ export function AuthPanel({
               <KeyRoundIcon />
             </div>
             <CardTitle>
-              {mode === "login" ? "Welcome back" : "Create operator account"}
+              {mode === "login" ? "Sign in" : "Create operator account"}
             </CardTitle>
             <CardDescription>
               {mode === "login"
@@ -127,8 +127,8 @@ export function AuthPanel({
               variant="ghost"
             >
               {mode === "login"
-                ? "First run? Create the admin account"
-                : "Already set up? Sign in"}
+                ? "Create the admin account"
+                : "Sign in to an existing account"}
             </Button>
           </CardContent>
         </Card>
@@ -141,9 +141,6 @@ export function AuthPanel({
           Hope
         </div>
         <div className="max-w-md">
-          <p className="text-sm text-primary-foreground/70">
-            Private infrastructure console
-          </p>
           <h1 className="mt-3 text-4xl font-semibold tracking-tight">
             Infrastructure inventory
           </h1>
@@ -151,7 +148,6 @@ export function AuthPanel({
             Devices, interfaces, addresses, and identity evidence.
           </p>
         </div>
-        <p className="text-sm text-primary-foreground/60">M1 / Inventory</p>
       </aside>
     </main>
   );

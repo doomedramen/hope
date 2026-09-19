@@ -16,7 +16,6 @@ import {
   Card,
   CardAction,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -65,14 +64,7 @@ function ChangesPage() {
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
       <div>
-        <p className="text-sm text-muted-foreground">Changes / Event stream</p>
-        <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-          See the shape of change.
-        </h1>
-        <p className="mt-2 max-w-2xl text-muted-foreground">
-          A durable feed of inventory changes with severity, source, and
-          field-level snapshots.
-        </p>
+        <h1 className="text-3xl font-semibold tracking-tight">Changes</h1>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -80,7 +72,7 @@ function ChangesPage() {
           icon={<ActivityIcon />}
           label="Events"
           value={changes.length}
-          detail="Current filter window"
+          detail="Matching changes"
         />
         <Summary
           icon={<ShieldAlertIcon />}
@@ -88,11 +80,11 @@ function ChangesPage() {
           value={
             changes.filter((change) => change.severity === "critical").length
           }
-          detail="Needs attention"
+          detail="Critical events"
         />
         <Summary
           icon={<CircleAlertIcon />}
-          label="Review soon"
+          label="Review"
           value={
             changes.filter(
               (change) =>
@@ -105,8 +97,7 @@ function ChangesPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Global change feed</CardTitle>
-          <CardDescription>Recent events first.</CardDescription>
+          <CardTitle>Change history</CardTitle>
           <CardAction>
             <Badge variant="outline">{changes.length} events</Badge>
           </CardAction>
@@ -153,7 +144,7 @@ function ChangesPage() {
           ) : changesQuery.isError ? (
             <Alert variant="destructive">
               <CircleAlertIcon />
-              <AlertTitle>Change feed unavailable</AlertTitle>
+              <AlertTitle>Changes unavailable</AlertTitle>
               <AlertDescription>{changesQuery.error.message}</AlertDescription>
               <Button
                 onClick={() => changesQuery.refetch()}
@@ -169,9 +160,9 @@ function ChangesPage() {
                 <EmptyMedia variant="icon">
                   <ActivityIcon />
                 </EmptyMedia>
-                <EmptyTitle>No changes in this view</EmptyTitle>
+                <EmptyTitle>No matching changes</EmptyTitle>
                 <EmptyDescription>
-                  Changes show their source and severity here.
+                  No events match the selected filters.
                 </EmptyDescription>
               </EmptyHeader>
             </Empty>

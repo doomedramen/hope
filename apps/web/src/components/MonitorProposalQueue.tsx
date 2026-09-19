@@ -214,8 +214,7 @@ export function MonitorProposalQueue() {
             </AlertDialogMedia>
             <AlertDialogTitle>Reject this monitor proposal?</AlertDialogTitle>
             <AlertDialogDescription>
-              The proposal will leave the pending queue. M4 will not create a
-              monitor from it.
+              Rejecting it prevents monitor creation.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

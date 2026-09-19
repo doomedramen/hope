@@ -376,7 +376,7 @@ function ReviewDetail({
       <section>
         <h4 className="font-medium">Source observations</h4>
         <div className="mt-3 grid gap-3 xl:grid-cols-2">
-          <Observation title="M2 classification" value={review.evidence.m2} />
+          <Observation title="Classification" value={review.evidence.m2} />
           <Observation
             title="Fingerprint evidence"
             value={review.evidence.fingerprint}

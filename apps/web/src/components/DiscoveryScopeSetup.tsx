@@ -223,7 +223,7 @@ export function DiscoveryScopeSetup({
       <CardHeader className="border-b">
         <CardTitle>Networks</CardTitle>
         <CardDescription>
-          Approve exactly which private network addresses discovery may scan.
+          Choose the private addresses that discovery can scan.
         </CardDescription>
         <CardAction>
           <Badge variant="outline">{networks.length} configured</Badge>
@@ -523,7 +523,7 @@ function ScopeForm({
               I reviewed the target count
             </FieldLabel>
             <FieldDescription>
-              Discovery stays blocked until you confirm this scope.
+              Confirm the scope to enable discovery.
             </FieldDescription>
           </FieldContent>
         </Field>

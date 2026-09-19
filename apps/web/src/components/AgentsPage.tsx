@@ -120,13 +120,7 @@ export function AgentsPage() {
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
       <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
         <div>
-          <p className="text-sm text-muted-foreground">Operations / Agents</p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-            Agent fleet
-          </h1>
-          <p className="mt-2 max-w-2xl text-muted-foreground">
-            Connection state, host inventory, and evidence reconciliation.
-          </p>
+          <h1 className="text-3xl font-semibold tracking-tight">Agents</h1>
         </div>
         <Button
           onClick={() => {
@@ -143,7 +137,7 @@ export function AgentsPage() {
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
-          detail="Enrolled identities"
+          detail="Enrolled agents"
           icon={<ServerIcon />}
           label="Enrolled"
           value={agents.length}
@@ -596,7 +590,7 @@ function EvidenceList({ evidence }: { evidence: AgentDetail["evidence"] }) {
         <div>
           <h2 className="text-sm font-medium">Recent evidence</h2>
           <p className="text-xs text-muted-foreground">
-            Agent observations retained with provenance.
+            Agent observations and source.
           </p>
         </div>
         <Badge variant={evidence.length ? "outline" : "secondary"}>
@@ -851,7 +845,7 @@ function ProcessInventory({
       <div>
         <h2 className="text-sm font-medium">Processes</h2>
         <p className="text-xs text-muted-foreground">
-          Selected process records visible to agent.
+          Processes reported by agent.
         </p>
       </div>
       <Table>
@@ -900,8 +894,7 @@ function SocketInventory({ sockets }: { sockets: AgentSocketInventory[] }) {
       <div>
         <h2 className="text-sm font-medium">Sockets</h2>
         <p className="text-xs text-muted-foreground">
-          Local listener evidence and independent monitoring-worker
-          reachability.
+          Local listeners and worker reachability.
         </p>
       </div>
       <Table>

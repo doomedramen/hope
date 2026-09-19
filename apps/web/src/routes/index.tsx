@@ -69,13 +69,7 @@ function OverviewPage() {
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <div className="max-w-2xl">
-        <p className="text-sm text-muted-foreground">Overview / M1 inventory</p>
-        <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-          Infrastructure inventory
-        </h1>
-        <p className="mt-2 text-muted-foreground">
-          Devices, network interfaces, IP addresses, and identity evidence.
-        </p>
+        <h1 className="text-3xl font-semibold tracking-tight">Overview</h1>
       </div>
       <div className="grid gap-4 md:grid-cols-3">
         <OverviewMetric
@@ -96,7 +90,7 @@ function OverviewPage() {
           icon={<NetworkIcon />}
           label="Recent changes"
           value={changes.length}
-          detail="Recorded events"
+          detail="Inventory events"
           to="/changes"
         />
       </div>
@@ -104,7 +98,6 @@ function OverviewPage() {
         <Card>
           <CardHeader>
             <CardTitle>Recent changes</CardTitle>
-            <CardDescription>Recent inventory events.</CardDescription>
             <CardAction>
               <Link className="text-sm hover:underline" to="/changes">
                 View all

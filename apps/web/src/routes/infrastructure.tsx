@@ -241,15 +241,9 @@ function InfrastructurePage() {
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
       <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
         <div>
-          <p className="text-sm text-muted-foreground">
-            Infrastructure / Inventory
-          </p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">
+          <h1 className="text-3xl font-semibold tracking-tight">
             Devices and network records
           </h1>
-          <p className="mt-2 max-w-2xl text-muted-foreground">
-            Manage devices, addresses, evidence, and identity matches.
-          </p>
         </div>
         <Button onClick={() => setDialog("create")}>
           <PlusIcon data-icon="inline-start" />
@@ -272,13 +266,13 @@ function InfrastructurePage() {
         />
         <MetricCard
           icon={<NetworkIcon />}
-          label="Live surface"
+          label="Current IPs"
           value={currentAddresses}
           detail="Current IP addresses"
         />
         <MetricCard
           icon={<CircleAlertIcon />}
-          label="Stale signals"
+          label="Stale devices"
           value={staleDevices}
           detail={staleDevices ? "Needs review" : "No stale devices"}
         />
@@ -613,7 +607,7 @@ function DeviceDetail({
           )}
         </section>
         <section>
-          <h3 className="mb-2 text-sm font-medium">Evidence / Why?</h3>
+          <h3 className="mb-2 text-sm font-medium">Evidence</h3>
           {detail.evidence.length ? (
             <div className="flex flex-col divide-y">
               {detail.evidence.slice(0, 6).map((evidence) => (
@@ -744,7 +738,7 @@ function ReviewQueue({
               <EmptyMedia variant="icon">
                 <ShieldCheckIcon />
               </EmptyMedia>
-              <EmptyTitle>Queue is clear</EmptyTitle>
+              <EmptyTitle>No pending matches</EmptyTitle>
               <EmptyDescription>
                 No identity matches need review.
               </EmptyDescription>
@@ -1237,7 +1231,7 @@ function NoDevices({ onCreate }: { onCreate?: () => void }) {
         </EmptyMedia>
         <EmptyTitle>No devices yet</EmptyTitle>
         <EmptyDescription>
-          Create the first record or run the M1 seed command.
+          Create the first record or run the seed command.
         </EmptyDescription>
       </EmptyHeader>
       {onCreate ? (
