@@ -39,6 +39,33 @@ export interface DiscoveryScope {
   updated_at: string;
 }
 
+export type ScanRunKind = "initial_discovery" | "change_scan" | "full_tcp";
+
+export type ScanRunStatus =
+  "pending" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface ScanRun {
+  id: string;
+  network_id: string;
+  job_id: string;
+  kind: ScanRunKind;
+  status: ScanRunStatus;
+  scope_version: number;
+  targets_planned: number;
+  targets_completed: number;
+  ports_planned: number;
+  ports_completed: number;
+  complete: boolean;
+  cancellation_requested: boolean;
+  requested_by: string | null;
+  source: "operator" | "scheduler" | "system";
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Device {
   id: string;
   device_type: string;
@@ -248,6 +275,17 @@ export async function confirmDiscoveryScope(
       body: JSON.stringify({ target_count: targetCount }),
     },
   );
+}
+
+export async function launchNetworkScan(
+  networkId: string,
+  input: { kind: ScanRunKind; idempotencyKey: string },
+): Promise<ScanRun> {
+  return request<ScanRun>(`/api/v1/networks/${networkId}/scans`, {
+    method: "POST",
+    headers: { "Idempotency-Key": input.idempotencyKey },
+    body: JSON.stringify({ kind: input.kind }),
+  });
 }
 
 export async function fetchDevice(id: string): Promise<DeviceDetail> {

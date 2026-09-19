@@ -1,11 +1,18 @@
 import { useMutation } from "@tanstack/react-query";
-import { CheckIcon, CircleAlertIcon, NetworkIcon } from "lucide-react";
+import {
+  CheckIcon,
+  CircleAlertIcon,
+  NetworkIcon,
+  PlayIcon,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import {
   confirmDiscoveryScope,
   draftDiscoveryScope,
+  launchNetworkScan,
   type DiscoveryScope,
   type Network,
+  type ScanRun,
 } from "@/lib/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -53,6 +60,7 @@ interface ScopeDraftState {
   appliedExcludedCidrs: string[] | null;
   appliedScanProfile: ScanProfile | null;
   acknowledged: boolean;
+  scanRun: ScanRun | null;
 }
 
 const DEFAULT_SCOPE_STATE: ScopeDraftState = {
@@ -62,6 +70,7 @@ const DEFAULT_SCOPE_STATE: ScopeDraftState = {
   appliedExcludedCidrs: null,
   appliedScanProfile: null,
   acknowledged: false,
+  scanRun: null,
 };
 
 export function DiscoveryScopeSetup({
@@ -111,6 +120,7 @@ export function DiscoveryScopeSetup({
           appliedExcludedCidrs: variables.excludedCidrs,
           appliedScanProfile: variables.scanProfile,
           acknowledged: false,
+          scanRun: null,
         },
       }));
     },
@@ -130,6 +140,29 @@ export function DiscoveryScopeSetup({
           ...(current[variables.networkId] ?? DEFAULT_SCOPE_STATE),
           scope,
           acknowledged: false,
+          scanRun: null,
+        },
+      }));
+    },
+  });
+  const scanMutation = useMutation({
+    mutationFn: ({
+      networkId,
+      idempotencyKey,
+    }: {
+      networkId: string;
+      idempotencyKey: string;
+    }) =>
+      launchNetworkScan(networkId, {
+        kind: "initial_discovery",
+        idempotencyKey,
+      }),
+    onSuccess: (scanRun, variables) => {
+      setScopeStates((current) => ({
+        ...current,
+        [variables.networkId]: {
+          ...(current[variables.networkId] ?? DEFAULT_SCOPE_STATE),
+          scanRun,
         },
       }));
     },
@@ -215,12 +248,15 @@ export function DiscoveryScopeSetup({
               <div className="flex flex-col gap-1">
                 {networks.map((network) => {
                   const state = scopeStates[network.id];
-                  const confirmed =
-                    state?.scope?.confirmed_at &&
-                    !isScopeDirty(
-                      state,
-                      parseExcludedCidrs(state.excludedCidrs),
-                    );
+                  const confirmed = state
+                    ? isScopeConfirmed(
+                        state.scope,
+                        isScopeDirty(
+                          state,
+                          parseExcludedCidrs(state.excludedCidrs),
+                        ),
+                      )
+                    : false;
                   return (
                     <Button
                       aria-pressed={network.id === selectedNetwork?.id}
@@ -230,6 +266,7 @@ export function DiscoveryScopeSetup({
                         setSelectedNetworkId(network.id);
                         draftMutation.reset();
                         confirmMutation.reset();
+                        scanMutation.reset();
                       }}
                       variant={
                         network.id === selectedNetwork?.id
@@ -262,28 +299,41 @@ export function DiscoveryScopeSetup({
                 excludedCidrs={selectedState.excludedCidrs}
                 isDirty={scopeIsDirty}
                 network={selectedNetwork}
+                scanError={
+                  scanMutation.variables?.networkId === selectedNetwork.id
+                    ? scanMutation.error
+                    : null
+                }
+                scanPending={
+                  scanMutation.isPending &&
+                  scanMutation.variables?.networkId === selectedNetwork.id
+                }
+                scanRun={selectedState.scanRun}
                 onAcknowledge={(acknowledged) =>
                   setSelectedState((current) => ({
                     ...current,
                     acknowledged,
                   }))
                 }
-                onExcludedCidrsChange={(excludedCidrs) =>
+                onExcludedCidrsChange={(excludedCidrs) => {
+                  scanMutation.reset();
                   setSelectedState((current) => ({
                     ...current,
                     excludedCidrs,
                     acknowledged: false,
-                  }))
-                }
-                onProfileChange={(scanProfile) =>
+                  }));
+                }}
+                onProfileChange={(scanProfile) => {
+                  scanMutation.reset();
                   setSelectedState((current) => ({
                     ...current,
                     scanProfile,
                     acknowledged: false,
-                  }))
-                }
+                  }));
+                }}
                 onConfirm={() => {
                   if (selectedState.scope) {
+                    scanMutation.reset();
                     confirmMutation.mutate({
                       networkId: selectedNetwork.id,
                       targetCount: selectedState.scope.target_count,
@@ -291,11 +341,23 @@ export function DiscoveryScopeSetup({
                   }
                 }}
                 onDraft={() => {
+                  scanMutation.reset();
                   draftMutation.mutate({
                     networkId: selectedNetwork.id,
                     excludedCidrs,
                     scanProfile: selectedState.scanProfile,
                   });
+                }}
+                onLaunch={() => {
+                  if (
+                    selectedState.scope &&
+                    isScopeConfirmed(selectedState.scope, scopeIsDirty)
+                  ) {
+                    scanMutation.mutate({
+                      networkId: selectedNetwork.id,
+                      idempotencyKey: createIdempotencyKey(),
+                    });
+                  }
                 }}
                 profile={selectedState.scanProfile}
                 scope={selectedState.scope}
@@ -319,11 +381,15 @@ function ScopeForm({
   draftPending,
   confirmPending,
   error,
+  scanError,
+  scanPending,
+  scanRun,
   onExcludedCidrsChange,
   onProfileChange,
   onAcknowledge,
   onDraft,
   onConfirm,
+  onLaunch,
 }: {
   network: Network;
   scope: DiscoveryScope | null;
@@ -335,13 +401,17 @@ function ScopeForm({
   draftPending: boolean;
   confirmPending: boolean;
   error: unknown;
+  scanError: unknown;
+  scanPending: boolean;
+  scanRun: ScanRun | null;
   onExcludedCidrsChange: (value: string) => void;
   onProfileChange: (value: ScanProfile) => void;
   onAcknowledge: (value: boolean) => void;
   onDraft: () => void;
   onConfirm: () => void;
+  onLaunch: () => void;
 }) {
-  const confirmed = Boolean(scope?.confirmed_at) && !isDirty;
+  const confirmed = isScopeConfirmed(scope, isDirty);
   const targetCount = scope ? formatCount(scope.target_count) : null;
   const status = confirmed
     ? "Confirmed"
@@ -469,12 +539,150 @@ function ScopeForm({
         </Button>
       ) : null}
       {confirmed ? (
-        <p className="flex items-center gap-2 text-sm text-muted-foreground">
-          <CheckIcon className="text-primary" />
-          Discovery scope confirmed for {targetCount} targets.
-        </p>
+        <>
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            <CheckIcon className="text-primary" />
+            Discovery scope confirmed for {targetCount} targets.
+          </p>
+          <ScanLaunch
+            error={scanError}
+            network={network}
+            onLaunch={onLaunch}
+            pending={scanPending}
+            run={scanRun}
+            targetCount={targetCount}
+          />
+        </>
       ) : null}
     </form>
+  );
+}
+
+function ScanLaunch({
+  network,
+  run,
+  targetCount,
+  pending,
+  error,
+  onLaunch,
+}: {
+  network: Network;
+  run: ScanRun | null;
+  targetCount: string | null;
+  pending: boolean;
+  error: unknown;
+  onLaunch: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-4 rounded-lg border bg-muted/20 p-4">
+      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+        <div>
+          <p className="font-medium">Initial discovery scan</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Scan approved addresses in {network.cidr}. This launches a full TCP
+            port sweep for the confirmed scope.
+          </p>
+        </div>
+        <Button disabled={pending} onClick={onLaunch} type="button">
+          {pending ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <PlayIcon data-icon="inline-start" />
+          )}
+          {pending ? "Queueing initial discovery…" : "Launch initial discovery"}
+        </Button>
+      </div>
+
+      {pending ? (
+        <p aria-live="polite" className="text-sm text-muted-foreground">
+          Submitting scan request for confirmed scope. The server will queue
+          work only for approved targets.
+        </p>
+      ) : null}
+      {error ? <ScanLaunchError error={error} /> : null}
+      {run ? <ScanRunStatus run={run} targetCount={targetCount} /> : null}
+    </div>
+  );
+}
+
+function ScanRunStatus({
+  run,
+  targetCount,
+}: {
+  run: ScanRun;
+  targetCount: string | null;
+}) {
+  const completedTargets = formatCount(run.targets_completed);
+  const plannedTargets = targetCount ?? formatCount(run.targets_planned);
+
+  switch (run.status) {
+    case "pending":
+      return (
+        <Alert aria-live="polite">
+          <NetworkIcon />
+          <AlertTitle>Initial discovery queued</AlertTitle>
+          <AlertDescription>
+            Server accepted scan for {plannedTargets} confirmed targets. Work
+            has not started yet.
+          </AlertDescription>
+        </Alert>
+      );
+    case "running":
+      return (
+        <Alert aria-live="polite">
+          <NetworkIcon />
+          <AlertTitle>Initial discovery running</AlertTitle>
+          <AlertDescription>
+            {completedTargets} of {plannedTargets} confirmed targets completed.
+          </AlertDescription>
+        </Alert>
+      );
+    case "succeeded":
+      return (
+        <Alert aria-live="polite">
+          <CheckIcon />
+          <AlertTitle>Initial discovery complete</AlertTitle>
+          <AlertDescription>
+            Full TCP scan completed for {plannedTargets} confirmed targets.
+          </AlertDescription>
+        </Alert>
+      );
+    case "failed":
+      return (
+        <Alert aria-live="polite" variant="destructive">
+          <CircleAlertIcon />
+          <AlertTitle>Initial discovery failed</AlertTitle>
+          <AlertDescription>
+            {run.error ??
+              "Server marked scan run failed without an error message."}
+          </AlertDescription>
+        </Alert>
+      );
+    case "cancelled":
+      return (
+        <Alert aria-live="polite" variant="destructive">
+          <CircleAlertIcon />
+          <AlertTitle>Initial discovery cancelled</AlertTitle>
+          <AlertDescription>
+            Scan stopped after {completedTargets} of {plannedTargets} confirmed
+            targets completed.
+          </AlertDescription>
+        </Alert>
+      );
+  }
+}
+
+function ScanLaunchError({ error }: { error: unknown }) {
+  return (
+    <Alert variant="destructive">
+      <CircleAlertIcon />
+      <AlertTitle>Initial discovery launch failed</AlertTitle>
+      <AlertDescription>
+        {error instanceof Error
+          ? error.message
+          : "Server rejected initial discovery launch without an error message."}
+      </AlertDescription>
+    </Alert>
   );
 }
 
@@ -485,7 +693,9 @@ function ScopeError({ error }: { error: unknown }) {
       <CircleAlertIcon />
       <AlertTitle>Scope action failed</AlertTitle>
       <AlertDescription>
-        {error instanceof Error ? error.message : "Try again."}
+        {error instanceof Error
+          ? error.message
+          : "Scope server returned no error details."}
       </AlertDescription>
     </Alert>
   );
@@ -507,6 +717,26 @@ function isScopeDirty(
     (state.appliedExcludedCidrs?.join("\n") !== excludedCidrs.join("\n") ||
       state.appliedScanProfile !== state.scanProfile)
   );
+}
+
+function isScopeConfirmed(
+  scope: DiscoveryScope | null,
+  isDirty: boolean,
+): boolean {
+  return Boolean(
+    scope &&
+    !isDirty &&
+    scope.enabled &&
+    scope.confirmed_at &&
+    scope.confirmed_target_count === scope.target_count,
+  );
+}
+
+function createIdempotencyKey(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `scan-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function formatCount(value: number): string {

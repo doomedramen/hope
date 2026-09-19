@@ -3,6 +3,7 @@ import {
   confirmDiscoveryScope,
   draftDiscoveryScope,
   fetchHealthReady,
+  launchNetworkScan,
 } from "./api";
 
 describe("fetchHealthReady", () => {
@@ -85,6 +86,40 @@ describe("fetchHealthReady", () => {
       }),
     );
     const headers = new Headers(fetchMock.mock.calls[1][1]?.headers);
+    expect(headers.get("x-requested-with")).toBe("hope");
+  });
+
+  it("launches an initial discovery scan with an idempotency key", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "run-1",
+          network_id: "network-1",
+          job_id: "job-1",
+          kind: "initial_discovery",
+          status: "pending",
+          targets_planned: 252,
+        }),
+        { status: 202, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const run = await launchNetworkScan("network-1", {
+      kind: "initial_discovery",
+      idempotencyKey: "scan-network-1-unique-key",
+    });
+
+    expect(run.id).toBe("run-1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/networks/network-1/scans",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ kind: "initial_discovery" }),
+      }),
+    );
+    const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
+    expect(headers.get("idempotency-key")).toBe("scan-network-1-unique-key");
     expect(headers.get("x-requested-with")).toBe("hope");
   });
 });
