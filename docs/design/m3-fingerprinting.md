@@ -30,6 +30,36 @@ or inspect unbounded body data. Protocol collectors remain separately bounded.
 The first set covers generic HTTP/TLS/SSH facts produced by M2, with generic
 fallbacks when no signature matches.
 
+### 2.1 Slice 1 implementation
+
+The pure engine lives in `domain::fingerprinting`. `FingerprintInput` accepts
+only normalized M2 fields and validates the same bounded shape before a rule
+can read it: allowlisted HTTP headers, status, title, body sample, banner,
+same-endpoint redirects, TLS ALPN, and reduced certificate metadata. The
+`from_m2_evidence` adapter parses stored M2 JSON only; it does not probe or
+persist anything.
+
+`FingerprintRule` is the extension point. A rule returns a protocol, product,
+and version match, confidence, exact `EvidenceField` paths, and stable reasons.
+`FingerprintEngine` orders competing candidates by confidence and rule ID.
+Every candidate carries `rule_id` and `fixture_version`. If no rule matches,
+the engine returns `fallback.<protocol>` with a generic protocol candidate,
+so unknown HTTP, TLS, SSH, and TCP services remain visible.
+
+Built-in HTTP signatures cover AdGuard Home, Grafana, Home Assistant, Immich,
+Jellyfin, Lidarr, Nextcloud, OPNsense, Pi-hole, Plex, Portainer, Proxmox VE,
+Radarr, Readarr, Sonarr, TrueNAS, and UniFi. Product signatures require two
+independent fields, normally title plus body or server. A single title or
+body marker cannot create a product guess. OpenSSH and Dropbear use their
+structured SSH implementation banner as a high-specificity exception and
+still expose the exact banner field and parsed version when present.
+
+Checked-in fixtures live under
+`crates/domain/fixtures/fingerprinting/v1/`. Each JSON file has
+`format_version`, normalized `input`, and `expected` candidate fields. The
+fixture envelope version is independent from each rule's stamped fixture
+version so fixture readers and signatures can evolve separately.
+
 ## 3. Reconciliation and review
 
 Automatic fingerprint evidence is append-only. A reconciliation transaction
@@ -54,7 +84,7 @@ health execution are M4 work.
 
 ## 5. Delivery sequence
 
-1. Pure rule engine, signed-in fixtures, and score/explanation tests.
+1. Pure rule engine, checked-in fixtures, and score/explanation tests.
 2. Fingerprint evidence persistence and canonical service reconciliation.
 3. Service-review queue and **Why?** API/UI.
 4. Monitor-proposal policy, persistence, and review UI.

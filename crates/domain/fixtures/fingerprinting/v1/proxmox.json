@@ -1,0 +1,37 @@
+{
+  "format_version": 1,
+  "name": "proxmox-https",
+  "input": {
+    "protocol": "https",
+    "protocol_confidence": 0.95,
+    "status": 200,
+    "headers": {
+      "content-type": "text/html",
+      "server": "pve-api-daemon"
+    },
+    "title": "Proxmox VE",
+    "body_sample": "<html><body>proxmox management interface</body></html>",
+    "tls": {
+      "alpn": "http/1.1",
+      "certificate": [
+        {
+          "subject": "pve.proxmox.lab",
+          "subject_alt_names": ["pve.proxmox.lab"]
+        }
+      ]
+    }
+  },
+  "expected": {
+    "rule_id": "http.proxmox",
+    "fixture_version": 1,
+    "protocol": "https",
+    "product": "Proxmox VE",
+    "version": null,
+    "confidence": 0.93,
+    "evidence_paths": [
+      "body_sample",
+      "title",
+      "tls.certificate[].subject"
+    ]
+  }
+}

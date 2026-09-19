@@ -1,0 +1,18 @@
+{
+  "format_version": 1,
+  "name": "openssh-banner",
+  "input": {
+    "protocol": "ssh",
+    "protocol_confidence": 0.98,
+    "banner": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13"
+  },
+  "expected": {
+    "rule_id": "ssh.openssh",
+    "fixture_version": 1,
+    "protocol": "ssh",
+    "product": "OpenSSH",
+    "version": "9.6",
+    "confidence": 0.92,
+    "evidence_paths": ["banner"]
+  }
+}

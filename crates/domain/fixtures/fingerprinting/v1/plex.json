@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "name": "plex-http",
+  "input": {
+    "protocol": "http",
+    "protocol_confidence": 0.98,
+    "status": 200,
+    "headers": {
+      "content-type": "text/html",
+      "server": "Plex Media Server/1.40.0.7998"
+    },
+    "title": "Plex Web",
+    "body_sample": "<html><body>plex web client</body></html>"
+  },
+  "expected": {
+    "rule_id": "http.plex",
+    "fixture_version": 1,
+    "protocol": "http",
+    "product": "Plex",
+    "version": "1.40.0.7998",
+    "confidence": 0.93,
+    "evidence_paths": ["body_sample", "headers.server", "title"]
+  }
+}

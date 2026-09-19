@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "name": "weak-single-field-http",
+  "input": {
+    "protocol": "http",
+    "title": "Plex"
+  },
+  "expected": {
+    "rule_id": "fallback.http",
+    "fixture_version": 1,
+    "protocol": "http",
+    "product": null,
+    "version": null,
+    "confidence": 0.98,
+    "evidence_paths": ["protocol"]
+  }
+}

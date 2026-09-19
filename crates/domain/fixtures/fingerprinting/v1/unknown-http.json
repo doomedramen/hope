@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "name": "unknown-http",
+  "input": {
+    "protocol": "http",
+    "protocol_confidence": 0.98,
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain",
+      "server": "fixture-server"
+    },
+    "body_sample": "hello from an unknown service"
+  },
+  "expected": {
+    "rule_id": "fallback.http",
+    "fixture_version": 1,
+    "protocol": "http",
+    "product": null,
+    "version": null,
+    "confidence": 0.98,
+    "evidence_paths": ["protocol"]
+  }
+}

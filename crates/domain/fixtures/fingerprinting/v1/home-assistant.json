@@ -1,0 +1,22 @@
+{
+  "format_version": 1,
+  "name": "home-assistant-http",
+  "input": {
+    "protocol": "http",
+    "status": 200,
+    "headers": {
+      "content-type": "text/html"
+    },
+    "title": "Home Assistant",
+    "body_sample": "<html><body>home-assistant frontend</body></html>"
+  },
+  "expected": {
+    "rule_id": "http.home_assistant",
+    "fixture_version": 1,
+    "protocol": "http",
+    "product": "Home Assistant",
+    "version": null,
+    "confidence": 0.86,
+    "evidence_paths": ["body_sample", "title"]
+  }
+}

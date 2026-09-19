@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub mod discovery;
+pub mod fingerprinting;
 pub mod inventory;
 
 /// A user account, as created by the setup/bootstrap flow.

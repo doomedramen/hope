@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "name": "unknown-tcp",
+  "input": {
+    "protocol": "tcp",
+    "protocol_confidence": 0.45
+  },
+  "expected": {
+    "rule_id": "fallback.tcp",
+    "fixture_version": 1,
+    "protocol": "tcp",
+    "product": null,
+    "version": null,
+    "confidence": 0.45,
+    "evidence_paths": ["protocol"]
+  }
+}
