@@ -74,11 +74,19 @@ The scanner never performs authentication, protocol writes, or exploit probes.
 
 ## 4. Observation application
 
-For each address, the worker resolves or creates an unconfirmed device through
-M1 identity reconciliation. An open TCP port creates a `network_scan` evidence
-row and a `port.opened` change event when it was not already current. A full,
-complete scan can add absent evidence and a `port.closed` change event for a
-previously observed port. Partial scans only refresh positive evidence.
+For each address, the worker resolves or creates an unconfirmed `unknown`
+device with one current M1 interface/address record. An open TCP port appends a
+`network_scan` evidence row with attribute `open_port` and value
+`{"address":"...","port":443,"transport":"tcp"}`. It emits a
+`port.opened` change event only when the latest matching scan evidence was
+absent or missing; repeated positive observations refresh evidence without
+duplicating the event.
+
+A full, complete scan can append absent evidence and a `port.closed` change
+event for a previously observed port. Closure reconciliation runs in the same
+transaction that marks the run `succeeded`. Partial, failed, and cancelled
+runs only retain raw observations and refresh positive evidence; they never
+write absence evidence or closure events.
 
 M3 consumes the open-port evidence for HTTP, TLS, SSH, and generic TCP
 classification. M2 does not create product or service guesses.

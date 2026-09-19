@@ -8,7 +8,8 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
+use std::net::IpAddr;
 use uuid::Uuid;
 
 use crate::inventory::pagination::{ListParams, decode_cursor, effective_limit, encode_cursor};
@@ -37,22 +38,37 @@ pub async fn assign_address_tx(
 ) -> sqlx::Result<Value> {
     let mut tx = pool.begin().await?;
 
+    let row = assign_address_in_tx(&mut tx, interface_id, ip, address_type).await?;
+
+    tx.commit().await?;
+    Ok(row)
+}
+
+/// Assign `ip` inside an existing transaction. Refreshing an already-current
+/// address updates its observation timestamp; moving an address closes its
+/// old row and appends a new current row.
+async fn assign_address_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    interface_id: Uuid,
+    ip: &str,
+    address_type: Option<&str>,
+) -> sqlx::Result<Value> {
     let already_current: Option<(String,)> =
         sqlx::query_as("select host(ip) from addresses where interface_id = $1 and is_current")
             .bind(interface_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
 
     if let Some((current_ip,)) = &already_current {
         if current_ip == ip {
-            // No-op: already current, nothing to close/insert.
             let row: (Value,) = sqlx::query_as(
-                "select row_to_json(t) from (select * from addresses where interface_id = $1 and is_current) t",
+                "update addresses set last_seen = now(), version = version + 1, updated_at = now() \
+                 where interface_id = $1 and is_current \
+                 returning row_to_json(addresses.*)",
             )
             .bind(interface_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
-            tx.commit().await?;
             return Ok(row.0);
         }
 
@@ -61,7 +77,7 @@ pub async fn assign_address_tx(
              where interface_id = $1 and is_current",
         )
         .bind(interface_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
@@ -73,11 +89,72 @@ pub async fn assign_address_tx(
     .bind(interface_id)
     .bind(ip)
     .bind(address_type)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
-    tx.commit().await?;
     Ok(row.0)
+}
+
+/// Resolve the device currently owning `ip`, or create an unconfirmed
+/// unknown device with one interface and current address for a newly scanned
+/// address. The address lock prevents concurrent scans from creating two
+/// owners for one current IP.
+pub async fn ensure_scanned_address(pool: &PgPool, ip: IpAddr) -> sqlx::Result<Uuid> {
+    let ip = ip.to_string();
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&ip)
+        .execute(&mut *tx)
+        .await?;
+
+    let existing: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "select a.interface_id, d.id \
+         from addresses a \
+         join interfaces i on i.id = a.interface_id \
+         join devices d on d.id = i.device_id \
+         where a.ip = $1::inet and a.is_current \
+         for update of a",
+    )
+    .bind(&ip)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let device_id = if let Some((interface_id, device_id)) = existing {
+        assign_address_in_tx(&mut tx, interface_id, &ip, Some("unknown")).await?;
+        resolve_device_in_tx(&mut tx, device_id).await?
+    } else {
+        let (device_id,): (Uuid,) = sqlx::query_as(
+            "insert into devices (device_type, status) values ('unknown', 'active') returning id",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        let (interface_id,): (Uuid,) =
+            sqlx::query_as("insert into interfaces (device_id) values ($1) returning id")
+                .bind(device_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        assign_address_in_tx(&mut tx, interface_id, &ip, Some("unknown")).await?;
+        device_id
+    };
+
+    tx.commit().await?;
+    Ok(device_id)
+}
+
+async fn resolve_device_in_tx(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> sqlx::Result<Uuid> {
+    let mut current = id;
+    loop {
+        let next: Option<(Option<Uuid>,)> =
+            sqlx::query_as("select canonical_of from devices where id = $1")
+                .bind(current)
+                .fetch_optional(&mut **tx)
+                .await?;
+        match next {
+            Some((Some(canonical_of),)) if canonical_of != current => current = canonical_of,
+            _ => return Ok(current),
+        }
+    }
 }
 
 pub async fn assign(

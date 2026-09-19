@@ -17,7 +17,7 @@ Applied automatically by `server serve` and `server migrate` via
 - **Upgrade from the previous test schema**: covered from M1 onward by
   `apps/server/tests/migration_upgrade.rs` (DB-gated, `DATABASE_URL`
   required): applies migrations 0001-0003 (the M0 schema) as if already
-  deployed, inserts sample data, then applies 0004-0007 (M1) on top and
-  asserts the M0 data is unchanged and the new tables exist. Extend this
-  test's M0/M1 migration lists as later milestones add releases to
-  upgrade from.
+  deployed, inserts sample data, then applies the full migration set on top
+  and asserts the M0 data is unchanged and the new tables exist. Extend this
+  test's assertions as later milestones add release-specific upgrade
+  guarantees.

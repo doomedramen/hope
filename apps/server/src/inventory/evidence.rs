@@ -10,7 +10,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::auth_mw::CurrentUser;
@@ -32,6 +32,41 @@ pub struct SubmitEvidence {
     #[serde(default)]
     pub absent: bool,
     pub expires_at: Option<String>,
+}
+
+/// Append inferred evidence inside the mutation transaction that consumed
+/// it. Automatic evidence is append-only; callers mark absence with a new
+/// row instead of mutating a previous observation.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_automatic_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    subject_table: &str,
+    subject_id: Uuid,
+    source_type: &str,
+    source_instance: Option<&str>,
+    attribute: &str,
+    value: &Value,
+    confidence: f32,
+    absent: bool,
+) -> sqlx::Result<Uuid> {
+    let (id,): (Uuid,) = sqlx::query_as(
+        "insert into evidence \
+            (subject_table, subject_id, source_type, source_instance, attribute, value, \
+             confidence, absent) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8) \
+         returning id",
+    )
+    .bind(subject_table)
+    .bind(subject_id)
+    .bind(source_type)
+    .bind(source_instance)
+    .bind(attribute)
+    .bind(value)
+    .bind(confidence)
+    .bind(absent)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(id)
 }
 
 /// POST /api/v1/evidence — append a new evidence row. Manual submissions

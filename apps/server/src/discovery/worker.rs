@@ -2,10 +2,10 @@
 //!
 //! This module owns scan-run policy and persistence. [`super::tcp`] owns only
 //! TCP connect probes and their concurrency limits. Partial runs retain their
-//! observations, but this coordinator never writes absence evidence or change
-//! events, so only a complete run can later support closure reconciliation.
+//! observations and positive evidence, while only a complete successful run
+//! writes absence evidence and closure change events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,16 +15,19 @@ use anyhow::{Context, Result, anyhow};
 use domain::discovery::ApprovedScope;
 use futures_util::stream::{self, StreamExt};
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::tcp::{ConnectScanner, ConnectScannerConfig, PortObservation, PortState, Scanner};
+use crate::inventory::{addresses, events::Recorder, evidence};
 
 const TCP_PORT_COUNT: i64 = 65_535;
 const SCAN_BATCH_SIZE: usize = 256;
 const JOB_LEASE_SECS: i64 = 60;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const PORT_EVIDENCE_ATTRIBUTE: &str = "open_port";
+const PORT_EVIDENCE_CONFIDENCE: f32 = 0.9;
 
 /// Result used by the worker loop to distinguish a successful job from a
 /// cooperative cancellation. A cancelled run must not be retried as failed.
@@ -88,7 +91,7 @@ pub async fn handle(
         Ok(scanner) => scanner,
         Err(error) => return async_fail_run(pool, run.id, error).await,
     };
-    let device_ids = load_device_ids(pool).await?;
+    let mut device_ids = load_device_ids(pool).await?;
     let ports: Vec<u16> = (1..=u16::MAX).collect();
     let expected_ports = run
         .targets_planned
@@ -113,7 +116,7 @@ pub async fn handle(
             targets: &targets,
             ports: &ports,
             scanner: &scanner,
-            device_ids: &device_ids,
+            device_ids: &mut device_ids,
         },
     )
     .await
@@ -335,7 +338,7 @@ struct ScanPlan<'a> {
     targets: &'a [IpAddr],
     ports: &'a [u16],
     scanner: &'a dyn Scanner,
-    device_ids: &'a HashMap<IpAddr, Uuid>,
+    device_ids: &'a mut HashMap<IpAddr, Uuid>,
 }
 
 async fn execute_run(
@@ -449,6 +452,11 @@ async fn execute_run(
             )
             .await;
         }
+
+        let device_id = addresses::ensure_scanned_address(pool, *address)
+            .await
+            .with_context(|| format!("resolve scanned address {address}"))?;
+        device_ids.insert(*address, device_id);
 
         let port_offset = if target_index == first_target {
             initial_port_offset
@@ -583,7 +591,9 @@ async fn execute_run(
         mark_failed(pool, run.id, &error.to_string()).await?;
         return Err(error);
     }
-    mark_succeeded(pool, run.id).await?;
+    if let Err(error) = complete_run(pool, run.id, targets, ports).await {
+        return async_fail_run(pool, run.id, error).await;
+    }
     report_progress(
         pool,
         job_id,
@@ -646,6 +656,78 @@ async fn scan_batch<S: Scanner + ?Sized>(
     }
 }
 
+fn port_evidence_value(observation: &PortObservation) -> Value {
+    json!({
+        "address": observation.address.to_string(),
+        "port": observation.port,
+        "transport": "tcp",
+    })
+}
+
+fn port_snapshot(value: &Value, state: &str) -> Value {
+    let mut snapshot = value.clone();
+    if let Some(object) = snapshot.as_object_mut() {
+        object.insert("state".to_string(), Value::String(state.to_string()));
+        snapshot
+    } else {
+        json!({"value": value, "state": state})
+    }
+}
+
+async fn record_open_port_evidence(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    device_id: Uuid,
+    observation: &PortObservation,
+) -> Result<Uuid> {
+    let value = port_evidence_value(observation);
+    let previous: Option<(bool, Value)> = sqlx::query_as(
+        "select absent, value from evidence \
+         where subject_table = 'devices' and subject_id = $1 \
+           and source_type = 'network_scan' and attribute = $2 and value = $3 \
+         order by last_seen desc, created_at desc, id desc limit 1",
+    )
+    .bind(device_id)
+    .bind(PORT_EVIDENCE_ATTRIBUTE)
+    .bind(&value)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let source_instance = run_id.to_string();
+    let evidence_id = evidence::record_automatic_tx(
+        tx,
+        "devices",
+        device_id,
+        "network_scan",
+        Some(&source_instance),
+        PORT_EVIDENCE_ATTRIBUTE,
+        &value,
+        PORT_EVIDENCE_CONFIDENCE,
+        false,
+    )
+    .await?;
+
+    let was_open = previous
+        .as_ref()
+        .map(|(absent, _)| !*absent)
+        .unwrap_or(false);
+    if !was_open {
+        Recorder::record_change(
+            tx,
+            "devices",
+            device_id,
+            "port.opened",
+            "notice",
+            previous.as_ref().map(|_| port_snapshot(&value, "closed")),
+            Some(port_snapshot(&value, "open")),
+            Some("network_scan"),
+        )
+        .await?;
+    }
+
+    Ok(evidence_id)
+}
+
 async fn persist_observations(
     pool: &PgPool,
     run_id: Uuid,
@@ -656,19 +738,34 @@ async fn persist_observations(
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     for observation in observations {
+        let device_id = device_ids
+            .get(&observation.address)
+            .copied()
+            .ok_or_else(|| {
+                anyhow!(
+                    "no inventory device for scanned address {}",
+                    observation.address
+                )
+            })?;
+        let evidence_id = if observation.state == PortState::Open {
+            Some(record_open_port_evidence(&mut tx, run_id, device_id, observation).await?)
+        } else {
+            None
+        };
         let latency_ms = i32::try_from(observation.latency.as_millis()).unwrap_or(i32::MAX);
         sqlx::query(
             "insert into port_observations \
-                (scan_run_id, device_id, address, port, transport, state, latency_ms) \
-             values ($1, $2, $3::inet, $4, 'tcp', $5, $6) \
+                (scan_run_id, device_id, address, port, transport, state, latency_ms, evidence_id) \
+             values ($1, $2, $3::inet, $4, 'tcp', $5, $6, $7) \
              on conflict (scan_run_id, address, port, transport) do nothing",
         )
         .bind(run_id)
-        .bind(device_ids.get(&observation.address).copied())
+        .bind(device_id)
         .bind(observation.address.to_string())
         .bind(i32::from(observation.port))
         .bind(port_state_name(observation.state))
         .bind(latency_ms)
+        .bind(evidence_id)
         .execute(&mut *tx)
         .await?;
     }
@@ -684,6 +781,121 @@ async fn persist_observations(
     .await?;
     if updated.rows_affected() != 1 {
         return Err(anyhow!("scan run is no longer writable"));
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn complete_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    targets: &[IpAddr],
+    ports: &[u16],
+) -> Result<()> {
+    let target_addresses: Vec<String> = targets.iter().map(ToString::to_string).collect();
+    let target_address_set: HashSet<String> = target_addresses.iter().cloned().collect();
+    let mut tx = pool.begin().await?;
+
+    let open_observations: Vec<(String, i32, String)> = sqlx::query_as(
+        "select host(address), port, transport from port_observations \
+         where scan_run_id = $1 and state = 'open'",
+    )
+    .bind(run_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let current_open: HashSet<(String, i32, String)> = open_observations.into_iter().collect();
+
+    let previous_open: Vec<(Uuid, Value, bool)> = sqlx::query_as(
+        "select distinct on (subject_id, value) subject_id, value, absent \
+         from evidence \
+         where subject_table = 'devices' and source_type = 'network_scan' \
+           and attribute = $1 \
+           and value->>'address' = any($2::text[]) \
+         order by subject_id, value, last_seen desc, created_at desc, id desc",
+    )
+    .bind(PORT_EVIDENCE_ATTRIBUTE)
+    .bind(&target_addresses)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let source_instance = run_id.to_string();
+    for (device_id, value, absent) in previous_open {
+        if absent {
+            continue;
+        }
+        let Some(address) = value.get("address").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(port) = value
+            .get("port")
+            .and_then(Value::as_i64)
+            .and_then(|port| i32::try_from(port).ok())
+        else {
+            continue;
+        };
+        let Some(transport) = value.get("transport").and_then(Value::as_str) else {
+            continue;
+        };
+        if !target_address_set.contains(address)
+            || !ports.iter().any(|candidate| i32::from(*candidate) == port)
+        {
+            continue;
+        }
+        let key = (address.to_string(), port, transport.to_string());
+        if current_open.contains(&key) {
+            continue;
+        }
+
+        let evidence_id = evidence::record_automatic_tx(
+            &mut tx,
+            "devices",
+            device_id,
+            "network_scan",
+            Some(&source_instance),
+            PORT_EVIDENCE_ATTRIBUTE,
+            &value,
+            PORT_EVIDENCE_CONFIDENCE,
+            true,
+        )
+        .await?;
+        Recorder::record_change(
+            &mut tx,
+            "devices",
+            device_id,
+            "port.closed",
+            "notice",
+            Some(port_snapshot(&value, "open")),
+            Some(port_snapshot(&value, "closed")),
+            Some("network_scan"),
+        )
+        .await?;
+        sqlx::query(
+            "update port_observations set evidence_id = $5 \
+             where scan_run_id = $1 and address = $2::inet and port = $3 and transport = $4",
+        )
+        .bind(run_id)
+        .bind(address)
+        .bind(port)
+        .bind(transport)
+        .bind(evidence_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let updated = sqlx::query(
+        "update scan_runs set status = 'succeeded', complete = true, finished_at = now(), \
+            error = null, updated_at = now() \
+         where id = $1 and status = 'running' and not complete \
+           and not cancellation_requested \
+           and targets_completed = targets_planned and ports_completed = ports_planned",
+    )
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow!(
+            "scan run completion rejected before all probes completed"
+        ));
     }
     tx.commit().await?;
     Ok(())
@@ -723,24 +935,6 @@ async fn mark_target_completed(pool: &PgPool, run_id: Uuid, targets_completed: i
     .await?;
     if result.rows_affected() != 1 {
         return Err(anyhow!("scan run target progress update was rejected"));
-    }
-    Ok(())
-}
-
-async fn mark_succeeded(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    let result = sqlx::query(
-        "update scan_runs set status = 'succeeded', complete = true, finished_at = now(), \
-            error = null, updated_at = now() \
-         where id = $1 and status = 'running' and not cancellation_requested \
-           and targets_completed = targets_planned and ports_completed = ports_planned",
-    )
-    .bind(run_id)
-    .execute(pool)
-    .await?;
-    if result.rows_affected() != 1 {
-        return Err(anyhow!(
-            "scan run completion rejected before all probes completed"
-        ));
     }
     Ok(())
 }
@@ -978,7 +1172,7 @@ mod tests {
         let run = load_run(&pool, job_id).await.expect("load test run");
         let scanner = FakeScanner::default();
         let target = "192.168.30.10".parse().expect("test target");
-        let device_ids = HashMap::new();
+        let mut device_ids = HashMap::new();
         let outcome = execute_run(
             ExecutionContext {
                 pool: &pool,
@@ -990,7 +1184,7 @@ mod tests {
                 targets: &[target],
                 ports: &[80, 443],
                 scanner: &scanner,
-                device_ids: &device_ids,
+                device_ids: &mut device_ids,
             },
         )
         .await
@@ -1022,6 +1216,241 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_scan_application_emits_deduplicated_open_and_complete_close_events() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let octets = Uuid::new_v4().into_bytes();
+        let address = format!("10.{}.{}.{}", octets[0], octets[1], octets[2]);
+        let target: IpAddr = address.parse().expect("test target");
+        let port_value = json!({
+            "address": address,
+            "port": 80,
+            "transport": "tcp",
+        });
+
+        let (_, job_id, run_id) = test_run_for_address(&pool, &address, 2).await;
+        let run = load_run(&pool, job_id).await.expect("load open test run");
+        let scanner = FakeScanner {
+            open_port: Some(80),
+            ..FakeScanner::default()
+        };
+        let mut device_ids = HashMap::new();
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id,
+                worker_id: "test-worker",
+            },
+            run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &scanner,
+                device_ids: &mut device_ids,
+            },
+        )
+        .await
+        .expect("complete open test run");
+
+        let (device_id,): (Uuid,) = sqlx::query_as(
+            "select d.id from devices d \
+             join interfaces i on i.device_id = d.id \
+             join addresses a on a.interface_id = i.id \
+             where a.ip = $1::inet and a.is_current",
+        )
+        .bind(&address)
+        .fetch_one(&pool)
+        .await
+        .expect("resolve scanned device");
+        let open_events: (i64,) = sqlx::query_as(
+            "select count(*) from change_events where entity_id = $1 and category = 'port.opened'",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count open events");
+        assert_eq!(open_events.0, 1, "new open port emits one event");
+        let open_evidence: (i64,) = sqlx::query_as(
+            "select count(*) from evidence \
+             where subject_table = 'devices' and subject_id = $1 \
+               and source_type = 'network_scan' and attribute = $2 and value = $3 \
+               and not absent",
+        )
+        .bind(device_id)
+        .bind(PORT_EVIDENCE_ATTRIBUTE)
+        .bind(&port_value)
+        .fetch_one(&pool)
+        .await
+        .expect("count open evidence");
+        assert_eq!(open_evidence.0, 1);
+        let linked_observation: (bool,) = sqlx::query_as(
+            "select evidence_id is not null from port_observations where scan_run_id = $1 and port = 80",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read linked open observation");
+        assert!(linked_observation.0);
+
+        let (_, repeat_job_id, _) = test_run_for_address(&pool, &address, 2).await;
+        let repeat_run = load_run(&pool, repeat_job_id)
+            .await
+            .expect("load repeated open test run");
+        let repeat_scanner = FakeScanner {
+            open_port: Some(80),
+            ..FakeScanner::default()
+        };
+        let mut repeat_device_ids = HashMap::new();
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id: repeat_job_id,
+                worker_id: "test-worker",
+            },
+            repeat_run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &repeat_scanner,
+                device_ids: &mut repeat_device_ids,
+            },
+        )
+        .await
+        .expect("complete repeated open test run");
+        let open_events_after_repeat: (i64,) = sqlx::query_as(
+            "select count(*) from change_events where entity_id = $1 and category = 'port.opened'",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count repeated open events");
+        assert_eq!(
+            open_events_after_repeat.0, 1,
+            "refresh does not duplicate event"
+        );
+
+        let (_, failed_job_id, _) = test_run_for_address(&pool, &address, 2).await;
+        let failed_run = load_run(&pool, failed_job_id)
+            .await
+            .expect("load partial test run");
+        let failed_scanner = FakeScanner {
+            open_port: Some(80),
+            fail_port: Some(443),
+            ..FakeScanner::default()
+        };
+        let mut failed_device_ids = HashMap::new();
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id: failed_job_id,
+                worker_id: "test-worker",
+            },
+            failed_run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &failed_scanner,
+                device_ids: &mut failed_device_ids,
+            },
+        )
+        .await
+        .expect_err("partial scanner run must fail");
+        let open_after_failure: (bool,) = sqlx::query_as(
+            "select absent from evidence \
+             where subject_table = 'devices' and subject_id = $1 \
+               and source_type = 'network_scan' and attribute = $2 and value = $3 \
+             order by last_seen desc, created_at desc, id desc limit 1",
+        )
+        .bind(device_id)
+        .bind(PORT_EVIDENCE_ATTRIBUTE)
+        .bind(&port_value)
+        .fetch_one(&pool)
+        .await
+        .expect("read evidence after failed run");
+        assert!(!open_after_failure.0, "failed run cannot close port");
+
+        let (_, cancelled_job_id, _) = test_run_for_address(&pool, &address, 2).await;
+        jobs::request_cancel(&pool, cancelled_job_id)
+            .await
+            .expect("request cancellation");
+        let cancelled_run = load_run(&pool, cancelled_job_id)
+            .await
+            .expect("load cancelled test run");
+        let cancelled_scanner = FakeScanner::default();
+        let mut cancelled_device_ids = HashMap::new();
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id: cancelled_job_id,
+                worker_id: "test-worker",
+            },
+            cancelled_run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &cancelled_scanner,
+                device_ids: &mut cancelled_device_ids,
+            },
+        )
+        .await
+        .expect("cancelled test run");
+        let closed_events_before_complete: (i64,) = sqlx::query_as(
+            "select count(*) from change_events where entity_id = $1 and category = 'port.closed'",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count closed events before complete run");
+        assert_eq!(closed_events_before_complete.0, 0);
+
+        let (_, closing_job_id, _) = test_run_for_address(&pool, &address, 2).await;
+        let closing_run = load_run(&pool, closing_job_id)
+            .await
+            .expect("load closing test run");
+        let closing_scanner = FakeScanner::default();
+        let mut closing_device_ids = HashMap::new();
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id: closing_job_id,
+                worker_id: "test-worker",
+            },
+            closing_run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &closing_scanner,
+                device_ids: &mut closing_device_ids,
+            },
+        )
+        .await
+        .expect("complete closing test run");
+        let closed_events: (i64,) = sqlx::query_as(
+            "select count(*) from change_events where entity_id = $1 and category = 'port.closed'",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count closed events");
+        assert_eq!(closed_events.0, 1, "complete run emits one close event");
+        let closed_evidence: (bool,) = sqlx::query_as(
+            "select absent from evidence \
+             where subject_table = 'devices' and subject_id = $1 \
+               and source_type = 'network_scan' and attribute = $2 and value = $3 \
+             order by last_seen desc, created_at desc, id desc limit 1",
+        )
+        .bind(device_id)
+        .bind(PORT_EVIDENCE_ATTRIBUTE)
+        .bind(&port_value)
+        .fetch_one(&pool)
+        .await
+        .expect("read closed evidence");
+        assert!(closed_evidence.0);
+    }
+
+    #[tokio::test]
     async fn db_failed_run_stays_partial_and_writes_no_closure_evidence() {
         let Some(pool) = pool_or_skip().await else {
             eprintln!("skipping: DATABASE_URL not set");
@@ -1033,7 +1462,7 @@ mod tests {
             fail_port: Some(443),
             ..FakeScanner::default()
         };
-        let device_ids = HashMap::new();
+        let mut device_ids = HashMap::new();
         let error = execute_run(
             ExecutionContext {
                 pool: &pool,
@@ -1045,7 +1474,7 @@ mod tests {
                 targets: &["192.168.30.10".parse().unwrap()],
                 ports: &[80, 443],
                 scanner: &scanner,
-                device_ids: &device_ids,
+                device_ids: &mut device_ids,
             },
         )
         .await
@@ -1086,7 +1515,7 @@ mod tests {
             .expect("request test cancellation");
         let run = load_run(&pool, job_id).await.expect("load test run");
         let scanner = FakeScanner::default();
-        let device_ids = HashMap::new();
+        let mut device_ids = HashMap::new();
         let outcome = execute_run(
             ExecutionContext {
                 pool: &pool,
@@ -1098,7 +1527,7 @@ mod tests {
                 targets: &["192.168.30.10".parse().unwrap()],
                 ports: &[80, 443],
                 scanner: &scanner,
-                device_ids: &device_ids,
+                device_ids: &mut device_ids,
             },
         )
         .await
@@ -1133,13 +1562,21 @@ mod tests {
     }
 
     async fn test_run(pool: &PgPool, ports_planned: i64) -> (Uuid, Uuid, Uuid) {
-        let (network_id,): (Uuid,) = sqlx::query_as(
-            "insert into networks (cidr, name) values ('192.168.30.10/32', $1) returning id",
-        )
-        .bind(format!("scan-test-{}", Uuid::new_v4()))
-        .fetch_one(pool)
-        .await
-        .expect("create test network");
+        test_run_for_address(pool, "192.168.30.10", ports_planned).await
+    }
+
+    async fn test_run_for_address(
+        pool: &PgPool,
+        address: &str,
+        ports_planned: i64,
+    ) -> (Uuid, Uuid, Uuid) {
+        let (network_id,): (Uuid,) =
+            sqlx::query_as("insert into networks (cidr, name) values ($1::cidr, $2) returning id")
+                .bind(format!("{address}/32"))
+                .bind(format!("scan-test-{}", Uuid::new_v4()))
+                .fetch_one(pool)
+                .await
+                .expect("create test network");
         sqlx::query(
             "insert into discovery_scopes \
                 (network_id, target_count, confirmed_target_count, confirmed_at) \
@@ -1176,6 +1613,7 @@ mod tests {
     #[derive(Default)]
     struct FakeScanner {
         fail_port: Option<u16>,
+        open_port: Option<u16>,
         calls: AtomicUsize,
     }
 
@@ -1192,7 +1630,11 @@ mod tests {
             Ok(PortObservation {
                 address: target.ip(),
                 port: target.port(),
-                state: PortState::Closed,
+                state: if self.open_port == Some(target.port()) {
+                    PortState::Open
+                } else {
+                    PortState::Closed
+                },
                 latency: Duration::from_millis(1),
             })
         }
