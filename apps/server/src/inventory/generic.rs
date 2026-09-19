@@ -10,14 +10,16 @@
 //! queries, not `query!`" — every column name is a compile-time `&str`
 //! constant, only the row shape is dynamic.
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use sqlx::QueryBuilder;
 use sqlx::postgres::Postgres;
+use sqlx::{QueryBuilder, Transaction};
 use uuid::Uuid;
 
+use crate::auth_mw::CurrentUser;
 use crate::inventory::pagination::{ListParams, decode_cursor, effective_limit, encode_cursor};
 use crate::state::AppState;
 
@@ -339,6 +341,153 @@ pub async fn patch_generic(
     }
 }
 
+// Service PATCH keeps projection and confirmed manual provenance in one
+// optimistic-concurrency transaction. Other resources retain generic PATCH.
+async fn patch_service(
+    state: &AppState,
+    id: Uuid,
+    body: Value,
+    user_id: Uuid,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    let Value::Object(map) = &body else {
+        return Err(err(StatusCode::BAD_REQUEST, "body must be a JSON object"));
+    };
+    let Some(expected_version) = map.get("version").and_then(|v| v.as_i64()) else {
+        return Err(err(StatusCode::BAD_REQUEST, "version is required"));
+    };
+
+    let cols: Vec<Column> = SERVICES
+        .patchable
+        .iter()
+        .filter(|c| map.contains_key(c.name))
+        .copied()
+        .collect();
+    let expected_version = expected_version as i32;
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    type ServicePatchState = (Option<String>, Option<String>, Option<String>, i32);
+    let current: Option<ServicePatchState> = sqlx::query_as(
+        "select product, product_version, protocol, version \
+         from services where id = $1 for update",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let Some((current_product, current_product_version, current_protocol, current_version)) =
+        current
+    else {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "version mismatch (row changed concurrently or does not exist)",
+        ));
+    };
+    if current_version != expected_version {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "version mismatch (row changed concurrently or does not exist)",
+        ));
+    }
+
+    let manual_values: Vec<(&str, Value)> = ["product", "product_version", "protocol"]
+        .into_iter()
+        .filter_map(|field| {
+            let requested = map.get(field)?;
+            let current = match field {
+                "product" => current_product.as_deref(),
+                "product_version" => current_product_version.as_deref(),
+                "protocol" => current_protocol.as_deref(),
+                _ => unreachable!("manual service field list is fixed"),
+            };
+            let requested_text = value_to_text(requested);
+            (requested_text.as_deref() != current).then(|| {
+                (
+                    field,
+                    requested_text.map(Value::String).unwrap_or(Value::Null),
+                )
+            })
+        })
+        .collect();
+
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("update services set ");
+    let mut first = true;
+    for c in &cols {
+        if !first {
+            qb.push(", ");
+        }
+        first = false;
+        qb.push(c.name);
+        qb.push(" = ");
+        match value_to_text(&map[c.name]) {
+            Some(text) => {
+                qb.push_bind(text);
+                qb.push("::");
+                qb.push(c.pg_type);
+            }
+            None => {
+                qb.push("null::");
+                qb.push(c.pg_type);
+            }
+        }
+    }
+    if !first {
+        qb.push(", ");
+    }
+    qb.push("version = version + 1, updated_at = now() where id = ");
+    qb.push_bind(id);
+    qb.push(" and version = ");
+    qb.push_bind(expected_version);
+    qb.push(" returning row_to_json(services.*) as row");
+
+    let row: Option<(Value,)> = qb
+        .build_query_as()
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((row,)) = row else {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "version mismatch (row changed concurrently or does not exist)",
+        ));
+    };
+
+    record_manual_service_evidence(&mut tx, id, user_id, &manual_values)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(row)
+}
+
+async fn record_manual_service_evidence(
+    tx: &mut Transaction<'_, Postgres>,
+    service_id: Uuid,
+    user_id: Uuid,
+    fields: &[(&str, Value)],
+) -> sqlx::Result<()> {
+    for (attribute, value) in fields {
+        sqlx::query(
+            "insert into evidence \
+                (subject_table, subject_id, source_type, attribute, value, confidence, confirmed_by) \
+             values ('services', $1, 'manual', $2, $3, 1.0, $4)",
+        )
+        .bind(service_id)
+        .bind(attribute)
+        .bind(value)
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 // --- axum handlers, one per resource (thin wrappers so routing stays
 // declarative in main.rs) ---
 
@@ -394,6 +543,187 @@ macro_rules! resource_handlers {
 resource_handlers!(networks, NETWORKS);
 resource_handlers!(interfaces, INTERFACES);
 resource_handlers!(workloads, WORKLOADS);
-resource_handlers!(services, SERVICES);
+pub mod services {
+    use super::*;
+
+    pub async fn list(
+        State(state): State<AppState>,
+        Query(params): Query<ListParams>,
+    ) -> (StatusCode, Json<Value>) {
+        match list_generic(&SERVICES, &state, params).await {
+            Ok(v) => (StatusCode::OK, Json(v)),
+            Err((status, body)) => (status, body),
+        }
+    }
+
+    pub async fn get(
+        State(state): State<AppState>,
+        Path(id): Path<Uuid>,
+    ) -> (StatusCode, Json<Value>) {
+        match get_generic(&SERVICES, &state, id).await {
+            Ok(v) => (StatusCode::OK, Json(v)),
+            Err((status, body)) => (status, body),
+        }
+    }
+
+    pub async fn create(
+        State(state): State<AppState>,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        match create_generic(&SERVICES, &state, body).await {
+            Ok(v) => (StatusCode::CREATED, Json(v)),
+            Err((status, body)) => (status, body),
+        }
+    }
+
+    pub async fn patch(
+        State(state): State<AppState>,
+        Extension(user): Extension<CurrentUser>,
+        Path(id): Path<Uuid>,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        match patch_service(&state, id, body, user.0).await {
+            Ok(v) => (StatusCode::OK, Json(v)),
+            Err((status, body)) => (status, body),
+        }
+    }
+}
 resource_handlers!(endpoints, ENDPOINTS);
 resource_handlers!(dependency_edges, DEPENDENCY_EDGES);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inventory::fingerprinting;
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    async fn pool_or_skip() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn service_patch_records_manual_provenance_before_fingerprint_reconciliation() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let state = AppState { pool: pool.clone() };
+        let (device_id,): (Uuid,) =
+            sqlx::query_as("insert into devices (device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .expect("create generic service test device");
+        let (service_id,): (Uuid,) = sqlx::query_as(
+            "insert into services (protocol, product, product_version, owner_kind, owner_id) \
+             values ('http', 'Automatic Product', '1.0.0', 'device', $1) returning id",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .expect("create generic service test service");
+        let (user_id,): (Uuid,) = sqlx::query_as(
+            "insert into users (email, password_hash) values ($1, 'test') returning id",
+        )
+        .bind(format!("generic-{}@example.com", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("create generic service test user");
+
+        let conflict = patch_service(
+            &state,
+            service_id,
+            json!({"product": "Stale Product", "version": 99}),
+            user_id,
+        )
+        .await;
+        assert!(matches!(conflict, Err((status, _)) if status == StatusCode::CONFLICT));
+
+        let patched = patch_service(
+            &state,
+            service_id,
+            json!({
+                "product": "Manual Product",
+                "product_version": "9.9.9",
+                "protocol": "custom",
+                "version": 1
+            }),
+            user_id,
+        )
+        .await
+        .expect("patch service with manual fields");
+        assert_eq!(patched["version"], json!(2));
+
+        let manual_rows: Vec<(String, Value, Uuid)> = sqlx::query_as(
+            "select attribute, value, confirmed_by from evidence \
+             where subject_table = 'services' and subject_id = $1 \
+               and source_type = 'manual' and confirmed_by is not null \
+             order by attribute",
+        )
+        .bind(service_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read manual service evidence");
+        assert_eq!(
+            manual_rows,
+            vec![
+                ("product".to_string(), json!("Manual Product"), user_id),
+                ("product_version".to_string(), json!("9.9.9"), user_id),
+                ("protocol".to_string(), json!("custom"), user_id),
+            ]
+        );
+
+        sqlx::query(
+            "insert into evidence \
+                (subject_table, subject_id, source_type, source_instance, attribute, value, confidence) \
+             values ('services', $1, 'network_scan', 'scan-after-edit', \
+                'protocol_classification', $2, 0.99)",
+        )
+        .bind(service_id)
+        .bind(json!({
+            "protocol": "http",
+            "status": 200,
+            "headers": {"server": "Plex Media Server/1.32.5"},
+            "title": "Plex",
+            "body_sample": "Plex Media Server"
+        }))
+        .execute(&pool)
+        .await
+        .expect("insert conflicting M2 classification");
+
+        let outcome = fingerprinting::reconcile_service_fingerprint(
+            &pool,
+            service_id,
+            Some("scan-after-edit"),
+        )
+        .await
+        .expect("reconcile conflicting fingerprint")
+        .expect("classification exists");
+        assert!(outcome.changed_fields.is_empty());
+
+        let service: (Option<String>, Option<String>, Option<String>, i32) = sqlx::query_as(
+            "select product, product_version, protocol, version from services where id = $1",
+        )
+        .bind(service_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read manually edited service");
+        assert_eq!(
+            service,
+            (
+                Some("Manual Product".to_string()),
+                Some("9.9.9".to_string()),
+                Some("custom".to_string()),
+                2,
+            )
+        );
+    }
+}
