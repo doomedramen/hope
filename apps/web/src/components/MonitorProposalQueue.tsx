@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ActivityIcon,
+  CheckCheckIcon,
   CheckIcon,
   CircleAlertIcon,
   ListChecksIcon,
@@ -75,6 +76,18 @@ export function MonitorProposalQueue() {
       setRejectOpen(false);
     },
   });
+  const bulkApproveMutation = useMutation({
+    mutationFn: async () => {
+      for (const proposal of proposalsQuery.data?.items ?? []) {
+        await resolveMonitorProposal(proposal.id, "approve");
+      }
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["monitor-proposals", "pending"],
+      });
+    },
+  });
 
   const proposals = proposalsQuery.data?.items ?? [];
   const selected =
@@ -96,12 +109,22 @@ export function MonitorProposalQueue() {
           </span>
           <CardTitle>Pending monitor proposals</CardTitle>
         </div>
-        <Badge
-          className="ml-auto"
-          variant={proposals.length ? "outline" : "secondary"}
-        >
-          {proposals.length} pending
-        </Badge>
+        <div className="ml-auto flex items-center gap-2">
+          {proposals.length > 1 ? (
+            <Button
+              disabled={bulkApproveMutation.isPending}
+              onClick={() => bulkApproveMutation.mutate()}
+              size="sm"
+              variant="outline"
+            >
+              <CheckCheckIcon />
+              {bulkApproveMutation.isPending ? "Approving..." : "Approve all"}
+            </Button>
+          ) : null}
+          <Badge variant={proposals.length ? "outline" : "secondary"}>
+            {proposals.length} pending
+          </Badge>
+        </div>
       </CardHeader>
       {proposalsQuery.isLoading ? (
         <ProposalLoading />
@@ -165,6 +188,19 @@ export function MonitorProposalQueue() {
             <AlertDescription>
               {resolveMutation.error instanceof Error
                 ? resolveMutation.error.message
+                : "Try again."}
+            </AlertDescription>
+          </Alert>
+        </div>
+      ) : null}
+      {bulkApproveMutation.isError ? (
+        <div className="border-t px-6 py-4">
+          <Alert variant="destructive">
+            <CircleAlertIcon />
+            <AlertTitle>Bulk approval was not completed</AlertTitle>
+            <AlertDescription>
+              {bulkApproveMutation.error instanceof Error
+                ? bulkApproveMutation.error.message
                 : "Try again."}
             </AlertDescription>
           </Alert>
