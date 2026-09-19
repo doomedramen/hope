@@ -99,13 +99,8 @@ function RootLayout() {
           </div>
         </aside>
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="flex h-14 items-center justify-between border-b px-5">
-            <div>
-              <span className="font-medium md:hidden">Hope</span>
-              <span className="hidden text-sm text-muted-foreground md:inline">
-                Homelab operations platform
-              </span>
-            </div>
+          <header className="flex h-14 items-center justify-between border-b px-5 md:hidden">
+            <span className="font-medium">Hope</span>
             <HealthIndicator />
           </header>
           <main className="flex-1 p-5 md:p-8">
