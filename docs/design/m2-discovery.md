@@ -104,8 +104,40 @@ reconciliation runs in the same transaction that marks the run `succeeded`.
 Partial, failed, and cancelled runs only retain raw observations and refresh
 positive evidence; they never write absence evidence or closure events.
 
-M3 consumes the open-port evidence for HTTP, TLS, SSH, and generic TCP
-classification. M2 does not create product or service guesses.
+## 4.1 Basic open-port classification
+
+M2 classifies every open TCP observation that has a resolved device. It writes
+the result into the M1 `services` and `endpoints` tables; it does not create a
+fingerprinting table or a parallel port-service model.
+
+The classifier has a per-port connection budget, connect/read timeouts, an
+overall deadline, bounded banner/header/body samples, and a small redirect
+limit. It sends no credentials, cookies, authorization headers, login
+attempts, or exploit payloads. Its only application write is one ordinary
+HTTP `GET` request with `Connection: close`; SSH classification stops at the
+server banner. A banner beginning with `SSH-` produces `ssh` evidence.
+
+HTTP responses produce `http` evidence containing status, an allowlisted
+header subset, bounded title/body samples, and same-endpoint redirects. A TLS
+handshake followed by an HTTP response produces `https`; a TLS handshake with
+no HTTP response produces `tls`. TLS certificate metadata is limited to
+fingerprint, subject/SAN, issuer, validity, and negotiated ALPN. The
+observation verifier lets the handshake finish so metadata can be collected,
+but deliberately does not establish trust or make credentials available;
+evidence records `certificate_trust = not_validated`.
+
+If no protocol responds, the open port still produces `tcp` classification and
+remains visible. The result is stored as `network_scan` evidence on the
+canonical service with attribute `protocol_classification`. One canonical
+`socket` endpoint is reused for each device/address/port. Repeated scans
+refresh evidence and endpoint timestamps without duplicating services or
+change events. An automatic classification may replace an earlier automatic
+classification when the protocol changes, but a confirmed manual protocol is
+not overwritten. Complete closure reconciliation marks the matching socket
+endpoint non-current; partial runs never do so.
+
+M3 adds product signatures, versions, mDNS/DNS-SD, UPnP, and richer
+reconciliation. Those are outside this M2 classifier.
 
 ## 5. Interfaces
 
@@ -154,3 +186,5 @@ the same transactional enqueue step.
   ambiguous transport outcomes; explicit probe-list and concurrency bounds.
 - Run application: partial runs cannot close ports; complete runs emit accurate
   open/closed change events.
+- Basic classifier: local HTTP, TLS/HTTPS, SSH-banner, generic TCP, bounded
+  redirects/body, and sensitive-header fixtures.

@@ -19,6 +19,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use super::classification::{ClassificationResult, Classifier};
 use super::tcp::{ConnectScanner, ConnectScannerConfig, PortObservation, PortState, Scanner};
 use crate::inventory::{addresses, events::Recorder, evidence};
 
@@ -28,6 +29,7 @@ const JOB_LEASE_SECS: i64 = 60;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PORT_EVIDENCE_ATTRIBUTE: &str = "open_port";
 const PORT_EVIDENCE_CONFIDENCE: f32 = 0.9;
+const CLASSIFICATION_EVIDENCE_ATTRIBUTE: &str = "protocol_classification";
 
 /// Result used by the worker loop to distinguish a successful job from a
 /// cooperative cancellation. A cancelled run must not be retried as failed.
@@ -357,6 +359,7 @@ async fn execute_run(
         scanner,
         device_ids,
     } = plan;
+    let classifier = Classifier::new(Default::default()).map_err(|error| anyhow!(error))?;
     if ports.is_empty() {
         let error = anyhow!("TCP scan has no ports");
         mark_failed(pool, run.id, &error.to_string()).await?;
@@ -511,6 +514,8 @@ async fn execute_run(
                 address_has_liveness = true;
             }
             if !observations.is_empty() {
+                let classifications =
+                    classify_open_observations(&classifier, &observations, device_ids).await;
                 let next_ports_completed = ports_completed
                     .checked_add(observations.len() as i64)
                     .ok_or_else(|| anyhow!("scan port progress overflow"))?;
@@ -521,6 +526,7 @@ async fn execute_run(
                     next_targets_completed,
                     &observations,
                     device_ids,
+                    &classifications,
                 )
                 .await
                 {
@@ -615,6 +621,39 @@ async fn execute_run(
 struct BatchResult {
     observations: Vec<PortObservation>,
     failure: Option<ProbeFailure>,
+}
+
+struct ClassifiedOpenPort {
+    address: IpAddr,
+    port: u16,
+    device_id: Uuid,
+    result: ClassificationResult,
+}
+
+async fn classify_open_observations(
+    classifier: &Classifier,
+    observations: &[PortObservation],
+    device_ids: &HashMap<IpAddr, Uuid>,
+) -> Vec<ClassifiedOpenPort> {
+    let mut classifications = Vec::new();
+    for observation in observations {
+        if observation.state != PortState::Open {
+            continue;
+        }
+        let Some(device_id) = device_ids.get(&observation.address).copied() else {
+            continue;
+        };
+        let result = classifier
+            .classify(observation.address, observation.port)
+            .await;
+        classifications.push(ClassifiedOpenPort {
+            address: observation.address,
+            port: observation.port,
+            device_id,
+            result,
+        });
+    }
+    classifications
 }
 
 enum ProbeFailure {
@@ -740,8 +779,18 @@ async fn persist_observations(
     targets_completed: Option<i64>,
     observations: &[PortObservation],
     device_ids: &HashMap<IpAddr, Uuid>,
+    classifications: &[ClassifiedOpenPort],
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    let classifications_by_port: HashMap<(IpAddr, u16), &ClassifiedOpenPort> = classifications
+        .iter()
+        .map(|classification| {
+            (
+                (classification.address, classification.port),
+                classification,
+            )
+        })
+        .collect();
     for observation in observations {
         let device_id = device_ids.get(&observation.address).copied();
         let evidence_id = if observation.state == PortState::Open {
@@ -755,6 +804,19 @@ async fn persist_observations(
         } else {
             None
         };
+        if let Some(classification) =
+            classifications_by_port.get(&(observation.address, observation.port))
+        {
+            reconcile_service_classification(
+                &mut tx,
+                run_id,
+                classification.device_id,
+                classification.address,
+                classification.port,
+                &classification.result,
+            )
+            .await?;
+        }
         let latency_ms = i32::try_from(observation.latency.as_millis()).unwrap_or(i32::MAX);
         sqlx::query(
             "insert into port_observations \
@@ -787,6 +849,212 @@ async fn persist_observations(
     }
     tx.commit().await?;
     Ok(())
+}
+
+async fn reconcile_service_classification(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    device_id: Uuid,
+    address: IpAddr,
+    port: u16,
+    result: &ClassificationResult,
+) -> Result<()> {
+    let lock_key = format!("service-classification:{device_id}:{address}:{port}");
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(lock_key)
+        .execute(&mut **tx)
+        .await?;
+
+    let existing: Option<(Uuid, Uuid, Option<String>, bool, bool)> = sqlx::query_as(
+        "select s.id, e.id, s.protocol, e.is_current, exists( \
+             select 1 from evidence manual \
+             where manual.subject_table = 'services' and manual.subject_id = s.id \
+               and manual.attribute in ('protocol', 'protocol_classification') \
+               and manual.source_type = 'manual' and manual.confirmed_by is not null \
+               and not manual.absent) \
+         from endpoints e \
+         join services s on s.id = e.service_id \
+         where s.owner_kind = 'device' and s.owner_id = $1 \
+           and e.endpoint_type = 'socket' and e.address = $2::inet and e.port = $3 \
+         order by e.is_current desc, e.last_seen desc, e.created_at, e.id \
+         limit 1",
+    )
+    .bind(device_id)
+    .bind(address.to_string())
+    .bind(i32::from(port))
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let (
+        service_id,
+        endpoint_id,
+        previous_protocol,
+        endpoint_current,
+        manually_confirmed,
+        created_service,
+    ) = if let Some((service_id, endpoint_id, protocol, endpoint_current, manually_confirmed)) =
+        existing
+    {
+        (
+            service_id,
+            endpoint_id,
+            protocol,
+            endpoint_current,
+            manually_confirmed,
+            false,
+        )
+    } else {
+        let service_name = format!(
+            "{} {}:{}",
+            result.protocol.as_str().to_ascii_uppercase(),
+            address,
+            port
+        );
+        let (service_id,): (Uuid,) = sqlx::query_as(
+            "insert into services (name, protocol, owner_kind, owner_id) \
+             values ($1, $2, 'device', $3) returning id",
+        )
+        .bind(service_name)
+        .bind(result.protocol.as_str())
+        .bind(device_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        let (endpoint_id,): (Uuid,) = sqlx::query_as(
+            "insert into endpoints (service_id, endpoint_type, address, port, is_current) \
+             values ($1, 'socket', $2::inet, $3, true) returning id",
+        )
+        .bind(service_id)
+        .bind(address.to_string())
+        .bind(i32::from(port))
+        .fetch_one(&mut **tx)
+        .await?;
+        (service_id, endpoint_id, None, true, false, true)
+    };
+
+    if !endpoint_current {
+        sqlx::query(
+            "update endpoints set is_current = true, last_seen = now(), \
+                version = version + 1, updated_at = now() where id = $1",
+        )
+        .bind(endpoint_id)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        sqlx::query("update endpoints set last_seen = now(), updated_at = now() where id = $1")
+            .bind(endpoint_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    let auto_classification_exists: (bool,) = sqlx::query_as(
+        "select exists( \
+             select 1 from evidence \
+             where subject_table = 'services' and subject_id = $1 \
+               and source_type = 'network_scan' and attribute = $2)",
+    )
+    .bind(service_id)
+    .bind(CLASSIFICATION_EVIDENCE_ATTRIBUTE)
+    .fetch_one(&mut **tx)
+    .await?;
+    let classification_value = classification_evidence_value(result, service_id, endpoint_id);
+    let source_instance = run_id.to_string();
+    let existing_evidence: Option<(Uuid,)> = sqlx::query_as(
+        "select id from evidence \
+         where subject_table = 'services' and subject_id = $1 \
+           and source_type = 'network_scan' and source_instance = $2 \
+           and attribute = $3 and value = $4 and not absent \
+         order by created_at desc, id desc limit 1",
+    )
+    .bind(service_id)
+    .bind(&source_instance)
+    .bind(CLASSIFICATION_EVIDENCE_ATTRIBUTE)
+    .bind(&classification_value)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if existing_evidence.is_none() {
+        evidence::record_automatic_tx(
+            tx,
+            "services",
+            service_id,
+            "network_scan",
+            Some(&source_instance),
+            CLASSIFICATION_EVIDENCE_ATTRIBUTE,
+            &classification_value,
+            result.confidence,
+            false,
+        )
+        .await?;
+    }
+
+    let should_update_protocol = !created_service
+        && !manually_confirmed
+        && (previous_protocol.is_none() || auto_classification_exists.0)
+        && previous_protocol.as_deref() != Some(result.protocol.as_str());
+    if should_update_protocol {
+        sqlx::query(
+            "update services set protocol = $2, version = version + 1, updated_at = now() \
+             where id = $1",
+        )
+        .bind(service_id)
+        .bind(result.protocol.as_str())
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    if created_service {
+        Recorder::record_change(
+            tx,
+            "services",
+            service_id,
+            "service.classified",
+            "notice",
+            None,
+            Some(json!({
+                "protocol": result.protocol.as_str(),
+                "endpoint_id": endpoint_id,
+                "address": address.to_string(),
+                "port": port,
+            })),
+            Some("network_scan"),
+        )
+        .await?;
+    } else if should_update_protocol {
+        Recorder::record_change(
+            tx,
+            "services",
+            service_id,
+            "service.protocol_changed",
+            "notice",
+            Some(json!({
+                "protocol": previous_protocol,
+                "endpoint_id": endpoint_id,
+                "address": address.to_string(),
+                "port": port,
+            })),
+            Some(json!({
+                "protocol": result.protocol.as_str(),
+                "endpoint_id": endpoint_id,
+                "address": address.to_string(),
+                "port": port,
+            })),
+            Some("network_scan"),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn classification_evidence_value(
+    result: &ClassificationResult,
+    service_id: Uuid,
+    endpoint_id: Uuid,
+) -> Value {
+    let mut value = result.evidence.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.insert("service_id".to_string(), json!(service_id));
+        object.insert("endpoint_id".to_string(), json!(endpoint_id));
+    }
+    value
 }
 
 fn observation_proves_liveness(observation: &PortObservation) -> bool {
@@ -941,6 +1209,9 @@ async fn complete_run(
         .bind(evidence_id)
         .execute(&mut *tx)
         .await?;
+        if transport == "tcp" {
+            close_service_endpoints(&mut tx, device_id, address, port).await?;
+        }
     }
 
     let updated = sqlx::query(
@@ -959,6 +1230,28 @@ async fn complete_run(
         ));
     }
     tx.commit().await?;
+    Ok(())
+}
+
+async fn close_service_endpoints(
+    tx: &mut Transaction<'_, Postgres>,
+    device_id: Uuid,
+    address: &str,
+    port: i32,
+) -> Result<()> {
+    sqlx::query(
+        "update endpoints e set is_current = false, last_seen = now(), \
+            version = version + 1, updated_at = now() \
+         from services s \
+         where e.service_id = s.id and s.owner_kind = 'device' and s.owner_id = $1 \
+           and e.endpoint_type = 'socket' and e.address = $2::inet and e.port = $3 \
+           and e.is_current",
+    )
+    .bind(device_id)
+    .bind(address)
+    .bind(port)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -1190,6 +1483,8 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::AtomicUsize;
 
+    use super::super::classification::ServiceProtocol;
+
     #[test]
     fn target_addresses_match_approved_scope_exclusions() {
         let scope = ApprovedScope::parse(
@@ -1215,6 +1510,97 @@ mod tests {
         assert_eq!(port_state_name(PortState::Open), "open");
         assert_eq!(port_state_name(PortState::Closed), "closed");
         assert_eq!(port_state_name(PortState::Filtered), "filtered");
+    }
+
+    #[tokio::test]
+    async fn db_open_classification_reuses_canonical_service_and_evidence() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let octets = Uuid::new_v4().into_bytes();
+        let address = format!("10.{}.{}.{}", octets[0], octets[1], octets[2]);
+        let (device_id,): (Uuid,) =
+            sqlx::query_as("insert into devices (device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .expect("create classification device");
+        let (interface_id,): (Uuid,) =
+            sqlx::query_as("insert into interfaces (device_id) values ($1) returning id")
+                .bind(device_id)
+                .fetch_one(&pool)
+                .await
+                .expect("create classification interface");
+        sqlx::query(
+            "insert into addresses (interface_id, ip, is_current) values ($1, $2::inet, true)",
+        )
+        .bind(interface_id)
+        .bind(&address)
+        .execute(&pool)
+        .await
+        .expect("create classification address");
+
+        let result = ClassificationResult {
+            protocol: ServiceProtocol::Http,
+            confidence: 0.98,
+            evidence: json!({
+                "protocol": "http",
+                "transport": "tcp",
+                "address": address,
+                "port": 18080,
+                "probe": "http_get",
+                "status": 200,
+            }),
+        };
+        let run_id = Uuid::new_v4();
+        let ip = address.parse().expect("classification IP");
+        let mut tx = pool.begin().await.expect("begin classification tx");
+        reconcile_service_classification(&mut tx, run_id, device_id, ip, 18080, &result)
+            .await
+            .expect("persist first classification");
+        reconcile_service_classification(&mut tx, run_id, device_id, ip, 18080, &result)
+            .await
+            .expect("persist repeated classification");
+        tx.commit().await.expect("commit classifications");
+
+        let services: (i64,) = sqlx::query_as(
+            "select count(*) from services where owner_kind = 'device' and owner_id = $1",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count classification services");
+        assert_eq!(services.0, 1);
+        let endpoints: (i64,) = sqlx::query_as(
+            "select count(*) from endpoints e join services s on s.id = e.service_id \
+             where s.owner_kind = 'device' and s.owner_id = $1 and e.address = $2::inet \
+               and e.port = 18080 and e.is_current",
+        )
+        .bind(device_id)
+        .bind(&address)
+        .fetch_one(&pool)
+        .await
+        .expect("count classification endpoints");
+        assert_eq!(endpoints.0, 1);
+        let evidence_rows: (i64,) = sqlx::query_as(
+            "select count(*) from evidence where subject_table = 'services' \
+             and source_type = 'network_scan' and source_instance = $1 \
+             and attribute = $2",
+        )
+        .bind(run_id.to_string())
+        .bind(CLASSIFICATION_EVIDENCE_ATTRIBUTE)
+        .fetch_one(&pool)
+        .await
+        .expect("count classification evidence");
+        assert_eq!(evidence_rows.0, 1);
+        let events: (i64,) = sqlx::query_as(
+            "select count(*) from change_events where entity_kind = 'services' \
+             and category = 'service.classified'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count classification events");
+        assert_eq!(events.0, 1);
     }
 
     #[tokio::test]

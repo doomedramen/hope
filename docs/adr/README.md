@@ -16,6 +16,7 @@ Decisions are recorded using the template in [`0000-template.md`](0000-template.
 | [0010](0010-tcp-connect-scanner.md) | TCP connect scanning only for v1; SYN scanning deferred behind a trait. |
 | [0011](0011-generic-webhook-ntfy-notifications.md) | Generic webhook + ntfy as the v1 notification providers. |
 | [0012](0012-jiff-time-rrule-recurrence.md) | `jiff` for time maths; `rrule` for RFC 5545 recurrence, isolated from `chrono`. |
+| [0013](0013-safe-basic-tcp-classification.md) | Bounded observation-only TCP protocol classification. |
 
 ## Supporting library defaults
 
