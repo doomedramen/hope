@@ -118,3 +118,33 @@ Enrollment trust bottoms out on the operator copying the CA fingerprint/enroll s
 - Status: captured
 
 DB-gated test `enroll_connect_hello_heartbeat_replay_expiry_revocation` could not run: Docker Desktop daemon unresponsive. Re-run against postgres:17 before merging m0-foundation.
+
+## Hand-rolled Postgres session store
+
+- Created: 2026-09-19
+- Type: note
+- Area: auth
+- Context: M0 sessions / rate limiting slice
+- Status: captured
+
+`tower-sessions-sqlx-store` 0.15.0 depends on `tower-sessions-core` 0.14, incompatible with `tower-sessions` 0.15, so a custom `PgSessionStore` was written. Not yet exercised against a real Postgres (Docker outage). Revisit if the upstream crate catches up.
+
+## CSRF middleware unproven end-to-end
+
+- Created: 2026-09-19
+- Type: todo
+- Area: auth
+- Context: M0 sessions / rate limiting slice
+- Status: captured
+
+CSRF header middleware applied to setup/login, but no cookie-authenticated mutating route exists yet to verify it. Test once the first one lands.
+
+## Rate limiting is per-IP only
+
+- Created: 2026-09-19
+- Type: note
+- Area: auth
+- Context: M0 sessions / rate limiting slice
+- Status: captured
+
+No per-account lockout. `X-Forwarded-For` trust is off by default and must be enabled explicitly behind a reverse proxy, otherwise all clients share the proxy's IP bucket.
