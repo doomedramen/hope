@@ -228,3 +228,13 @@ M0 gate "upgrade from previous test schema" not testable yet (no prior schema; s
 - Status: captured
 
 Repo has no remote, so CI never runs. arm64/amd64 musl agent cross-compile (needs cargo-zigbuild, not installed) and the CI signing job are unverified.
+
+## Agent cross-compile verified locally
+
+- Created: 2026-09-19
+- Type: note
+- Area: ci
+- Context: Closing M0 gates locally
+- Status: captured
+
+cargo-zigbuild 0.23.4 + zig 0.16.0: agent builds for x86_64/aarch64-unknown-linux-musl (static, 3.9M/3.5M release) and both run `--version` in alpine containers. CI signing job itself still unexercised (no remote).
