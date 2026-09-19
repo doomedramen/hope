@@ -367,7 +367,8 @@ mod tests {
         .await
         .expect("create test network");
         let job_id: (Uuid,) = sqlx::query_as(
-            "insert into jobs (job_type, idempotency_key, payload) +             values ('discovery.full_tcp', $1, $2) returning id",
+            "insert into jobs (job_type, idempotency_key, payload) \
+             values ('discovery.full_tcp', $1, $2) returning id",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(json!({"network_id": network_id.0}))
@@ -375,7 +376,9 @@ mod tests {
         .await
         .expect("create test job");
         let run_id: (Uuid,) = sqlx::query_as(
-            "insert into scan_runs +                (network_id, job_id, kind, scope_version, targets_planned, ports_planned, requested_by) +             values ($1, $2, 'initial_discovery', 1, 1, 65_535, $3) returning id",
+            "insert into scan_runs \
+                (network_id, job_id, kind, scope_version, targets_planned, ports_planned, requested_by) \
+             values ($1, $2, 'initial_discovery', 1, 1, 65_535, $3) returning id",
         )
         .bind(network_id.0)
         .bind(job_id.0)
@@ -399,7 +402,8 @@ mod tests {
         assert_eq!(view["authoritative"], false);
 
         let flags: (bool, bool) = sqlx::query_as(
-            "select j.cancel_requested, sr.cancellation_requested +             from jobs j join scan_runs sr on sr.job_id = j.id where sr.id = $1",
+            "select j.cancel_requested, sr.cancellation_requested \
+             from jobs j join scan_runs sr on sr.job_id = j.id where sr.id = $1",
         )
         .bind(run_id.0)
         .fetch_one(&pool)

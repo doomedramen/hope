@@ -1571,7 +1571,7 @@ async fn close_service_endpoints(
 ) -> Result<()> {
     sqlx::query(
         "update endpoints e set is_current = false, last_seen = now(), \
-            version = version + 1, updated_at = now() \
+            version = e.version + 1, updated_at = now() \
          from services s \
          where e.service_id = s.id and s.owner_kind = 'device' and s.owner_id = $1 \
            and e.endpoint_type = 'socket' and e.address = $2::inet and e.port = $3 \
@@ -2082,8 +2082,11 @@ mod tests {
         assert_eq!(evidence_rows.0, 1);
         let events: (i64,) = sqlx::query_as(
             "select count(*) from change_events where entity_kind = 'services' \
+             and entity_id in (select id from services \
+                               where owner_kind = 'device' and owner_id = $1) \
              and category = 'service.classified'",
         )
+        .bind(device_id)
         .fetch_one(&pool)
         .await
         .expect("count classification events");
