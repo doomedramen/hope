@@ -54,11 +54,15 @@ jobs:
       - run: pnpm -C apps/web build
 
   agent-cross-compile:
-    name: agent cross-compile (amd64/arm64 musl)
+    name: agent cross-compile, sign, and release bundle (amd64/arm64 musl)
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -66,11 +70,41 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-zigbuild
-      - run: cargo zigbuild --release -p agent --target ${{ matrix.target }}
+
+      # Release signing key: use repo secrets if configured (real
+      # releases), otherwise generate an ephemeral CI-only keypair so the
+      # pipeline still exercises signing + verification end-to-end on
+      # every PR. An ephemeral key means these CI-signed binaries are
+      # NOT trusted by any real agent build -- see docs/release-signing.md.
+      - name: Resolve signing key
+        run: |
+          mkdir -p ci-release-keys
+          if [ -n "${{ secrets.HOPE_RELEASE_SIGNING_KEY_HEX }}" ]; then
+            echo "${{ secrets.HOPE_RELEASE_SIGNING_KEY_HEX }}" > ci-release-keys/signing-key.hex
+            echo "${{ secrets.HOPE_RELEASE_PUBLIC_KEY_HEX }}" > ci-release-keys/public-key.hex
+            echo "Using repository-configured release signing key."
+          else
+            cargo run -p xtask -- keygen --out ci-release-keys
+            echo "::warning::No HOPE_RELEASE_SIGNING_KEY_HEX secret configured; signed with an ephemeral CI-only key. These binaries are not trustable as a real release."
+          fi
+
+      - name: Build agent (with embedded release public key)
+        env:
+          HOPE_RELEASE_PUBLIC_KEY_FILE: ${{ github.workspace }}/ci-release-keys/public-key.hex
+        run: cargo zigbuild --release -p agent --target ${{ matrix.target }}
+
+      - name: Sign release
+        run: |
+          cargo run -p xtask -- sign \
+            --version "0.0.0-ci.${{ github.sha }}" \
+            --key ci-release-keys/signing-key.hex \
+            --out dist/release \
+            --artifact "target/${{ matrix.target }}/release/agent=linux=${{ matrix.arch }}"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/agent
+          name: agent-release-linux-${{ matrix.arch }}
+          path: dist/release
 
   docker-build:
     name: docker build (server)

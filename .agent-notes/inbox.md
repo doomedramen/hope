@@ -148,3 +148,13 @@ CSRF header middleware applied to setup/login, but no cookie-authenticated mutat
 - Status: captured
 
 No per-account lockout. `X-Forwarded-For` trust is off by default and must be enabled explicitly behind a reverse proxy, otherwise all clients share the proxy's IP bucket.
+
+## Handshake test re-verified; session store still lacks a DB test
+
+- Created: 2026-09-19
+- Type: note
+- Area: testing
+- Context: Docker back after outage
+- Status: captured
+
+At ba7965b, full workspace tests passed against postgres:17 incl. `enroll_connect_hello_heartbeat_replay_expiry_revocation` and jobs tests. Hand-rolled `PgSessionStore` has no DB-gated test yet, so still unverified against real Postgres.
