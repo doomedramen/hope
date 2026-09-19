@@ -12,6 +12,7 @@ import {
   fetchChanges,
   fetchDevices,
   fetchIdentitySuggestions,
+  fetchMonitorProposals,
   fetchServiceReviews,
 } from "@/lib/api";
 import { formatRelative, labelize, shortId } from "@/lib/format";
@@ -43,6 +44,10 @@ function OverviewPage() {
     queryKey: ["service-reviews", "pending"],
     queryFn: () => fetchServiceReviews(),
   });
+  const monitorProposalsQuery = useQuery({
+    queryKey: ["monitor-proposals", "pending"],
+    queryFn: () => fetchMonitorProposals(),
+  });
   const changesQuery = useQuery({
     queryKey: ["changes", "overview"],
     queryFn: () => fetchChanges(),
@@ -51,11 +56,14 @@ function OverviewPage() {
   const suggestions = suggestionsQuery.data?.items ?? [];
   const changes = changesQuery.data?.items ?? [];
   const pendingReviews =
-    suggestions.length + (serviceReviewsQuery.data?.items.length ?? 0);
+    suggestions.length +
+    (serviceReviewsQuery.data?.items.length ?? 0) +
+    (monitorProposalsQuery.data?.items.length ?? 0);
   const loading =
     devicesQuery.isLoading ||
     suggestionsQuery.isLoading ||
     serviceReviewsQuery.isLoading ||
+    monitorProposalsQuery.isLoading ||
     changesQuery.isLoading;
 
   return (
@@ -81,7 +89,7 @@ function OverviewPage() {
           icon={<ShieldCheckIcon />}
           label="Pending review"
           value={pendingReviews}
-          detail="Identity and service matches"
+          detail="Identity, service, and monitor reviews"
           to="/monitoring"
         />
         <OverviewMetric
