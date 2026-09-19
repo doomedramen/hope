@@ -8,6 +8,37 @@ export interface ApiPage<T> {
   next_cursor: string | null;
 }
 
+export interface Network {
+  id: string;
+  site_id: string | null;
+  cidr: string;
+  vlan: number | null;
+  gateway: string | null;
+  scan_policy: Record<string, unknown>;
+  name: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiscoveryScope {
+  network_id: string;
+  excluded_cidrs: string[];
+  scan_profile: "normal" | "low_impact" | string;
+  target_count: number;
+  confirmed_target_count: number | null;
+  confirmed_at: string | null;
+  enabled: boolean;
+  tcp_concurrency: number;
+  per_host_concurrency: number;
+  connect_timeout_ms: number;
+  discovery_interval_seconds: number;
+  full_tcp_interval_seconds: number;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Device {
   id: string;
   device_type: string;
@@ -184,6 +215,39 @@ export async function fetchHealthReady(): Promise<ReadyResponse> {
 
 export async function fetchDevices(): Promise<ApiPage<Device>> {
   return request<ApiPage<Device>>("/api/v1/devices?limit=100");
+}
+
+export async function fetchNetworks(): Promise<ApiPage<Network>> {
+  return request<ApiPage<Network>>("/api/v1/networks?limit=100");
+}
+
+export async function draftDiscoveryScope(
+  networkId: string,
+  input: {
+    excluded_cidrs: string[];
+    scan_profile: "normal" | "low_impact";
+  },
+): Promise<DiscoveryScope> {
+  return request<DiscoveryScope>(
+    `/api/v1/networks/${networkId}/discovery-scope`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function confirmDiscoveryScope(
+  networkId: string,
+  targetCount: number,
+): Promise<DiscoveryScope> {
+  return request<DiscoveryScope>(
+    `/api/v1/networks/${networkId}/discovery-scope/confirm`,
+    {
+      method: "POST",
+      body: JSON.stringify({ target_count: targetCount }),
+    },
+  );
 }
 
 export async function fetchDevice(id: string): Promise<DeviceDetail> {

@@ -15,12 +15,14 @@ import {
   XIcon,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
+import { DiscoveryScopeSetup } from "@/components/DiscoveryScopeSetup";
 import {
   createDevice,
   fetchAddresses,
   fetchDevice,
   fetchDevices,
   fetchIdentitySuggestions,
+  fetchNetworks,
   mergeDevice,
   patchDevice,
   resolveIdentitySuggestion,
@@ -110,6 +112,10 @@ function InfrastructurePage() {
   const suggestionsQuery = useQuery({
     queryKey: ["identity-suggestions"],
     queryFn: fetchIdentitySuggestions,
+  });
+  const networksQuery = useQuery({
+    queryKey: ["networks"],
+    queryFn: fetchNetworks,
   });
   const devices = devicesQuery.data?.items ?? EMPTY_DEVICES;
   const selectedId = devices.some((device) => device.id === requestedDeviceId)
@@ -250,6 +256,12 @@ function InfrastructurePage() {
           Add device
         </Button>
       </div>
+
+      <DiscoveryScopeSetup
+        error={networksQuery.error}
+        loading={networksQuery.isLoading}
+        networks={networksQuery.data?.items ?? []}
+      />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
