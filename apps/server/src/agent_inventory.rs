@@ -32,15 +32,20 @@ pub const MAX_STRING_BYTES: usize = 16 * 1024;
 pub const MAX_JSON_DEPTH: usize = 32;
 pub const MAX_JSON_NODES: usize = 100_000;
 pub const INVENTORY_HISTORY_LIMIT: i64 = 30;
+pub const AGENT_OBSERVATION_HISTORY_LIMIT: i64 = 4_096;
 pub const SUPPORTED_PROTOCOL_MIN: u32 = protocol::LEGACY_PROTOCOL_VERSION;
 pub const SUPPORTED_PROTOCOL_MAX: u32 = protocol::PROTOCOL_VERSION;
-pub const SUPPORTED_CAPABILITIES: &[protocol::Capability] =
-    &[protocol::Capability::InventorySnapshots];
+pub const SUPPORTED_CAPABILITIES: &[protocol::Capability] = &[
+    protocol::Capability::InventorySnapshots,
+    protocol::Capability::BoundedObservations,
+];
 
 #[derive(Debug, Error)]
 pub enum AgentInventoryError {
     #[error("inventory payload exceeds {MAX_MESSAGE_BYTES} bytes")]
     PayloadTooLarge,
+    #[error("observation batch payload exceeds the bounded batch size")]
+    ObservationPayloadTooLarge,
     #[error("inventory payload has unsupported JSON shape: {0}")]
     InvalidPayload(String),
     #[error("unsupported agent protocol version {0}")]
@@ -90,6 +95,16 @@ pub struct InventorySnapshot {
     pub schema_version: u32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ParsedObservationBatch {
+    #[serde(rename = "type")]
+    pub message_type: String,
+    pub message_id: Uuid,
+    pub protocol_version: u32,
+    #[serde(flatten)]
+    pub batch: protocol::ObservationBatch,
+}
+
 fn default_complete() -> bool {
     true
 }
@@ -106,6 +121,14 @@ pub struct IngestOutcome {
     pub replayed: bool,
     pub current: bool,
     pub reconciliation: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ObservationIngestOutcome {
+    pub batch_id: Uuid,
+    pub observation_count: usize,
+    pub accepted_count: usize,
+    pub replayed: bool,
 }
 
 /// Parse and validate Hello's additive capability field. The mTLS identity is
@@ -138,6 +161,53 @@ pub fn parse_snapshot_value(value: Value) -> Result<InventorySnapshot, AgentInve
     }
     let snapshot: InventorySnapshot = serde_json::from_value(value)?;
     validate_snapshot(&snapshot)
+}
+
+pub fn parse_observation_batch_value(
+    value: Value,
+) -> Result<ParsedObservationBatch, AgentInventoryError> {
+    let batch: ParsedObservationBatch = serde_json::from_value(value)?;
+    let encoded_batch = serde_json::to_vec(&batch.batch)?;
+    if encoded_batch.len() > protocol::MAX_OBSERVATION_BATCH_BYTES {
+        return Err(AgentInventoryError::ObservationPayloadTooLarge);
+    }
+    validate_observation_batch(&batch)
+}
+
+fn validate_observation_batch(
+    parsed: &ParsedObservationBatch,
+) -> Result<ParsedObservationBatch, AgentInventoryError> {
+    if parsed.message_type != "observation_batch" {
+        return Err(AgentInventoryError::InvalidPayload(format!(
+            "expected type observation_batch, got {}",
+            parsed.message_type
+        )));
+    }
+    ensure_observation_protocol(parsed.protocol_version)?;
+    if parsed.message_id.is_nil() {
+        return Err(AgentInventoryError::InvalidPayload(
+            "message_id must not be nil".to_string(),
+        ));
+    }
+    parsed
+        .batch
+        .validate()
+        .map_err(|error| AgentInventoryError::InvalidPayload(error.to_string()))?;
+    OffsetDateTime::from_unix_timestamp(parsed.batch.collected_at_unix_secs).map_err(|error| {
+        AgentInventoryError::InvalidPayload(format!("invalid collected_at_unix_secs: {error}"))
+    })?;
+    for observation in &parsed.batch.observations {
+        OffsetDateTime::from_unix_timestamp(observation.observed_at_unix_secs).map_err(
+            |error| {
+                AgentInventoryError::InvalidPayload(format!(
+                    "invalid observed_at_unix_secs: {error}"
+                ))
+            },
+        )?;
+        let mut nodes = 0;
+        validate_json_tree(&observation.value, 0, &mut nodes)?;
+    }
+    Ok(parsed.clone())
 }
 
 fn validate_snapshot(
@@ -173,6 +243,14 @@ fn validate_snapshot(
 
 fn ensure_supported_protocol(version: u32) -> Result<(), AgentInventoryError> {
     if !(SUPPORTED_PROTOCOL_MIN..=SUPPORTED_PROTOCOL_MAX).contains(&version) {
+        return Err(AgentInventoryError::UnsupportedProtocol(version));
+    }
+    Ok(())
+}
+
+fn ensure_observation_protocol(version: u32) -> Result<(), AgentInventoryError> {
+    ensure_supported_protocol(version)?;
+    if version != protocol::PROTOCOL_VERSION {
         return Err(AgentInventoryError::UnsupportedProtocol(version));
     }
     Ok(())
@@ -465,6 +543,103 @@ pub async fn ingest_snapshot(
         current: true,
         reconciliation: reconciliation_json,
     })
+}
+
+/// Ingest one authenticated observation batch. Each observation is retained as
+/// an append-only raw row, while `(agent_id, idempotency_key)` makes retries
+/// safe across reconnects and new transport envelopes.
+pub async fn ingest_observation_batch(
+    pool: &PgPool,
+    authenticated_agent_id: Uuid,
+    protocol_version: u32,
+    batch: &protocol::ObservationBatch,
+) -> Result<ObservationIngestOutcome, AgentInventoryError> {
+    ensure_observation_protocol(protocol_version)?;
+    batch
+        .validate()
+        .map_err(|error| AgentInventoryError::InvalidPayload(error.to_string()))?;
+    if batch.agent_id != authenticated_agent_id {
+        return Err(AgentInventoryError::AgentIdentityMismatch);
+    }
+
+    let agent: Option<(Option<OffsetDateTime>,)> =
+        sqlx::query_as("select revoked_at from agents where id = $1")
+            .bind(authenticated_agent_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((revoked_at,)) = agent else {
+        return Err(AgentInventoryError::UnknownAgent(authenticated_agent_id));
+    };
+    if revoked_at.is_some() {
+        return Err(AgentInventoryError::RevokedAgent(authenticated_agent_id));
+    }
+
+    let collected_at = OffsetDateTime::from_unix_timestamp(batch.collected_at_unix_secs)
+        .map_err(|error| AgentInventoryError::InvalidPayload(error.to_string()))?;
+    let protocol_version = i32::try_from(protocol_version).unwrap_or(i32::MAX);
+    let mut tx = pool.begin().await?;
+    let mut accepted_count = 0;
+
+    for observation in &batch.observations {
+        let observed_at = OffsetDateTime::from_unix_timestamp(observation.observed_at_unix_secs)
+            .map_err(|error| AgentInventoryError::InvalidPayload(error.to_string()))?;
+        let result = sqlx::query(
+            "insert into agent_observations \
+                (agent_id, batch_id, idempotency_key, observation_key, source, protocol_version, \
+                 collected_at, observed_at, state, value) \
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+             on conflict (agent_id, idempotency_key) do nothing",
+        )
+        .bind(authenticated_agent_id)
+        .bind(batch.batch_id)
+        .bind(&observation.idempotency_key)
+        .bind(&observation.key)
+        .bind(&observation.source)
+        .bind(protocol_version)
+        .bind(collected_at)
+        .bind(observed_at)
+        .bind(observation_state_name(observation.state))
+        .bind(&observation.value)
+        .execute(&mut *tx)
+        .await?;
+        accepted_count += usize::try_from(result.rows_affected()).unwrap_or(usize::MAX);
+    }
+
+    sqlx::query("update agents set last_seen = now(), last_heartbeat_at = now() where id = $1")
+        .bind(authenticated_agent_id)
+        .execute(&mut *tx)
+        .await?;
+    recover_incident_in_tx(&mut tx, authenticated_agent_id).await?;
+
+    // Keep raw agent observations useful for replay/debugging without turning
+    // an active agent into an unbounded append-only storage workload.
+    sqlx::query(
+        "delete from agent_observations o \
+         where o.agent_id = $1 \
+           and o.id not in (select id from agent_observations \
+                            where agent_id = $1 order by received_at desc, id desc limit $2)",
+    )
+    .bind(authenticated_agent_id)
+    .bind(AGENT_OBSERVATION_HISTORY_LIMIT)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(ObservationIngestOutcome {
+        batch_id: batch.batch_id,
+        observation_count: batch.observations.len(),
+        accepted_count,
+        replayed: !batch.observations.is_empty() && accepted_count == 0,
+    })
+}
+
+fn observation_state_name(state: protocol::ObservationState) -> &'static str {
+    match state {
+        protocol::ObservationState::Ok => "ok",
+        protocol::ObservationState::Degraded => "degraded",
+        protocol::ObservationState::Unavailable => "unavailable",
+    }
 }
 
 async fn recover_incident_in_tx(
@@ -1666,6 +1841,23 @@ mod tests {
         }
     }
 
+    fn observation_batch(agent_id: Uuid, batch_id: Uuid) -> protocol::ObservationBatch {
+        protocol::ObservationBatch {
+            schema_version: protocol::M5_SCHEMA_VERSION,
+            batch_id,
+            agent_id,
+            collected_at_unix_secs: OffsetDateTime::now_utc().unix_timestamp(),
+            observations: vec![protocol::Observation {
+                idempotency_key: format!("{batch_id}/collector/host"),
+                key: "collector.host".to_string(),
+                source: "agent".to_string(),
+                observed_at_unix_secs: OffsetDateTime::now_utc().unix_timestamp(),
+                state: protocol::ObservationState::Ok,
+                value: json!({"status": "available"}),
+            }],
+        }
+    }
+
     async fn pool_or_skip() -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL").ok()?;
         let pool = PgPool::connect(&url)
@@ -1701,6 +1893,30 @@ mod tests {
             Err(AgentInventoryError::InvalidPayload(_))
         ));
 
+        let agent_id = Uuid::new_v4();
+        let observation = json!({
+            "type": "observation_batch",
+            "message_id": Uuid::new_v4(),
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "schema_version": protocol::M5_SCHEMA_VERSION,
+            "batch_id": Uuid::new_v4(),
+            "agent_id": agent_id,
+            "collected_at_unix_secs": 0,
+            "observations": [{
+                "idempotency_key": "oversized",
+                "key": "collector.host",
+                "source": "agent",
+                "observed_at_unix_secs": 0,
+                "state": "ok",
+                "value": "x".repeat(protocol::MAX_OBSERVATION_BATCH_BYTES)
+            }]
+        });
+        assert!(matches!(
+            parse_observation_batch_value(observation),
+            Err(AgentInventoryError::ObservationPayloadTooLarge)
+                | Err(AgentInventoryError::InvalidPayload(_))
+        ));
+
         let mut value = json!(null);
         for _ in 0..=MAX_JSON_DEPTH {
             value = json!([value]);
@@ -1711,6 +1927,59 @@ mod tests {
         assert!(matches!(
             parse_snapshot_value(serde_json::from_slice(&bytes).unwrap()),
             Err(AgentInventoryError::InvalidPayload(_))
+        ));
+    }
+
+    #[test]
+    fn parses_valid_observation_batch_and_rejects_malformed_envelopes() {
+        let agent_id = Uuid::new_v4();
+        let batch_id = Uuid::new_v4();
+        let batch = observation_batch(agent_id, batch_id);
+        let envelope = json!({
+            "type": "observation_batch",
+            "message_id": Uuid::new_v4(),
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "schema_version": batch.schema_version,
+            "batch_id": batch.batch_id,
+            "agent_id": batch.agent_id,
+            "collected_at_unix_secs": batch.collected_at_unix_secs,
+            "observations": batch.observations,
+        });
+        let parsed = parse_observation_batch_value(envelope).expect("valid observation batch");
+        assert_eq!(parsed.batch.batch_id, batch_id);
+        assert_eq!(parsed.batch.agent_id, agent_id);
+
+        let malformed = json!({
+            "type": "observation_batch",
+            "message_id": Uuid::new_v4(),
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "schema_version": protocol::M5_SCHEMA_VERSION,
+            "batch_id": batch_id,
+            "agent_id": agent_id,
+            "collected_at_unix_secs": 0,
+            "observations": [{"idempotency_key": "missing-fields"}]
+        });
+        assert!(matches!(
+            parse_observation_batch_value(malformed),
+            Err(AgentInventoryError::Json(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn observation_identity_mismatch_is_rejected_before_database_access() {
+        let pool = PgPool::connect_lazy("postgres://invalid/hope").expect("lazy pool");
+        let authenticated_agent_id = Uuid::new_v4();
+        let batch = observation_batch(Uuid::new_v4(), Uuid::new_v4());
+        let result = ingest_observation_batch(
+            &pool,
+            authenticated_agent_id,
+            protocol::PROTOCOL_VERSION,
+            &batch,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(AgentInventoryError::AgentIdentityMismatch)
         ));
     }
 
@@ -1747,6 +2016,50 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(device_count, 1);
+    }
+
+    #[tokio::test]
+    async fn observation_ingest_persists_metadata_and_deduplicates_retry() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let agent_id = Uuid::new_v4();
+        insert_test_agent(&pool, agent_id, false).await;
+        let batch = observation_batch(agent_id, Uuid::new_v4());
+
+        let first = ingest_observation_batch(&pool, agent_id, protocol::PROTOCOL_VERSION, &batch)
+            .await
+            .expect("persist observation batch");
+        let second = ingest_observation_batch(&pool, agent_id, protocol::PROTOCOL_VERSION, &batch)
+            .await
+            .expect("deduplicate observation retry");
+
+        assert_eq!(first.accepted_count, 1);
+        assert!(!first.replayed);
+        assert_eq!(second.accepted_count, 0);
+        assert!(second.replayed);
+
+        let row: (Uuid, String, String, String, Value) = sqlx::query_as(
+            "select agent_id, observation_key, source, state, value \
+             from agent_observations where agent_id = $1",
+        )
+        .bind(agent_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read persisted observation");
+        assert_eq!(row.0, agent_id);
+        assert_eq!(row.1, "collector.host");
+        assert_eq!(row.2, "agent");
+        assert_eq!(row.3, "ok");
+        assert_eq!(row.4, json!({"status": "available"}));
+
+        let count: i64 =
+            sqlx::query_scalar("select count(*) from agent_observations where agent_id = $1")
+                .bind(agent_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count persisted observations");
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]

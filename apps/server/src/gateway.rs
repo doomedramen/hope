@@ -19,7 +19,7 @@ use crate::agent_inventory::{self, AgentInventoryError};
 use crate::agents;
 use crate::config::Config;
 use crate::pki;
-use protocol::{CapabilityAck, CapabilityOffer, Envelope, Message};
+use protocol::{Capability, CapabilityAck, CapabilityOffer, Envelope, Message};
 
 fn build_server_config(config: &Config) -> anyhow::Result<ServerConfig> {
     let cert_pem = std::fs::read_to_string(&config.server_cert_path)?;
@@ -104,6 +104,7 @@ async fn handle_connection(
 
     let ws_stream = tokio_tungstenite::accept_async(tls_stream).await?;
     let (mut write, mut read) = ws_stream.split();
+    let mut negotiated_capabilities: Option<protocol::NegotiatedCapabilities> = None;
 
     while let Some(msg) = read.next().await {
         let msg = msg?;
@@ -245,14 +246,32 @@ async fn handle_connection(
                     agent_inventory::SUPPORTED_CAPABILITIES,
                 );
                 let (accepted, selected_protocol_version, capabilities, reason) = match negotiated {
-                    Ok(negotiated) => (
-                        true,
-                        Some(negotiated.protocol_version),
-                        negotiated.capabilities,
-                        None,
-                    ),
-                    Err(error) => (false, None, Vec::new(), Some(error.to_string())),
+                    Ok(mut negotiated) => {
+                        // M5 messages require protocol v2. Legacy
+                        // negotiation still acknowledges v1, but must not
+                        // advertise a capability unavailable on that
+                        // envelope version.
+                        if negotiated.protocol_version < protocol::PROTOCOL_VERSION {
+                            negotiated.capabilities.retain(|capability| {
+                                *capability != Capability::BoundedObservations
+                            });
+                        }
+                        negotiated_capabilities = Some(negotiated.clone());
+                        (
+                            true,
+                            Some(negotiated.protocol_version),
+                            negotiated.capabilities,
+                            None,
+                        )
+                    }
+                    Err(error) => {
+                        negotiated_capabilities = None;
+                        (false, None, Vec::new(), Some(error.to_string()))
+                    }
                 };
+                if !accepted {
+                    negotiated_capabilities = None;
+                }
                 let ack_protocol_version = selected_protocol_version.unwrap_or(protocol_version);
                 let ack = Envelope::with_protocol_version(
                     ack_protocol_version,
@@ -355,7 +374,97 @@ async fn handle_connection(
                     }
                 }
             }
-            "hello_ack" | "heartbeat_ack" | "inventory_snapshot_ack" | "protocol_error" => {
+            "observation_batch" => {
+                let Some(negotiated) = negotiated_capabilities.as_ref() else {
+                    let response = protocol_error(
+                        message_id,
+                        "capability_not_negotiated",
+                        "bounded observations capability was not negotiated",
+                    );
+                    write.send(WsMessage::Text(response)).await?;
+                    continue;
+                };
+                if negotiated.protocol_version != protocol_version
+                    || !negotiated
+                        .capabilities
+                        .contains(&Capability::BoundedObservations)
+                {
+                    let response = protocol_error(
+                        message_id,
+                        "unsupported_capability",
+                        "bounded observations are not available for this protocol session",
+                    );
+                    write.send(WsMessage::Text(response)).await?;
+                    continue;
+                }
+
+                let batch = match agent_inventory::parse_observation_batch_value(value) {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        let code = match error {
+                            AgentInventoryError::UnsupportedProtocol(_) => "unsupported_protocol",
+                            AgentInventoryError::ObservationPayloadTooLarge
+                            | AgentInventoryError::PayloadTooLarge => "payload_too_large",
+                            AgentInventoryError::AgentIdentityMismatch => "agent_identity_mismatch",
+                            _ => "observation_rejected",
+                        };
+                        let response = protocol_error(message_id, code, &error.to_string());
+                        write.send(WsMessage::Text(response)).await?;
+                        continue;
+                    }
+                };
+                match agent_inventory::ingest_observation_batch(
+                    &pool,
+                    agent.id,
+                    batch.protocol_version,
+                    &batch.batch,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        let ack = Envelope::with_protocol_version(
+                            negotiated.protocol_version,
+                            Message::ObservationBatchAck(protocol::ObservationBatchAck {
+                                batch_id: outcome.batch_id,
+                                accepted: true,
+                                observation_count: u32::try_from(outcome.observation_count)
+                                    .unwrap_or(u32::MAX),
+                                replayed: outcome.replayed,
+                                reason: None,
+                            }),
+                        );
+                        write
+                            .send(WsMessage::Text(serde_json::to_string(&ack)?))
+                            .await?;
+                    }
+                    Err(error @ AgentInventoryError::UnknownAgent(_))
+                    | Err(error @ AgentInventoryError::RevokedAgent(_)) => {
+                        let response =
+                            protocol_error(message_id, "agent_rejected", &error.to_string());
+                        write.send(WsMessage::Text(response)).await?;
+                        break;
+                    }
+                    Err(error @ AgentInventoryError::AgentIdentityMismatch) => {
+                        let response = protocol_error(
+                            message_id,
+                            "agent_identity_mismatch",
+                            &error.to_string(),
+                        );
+                        write.send(WsMessage::Text(response)).await?;
+                        break;
+                    }
+                    Err(error) => {
+                        let response =
+                            protocol_error(message_id, "observation_rejected", &error.to_string());
+                        write.send(WsMessage::Text(response)).await?;
+                    }
+                }
+            }
+            "hello_ack"
+            | "heartbeat_ack"
+            | "inventory_snapshot_ack"
+            | "observation_batch_ack"
+            | "protocol_error" => {
                 tracing::debug!(agent_id = %agent.id, message_type, "ignored server message from agent");
             }
             other => {

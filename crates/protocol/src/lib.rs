@@ -89,6 +89,8 @@ pub enum Message {
     InventorySnapshotAck(InventorySnapshotAck),
     /// Bounded observations associated with one snapshot collection.
     ObservationBatch(ObservationBatch),
+    /// Server acknowledgement for a bounded observation batch.
+    ObservationBatchAck(ObservationBatchAck),
 }
 
 /// Existing Rust fields stay source-compatible with the current server. The
@@ -347,6 +349,15 @@ pub struct ObservationBatch {
     pub observations: Vec<Observation>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ObservationBatchAck {
+    pub batch_id: Uuid,
+    pub accepted: bool,
+    pub observation_count: u32,
+    pub replayed: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationError {
     pub message: String,
@@ -432,15 +443,34 @@ impl InventorySnapshot {
 
 impl ObservationBatch {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.schema_version != M5_SCHEMA_VERSION {
+            return Err(ValidationError::new(format!(
+                "unsupported observation schema version {}",
+                self.schema_version
+            )));
+        }
+        if self.batch_id.is_nil() {
+            return Err(ValidationError::new("observation batch_id must not be nil"));
+        }
+        if self.agent_id.is_nil() {
+            return Err(ValidationError::new("observation agent_id must not be nil"));
+        }
         if self.observations.len() > MAX_OBSERVATIONS {
             return Err(ValidationError::new(format!(
                 "observations exceeds {MAX_OBSERVATIONS} entries"
             )));
         }
+        let mut idempotency_keys = BTreeSet::new();
         for observation in &self.observations {
-            validate_string("observation idempotency_key", &observation.idempotency_key)?;
-            validate_string("observation key", &observation.key)?;
-            validate_string("observation source", &observation.source)?;
+            validate_required_string("observation idempotency_key", &observation.idempotency_key)?;
+            validate_required_string("observation key", &observation.key)?;
+            validate_required_string("observation source", &observation.source)?;
+            if !idempotency_keys.insert(&observation.idempotency_key) {
+                return Err(ValidationError::new(format!(
+                    "duplicate observation idempotency_key `{}`",
+                    observation.idempotency_key
+                )));
+            }
             let bytes = serde_json::to_vec(&observation.value)
                 .map_err(|err| ValidationError::new(format!("invalid observation value: {err}")))?;
             if bytes.len() > MAX_COLLECTOR_PAYLOAD_BYTES {
@@ -455,6 +485,25 @@ impl ObservationBatch {
             return Err(ValidationError::new(format!(
                 "observation batch exceeds {MAX_OBSERVATION_BATCH_BYTES} bytes"
             )));
+        }
+        Ok(())
+    }
+}
+
+impl ObservationBatchAck {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.batch_id.is_nil() {
+            return Err(ValidationError::new(
+                "observation acknowledgement batch_id must not be nil",
+            ));
+        }
+        if usize::try_from(self.observation_count).unwrap_or(usize::MAX) > MAX_OBSERVATIONS {
+            return Err(ValidationError::new(format!(
+                "observation_count exceeds {MAX_OBSERVATIONS} entries"
+            )));
+        }
+        if let Some(reason) = &self.reason {
+            validate_string("reason", reason)?;
         }
         Ok(())
     }
@@ -487,8 +536,16 @@ impl Message {
                 Ok(())
             }
             Self::ObservationBatch(batch) => batch.validate(),
+            Self::ObservationBatchAck(ack) => ack.validate(),
         }
     }
+}
+
+fn validate_required_string(field: &str, value: &str) -> Result<(), ValidationError> {
+    if value.is_empty() {
+        return Err(ValidationError::new(format!("{field} must not be empty")));
+    }
+    validate_string(field, value)
 }
 
 /// Serialize only protocol messages that pass their declared size bounds.
@@ -611,6 +668,13 @@ mod tests {
                 value: serde_json::json!({"status": "available"}),
             }],
         }));
+        roundtrip(Message::ObservationBatchAck(ObservationBatchAck {
+            batch_id: snapshot_id,
+            accepted: true,
+            observation_count: 1,
+            replayed: false,
+            reason: None,
+        }));
     }
 
     #[test]
@@ -698,6 +762,35 @@ mod tests {
                 .collect(),
         };
         assert!(batch.validate().is_err());
+    }
+
+    #[test]
+    fn observation_validation_rejects_invalid_identity_fields() {
+        let agent_id = Uuid::new_v4();
+        let observation = Observation {
+            idempotency_key: "same".into(),
+            key: "collector.host".into(),
+            source: "agent".into(),
+            observed_at_unix_secs: 0,
+            state: ObservationState::Ok,
+            value: serde_json::Value::Null,
+        };
+        let mut batch = ObservationBatch {
+            schema_version: M5_SCHEMA_VERSION,
+            batch_id: Uuid::new_v4(),
+            agent_id,
+            collected_at_unix_secs: 0,
+            observations: vec![observation.clone(), observation],
+        };
+        assert!(batch.validate().is_err(), "duplicate keys must be rejected");
+
+        batch.observations.pop();
+        batch.schema_version = M5_SCHEMA_VERSION + 1;
+        assert!(batch.validate().is_err(), "unknown schema must be rejected");
+
+        batch.schema_version = M5_SCHEMA_VERSION;
+        batch.observations[0].source.clear();
+        assert!(batch.validate().is_err(), "empty source must be rejected");
     }
 
     #[test]
