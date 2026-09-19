@@ -493,6 +493,7 @@ mod tests {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
         let key = Uuid::new_v4().to_string();
         let id = enqueue(&pool, "cancel_test", &key, json!({}))
             .await
