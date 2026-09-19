@@ -83,10 +83,14 @@ absent or missing; repeated positive observations refresh evidence without
 duplicating the event.
 
 A full, complete scan can append absent evidence and a `port.closed` change
-event for a previously observed port. Closure reconciliation runs in the same
-transaction that marks the run `succeeded`. Partial, failed, and cancelled
-runs only retain raw observations and refresh positive evidence; they never
-write absence evidence or closure events.
+event for a previously observed port only when the historical evidence belongs
+to the same device observed at that address by the run, after resolving
+`canonical_of` redirects. If the address has a different or ambiguous owner,
+the run retains its raw observation but writes no absence evidence or closure
+event for the prior owner. Closure reconciliation runs in the same transaction
+that marks the run `succeeded`. Partial, failed, and cancelled runs only retain
+raw observations and refresh positive evidence; they never write absence
+evidence or closure events.
 
 M3 consumes the open-port evidence for HTTP, TLS, SSH, and generic TCP
 classification. M2 does not create product or service guesses.
