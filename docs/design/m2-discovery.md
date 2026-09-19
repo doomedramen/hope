@@ -45,14 +45,27 @@ run remains partial and can add open-port evidence, but it cannot close an
 existing port because unvisited ports have no absence evidence.
 
 TCP uses `open`, `closed`, or `filtered` only where the connect result supports
-that conclusion. The later UDP path uses `open`, `closed`, and
-`open_or_filtered`.
+that conclusion. M2 targeted UDP uses `open`, `closed`, and
+`open_or_filtered`; silence never becomes `closed`.
 
 ## 3. Worker and scanner modules
 
-`discovery::Scanner` is the seam used by scan jobs. M2 supplies one adapter:
-`ConnectScanner`, backed by `tokio::net::TcpStream::connect` with timeouts.
-SYN scanning stays out of v1 under ADR-0010.
+`discovery::tcp::Scanner` is the seam used by TCP scan jobs. M2 supplies one
+adapter: `ConnectScanner`, backed by `tokio::net::TcpStream::connect` with
+timeouts. SYN scanning stays out of v1 under ADR-0010.
+
+`discovery::udp::Scanner` is the seam used by targeted UDP jobs. M2 supplies
+`UdpScanner`, backed by an ephemeral `tokio::net::UdpSocket`. Each call takes
+an explicit port and configured safe payload; no API expands a target into a
+full UDP port range. Global, network, and per-host semaphores bound work, and
+the scanner applies a bounded inter-probe interval. A response is `open`, an
+ICMP port-unreachable result is `closed`, and timeout or other silence is
+`open_or_filtered`.
+
+`udp::persist_observations` writes these states to the existing
+`port_observations` table with `transport = 'udp'`. It does not update run
+progress or infer closure, so TCP worker observation application remains
+unchanged and partial UDP work cannot create absence evidence.
 
 The scan coordinator owns the semaphores in this order: global, scope, then
 host. It checks cancellation before each target and port, heartbeats the job
@@ -113,5 +126,7 @@ the same transactional enqueue step.
 - Scope draft/confirm routes: confirmation resets on change; mismatched count
   cannot confirm.
 - `discovery::Scanner`: local open/closed TCP ports and timeout handling.
+- `discovery::udp::Scanner`: local UDP reply plus injected closed and
+  ambiguous transport outcomes; explicit probe-list and concurrency bounds.
 - Run application: partial runs cannot close ports; complete runs emit accurate
   open/closed change events.
