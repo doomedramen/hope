@@ -268,3 +268,12 @@ Scores combine by probabilistic-OR (1 - Π(1-w)) because the design's example nu
 - Status: captured
 
 Branch m1-inventory at 74928eb, not merged. Done: migrations 0004-0008, identity/merge core (hostname weight 0.4, review floor 0.4), repo + /api/v1 layer, merge/split/undo, review queue, evidence, changes/audit, retention job, seed command; all 5 M1 gate tests pass; cargo check clean. Left: web UI screens, re-run fmt/clippy/web build+lint, confirm design doc update for threshold + probabilistic-OR example, then merge --ff-only into main.
+## Scan-heart logo
+
+- Created: 2026-09-19T16:47:16+01:00
+- Type: direction
+- Area: ui
+- Context: Continuing M3 review UI
+- Status: captured
+
+update the logo to be scan-heart
