@@ -21,3 +21,7 @@ Applied automatically by `server serve` and `server migrate` via
   and asserts the M0 data is unchanged and the new tables exist. Extend this
   test's assertions as later milestones add release-specific upgrade
   guarantees.
+
+M3 adds `service_review_items` in migration `0012_service_review_items.sql`.
+It is durable queue state; fingerprint evidence remains append-only in the
+shared `evidence` table.

@@ -238,6 +238,22 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             "/api/v1/identity-suggestions/{id}/reject",
             post(inventory::identity_service::reject_suggestion),
         )
+        .route(
+            "/api/v1/service-reviews",
+            get(inventory::service_reviews::list),
+        )
+        .route(
+            "/api/v1/service-reviews/{id}",
+            get(inventory::service_reviews::get),
+        )
+        .route(
+            "/api/v1/service-reviews/{id}/confirm",
+            post(inventory::service_reviews::confirm),
+        )
+        .route(
+            "/api/v1/service-reviews/{id}/reject",
+            post(inventory::service_reviews::reject),
+        )
         .route("/api/v1/changes", get(inventory::changes::list))
         .route("/api/v1/audit", get(inventory::changes::list_audit))
         .route(

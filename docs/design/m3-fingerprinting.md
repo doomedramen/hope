@@ -91,6 +91,31 @@ updates only automatic fields, and emits one material change event. Conflicting
 or low-confidence guesses create a service-review item rather than silently
 overwriting a service. The item lists competing candidates and their evidence.
 
+The current policy uses a product auto-apply threshold of `0.90`. A product
+candidate at or above `0.90` may fill an empty automatic product field. A
+candidate below `0.90` enters review; the engine's normal two-field product
+candidate is `0.86`, so it is intentionally reviewable. Any candidate that
+differs from an existing non-manual product is also a conflict and enters
+review, even when its confidence is above the threshold. Competing product
+candidates in one report are a conflict. These paths do not change product or
+version projections. Confirmed manual service evidence suppresses both review
+creation and automatic projection for its protected fields.
+
+Review rows retain the selected candidate, all ranked candidates, M2 input,
+fingerprint evidence ID, rule ID, fixture version, confidence, reason, and
+threshold. Candidate identity is a stable hash of the candidate alone, so a
+later scan with unchanged candidate data does not create another row. Rejecting
+a row records the decision and suppresses that unchanged candidate. Confirming
+a row appends confirmed manual fingerprint evidence and applies the candidate
+transactionally; a later automatic result cannot overwrite it.
+
+The API exposes `GET /api/v1/service-reviews` (pending by default, with
+`status`, cursor, and limit filters), `GET /api/v1/service-reviews/{id}`, and
+`POST /api/v1/service-reviews/{id}/confirm` or `/reject`. These routes use the
+existing session-authenticated inventory router, including its custom-header
+CSRF check. Monitor proposals and mDNS/UPnP collectors remain outside this
+slice.
+
 The review UI must show the source observations, scores, and rules. Confirming
 a classification writes manual evidence; rejecting it records the decision and
 prevents the same unchanged automatic candidate from repeatedly resurfacing.

@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
-use crate::inventory::{events::Recorder, evidence};
+use crate::inventory::{events::Recorder, evidence, service_reviews};
 
 /// Evidence attribute written for every processed M2 classification.
 pub const FINGERPRINT_EVIDENCE_ATTRIBUTE: &str = "fingerprint";
@@ -28,6 +28,8 @@ pub struct ReconcileOutcome {
     pub service_id: Uuid,
     pub fingerprint_evidence_id: Uuid,
     pub candidate: FingerprintCandidate,
+    #[allow(dead_code)]
+    pub review_id: Option<Uuid>,
     pub changed_fields: Vec<String>,
 }
 
@@ -115,9 +117,52 @@ pub async fn reconcile_service_fingerprint_tx(
     .ok_or_else(|| anyhow!("service {service_id} not found"))?;
 
     let manual_fields = load_manual_fields(tx, service_id).await?;
+    let product_candidates: HashSet<&str> = report
+        .candidates
+        .iter()
+        .filter_map(|candidate| candidate.product.as_deref())
+        .collect();
+    let has_competing_product_candidates = product_candidates.len() > 1;
+    let product_conflicts_with_projection = candidate.product.as_deref().is_some_and(|product| {
+        current_product
+            .as_deref()
+            .is_some_and(|current| current != product)
+            && !manual_fields.contains("product")
+    });
+    let review_reason = candidate.product.as_ref().and_then(|_| {
+        if manual_fields.contains("product") {
+            None
+        } else if has_competing_product_candidates || product_conflicts_with_projection {
+            Some(service_reviews::ReviewReason::Conflict)
+        } else if candidate.confidence < service_reviews::PRODUCT_AUTO_APPLY_CONFIDENCE {
+            Some(service_reviews::ReviewReason::LowConfidence)
+        } else {
+            None
+        }
+    });
+    let review_id = if let Some(reason) = review_reason {
+        service_reviews::enqueue_review_tx(
+            tx,
+            service_id,
+            fingerprint_evidence_id,
+            source_instance,
+            &candidate,
+            &report.candidates,
+            &classification.value,
+            &evidence_value,
+            reason,
+        )
+        .await?
+    } else {
+        None
+    };
+    if let Some(review_id) = review_id {
+        tracing::debug!(%service_id, %review_id, "service fingerprint needs review");
+    }
     let mut updates = Vec::new();
 
     if let Some(product) = candidate.product.as_ref()
+        && review_id.is_none()
         && !manual_fields.contains("product")
         && should_apply_automatic_value(
             tx,
@@ -137,6 +182,7 @@ pub async fn reconcile_service_fingerprint_tx(
     }
 
     if let Some(version) = candidate.version.as_ref()
+        && review_id.is_none()
         && !manual_fields.contains("product_version")
         && should_apply_automatic_value(
             tx,
@@ -193,6 +239,7 @@ pub async fn reconcile_service_fingerprint_tx(
         service_id,
         fingerprint_evidence_id,
         candidate,
+        review_id,
         changed_fields: updates
             .into_iter()
             .map(|update| update.name.to_string())

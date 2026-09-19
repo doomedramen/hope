@@ -1,7 +1,7 @@
 //! Migration upgrade-path test (migrations/README.md, M1 gate follow-up):
 //! apply the M0 schema (migrations 0001-0003) as if already deployed,
-//! insert sample data, then apply the M1 migrations (0004-0007) on top,
-//! and assert the M0 data survived untouched.
+//! insert sample data, then apply all later migrations on top, and assert the
+//! M0 data survived untouched.
 //!
 //! DB-gated: requires `DATABASE_URL` pointing at a throwaway Postgres 17,
 //! e.g.
@@ -72,8 +72,8 @@ async fn m0_schema_upgrades_to_m1_without_data_loss() {
         .await
         .expect("insert sample agent");
 
-    // Step 3: apply the full migration set (0001-0007), i.e. the M1
-    // migrations land on top of the already-deployed M0 schema.
+    // Step 3: apply the full migration set, i.e. later milestone migrations
+    // land on top of the already-deployed M0 schema.
     Migrator::new(all_migrations_dir)
         .await
         .expect("load full migrator")
@@ -104,6 +104,12 @@ async fn m0_schema_upgrades_to_m1_without_data_loss() {
         .await
         .expect("devices table exists after upgrade");
     assert_eq!(device_count, 0);
+
+    let review_count: i64 = sqlx::query_scalar("select count(*) from service_review_items")
+        .fetch_one(&pool)
+        .await
+        .expect("service review table exists after upgrade");
+    assert_eq!(review_count, 0);
 }
 
 /// Build a temp directory containing only the M0 migration files

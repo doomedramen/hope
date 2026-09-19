@@ -13,3 +13,4 @@ pub mod generic;
 pub mod identity_service;
 pub mod pagination;
 pub mod retention;
+pub mod service_reviews;
