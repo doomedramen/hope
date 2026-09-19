@@ -128,6 +128,157 @@ export interface DeviceDetail extends Device {
   merged_member_ids: string[];
 }
 
+export type AgentStatus = "online" | "offline" | "stale" | string;
+
+export interface AgentInventorySummary {
+  interfaces: number;
+  filesystems: number;
+  processes: number;
+  sockets: number;
+  containers: number;
+}
+
+export interface Agent {
+  id: string;
+  hostname: string | null;
+  status: AgentStatus;
+  agent_version: string | null;
+  os: string | null;
+  arch: string | null;
+  capabilities: string[];
+  last_seen: string | null;
+  inventory_summary: AgentInventorySummary;
+  device_id: string | null;
+  protocol_version: number | null;
+  revoked_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentHostInventory {
+  hostname: string | null;
+  os: string | null;
+  distribution: string | null;
+  kernel: string | null;
+  arch: string | null;
+  boot_id: string | null;
+  uptime_seconds: number | null;
+  cpu_model: string | null;
+  cpu_count: number | null;
+  load_1m: number | null;
+  memory_total_bytes: number | null;
+  memory_used_bytes: number | null;
+  machine_id_hash: string | null;
+}
+
+export interface AgentNetworkInterface {
+  name: string;
+  mac: string | null;
+  addresses: string[];
+  state: string | null;
+  mtu: number | null;
+}
+
+export interface AgentNetworkRoute {
+  destination: string;
+  gateway: string | null;
+  interface_name: string | null;
+}
+
+export interface AgentNetworkInventory {
+  interfaces: AgentNetworkInterface[];
+  routes: AgentNetworkRoute[];
+}
+
+export interface AgentFilesystemInventory {
+  mount_point: string;
+  device: string | null;
+  filesystem: string | null;
+  total_bytes: number | null;
+  used_bytes: number | null;
+  available_bytes: number | null;
+  inode_total: number | null;
+  inode_used: number | null;
+  read_only: boolean | null;
+}
+
+export interface AgentProcessInventory {
+  pid: number;
+  name: string;
+  command: string | null;
+  user: string | null;
+  state: string | null;
+  cpu_percent: number | null;
+  memory_bytes: number | null;
+  started_at: string | null;
+}
+
+export type AgentReachabilityState =
+  "reachable" | "unreachable" | "not_checked" | "unknown" | string;
+
+export interface AgentSocketReachability {
+  state: AgentReachabilityState;
+  checked_at: string | null;
+  worker_id: string | null;
+  endpoint: string | null;
+}
+
+export interface AgentSocketInventory {
+  protocol: string;
+  local_address: string;
+  local_port: number;
+  state: string | null;
+  listening: boolean;
+  process_name: string | null;
+  process_id: number | null;
+  reachability: AgentSocketReachability;
+}
+
+export interface AgentContainerInventory {
+  id: string;
+  name: string;
+  image: string | null;
+  status: string | null;
+  health: string | null;
+  networks: string[];
+  mounts: string[];
+  published_ports: string[];
+}
+
+export interface AgentEvidenceItem {
+  id: string;
+  source: string;
+  source_instance: string | null;
+  attribute: string;
+  value: unknown;
+  confidence: number;
+  observed_at: string;
+  expires_at: string | null;
+  absent: boolean;
+  confirmed: boolean;
+}
+
+export interface AgentReconciliation {
+  status: "matched" | "pending" | "conflict" | "unmatched" | string;
+  device_id: string | null;
+  confidence: number | null;
+  matched_identifiers: string[];
+  conflicts: string[];
+  last_reconciled_at: string | null;
+  explanation: string | null;
+}
+
+export interface AgentDetail extends Agent {
+  host: AgentHostInventory | null;
+  network: AgentNetworkInventory | null;
+  filesystems: AgentFilesystemInventory[];
+  processes: AgentProcessInventory[];
+  sockets: AgentSocketInventory[];
+  containers: AgentContainerInventory[];
+  evidence: AgentEvidenceItem[];
+  reconciliation: AgentReconciliation;
+}
+
 export interface MatchedIdentifier {
   rule_type: string;
   weight: number;
@@ -479,6 +630,14 @@ export async function cancelScanRun(id: string): Promise<ScanRun> {
 
 export async function fetchDevice(id: string): Promise<DeviceDetail> {
   return request<DeviceDetail>(`/api/v1/devices/${id}`);
+}
+
+export async function fetchAgents(): Promise<ApiPage<Agent>> {
+  return request<ApiPage<Agent>>("/api/v1/agents?limit=100");
+}
+
+export async function fetchAgent(id: string): Promise<AgentDetail> {
+  return request<AgentDetail>(`/api/v1/agents/${id}`);
 }
 
 export async function fetchAddresses(): Promise<ApiPage<Address>> {

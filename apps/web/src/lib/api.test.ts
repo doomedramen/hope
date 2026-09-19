@@ -3,6 +3,8 @@ import {
   cancelScanRun,
   confirmDiscoveryScope,
   draftDiscoveryScope,
+  fetchAgent,
+  fetchAgents,
   fetchScanRun,
   fetchHealthReady,
   fetchMonitors,
@@ -12,6 +14,84 @@ import {
 describe("fetchHealthReady", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("fetches enrolled agents with bounded pagination", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: "agent-1",
+              hostname: "edge-01",
+              status: "online",
+              agent_version: "0.5.0",
+              os: "linux",
+              arch: "amd64",
+              capabilities: ["filesystem", "socket"],
+              last_seen: "2026-09-19T10:00:00Z",
+              inventory_summary: {
+                interfaces: 2,
+                filesystems: 3,
+                processes: 12,
+                sockets: 4,
+                containers: 1,
+              },
+            },
+          ],
+          next_cursor: null,
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchAgents();
+
+    expect(result.items[0]?.hostname).toBe("edge-01");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/agents?limit=100",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("fetches an agent detail record with inventory and reconciliation state", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "agent-1",
+          hostname: "edge-01",
+          status: "online",
+          agent_version: "0.5.0",
+          sockets: [
+            {
+              protocol: "tcp",
+              local_address: "0.0.0.0",
+              local_port: 8080,
+              listening: true,
+              reachability: { state: "reachable" },
+            },
+          ],
+          reconciliation: {
+            status: "matched",
+            confidence: 1,
+            matched_identifiers: ["agent_id"],
+            conflicts: [],
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchAgent("agent-1");
+
+    expect(result.reconciliation.status).toBe("matched");
+    expect(result.sockets[0]?.reachability.state).toBe("reachable");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/agents/agent-1",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
   });
 
   it("parses a ready response", async () => {
