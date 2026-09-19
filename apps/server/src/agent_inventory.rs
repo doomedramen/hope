@@ -1,11 +1,9 @@
 //! M5 agent inventory protocol, projection, and authenticated read APIs.
 //!
-//! The shared protocol crate predates the inventory message. This module owns
-//! the additive wire contract locally so M5 can interoperate without changing
-//! `crates/protocol`: the gateway checks the envelope header, then delegates
-//! `inventory_snapshot` payloads here. Raw inventory remains available in a
-//! bounded current snapshot and recent history; canonical M1 rows are a
-//! non-destructive projection of the same observation.
+//! The gateway keeps the authenticated storage and projection boundary here.
+//! The shared protocol crate owns the versioned wire types; these local types
+//! retain compatibility with the first M5 snapshot shape while accepting the
+//! additive snapshot identity fields used by current agents.
 
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -34,8 +32,10 @@ pub const MAX_STRING_BYTES: usize = 16 * 1024;
 pub const MAX_JSON_DEPTH: usize = 32;
 pub const MAX_JSON_NODES: usize = 100_000;
 pub const INVENTORY_HISTORY_LIMIT: i64 = 30;
-pub const SUPPORTED_PROTOCOL_MIN: u32 = protocol::PROTOCOL_VERSION;
+pub const SUPPORTED_PROTOCOL_MIN: u32 = protocol::LEGACY_PROTOCOL_VERSION;
 pub const SUPPORTED_PROTOCOL_MAX: u32 = protocol::PROTOCOL_VERSION;
+pub const SUPPORTED_CAPABILITIES: &[protocol::Capability] =
+    &[protocol::Capability::InventorySnapshots];
 
 #[derive(Debug, Error)]
 pub enum AgentInventoryError {
@@ -84,10 +84,18 @@ pub struct InventorySnapshot {
     pub inventory: Value,
     #[serde(default = "default_complete")]
     pub complete: bool,
+    #[serde(default)]
+    pub snapshot_id: Uuid,
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
 }
 
 fn default_complete() -> bool {
     true
+}
+
+fn default_schema_version() -> u32 {
+    protocol::M5_SCHEMA_VERSION
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,6 +247,11 @@ pub async fn ingest_snapshot(
     let sequence = i64::try_from(snapshot.sequence).map_err(|_| {
         AgentInventoryError::InvalidPayload("sequence exceeds signed database range".to_string())
     })?;
+    let source_snapshot_id = if snapshot.snapshot_id.is_nil() {
+        snapshot.message_id
+    } else {
+        snapshot.snapshot_id
+    };
 
     let agent: Option<(String, Option<OffsetDateTime>)> =
         sqlx::query_as("select cert_fingerprint, revoked_at from agents where id = $1")
@@ -280,10 +293,12 @@ pub async fn ingest_snapshot(
     let mut tx = pool.begin().await?;
     let existing_message: Option<(Uuid, i64)> = sqlx::query_as(
         "select id, sequence from agent_inventory_snapshots \
-         where agent_id = $1 and message_id = $2",
+         where agent_id = $1 and (message_id = $2 or source_snapshot_id = $3) \
+         order by id limit 1",
     )
     .bind(authenticated_agent_id)
     .bind(snapshot.message_id)
+    .bind(source_snapshot_id)
     .fetch_optional(&mut *tx)
     .await?;
     if let Some((snapshot_id, existing_sequence)) = existing_message {
@@ -318,12 +333,13 @@ pub async fn ingest_snapshot(
         .map_err(|error| AgentInventoryError::InvalidPayload(error.to_string()))?;
     let inserted: Option<(Uuid,)> = sqlx::query_as(
         "insert into agent_inventory_snapshots \
-            (agent_id, message_id, protocol_version, sequence, collected_at, inventory, complete) \
-         values ($1, $2, $3, $4, $5, $6, $7) \
+            (agent_id, message_id, source_snapshot_id, protocol_version, sequence, collected_at, inventory, complete) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8) \
          on conflict (agent_id, sequence) do nothing returning id",
     )
     .bind(authenticated_agent_id)
     .bind(snapshot.message_id)
+    .bind(source_snapshot_id)
     .bind(i32::try_from(snapshot.protocol_version).unwrap_or(i32::MAX))
     .bind(sequence)
     .bind(collected_at)
@@ -332,8 +348,8 @@ pub async fn ingest_snapshot(
     .fetch_optional(&mut *tx)
     .await?;
     let Some((snapshot_id,)) = inserted else {
-        let existing: Option<(Uuid, i64)> = sqlx::query_as(
-            "select id, sequence from agent_inventory_snapshots \
+        let existing: Option<(Uuid, i64, Uuid)> = sqlx::query_as(
+            "select id, sequence, source_snapshot_id from agent_inventory_snapshots \
              where agent_id = $1 and sequence = $2",
         )
         .bind(authenticated_agent_id)
@@ -341,7 +357,17 @@ pub async fn ingest_snapshot(
         .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
-        if let Some((existing_id, existing_sequence)) = existing {
+        if let Some((existing_id, existing_sequence, existing_source_snapshot_id)) = existing {
+            if existing_source_snapshot_id == source_snapshot_id {
+                return Ok(IngestOutcome {
+                    snapshot_id: existing_id,
+                    sequence: u64::try_from(existing_sequence).unwrap_or_default(),
+                    device_id: Some(device_id),
+                    replayed: true,
+                    current: existing_sequence > 0,
+                    reconciliation: reconciliation_json,
+                });
+            }
             if existing_sequence == sequence {
                 return Err(AgentInventoryError::StaleSnapshot {
                     sequence: snapshot.sequence,
@@ -364,18 +390,20 @@ pub async fn ingest_snapshot(
 
     sqlx::query(
         "insert into agent_inventory_current \
-            (agent_id, snapshot_id, message_id, protocol_version, sequence, collected_at, \
+            (agent_id, snapshot_id, message_id, source_snapshot_id, protocol_version, sequence, collected_at, \
              received_at, inventory, complete) \
-         values ($1, $2, $3, $4, $5, $6, now(), $7, $8) \
+         values ($1, $2, $3, $4, $5, $6, $7, now(), $8, $9) \
          on conflict (agent_id) do update set snapshot_id = excluded.snapshot_id, \
-             message_id = excluded.message_id, protocol_version = excluded.protocol_version, \
-             sequence = excluded.sequence, collected_at = excluded.collected_at, \
-             received_at = now(), inventory = excluded.inventory, complete = excluded.complete \
+             message_id = excluded.message_id, source_snapshot_id = excluded.source_snapshot_id, \
+             protocol_version = excluded.protocol_version, sequence = excluded.sequence, \
+             collected_at = excluded.collected_at, received_at = now(), inventory = excluded.inventory, \
+             complete = excluded.complete \
              where agent_inventory_current.sequence < excluded.sequence",
     )
     .bind(authenticated_agent_id)
     .bind(snapshot_id)
     .bind(snapshot.message_id)
+    .bind(source_snapshot_id)
     .bind(i32::try_from(snapshot.protocol_version).unwrap_or(i32::MAX))
     .bind(sequence)
     .bind(collected_at)
@@ -1587,6 +1615,8 @@ mod tests {
                 "sockets": [{"address": "127.0.0.1", "port": 22, "protocol": "tcp"}]
             }),
             complete: true,
+            snapshot_id: Uuid::new_v4(),
+            schema_version: protocol::M5_SCHEMA_VERSION,
         }
     }
 

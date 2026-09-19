@@ -772,6 +772,38 @@ mod handshake_tests {
             protocol::Message::HelloAck(protocol::HelloAck { accepted: true, .. })
         ));
 
+        let offer = protocol::Envelope::new(protocol::Message::CapabilityOffer(
+            protocol::CapabilityOffer {
+                supported_protocol_versions: protocol::SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+                capabilities: vec![protocol::Capability::InventorySnapshots],
+            },
+        ));
+        write
+            .send(WsMessage::Text(serde_json::to_string(&offer).unwrap()))
+            .await
+            .unwrap();
+        let capability_ack = tokio::time::timeout(Duration::from_secs(2), read.next())
+            .await
+            .expect("capability negotiation should be acknowledged")
+            .unwrap()
+            .unwrap();
+        let WsMessage::Text(capability_ack) = capability_ack else {
+            panic!("expected capability acknowledgement")
+        };
+        let capability_ack: protocol::Envelope = serde_json::from_str(&capability_ack).unwrap();
+        let protocol::Message::CapabilityAck(capability_ack) = capability_ack.message else {
+            panic!("expected capability acknowledgement envelope")
+        };
+        assert!(capability_ack.accepted);
+        assert_eq!(
+            capability_ack.selected_protocol_version,
+            Some(protocol::PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            capability_ack.capabilities,
+            vec![protocol::Capability::InventorySnapshots]
+        );
+
         let heartbeat =
             protocol::Envelope::new(protocol::Message::Heartbeat(protocol::Heartbeat {
                 agent_id: enrolled.agent_id,

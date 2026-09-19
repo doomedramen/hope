@@ -19,7 +19,7 @@ use crate::agent_inventory::{self, AgentInventoryError};
 use crate::agents;
 use crate::config::Config;
 use crate::pki;
-use protocol::{Envelope, Message};
+use protocol::{CapabilityAck, CapabilityOffer, Envelope, Message};
 
 fn build_server_config(config: &Config) -> anyhow::Result<ServerConfig> {
     let cert_pem = std::fs::read_to_string(&config.server_cert_path)?;
@@ -205,12 +205,64 @@ async fn handle_connection(
                 )
                 .await?;
                 tracing::info!(agent_id = %agent.id, capabilities = hello.capabilities.len(), "agent hello");
-                let ack = Envelope::new(Message::HelloAck(protocol::HelloAck {
-                    accepted: true,
-                    server_version: env!("CARGO_PKG_VERSION").to_string(),
-                    heartbeat_interval_secs: 30,
-                    reason: None,
-                }));
+                let ack = Envelope::with_protocol_version(
+                    protocol_version,
+                    Message::HelloAck(protocol::HelloAck {
+                        accepted: true,
+                        server_version: env!("CARGO_PKG_VERSION").to_string(),
+                        heartbeat_interval_secs: 30,
+                        reason: None,
+                    }),
+                );
+                write
+                    .send(WsMessage::Text(serde_json::to_string(&ack)?))
+                    .await?;
+            }
+            "capability_offer" => {
+                let offer: CapabilityOffer = match serde_json::from_value(value) {
+                    Ok(offer) => offer,
+                    Err(error) => {
+                        let response = protocol_error(
+                            message_id,
+                            "malformed_capability_offer",
+                            &error.to_string(),
+                        );
+                        write.send(WsMessage::Text(response)).await?;
+                        continue;
+                    }
+                };
+                if let Err(error) = offer.validate() {
+                    let response =
+                        protocol_error(message_id, "invalid_capability_offer", &error.to_string());
+                    write.send(WsMessage::Text(response)).await?;
+                    continue;
+                }
+
+                let negotiated = protocol::negotiate_capabilities(
+                    &offer.supported_protocol_versions,
+                    protocol::SUPPORTED_PROTOCOL_VERSIONS,
+                    &offer.capabilities,
+                    agent_inventory::SUPPORTED_CAPABILITIES,
+                );
+                let (accepted, selected_protocol_version, capabilities, reason) = match negotiated {
+                    Ok(negotiated) => (
+                        true,
+                        Some(negotiated.protocol_version),
+                        negotiated.capabilities,
+                        None,
+                    ),
+                    Err(error) => (false, None, Vec::new(), Some(error.to_string())),
+                };
+                let ack_protocol_version = selected_protocol_version.unwrap_or(protocol_version);
+                let ack = Envelope::with_protocol_version(
+                    ack_protocol_version,
+                    Message::CapabilityAck(CapabilityAck {
+                        accepted,
+                        selected_protocol_version,
+                        capabilities,
+                        reason,
+                    }),
+                );
                 write
                     .send(WsMessage::Text(serde_json::to_string(&ack)?))
                     .await?;
@@ -235,9 +287,12 @@ async fn handle_connection(
                     break;
                 }
                 agents::touch_last_seen(&pool, agent.id).await?;
-                let ack = Envelope::new(Message::HeartbeatAck(protocol::HeartbeatAck {
-                    server_time_unix_secs: time::OffsetDateTime::now_utc().unix_timestamp(),
-                }));
+                let ack = Envelope::with_protocol_version(
+                    protocol_version,
+                    Message::HeartbeatAck(protocol::HeartbeatAck {
+                        server_time_unix_secs: time::OffsetDateTime::now_utc().unix_timestamp(),
+                    }),
+                );
                 write
                     .send(WsMessage::Text(serde_json::to_string(&ack)?))
                     .await?;
@@ -259,15 +314,18 @@ async fn handle_connection(
                 };
                 match agent_inventory::ingest_snapshot(&pool, agent.id, &snapshot).await {
                     Ok(outcome) => {
-                        let ack = json!({
-                            "type": "inventory_snapshot_ack",
-                            "message_id": snapshot.message_id,
-                            "protocol_version": protocol::PROTOCOL_VERSION,
-                            "accepted": true,
-                            "sequence": outcome.sequence,
-                            "replayed": outcome.replayed,
-                        });
-                        write.send(WsMessage::Text(ack.to_string())).await?;
+                        let ack = Envelope::new(Message::InventorySnapshotAck(
+                            protocol::InventorySnapshotAck {
+                                snapshot_id: snapshot.snapshot_id,
+                                accepted: true,
+                                sequence: outcome.sequence,
+                                replayed: outcome.replayed,
+                                reason: None,
+                            },
+                        ));
+                        write
+                            .send(WsMessage::Text(serde_json::to_string(&ack)?))
+                            .await?;
                     }
                     Err(error @ AgentInventoryError::StaleSnapshot { .. }) => {
                         let response = protocol_error(
