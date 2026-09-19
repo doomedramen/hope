@@ -20,6 +20,13 @@ or cookies, and one TLS handshake followed by the same safe request when
 appropriate. Connects, reads, header/body sizes, redirect hops, and total
 connections are bounded. Redirects stay on the scanned address and port.
 
+The worker runs at most eight classifications at once. A separate liveness
+monitor polls cancellation every 100 ms and heartbeats the 60-second job
+lease every 10 seconds with a five-second timeout, including current progress
+while classification runs. Cancellation aborts in-flight classifier probes;
+open observations still use generic `tcp` fallback evidence and persist in
+observation order before the run reaches its terminal cancelled state.
+
 The TLS client verifies handshake signatures but uses an observation-only
 certificate verifier. It records certificate fingerprint, subject/SAN, issuer,
 validity, and ALPN while explicitly marking certificate trust as

@@ -169,6 +169,25 @@ impl ClassificationResult {
             evidence,
         }
     }
+
+    /// Keep an open endpoint visible when classification cannot complete.
+    ///
+    /// The worker also uses this result when a job is cancelled while a
+    /// bounded classifier probe is in flight. It must not wait for that probe
+    /// just to preserve the generic-TCP inventory record.
+    pub fn generic_fallback(address: IpAddr, port: u16, probe_error: Option<&str>) -> Self {
+        let mut evidence = json!({
+            "protocol": ServiceProtocol::GenericTcp.as_str(),
+            "transport": "tcp",
+            "address": address.to_string(),
+            "port": port,
+            "probe": "bounded_tcp",
+        });
+        if let Some(probe_error) = probe_error {
+            evidence["probe_error"] = Value::String(probe_error.to_string());
+        }
+        Self::new(ServiceProtocol::GenericTcp, evidence)
+    }
 }
 
 /// Errors that prevent classifier setup. A live-port probe turns transport
@@ -195,19 +214,6 @@ impl Classifier {
     /// Classify one open port. Any probe failure returns generic TCP evidence
     /// rather than hiding the open port from the inventory.
     pub async fn classify(&self, address: IpAddr, port: u16) -> ClassificationResult {
-        let fallback = || {
-            ClassificationResult::new(
-                ServiceProtocol::GenericTcp,
-                json!({
-                    "protocol": ServiceProtocol::GenericTcp.as_str(),
-                    "transport": "tcp",
-                    "address": address.to_string(),
-                    "port": port,
-                    "probe": "bounded_tcp",
-                }),
-            )
-        };
-
         let result = timeout(
             self.config.overall_timeout,
             self.classify_inner(address, port),
@@ -216,21 +222,14 @@ impl Classifier {
         match result {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
-                let mut result = fallback();
+                let mut result = ClassificationResult::generic_fallback(address, port, None);
                 if let Some(object) = result.evidence.as_object_mut() {
                     object.insert("probe_error".to_string(), Value::String(error));
                 }
                 result
             }
             Err(_) => {
-                let mut result = fallback();
-                if let Some(object) = result.evidence.as_object_mut() {
-                    object.insert(
-                        "probe_error".to_string(),
-                        Value::String("overall_timeout".to_string()),
-                    );
-                }
-                result
+                ClassificationResult::generic_fallback(address, port, Some("overall_timeout"))
             }
         }
     }

@@ -8,14 +8,16 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use domain::discovery::ApprovedScope;
 use futures_util::stream::{self, StreamExt};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, Transaction};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -26,7 +28,14 @@ use crate::inventory::{addresses, events::Recorder, evidence};
 const TCP_PORT_COUNT: i64 = 65_535;
 const SCAN_BATCH_SIZE: usize = 256;
 const JOB_LEASE_SECS: i64 = 60;
+const JOB_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const JOB_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+// Keep classification fan-out independent from TCP scan fan-out. Each
+// classifier already has its own bounded connection budget, so this cap
+// prevents one batch of open ports from causing unbounded re-probing.
+const CLASSIFICATION_CONCURRENCY: usize = 8;
+const _: () = assert!(CLASSIFICATION_CONCURRENCY > 1);
 const PORT_EVIDENCE_ATTRIBUTE: &str = "open_port";
 const PORT_EVIDENCE_CONFIDENCE: f32 = 0.9;
 const CLASSIFICATION_EVIDENCE_ATTRIBUTE: &str = "protocol_classification";
@@ -343,6 +352,151 @@ struct ScanPlan<'a> {
     device_ids: &'a mut HashMap<IpAddr, Uuid>,
 }
 
+#[derive(Debug, Default)]
+struct WorkerControl {
+    cancellation_requested: AtomicBool,
+    lease_lost: AtomicBool,
+    stop_notify: Notify,
+}
+
+impl WorkerControl {
+    fn request_cancellation(&self) {
+        self.cancellation_requested.store(true, Ordering::Release);
+        self.stop_notify.notify_waiters();
+    }
+
+    fn mark_lease_lost(&self) {
+        self.lease_lost.store(true, Ordering::Release);
+        self.stop_notify.notify_waiters();
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        self.cancellation_requested.load(Ordering::Acquire)
+    }
+
+    fn lease_lost(&self) -> bool {
+        self.lease_lost.load(Ordering::Acquire)
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.cancellation_requested() || self.lease_lost()
+    }
+
+    fn stop_reason(&self) -> Option<StopReason> {
+        if self.lease_lost() {
+            Some(StopReason::LeaseLost)
+        } else if self.cancellation_requested() {
+            Some(StopReason::Cancelled)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopReason {
+    Cancelled,
+    LeaseLost,
+}
+
+#[derive(Debug)]
+struct JobProgress {
+    targets_completed: AtomicI64,
+    ports_completed: AtomicI64,
+}
+
+impl JobProgress {
+    fn new(targets_completed: i64, ports_completed: i64) -> Self {
+        Self {
+            targets_completed: AtomicI64::new(targets_completed),
+            ports_completed: AtomicI64::new(ports_completed),
+        }
+    }
+
+    fn set(&self, targets_completed: i64, ports_completed: i64) {
+        self.targets_completed
+            .store(targets_completed, Ordering::Release);
+        self.ports_completed
+            .store(ports_completed, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> (i64, i64) {
+        (
+            self.targets_completed.load(Ordering::Acquire),
+            self.ports_completed.load(Ordering::Acquire),
+        )
+    }
+}
+
+struct JobHeartbeatMonitor {
+    task: JoinHandle<()>,
+}
+
+impl JobHeartbeatMonitor {
+    fn start(
+        pool: PgPool,
+        job_id: Uuid,
+        worker_id: String,
+        run: ScanRun,
+        progress: Arc<JobProgress>,
+        control: Arc<WorkerControl>,
+    ) -> Self {
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval_at(
+                tokio::time::Instant::now() + JOB_HEARTBEAT_INTERVAL,
+                JOB_HEARTBEAT_INTERVAL,
+            );
+            loop {
+                interval.tick().await;
+                let (targets_completed, ports_completed) = progress.snapshot();
+                let heartbeat = tokio::time::timeout(
+                    JOB_HEARTBEAT_TIMEOUT,
+                    jobs::heartbeat(
+                        &pool,
+                        job_id,
+                        &worker_id,
+                        JOB_LEASE_SECS,
+                        Some(json!({
+                            "run_id": run.id,
+                            "status": "running",
+                            "targets_planned": run.targets_planned,
+                            "targets_completed": targets_completed,
+                            "ports_planned": run.ports_planned,
+                            "ports_completed": ports_completed,
+                        })),
+                    ),
+                )
+                .await;
+                match heartbeat {
+                    Ok(Ok(true)) => {}
+                    Ok(Ok(false)) => {
+                        tracing::warn!(job_id = %job_id, "job lease lost during discovery");
+                        control.mark_lease_lost();
+                        break;
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(job_id = %job_id, %error, "discovery lease heartbeat failed");
+                        control.mark_lease_lost();
+                        break;
+                    }
+                    Err(_) => {
+                        tracing::warn!(job_id = %job_id, "discovery lease heartbeat timed out");
+                        control.mark_lease_lost();
+                        break;
+                    }
+                }
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for JobHeartbeatMonitor {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 async fn execute_run(
     context: ExecutionContext<'_>,
     run: ScanRun,
@@ -404,34 +558,23 @@ async fn execute_run(
         return Err(error);
     }
 
-    let cancellation = Arc::new(AtomicBool::new(false));
-    if cancellation_requested(pool, job_id, run.id, &cancellation).await? {
-        mark_cancelled(pool, run.id).await?;
-        report_progress(
-            pool,
-            job_id,
-            worker_id,
-            &run,
-            "cancelled",
-            run.targets_completed,
-            run.ports_completed,
-        )
-        .await?;
-        return Ok(JobOutcome::Cancelled);
+    let control = Arc::new(WorkerControl::default());
+    let progress = Arc::new(JobProgress::new(run.targets_completed, run.ports_completed));
+    if let Some(reason) = stop_requested(pool, job_id, run.id, &control).await? {
+        return finish_stop(pool, job_id, worker_id, &run, &progress, reason).await;
     }
     mark_running(pool, run.id).await?;
-    report_progress(
-        pool,
+    report_progress(pool, job_id, worker_id, &run, "running", &progress).await?;
+    let _cancellation_monitor =
+        CancellationMonitor::start(pool.clone(), job_id, run.id, Arc::clone(&control));
+    let _heartbeat_monitor = JobHeartbeatMonitor::start(
+        pool.clone(),
         job_id,
-        worker_id,
-        &run,
-        "running",
-        run.targets_completed,
-        run.ports_completed,
-    )
-    .await?;
-    let _monitor =
-        CancellationMonitor::start(pool.clone(), job_id, run.id, Arc::clone(&cancellation));
+        worker_id.to_string(),
+        run.clone(),
+        Arc::clone(&progress),
+        Arc::clone(&control),
+    );
 
     let mut ports_completed = run.ports_completed;
     let mut targets_completed = run.targets_completed;
@@ -444,16 +587,8 @@ async fn execute_run(
         if target_index < first_target {
             continue;
         }
-        if cancellation_requested(pool, job_id, run.id, &cancellation).await? {
-            return finish_cancelled(
-                pool,
-                job_id,
-                worker_id,
-                &run,
-                targets_completed,
-                ports_completed,
-            )
-            .await;
+        if let Some(reason) = stop_requested(pool, job_id, run.id, &control).await? {
+            return finish_stop(pool, job_id, worker_id, &run, &progress, reason).await;
         }
 
         let mut address_has_liveness = false;
@@ -472,16 +607,8 @@ async fn execute_run(
             if let Err(error) = mark_target_completed(pool, run.id, targets_completed).await {
                 return async_fail_run(pool, run.id, error).await;
             }
-            report_progress(
-                pool,
-                job_id,
-                worker_id,
-                &run,
-                "running",
-                targets_completed,
-                ports_completed,
-            )
-            .await?;
+            progress.set(targets_completed, ports_completed);
+            report_progress(pool, job_id, worker_id, &run, "running", &progress).await?;
             continue;
         }
         for (batch_index, batch) in batches.enumerate() {
@@ -490,7 +617,7 @@ async fn execute_run(
                 &run.network_id.to_string(),
                 *address,
                 batch,
-                Arc::clone(&cancellation),
+                Arc::clone(&control),
             )
             .await;
             let observations = batch_result.observations;
@@ -514,8 +641,20 @@ async fn execute_run(
                 address_has_liveness = true;
             }
             if !observations.is_empty() {
-                let classifications =
-                    classify_open_observations(&classifier, &observations, device_ids).await;
+                let classification_batch = classify_open_observations(
+                    &classifier,
+                    &observations,
+                    device_ids,
+                    Arc::clone(&control),
+                )
+                .await;
+                if control.lease_lost() {
+                    return Err(anyhow!("job lease lost while classifying"));
+                }
+                let ClassificationBatch {
+                    classifications,
+                    cancelled: classification_cancelled,
+                } = classification_batch;
                 let next_ports_completed = ports_completed
                     .checked_add(observations.len() as i64)
                     .ok_or_else(|| anyhow!("scan port progress overflow"))?;
@@ -536,30 +675,20 @@ async fn execute_run(
                 if let Some(next_targets_completed) = next_targets_completed {
                     targets_completed = next_targets_completed;
                 }
-                report_progress(
-                    pool,
-                    job_id,
-                    worker_id,
-                    &run,
-                    "running",
-                    targets_completed,
-                    ports_completed,
-                )
-                .await?;
+                progress.set(targets_completed, ports_completed);
+                report_progress(pool, job_id, worker_id, &run, "running", &progress).await?;
+                if classification_cancelled {
+                    return finish_cancelled(pool, job_id, worker_id, &run, &progress).await;
+                }
             }
 
             if let Some(failure) = batch_result.failure {
                 match failure {
-                    ProbeFailure::Cancelled => {
-                        return finish_cancelled(
-                            pool,
-                            job_id,
-                            worker_id,
-                            &run,
-                            targets_completed,
-                            ports_completed,
-                        )
-                        .await;
+                    ProbeFailure::Stopped => {
+                        let reason = control.stop_reason().ok_or_else(|| {
+                            anyhow!("TCP scan stopped without cancellation or lease-loss reason")
+                        })?;
+                        return finish_stop(pool, job_id, worker_id, &run, &progress, reason).await;
                     }
                     ProbeFailure::Scanner(error) => {
                         let error = anyhow!(error);
@@ -568,30 +697,14 @@ async fn execute_run(
                     }
                 }
             }
-            if cancellation_requested(pool, job_id, run.id, &cancellation).await? {
-                return finish_cancelled(
-                    pool,
-                    job_id,
-                    worker_id,
-                    &run,
-                    targets_completed,
-                    ports_completed,
-                )
-                .await;
+            if let Some(reason) = stop_requested(pool, job_id, run.id, &control).await? {
+                return finish_stop(pool, job_id, worker_id, &run, &progress, reason).await;
             }
         }
     }
 
-    if cancellation_requested(pool, job_id, run.id, &cancellation).await? {
-        return finish_cancelled(
-            pool,
-            job_id,
-            worker_id,
-            &run,
-            targets_completed,
-            ports_completed,
-        )
-        .await;
+    if let Some(reason) = stop_requested(pool, job_id, run.id, &control).await? {
+        return finish_stop(pool, job_id, worker_id, &run, &progress, reason).await;
     }
     if targets_completed != run.targets_planned || ports_completed != run.ports_planned {
         let error = anyhow!(
@@ -605,16 +718,8 @@ async fn execute_run(
     if let Err(error) = complete_run(pool, run.id, targets, ports).await {
         return async_fail_run(pool, run.id, error).await;
     }
-    report_progress(
-        pool,
-        job_id,
-        worker_id,
-        &run,
-        "succeeded",
-        targets_completed,
-        ports_completed,
-    )
-    .await?;
+    progress.set(targets_completed, ports_completed);
+    report_progress(pool, job_id, worker_id, &run, "succeeded", &progress).await?;
     Ok(JobOutcome::Completed)
 }
 
@@ -630,35 +735,105 @@ struct ClassifiedOpenPort {
     result: ClassificationResult,
 }
 
-async fn classify_open_observations(
-    classifier: &Classifier,
+struct ClassificationBatch {
+    classifications: Vec<ClassifiedOpenPort>,
+    cancelled: bool,
+}
+
+#[async_trait]
+trait OpenPortClassifier: Send + Sync {
+    async fn classify(&self, address: IpAddr, port: u16) -> ClassificationResult;
+}
+
+#[async_trait]
+impl OpenPortClassifier for Classifier {
+    async fn classify(&self, address: IpAddr, port: u16) -> ClassificationResult {
+        Classifier::classify(self, address, port).await
+    }
+}
+
+async fn classify_open_observations<C: OpenPortClassifier + ?Sized>(
+    classifier: &C,
     observations: &[PortObservation],
     device_ids: &HashMap<IpAddr, Uuid>,
-) -> Vec<ClassifiedOpenPort> {
-    let mut classifications = Vec::new();
-    for observation in observations {
-        if observation.state != PortState::Open {
-            continue;
-        }
-        let Some(device_id) = device_ids.get(&observation.address).copied() else {
-            continue;
-        };
-        let result = classifier
-            .classify(observation.address, observation.port)
-            .await;
-        classifications.push(ClassifiedOpenPort {
-            address: observation.address,
-            port: observation.port,
-            device_id,
-            result,
-        });
+    control: Arc<WorkerControl>,
+) -> ClassificationBatch {
+    let candidates: Vec<(usize, IpAddr, u16, Uuid)> = observations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, observation)| {
+            if observation.state != PortState::Open {
+                return None;
+            }
+            let device_id = device_ids.get(&observation.address).copied()?;
+            Some((index, observation.address, observation.port, device_id))
+        })
+        .collect();
+
+    let mut pending = stream::iter(candidates.into_iter().map(
+        |(index, address, port, device_id)| {
+            let control = Arc::clone(&control);
+            async move {
+                let (result, stopped) = tokio::select! {
+                    biased;
+                    _ = wait_for_stop(Arc::clone(&control)) => {
+                        let reason = if control.cancellation_requested() {
+                            "cancelled"
+                        } else {
+                            "lease_lost"
+                        };
+                        (ClassificationResult::generic_fallback(address, port, Some(reason)), true)
+                    }
+                    result = classifier.classify(address, port) => (result, false),
+                };
+                (
+                    index,
+                    ClassifiedOpenPort {
+                        address,
+                        port,
+                        device_id,
+                        result,
+                    },
+                    stopped,
+                )
+            }
+        },
+    ))
+    .buffer_unordered(CLASSIFICATION_CONCURRENCY);
+
+    let mut indexed = Vec::new();
+    let mut cancelled = false;
+    while let Some((index, classification, stopped)) = pending.next().await {
+        cancelled |= stopped;
+        indexed.push((index, classification));
     }
-    classifications
+    indexed.sort_unstable_by_key(|(index, _)| *index);
+    ClassificationBatch {
+        classifications: indexed
+            .into_iter()
+            .map(|(_, classification)| classification)
+            .collect(),
+        cancelled,
+    }
 }
 
 enum ProbeFailure {
-    Cancelled,
+    Stopped,
     Scanner(super::tcp::ScannerError),
+}
+
+async fn wait_for_stop(control: Arc<WorkerControl>) {
+    loop {
+        let notified = control.stop_notify.notified();
+        tokio::pin!(notified);
+        // Register before checking the flag. This closes the race where a
+        // cancellation arrives between the flag check and awaiting Notify.
+        notified.as_mut().enable();
+        if control.stop_requested() {
+            return;
+        }
+        notified.await;
+    }
 }
 
 async fn scan_batch<S: Scanner + ?Sized>(
@@ -666,19 +841,22 @@ async fn scan_batch<S: Scanner + ?Sized>(
     network_key: &str,
     address: IpAddr,
     ports: &[u16],
-    cancellation: Arc<AtomicBool>,
+    control: Arc<WorkerControl>,
 ) -> BatchResult {
     let mut observations = Vec::with_capacity(ports.len());
     let mut probes = stream::iter(ports.iter().copied().map(|port| {
-        let cancellation = Arc::clone(&cancellation);
+        let control = Arc::clone(&control);
         async move {
-            if cancellation.load(Ordering::Acquire) {
-                return Err(ProbeFailure::Cancelled);
+            if control.stop_requested() {
+                return Err(ProbeFailure::Stopped);
             }
-            scanner
-                .scan_scoped(network_key, SocketAddr::new(address, port))
-                .await
-                .map_err(ProbeFailure::Scanner)
+            tokio::select! {
+                biased;
+                _ = wait_for_stop(Arc::clone(&control)) => Err(ProbeFailure::Stopped),
+                result = scanner.scan_scoped(network_key, SocketAddr::new(address, port)) => {
+                    result.map_err(ProbeFailure::Scanner)
+                }
+            }
         }
     }))
     .buffered(SCAN_BATCH_SIZE);
@@ -1349,14 +1527,14 @@ async fn mark_cancelled(pool: &PgPool, run_id: Uuid) -> Result<()> {
     Ok(())
 }
 
-async fn cancellation_requested(
+async fn stop_requested(
     pool: &PgPool,
     job_id: Uuid,
     run_id: Uuid,
-    cancellation: &AtomicBool,
-) -> Result<bool> {
-    if cancellation.load(Ordering::Acquire) {
-        return Ok(true);
+    control: &WorkerControl,
+) -> Result<Option<StopReason>> {
+    if let Some(reason) = control.stop_reason() {
+        return Ok(Some(reason));
     }
     let row = sqlx::query(
         "select j.cancel_requested or sr.cancellation_requested as requested \
@@ -1369,9 +1547,10 @@ async fn cancellation_requested(
     .await?;
     let requested: bool = row.try_get("requested")?;
     if requested {
-        cancellation.store(true, Ordering::Release);
+        control.request_cancellation();
+        return Ok(Some(StopReason::Cancelled));
     }
-    Ok(requested)
+    Ok(control.stop_reason())
 }
 
 async fn report_progress(
@@ -1380,9 +1559,9 @@ async fn report_progress(
     worker_id: &str,
     run: &ScanRun,
     status: &str,
-    targets_completed: i64,
-    ports_completed: i64,
+    progress: &JobProgress,
 ) -> Result<()> {
+    let (targets_completed, ports_completed) = progress.snapshot();
     let alive = jobs::heartbeat(
         pool,
         job_id,
@@ -1409,21 +1588,25 @@ async fn finish_cancelled(
     job_id: Uuid,
     worker_id: &str,
     run: &ScanRun,
-    targets_completed: i64,
-    ports_completed: i64,
+    progress: &JobProgress,
 ) -> Result<JobOutcome> {
     mark_cancelled(pool, run.id).await?;
-    report_progress(
-        pool,
-        job_id,
-        worker_id,
-        run,
-        "cancelled",
-        targets_completed,
-        ports_completed,
-    )
-    .await?;
+    report_progress(pool, job_id, worker_id, run, "cancelled", progress).await?;
     Ok(JobOutcome::Cancelled)
+}
+
+async fn finish_stop(
+    pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
+    run: &ScanRun,
+    progress: &JobProgress,
+    reason: StopReason,
+) -> Result<JobOutcome> {
+    match reason {
+        StopReason::Cancelled => finish_cancelled(pool, job_id, worker_id, run, progress).await,
+        StopReason::LeaseLost => Err(anyhow!("job lease lost while scanning")),
+    }
 }
 
 async fn async_fail_run<T>(pool: &PgPool, run_id: Uuid, error: anyhow::Error) -> Result<T> {
@@ -1436,10 +1619,13 @@ struct CancellationMonitor {
 }
 
 impl CancellationMonitor {
-    fn start(pool: PgPool, job_id: Uuid, run_id: Uuid, cancellation: Arc<AtomicBool>) -> Self {
+    fn start(pool: PgPool, job_id: Uuid, run_id: Uuid, control: Arc<WorkerControl>) -> Self {
         let task = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(CANCELLATION_POLL_INTERVAL).await;
+                if control.stop_requested() {
+                    break;
+                }
                 let requested = sqlx::query(
                     "select j.cancel_requested or sr.cancellation_requested as requested \
                      from jobs j join scan_runs sr on sr.job_id = j.id \
@@ -1452,7 +1638,7 @@ impl CancellationMonitor {
                 match requested {
                     Ok(Some(row)) => match row.try_get::<bool, _>("requested") {
                         Ok(true) => {
-                            cancellation.store(true, Ordering::Release);
+                            control.request_cancellation();
                             break;
                         }
                         Ok(false) => {}
@@ -1510,6 +1696,151 @@ mod tests {
         assert_eq!(port_state_name(PortState::Open), "open");
         assert_eq!(port_state_name(PortState::Closed), "closed");
         assert_eq!(port_state_name(PortState::Filtered), "filtered");
+    }
+
+    #[test]
+    fn classification_heartbeat_budget_stays_well_inside_job_lease() {
+        assert!(
+            JOB_HEARTBEAT_INTERVAL + JOB_HEARTBEAT_TIMEOUT
+                < Duration::from_secs(JOB_LEASE_SECS as u64)
+        );
+    }
+
+    #[derive(Clone)]
+    struct BoundedTestClassifier {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        started: Arc<AtomicUsize>,
+        first_wave: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl OpenPortClassifier for BoundedTestClassifier {
+        async fn classify(&self, address: IpAddr, port: u16) -> ClassificationResult {
+            let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+            self.max_active.fetch_max(active, Ordering::AcqRel);
+            let wave = self.started.fetch_add(1, Ordering::AcqRel) + 1;
+            if wave <= CLASSIFICATION_CONCURRENCY {
+                self.first_wave.wait().await;
+            }
+            let delay = if port.is_multiple_of(2) { 20 } else { 1 };
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            self.active.fetch_sub(1, Ordering::AcqRel);
+            ClassificationResult::generic_fallback(address, port, None)
+        }
+    }
+
+    #[tokio::test]
+    async fn classifications_run_concurrently_with_fixed_bound_and_input_order() {
+        let address: IpAddr = "192.0.2.20".parse().expect("test address");
+        let device_id = Uuid::new_v4();
+        let port_count = CLASSIFICATION_CONCURRENCY * 2;
+        let observations: Vec<_> = (0..port_count)
+            .map(|index| PortObservation {
+                address,
+                port: 10_000 + index as u16,
+                state: PortState::Open,
+                latency: Duration::from_millis(1),
+            })
+            .collect();
+        let device_ids = HashMap::from([(address, device_id)]);
+        let classifier = BoundedTestClassifier {
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: Arc::new(AtomicUsize::new(0)),
+            started: Arc::new(AtomicUsize::new(0)),
+            first_wave: Arc::new(tokio::sync::Barrier::new(CLASSIFICATION_CONCURRENCY)),
+        };
+        let max_active = Arc::clone(&classifier.max_active);
+        let batch = tokio::time::timeout(
+            Duration::from_secs(1),
+            classify_open_observations(
+                &classifier,
+                &observations,
+                &device_ids,
+                Arc::new(WorkerControl::default()),
+            ),
+        )
+        .await
+        .expect("bounded classifications finish");
+
+        assert!(!batch.cancelled);
+        assert_eq!(
+            max_active.load(Ordering::Acquire),
+            CLASSIFICATION_CONCURRENCY
+        );
+        assert_eq!(batch.classifications.len(), port_count);
+        let ports: Vec<_> = batch
+            .classifications
+            .iter()
+            .map(|classification| classification.port)
+            .collect();
+        assert_eq!(
+            ports,
+            observations
+                .iter()
+                .map(|observation| observation.port)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct BlockingTestClassifier {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl OpenPortClassifier for BlockingTestClassifier {
+        async fn classify(&self, _address: IpAddr, _port: u16) -> ClassificationResult {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            std::future::pending::<ClassificationResult>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_aborts_in_flight_classification_and_keeps_generic_fallbacks() {
+        let address: IpAddr = "192.0.2.21".parse().expect("test address");
+        let device_id = Uuid::new_v4();
+        let port_count = CLASSIFICATION_CONCURRENCY + 2;
+        let observations: Vec<_> = (0..port_count)
+            .map(|index| PortObservation {
+                address,
+                port: 11_000 + index as u16,
+                state: PortState::Open,
+                latency: Duration::from_millis(1),
+            })
+            .collect();
+        let device_ids = HashMap::from([(address, device_id)]);
+        let classifier = BlockingTestClassifier::default();
+        let control = Arc::new(WorkerControl::default());
+        let calls = Arc::clone(&classifier.calls);
+        let classify_task = tokio::spawn({
+            let classifier = classifier.clone();
+            let control = Arc::clone(&control);
+            async move {
+                classify_open_observations(&classifier, &observations, &device_ids, control).await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::Acquire) < CLASSIFICATION_CONCURRENCY {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("classification fan-out starts bounded first wave");
+        control.request_cancellation();
+
+        let batch = tokio::time::timeout(Duration::from_millis(100), classify_task)
+            .await
+            .expect("cancellation stops classification promptly")
+            .expect("classification task joins");
+        assert!(batch.cancelled);
+        assert_eq!(batch.classifications.len(), port_count);
+        assert!(batch
+            .classifications
+            .iter()
+            .all(|classification| classification.result.protocol == ServiceProtocol::GenericTcp));
+        assert_eq!(calls.load(Ordering::Acquire), CLASSIFICATION_CONCURRENCY);
     }
 
     #[tokio::test]

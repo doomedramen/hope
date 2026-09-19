@@ -70,6 +70,16 @@ unchanged and partial UDP work cannot create absence evidence.
 The scan coordinator owns the semaphores in this order: global, scope, then
 host. It checks cancellation before each target and port, heartbeats the job
 lease while a run is active, and records completed work in `jobs.progress`.
+Open-port classification uses a separate fixed concurrency bound of eight;
+each classifier retains its own connection and deadline limits, so a large
+open-port batch cannot create unbounded re-probing. A cancellation signal
+aborts in-flight classifier probes and uses the generic `tcp` fallback for
+open observations that still need persistence. Classification results are
+reordered to observation order before persistence, so service reconciliation
+remains in the same transaction and ordering as the raw port observations.
+The worker polls cancellation every 100 ms and renews the 60-second job lease
+every 10 seconds with a five-second heartbeat timeout, including progress
+counts while classification is active.
 The scanner never performs authentication, protocol writes, or exploit probes.
 
 ## 4. Observation application
