@@ -3,18 +3,24 @@
 //! exponential backoff + jitter on any error or disconnect; the backoff
 //! counter resets after a session is successfully established.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use rustls::RootCertStore;
+use sha2::{Digest, Sha256};
 use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use uuid::Uuid;
 
-use crate::identity::Paths;
-use protocol::{Envelope, Heartbeat, Hello, Message};
+use crate::collectors;
+use crate::identity::{Paths, write_private};
+use protocol::{
+    Capability, CapabilityAck, CapabilityOffer, Envelope, Heartbeat, Hello, Message,
+    SUPPORTED_PROTOCOL_VERSIONS, negotiate_capabilities,
+};
 
 const MAX_BACKOFF_SECS: u64 = 60;
 
@@ -69,6 +75,7 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
 
     let certs: Vec<_> =
         rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<_, _>>()?;
+    let agent_id = load_or_create_agent_id(state_dir, certs.first().map(|cert| cert.as_ref()))?;
     let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
         .ok_or_else(|| anyhow::anyhow!("no private key found in {}", paths.key.display()))?;
 
@@ -94,7 +101,6 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     tracing::info!(gateway_url, "connected to agent gateway");
 
     let (mut write, mut read) = ws_stream.split();
-    let agent_id = Uuid::new_v4();
 
     let hello = Envelope::new(Message::Hello(Hello {
         agent_id,
@@ -104,12 +110,24 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
         arch: std::env::consts::ARCH.to_string(),
     }));
     write
-        .send(WsMessage::Text(serde_json::to_string(&hello)?))
+        .send(WsMessage::Text(protocol::serialize_envelope(&hello)?))
+        .await?;
+
+    let offer = CapabilityOffer {
+        supported_protocol_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+        capabilities: collectors::capabilities(),
+    };
+    let offer_envelope = Envelope::new(Message::CapabilityOffer(offer.clone()));
+    write
+        .send(WsMessage::Text(protocol::serialize_envelope(
+            &offer_envelope,
+        )?))
         .await?;
 
     let start = Instant::now();
     let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
     heartbeat_interval.tick().await; // first tick fires immediately
+    let mut snapshot_sent = false;
 
     loop {
         tokio::select! {
@@ -118,7 +136,7 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                     agent_id,
                     uptime_secs: start.elapsed().as_secs(),
                 }));
-                write.send(WsMessage::Text(serde_json::to_string(&hb)?)).await?;
+                write.send(WsMessage::Text(protocol::serialize_envelope(&hb)?)).await?;
             }
             msg = read.next() => {
                 let Some(msg) = msg else {
@@ -128,7 +146,38 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                 let msg = msg?;
                 if let WsMessage::Text(text) = msg {
                     match serde_json::from_str::<Envelope>(&text) {
-                        Ok(envelope) => tracing::info!(?envelope.message, "received from gateway"),
+                        Ok(envelope) => {
+                            if let Message::CapabilityAck(ack) = envelope.message {
+                                if let Some(negotiated) = negotiated_from_ack(&offer, &ack) {
+                                    tracing::info!(
+                                        protocol_version = negotiated.protocol_version,
+                                        capabilities = ?negotiated.capabilities,
+                                        "agent capabilities negotiated"
+                                    );
+                                    if !snapshot_sent
+                                        && negotiated.capabilities.contains(&Capability::InventorySnapshots)
+                                    {
+                                        let snapshot = collectors::collect_snapshot(agent_id).await;
+                                        let snapshot_message = Envelope::new(Message::InventorySnapshot(snapshot.clone()));
+                                        write.send(WsMessage::Text(
+                                            protocol::serialize_envelope(&snapshot_message)?,
+                                        )).await?;
+                                        if negotiated.capabilities.contains(&Capability::BoundedObservations) {
+                                            let observations = collectors::observations_from_snapshot(&snapshot);
+                                            let observation_message = Envelope::new(Message::ObservationBatch(observations));
+                                            write.send(WsMessage::Text(
+                                                protocol::serialize_envelope(&observation_message)?,
+                                            )).await?;
+                                        }
+                                        snapshot_sent = true;
+                                    }
+                                } else {
+                                    tracing::warn!(?ack, "gateway rejected or returned invalid capability negotiation");
+                                }
+                            } else {
+                                tracing::info!(?envelope.message, "received from gateway");
+                            }
+                        }
                         Err(err) => tracing::warn!(error = %err, "malformed envelope from gateway"),
                     }
                 } else if msg.is_close() {
@@ -141,13 +190,69 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn negotiated_from_ack(
+    offer: &CapabilityOffer,
+    ack: &CapabilityAck,
+) -> Option<protocol::NegotiatedCapabilities> {
+    if !ack.accepted {
+        return None;
+    }
+    let selected = ack.selected_protocol_version?;
+    if !offer.supported_protocol_versions.contains(&selected) {
+        return None;
+    }
+    negotiate_capabilities(
+        &offer.supported_protocol_versions,
+        &[selected],
+        &offer.capabilities,
+        &ack.capabilities,
+    )
+    .ok()
+}
+
+fn agent_id_path(state_dir: &str) -> PathBuf {
+    Path::new(state_dir).join("agent-id")
+}
+
+/// Enrollment persists the client certificate. Persist a derived UUID beside
+/// it on first run, then always load that value on reconnect. The certificate
+/// hash gives first-run identity a deterministic fallback without generating a
+/// new identity for every WebSocket session.
+fn load_or_create_agent_id(
+    state_dir: &str,
+    certificate_der: Option<&[u8]>,
+) -> anyhow::Result<Uuid> {
+    let path = agent_id_path(state_dir);
+    if path.exists() {
+        let value = std::fs::read_to_string(&path)?;
+        return Uuid::parse_str(value.trim()).map_err(|err| {
+            anyhow::anyhow!("invalid persisted agent identity {}: {err}", path.display())
+        });
+    }
+
+    let certificate_der = certificate_der
+        .ok_or_else(|| anyhow::anyhow!("enrolled certificate contains no leaf certificate"))?;
+    let agent_id = stable_agent_id_from_certificate(certificate_der);
+    write_private(&path, &format!("{agent_id}\n"))?;
+    Ok(agent_id)
+}
+
+fn stable_agent_id_from_certificate(certificate_der: &[u8]) -> Uuid {
+    let digest = Sha256::digest(certificate_der);
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // Mark as a UUID v5-shaped, RFC 4122 variant identifier. This is a
+    // deterministic local identity, not a replacement for mTLS authority.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
 fn hostname_or_unknown() -> String {
-    #[cfg(unix)]
-    {
-        if let Ok(out) = std::process::Command::new("hostname").output()
-            && out.status.success()
-        {
-            return String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
+        let hostname = hostname.trim();
+        if !hostname.is_empty() {
+            return hostname.to_string();
         }
     }
     "unknown".to_string()
@@ -179,5 +284,28 @@ mod tests {
                 assert!(delay <= base, "delay {delay} exceeded base {base}");
             }
         }
+    }
+
+    #[test]
+    fn stable_identity_uses_certificate_bytes() {
+        let first = stable_agent_id_from_certificate(b"certificate-a");
+        let second = stable_agent_id_from_certificate(b"certificate-a");
+        let other = stable_agent_id_from_certificate(b"certificate-b");
+        assert_eq!(first, second);
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn persisted_identity_wins_on_reconnect() {
+        let directory = std::env::temp_dir().join(format!("hope-agent-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create state directory");
+        let path = directory.join("agent-id");
+        let expected = Uuid::new_v4();
+        std::fs::write(&path, format!("{expected}\n")).expect("write identity");
+
+        let actual = load_or_create_agent_id(directory.to_str().unwrap(), Some(b"different"))
+            .expect("load identity");
+        assert_eq!(actual, expected);
+        std::fs::remove_dir_all(directory).expect("remove test state directory");
     }
 }
