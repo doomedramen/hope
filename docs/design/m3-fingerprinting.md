@@ -60,6 +60,29 @@ Checked-in fixtures live under
 fixture envelope version is independent from each rule's stamped fixture
 version so fixture readers and signatures can evolve separately.
 
+### 2.2 Slice 2 implementation
+
+`apps/server/src/inventory/fingerprinting.rs` consumes the append-only M2
+`protocol_classification` row for the canonical service and runs the pure
+engine without opening another connection. It appends a `network_scan` /
+`fingerprint` row containing the selected candidate, all ranked candidates,
+the rule metadata, reasons, evidence fields, confidence, and the source M2
+evidence ID. Repeating the same scan instance and value reuses the existing
+row; a new scan instance remains a separate observation.
+
+The reconciler projects only automatic `product`, `product_version`, and
+`protocol` values onto the existing service. It takes a service advisory lock,
+uses the strongest automatic support before replacing an automatic value, and
+records one `service.fingerprint_changed` event for a real projection change.
+Generic fallback candidates remain evidence without inventing a product.
+Confirmed manual evidence protects the corresponding service field, including
+manual fingerprint evidence that confirms the whole classification.
+
+The DB gate covers repeated discoveries enriching one service, generic TCP
+remaining visible, automatic projection idempotence, and protection of manual
+values. Review items for conflicting or low-confidence candidates remain the
+next M3 slice.
+
 ## 3. Reconciliation and review
 
 Automatic fingerprint evidence is append-only. A reconciliation transaction
