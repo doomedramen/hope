@@ -5,6 +5,7 @@
 //! consume these rows in subsequent M4 slices.
 
 use anyhow::{Result, anyhow};
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -13,7 +14,9 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::auth_mw::CurrentUser;
 use crate::inventory::events::Recorder;
+use crate::monitor_checks;
 use crate::state::AppState;
 
 const DEFAULT_INTERVAL_SECONDS: i32 = 30;
@@ -28,6 +31,7 @@ fn err(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Valu
 #[derive(Debug, Deserialize)]
 pub struct MonitorListQuery {
     pub state: Option<String>,
+    pub agent_id: Option<Uuid>,
     pub limit: Option<i64>,
 }
 
@@ -40,6 +44,32 @@ pub struct MonitorResultsQuery {
 pub struct IncidentListQuery {
     pub state: Option<String>,
     pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentMonitorCreateRequest {
+    /// Used by POST `/api/v1/monitors`; path-scoped creation overwrites this
+    /// with the authenticated route target and rejects a conflicting value.
+    pub agent_id: Option<Uuid>,
+    pub monitor_type: String,
+    #[serde(default = "empty_object")]
+    pub config: Value,
+    /// Metric fields may be sent at the request root for a compact API call;
+    /// `config` remains the canonical response/storage shape.
+    pub metric: Option<String>,
+    pub operator: Option<String>,
+    pub threshold: Option<f64>,
+    pub mount_point: Option<String>,
+    pub timeout_seconds: Option<u64>,
+    pub interval_seconds: Option<i32>,
+    pub timeout_ms: Option<i32>,
+    pub failure_threshold: Option<i32>,
+    pub recovery_threshold: Option<i32>,
+    pub enabled: Option<bool>,
+}
+
+fn empty_object() -> Value {
+    json!({})
 }
 
 /// Create one monitor from an approved proposal inside the approval
@@ -172,6 +202,184 @@ fn bounded_config_i32(
     Ok(value)
 }
 
+fn request_agent_config(request: &AgentMonitorCreateRequest) -> Result<Value> {
+    let mut config = request
+        .config
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("agent monitor config must be a JSON object"))?;
+    let mut add_root_value = |key: &str, value: Value| -> Result<()> {
+        if config.insert(key.to_string(), value).is_some() {
+            return Err(anyhow!(
+                "agent monitor field `{key}` is duplicated in config"
+            ));
+        }
+        Ok(())
+    };
+    if let Some(value) = request.metric.as_deref() {
+        add_root_value("metric", json!(value))?;
+    }
+    if let Some(value) = request.operator.as_deref() {
+        add_root_value("operator", json!(value))?;
+    }
+    if let Some(value) = request.threshold {
+        if !value.is_finite() {
+            return Err(anyhow!("agent metric threshold must be finite"));
+        }
+        add_root_value("threshold", json!(value))?;
+    }
+    if let Some(value) = request.mount_point.as_deref() {
+        add_root_value("mount_point", json!(value))?;
+    }
+    if let Some(value) = request.timeout_seconds {
+        add_root_value("timeout_seconds", json!(value))?;
+    }
+    Ok(Value::Object(config))
+}
+
+fn request_timing(request: &AgentMonitorCreateRequest) -> Result<(i32, i32, i32, i32, bool)> {
+    let interval_seconds = request.interval_seconds.unwrap_or(DEFAULT_INTERVAL_SECONDS);
+    let timeout_ms = request.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
+    let failure_threshold = request
+        .failure_threshold
+        .unwrap_or(DEFAULT_FAILURE_THRESHOLD);
+    let recovery_threshold = request
+        .recovery_threshold
+        .unwrap_or(DEFAULT_RECOVERY_THRESHOLD);
+    if !(5..=86_400).contains(&interval_seconds) {
+        return Err(anyhow!("interval_seconds must be between 5 and 86400"));
+    }
+    if !(50..=60_000).contains(&timeout_ms) {
+        return Err(anyhow!("timeout_ms must be between 50 and 60000"));
+    }
+    if !(1..=20).contains(&failure_threshold) {
+        return Err(anyhow!("failure_threshold must be between 1 and 20"));
+    }
+    if !(1..=20).contains(&recovery_threshold) {
+        return Err(anyhow!("recovery_threshold must be between 1 and 20"));
+    }
+    Ok((
+        interval_seconds,
+        timeout_ms,
+        failure_threshold,
+        recovery_threshold,
+        request.enabled.unwrap_or(true),
+    ))
+}
+
+/// Create an agent monitor without manufacturing a service or endpoint row.
+/// Agent metric values come from `agent_inventory_current`; the gateway's
+/// bounded observation envelope remains outside this slice and is not used as
+/// a second metric source.
+pub async fn create_agent_monitor_record(
+    pool: &sqlx::PgPool,
+    agent_id: Uuid,
+    request: AgentMonitorCreateRequest,
+    created_by: Uuid,
+) -> Result<Value> {
+    let default_timeout: Option<(i32,)> = sqlx::query_as(
+        "select heartbeat_timeout_seconds from agents \
+         where id = $1 and revoked_at is null",
+    )
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((default_timeout,)) = default_timeout else {
+        return Err(anyhow!("agent not found or revoked"));
+    };
+    let default_timeout = u64::try_from(default_timeout)
+        .map_err(|_| anyhow!("agent heartbeat timeout is invalid"))?;
+    let config = request_agent_config(&request)?;
+    monitor_checks::validate_agent_monitor_config(&request.monitor_type, &config, default_timeout)
+        .map_err(|error| anyhow!(error.to_string()))?;
+    let (interval_seconds, timeout_ms, failure_threshold, recovery_threshold, enabled) =
+        request_timing(&request)?;
+
+    let mut tx = pool.begin().await?;
+    let monitor_id: Uuid = sqlx::query_scalar(
+        "insert into monitors \
+            (agent_id, monitor_type, config, interval_seconds, timeout_ms, \
+             failure_threshold, recovery_threshold, enabled, created_by) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning id",
+    )
+    .bind(agent_id)
+    .bind(&request.monitor_type)
+    .bind(&config)
+    .bind(interval_seconds)
+    .bind(timeout_ms)
+    .bind(failure_threshold)
+    .bind(recovery_threshold)
+    .bind(enabled)
+    .bind(created_by)
+    .fetch_one(&mut *tx)
+    .await?;
+    let after: Value =
+        sqlx::query_scalar("select row_to_json(t) from (select * from monitors where id = $1) t")
+            .bind(monitor_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    Recorder::record_change(
+        &mut tx,
+        "monitors",
+        monitor_id,
+        "monitor.created",
+        "notice",
+        None,
+        Some(after.clone()),
+        Some("manual"),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(after)
+}
+
+fn monitor_create_error(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    let status = if error.downcast_ref::<sqlx::Error>().is_some() {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    err(status, error.to_string())
+}
+
+pub async fn create_agent_monitor(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(agent_id): Path<Uuid>,
+    Json(mut request): Json<AgentMonitorCreateRequest>,
+) -> (StatusCode, Json<Value>) {
+    if let Some(body_agent_id) = request.agent_id
+        && body_agent_id != agent_id
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "body agent_id does not match path agent_id",
+        );
+    }
+    request.agent_id = Some(agent_id);
+    match create_agent_monitor_record(&state.pool, agent_id, request, user.0).await {
+        Ok(value) => (StatusCode::CREATED, Json(value)),
+        Err(error) => monitor_create_error(error),
+    }
+}
+
+pub async fn create_monitor(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(request): Json<AgentMonitorCreateRequest>,
+) -> (StatusCode, Json<Value>) {
+    let Some(agent_id) = request.agent_id else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "agent_id is required for agent monitors",
+        );
+    };
+    match create_agent_monitor_record(&state.pool, agent_id, request, user.0).await {
+        Ok(value) => (StatusCode::CREATED, Json(value)),
+        Err(error) => monitor_create_error(error),
+    }
+}
+
 pub async fn list(
     State(state): State<AppState>,
     Query(query): Query<MonitorListQuery>,
@@ -186,16 +394,20 @@ pub async fn list(
                   e.dns_name as endpoint_dns_name,\
                   s.name as service_name,\
                   s.product as service_product,\
-                  s.product_version as service_product_version\
+                  s.product_version as service_product_version,\
+                  m.agent_id, a.hostname as agent_hostname\
              from monitors m\
-             join endpoints e on e.id = m.endpoint_id\
-             join services s on s.id = m.service_id\
+             left join endpoints e on e.id = m.endpoint_id\
+             left join services s on s.id = m.service_id\
+             left join agents a on a.id = m.agent_id\
             where ($1::text is null or m.state = $1)\
+              and ($2::uuid is null or m.agent_id = $2)\
             order by m.created_at desc, m.id desc\
-            limit $2\
+            limit $3\
          ) t",
     )
     .bind(query.state)
+    .bind(query.agent_id)
     .bind(limit)
     .fetch_all(&state.pool)
     .await;
@@ -218,10 +430,12 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<Uuid>) -> (Status
                       e.dns_name as endpoint_dns_name,\
                       s.name as service_name,\
                       s.product as service_product,\
-                      s.product_version as service_product_version\
+                      s.product_version as service_product_version,\
+                      m.agent_id, a.hostname as agent_hostname\
                  from monitors m\
-                 join endpoints e on e.id = m.endpoint_id\
-                 join services s on s.id = m.service_id\
+                 left join endpoints e on e.id = m.endpoint_id\
+                 left join services s on s.id = m.service_id\
+                 left join agents a on a.id = m.agent_id\
                 where m.id = $1\
              ) t",
     )
@@ -290,11 +504,13 @@ pub async fn incidents(
                   e.url as endpoint_url,\
                   e.dns_name as endpoint_dns_name,\
                   s.name as service_name,\
-                  s.product as service_product\
+                  s.product as service_product,\
+                  m.agent_id, a.hostname as agent_hostname\
              from incidents i\
              join monitors m on m.id = i.monitor_id\
-             join endpoints e on e.id = m.endpoint_id\
-             join services s on s.id = m.service_id\
+             left join endpoints e on e.id = m.endpoint_id\
+             left join services s on s.id = m.service_id\
+             left join agents a on a.id = m.agent_id\
             where ($1::text is null or i.state = $1)\
             order by i.last_event_at desc, i.id desc\
             limit $2\
@@ -329,11 +545,13 @@ pub async fn incident(
                   e.url as endpoint_url,\
                   e.dns_name as endpoint_dns_name,\
                   s.name as service_name,\
-                  s.product as service_product\
+                  s.product as service_product,\
+                  m.agent_id, a.hostname as agent_hostname\
              from incidents i\
              join monitors m on m.id = i.monitor_id\
-             join endpoints e on e.id = m.endpoint_id\
-             join services s on s.id = m.service_id\
+             left join endpoints e on e.id = m.endpoint_id\
+             left join services s on s.id = m.service_id\
+             left join agents a on a.id = m.agent_id\
             where i.id = $1\
          ) t",
     )
@@ -374,6 +592,107 @@ mod tests {
         )
         .expect_err("zero threshold must be rejected");
         assert!(error.to_string().contains("failure_threshold"));
+    }
+
+    #[test]
+    fn agent_request_accepts_root_metric_fields_and_normalizes_storage_config() {
+        let request = AgentMonitorCreateRequest {
+            agent_id: Some(Uuid::new_v4()),
+            monitor_type: monitor_checks::AGENT_METRIC_MONITOR_TYPE.to_string(),
+            config: json!({}),
+            metric: Some("host.load.1".to_string()),
+            operator: Some("gt".to_string()),
+            threshold: Some(4.0),
+            mount_point: None,
+            timeout_seconds: None,
+            interval_seconds: None,
+            timeout_ms: None,
+            failure_threshold: None,
+            recovery_threshold: None,
+            enabled: None,
+        };
+        let config = request_agent_config(&request).expect("normalize metric fields");
+        assert_eq!(config["metric"], "host.load.1");
+        assert_eq!(config["operator"], "gt");
+        assert_eq!(config["threshold"], 4.0);
+    }
+
+    #[tokio::test]
+    async fn agent_monitor_creation_uses_agent_target_without_service_endpoint() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+
+        let agent_id: Uuid = sqlx::query_scalar(
+            "insert into agents \
+                (cert_fingerprint, cert_serial, hostname, heartbeat_timeout_seconds) \
+             values ($1, $2, 'monitor-agent', 45) returning id",
+        )
+        .bind(format!("monitor-agent-{}", Uuid::new_v4()))
+        .bind(format!("serial-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_id: Uuid = sqlx::query_scalar(
+            "insert into users (email, password_hash) values ($1, 'test') returning id",
+        )
+        .bind(format!("agent-monitor-{}@example.test", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let row = create_agent_monitor_record(
+            &pool,
+            agent_id,
+            AgentMonitorCreateRequest {
+                agent_id: None,
+                monitor_type: monitor_checks::AGENT_HEARTBEAT_MONITOR_TYPE.to_string(),
+                config: json!({}),
+                metric: None,
+                operator: None,
+                threshold: None,
+                mount_point: None,
+                timeout_seconds: Some(45),
+                interval_seconds: Some(30),
+                timeout_ms: Some(500),
+                failure_threshold: Some(2),
+                recovery_threshold: Some(2),
+                enabled: Some(true),
+            },
+            user_id,
+        )
+        .await
+        .unwrap();
+        let monitor_id: Uuid = row["id"].as_str().unwrap().parse().unwrap();
+        let persisted: (Option<Uuid>, Option<Uuid>, Uuid, String, Value) = sqlx::query_as(
+            "select service_id, endpoint_id, agent_id, monitor_type, config \
+             from monitors where id = $1",
+        )
+        .bind(monitor_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(persisted.0, None);
+        assert_eq!(persisted.1, None);
+        assert_eq!(persisted.2, agent_id);
+        assert_eq!(persisted.3, monitor_checks::AGENT_HEARTBEAT_MONITOR_TYPE);
+        assert_eq!(persisted.4["timeout_seconds"], 45);
+
+        let change_count: i64 = sqlx::query_scalar(
+            "select count(*) from change_events \
+             where entity_kind = 'monitors' and entity_id = $1 \
+               and category = 'monitor.created'",
+        )
+        .bind(monitor_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(change_count, 1);
     }
 
     #[tokio::test]

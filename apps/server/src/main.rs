@@ -302,9 +302,16 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             "/api/v1/monitor-proposals/{id}/reject",
             post(inventory::monitor_proposals::reject),
         )
-        .route("/api/v1/monitors", get(monitoring::list))
+        .route(
+            "/api/v1/monitors",
+            get(monitoring::list).post(monitoring::create_monitor),
+        )
         .route("/api/v1/monitors/{id}", get(monitoring::get))
         .route("/api/v1/monitors/{id}/results", get(monitoring::results))
+        .route(
+            "/api/v1/agents/{id}/monitors",
+            post(monitoring::create_agent_monitor),
+        )
         .route("/api/v1/incidents", get(monitoring::incidents))
         .route("/api/v1/incidents/{id}", get(monitoring::incident))
         .route(

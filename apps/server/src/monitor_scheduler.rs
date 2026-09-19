@@ -51,7 +51,13 @@ struct ClaimedMonitor {
     last_failure_at: Option<OffsetDateTime>,
     address: Option<String>,
     port: Option<i32>,
-    endpoint_type: String,
+    endpoint_type: Option<String>,
+    agent_id: Option<Uuid>,
+    agent_last_heartbeat_at: Option<OffsetDateTime>,
+    agent_created_at: Option<OffsetDateTime>,
+    agent_heartbeat_timeout_seconds: Option<i32>,
+    agent_revoked_at: Option<OffsetDateTime>,
+    agent_inventory: Option<Value>,
 }
 
 #[derive(Debug, FromRow)]
@@ -140,10 +146,15 @@ async fn claim_due(pool: &PgPool, owner: &str) -> sqlx::Result<Option<ClaimedMon
                 m.failure_threshold, m.recovery_threshold, m.state, m.underlying_state, \
                 m.consecutive_failures, m.consecutive_successes, m.last_result_at, \
                 m.last_success_at, m.last_failure_at, e.address::text as address, e.port, \
-                e.endpoint_type \
+                e.endpoint_type, m.agent_id, a.last_heartbeat_at as agent_last_heartbeat_at, \
+                a.created_at as agent_created_at, \
+                a.heartbeat_timeout_seconds as agent_heartbeat_timeout_seconds, \
+                a.revoked_at as agent_revoked_at, i.inventory as agent_inventory \
          from claimed c \
          join monitors m on m.id = c.id \
-         join endpoints e on e.id = m.endpoint_id",
+         left join endpoints e on e.id = m.endpoint_id \
+         left join agents a on a.id = m.agent_id \
+         left join agent_inventory_current i on i.agent_id = m.agent_id",
     )
     .bind(owner)
     .bind(CLAIM_LEASE_SECONDS)
@@ -152,19 +163,73 @@ async fn claim_due(pool: &PgPool, owner: &str) -> sqlx::Result<Option<ClaimedMon
 }
 
 async fn execute_one(pool: &PgPool, owner: &str, monitor: ClaimedMonitor) -> Result<()> {
-    let outcome = match build_request(&monitor) {
-        Ok(request) => monitor_checks::run(request).await,
-        Err(error) => CheckOutcome {
-            status: CheckStatus::Error,
-            latency_ms: 0,
-            error: Some(error.to_string()),
-            details: json!({
-                "protocol": monitor.monitor_type.clone(),
-                "endpoint_type": monitor.endpoint_type,
-            }),
+    let outcome = match monitor.monitor_type.as_str() {
+        monitor_checks::AGENT_HEARTBEAT_MONITOR_TYPE => run_agent_heartbeat(&monitor),
+        monitor_checks::AGENT_METRIC_MONITOR_TYPE => run_agent_metric(&monitor),
+        _ => match build_request(&monitor) {
+            Ok(request) => monitor_checks::run(request).await,
+            Err(error) => invalid_monitor_outcome(&monitor, error),
         },
     };
     persist_outcome(pool, owner, &monitor, outcome).await
+}
+
+fn run_agent_heartbeat(monitor: &ClaimedMonitor) -> CheckOutcome {
+    let Some(agent_id) = monitor.agent_id else {
+        return invalid_monitor_outcome(
+            monitor,
+            anyhow!("agent heartbeat monitor has no agent target"),
+        );
+    };
+    let default_timeout = monitor
+        .agent_heartbeat_timeout_seconds
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or(90);
+    let timeout = match monitor_checks::agent_heartbeat_timeout(&monitor.config, default_timeout) {
+        Ok(timeout) => timeout,
+        Err(error) => return invalid_monitor_outcome(monitor, anyhow!(error.to_string())),
+    };
+    let heartbeat_at = monitor.agent_last_heartbeat_at.or(monitor.agent_created_at);
+    let age = heartbeat_at.map(|timestamp| {
+        let seconds = OffsetDateTime::now_utc()
+            .unix_timestamp()
+            .saturating_sub(timestamp.unix_timestamp())
+            .max(0) as u64;
+        Duration::from_secs(seconds)
+    });
+    monitor_checks::run_agent_heartbeat(monitor_checks::AgentHeartbeatRequest {
+        agent_id,
+        age,
+        timeout,
+        revoked: monitor.agent_revoked_at.is_some(),
+    })
+}
+
+fn run_agent_metric(monitor: &ClaimedMonitor) -> CheckOutcome {
+    let Some(agent_id) = monitor.agent_id else {
+        return invalid_monitor_outcome(
+            monitor,
+            anyhow!("agent metric monitor has no agent target"),
+        );
+    };
+    monitor_checks::run_agent_metric(monitor_checks::AgentMetricRequest {
+        agent_id,
+        inventory: monitor.agent_inventory.as_ref(),
+        config: &monitor.config,
+    })
+}
+
+fn invalid_monitor_outcome(monitor: &ClaimedMonitor, error: anyhow::Error) -> CheckOutcome {
+    CheckOutcome {
+        status: CheckStatus::Error,
+        latency_ms: 0,
+        error: Some(error.to_string()),
+        details: json!({
+            "protocol": monitor.monitor_type.clone(),
+            "endpoint_type": monitor.endpoint_type,
+            "agent_id": monitor.agent_id,
+        }),
+    }
 }
 
 fn build_request(monitor: &ClaimedMonitor) -> Result<CheckRequest> {
@@ -929,5 +994,132 @@ mod tests {
         assert_eq!(row.0, "stale");
         assert_eq!(row.1, "up");
         assert_eq!(row.2, 1);
+    }
+
+    #[tokio::test]
+    async fn agent_heartbeat_and_metric_monitors_use_generic_result_and_incident_state() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        isolate_due_monitors(&pool).await;
+
+        let agent_id: Uuid = sqlx::query_scalar(
+            "insert into agents \
+                (cert_fingerprint, cert_serial, hostname, last_heartbeat_at) \
+             values ($1, $2, 'scheduler-agent', now()) returning id",
+        )
+        .bind(format!("scheduler-agent-{}", Uuid::new_v4()))
+        .bind(format!("serial-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let message_id = Uuid::new_v4();
+        let source_snapshot_id = Uuid::new_v4();
+        let inventory = json!({
+            "host": {"load": {"one": 5.0}}
+        });
+        sqlx::query(
+            "insert into agent_inventory_snapshots \
+                (agent_id, message_id, source_snapshot_id, protocol_version, sequence, \
+                 collected_at, inventory, complete) \
+             values ($1, $2, $3, 2, 1, now(), $4, true)",
+        )
+        .bind(agent_id)
+        .bind(message_id)
+        .bind(source_snapshot_id)
+        .bind(&inventory)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let stored_snapshot_id: Uuid = sqlx::query_scalar(
+            "select id from agent_inventory_snapshots where agent_id = $1 and message_id = $2",
+        )
+        .bind(agent_id)
+        .bind(message_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into agent_inventory_current \
+                (agent_id, snapshot_id, message_id, source_snapshot_id, protocol_version, \
+                 sequence, collected_at, inventory, complete) \
+             values ($1, $2, $3, $4, 2, 1, now(), $5, true)",
+        )
+        .bind(agent_id)
+        .bind(stored_snapshot_id)
+        .bind(message_id)
+        .bind(source_snapshot_id)
+        .bind(&inventory)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let heartbeat_id: Uuid = sqlx::query_scalar(
+            "insert into monitors \
+                (agent_id, monitor_type, config, interval_seconds, timeout_ms, \
+                 failure_threshold, recovery_threshold, next_run_at) \
+             values ($1, 'agent_heartbeat', '{}'::jsonb, 30, 500, 1, 1, now()) \
+             returning id",
+        )
+        .bind(agent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let metric_id: Uuid = sqlx::query_scalar(
+            "insert into monitors \
+                (agent_id, monitor_type, config, interval_seconds, timeout_ms, \
+                 failure_threshold, recovery_threshold, next_run_at) \
+             values ($1, 'agent_metric', $2, 30, 500, 1, 1, now()) returning id",
+        )
+        .bind(agent_id)
+        .bind(json!({
+            "metric": "host.load.1",
+            "operator": "gt",
+            "threshold": 4
+        }))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            let claimed = claim_due(&pool, "agent-monitor-test")
+                .await
+                .unwrap()
+                .expect("agent monitor is due");
+            execute_one(&pool, "agent-monitor-test", claimed)
+                .await
+                .unwrap();
+        }
+
+        let heartbeat_state: (String, String, i64) = sqlx::query_as(
+            "select state, underlying_state, \
+                    (select count(*) from monitor_results where monitor_id = $1) \
+             from monitors where id = $1",
+        )
+        .bind(heartbeat_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(heartbeat_state.0, "up");
+        assert_eq!(heartbeat_state.1, "up");
+        assert_eq!(heartbeat_state.2, 1);
+
+        let metric_state: (String, String, i64, Value) = sqlx::query_as(
+            "select m.state, m.underlying_state, \
+                    (select count(*) from incidents where monitor_id = $1 and state = 'open'), \
+                    (select details from monitor_results where monitor_id = $1 order by observed_at desc limit 1) \
+             from monitors m where m.id = $1",
+        )
+        .bind(metric_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(metric_state.0, "down");
+        assert_eq!(metric_state.1, "down");
+        assert_eq!(metric_state.2, 1);
+        assert_eq!(metric_state.3["metric"], "host.load.1");
+        assert_eq!(metric_state.3["value"], 5.0);
     }
 }

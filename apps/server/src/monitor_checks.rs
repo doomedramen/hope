@@ -21,6 +21,7 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::process::Command;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
+use uuid::Uuid;
 use x509_parser::parse_x509_certificate;
 
 const MAX_PATH_BYTES: usize = 2_048;
@@ -31,6 +32,16 @@ const MAX_BODY_BYTES: usize = 32 * 1024;
 const MAX_STORED_HEADER_VALUE_BYTES: usize = 256;
 const MAX_ERROR_BYTES: usize = 512;
 const USER_AGENT: &str = "hope-monitor/0.1";
+
+/// Monitor types that read authenticated agent state instead of opening a
+/// network connection. Keep these names aligned with migration 0022.
+pub const AGENT_HEARTBEAT_MONITOR_TYPE: &str = "agent_heartbeat";
+pub const AGENT_METRIC_MONITOR_TYPE: &str = "agent_metric";
+
+const MIN_AGENT_HEARTBEAT_TIMEOUT_SECONDS: u64 = 30;
+const MAX_AGENT_HEARTBEAT_TIMEOUT_SECONDS: u64 = 86_400;
+const MAX_AGENT_METRIC_THRESHOLD: f64 = 1.0e18;
+const MAX_AGENT_METRIC_MOUNT_BYTES: usize = 255;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckProtocol {
@@ -243,6 +254,419 @@ pub struct CheckOutcome {
     pub latency_ms: i32,
     pub error: Option<String>,
     pub details: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentMetricOperator {
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+}
+
+impl AgentMetricOperator {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GreaterThan => "gt",
+            Self::GreaterThanOrEqual => "gte",
+            Self::LessThan => "lt",
+            Self::LessThanOrEqual => "lte",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, CheckError> {
+        match value {
+            "gt" => Ok(Self::GreaterThan),
+            "gte" => Ok(Self::GreaterThanOrEqual),
+            "lt" => Ok(Self::LessThan),
+            "lte" => Ok(Self::LessThanOrEqual),
+            other => Err(CheckError::InvalidRequest(format!(
+                "unsupported agent metric operator `{other}`"
+            ))),
+        }
+    }
+
+    const fn triggers(self, value: f64, threshold: f64) -> bool {
+        match self {
+            Self::GreaterThan => value > threshold,
+            Self::GreaterThanOrEqual => value >= threshold,
+            Self::LessThan => value < threshold,
+            Self::LessThanOrEqual => value <= threshold,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentMetricConfig {
+    pub metric: String,
+    pub operator: AgentMetricOperator,
+    pub threshold: f64,
+    pub mount_point: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentHeartbeatRequest {
+    pub agent_id: Uuid,
+    /// Age of the newest authenticated heartbeat. `None` means no heartbeat
+    /// has ever been accepted; creation time is resolved by the scheduler.
+    pub age: Option<Duration>,
+    pub timeout: Duration,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentMetricRequest<'a> {
+    pub agent_id: Uuid,
+    pub inventory: Option<&'a Value>,
+    pub config: &'a Value,
+}
+
+/// Validate heartbeat-only configuration and return its effective timeout.
+/// An empty object follows the enrolled agent's configured timeout.
+pub fn agent_heartbeat_timeout(
+    config: &Value,
+    default_seconds: u64,
+) -> Result<Duration, CheckError> {
+    let object = config.as_object().ok_or_else(|| {
+        CheckError::InvalidRequest("agent heartbeat config must be a JSON object".to_string())
+    })?;
+    if object.keys().any(|key| key != "timeout_seconds") {
+        return Err(CheckError::InvalidRequest(
+            "agent heartbeat config only supports timeout_seconds".to_string(),
+        ));
+    }
+    let seconds = object
+        .get("timeout_seconds")
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                CheckError::InvalidRequest(
+                    "agent heartbeat timeout_seconds must be a positive integer".to_string(),
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(default_seconds);
+    if !(MIN_AGENT_HEARTBEAT_TIMEOUT_SECONDS..=MAX_AGENT_HEARTBEAT_TIMEOUT_SECONDS)
+        .contains(&seconds)
+    {
+        return Err(CheckError::InvalidRequest(format!(
+            "agent heartbeat timeout_seconds must be between {MIN_AGENT_HEARTBEAT_TIMEOUT_SECONDS} and {MAX_AGENT_HEARTBEAT_TIMEOUT_SECONDS}"
+        )));
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+/// Parse the deliberately small, stable metric vocabulary supported by M5.
+/// Dynamic high-cardinality paths are rejected; filesystem metrics use an
+/// explicit mount selector instead.
+pub fn agent_metric_config(config: &Value) -> Result<AgentMetricConfig, CheckError> {
+    let object = config.as_object().ok_or_else(|| {
+        CheckError::InvalidRequest("agent metric config must be a JSON object".to_string())
+    })?;
+    let metric = object
+        .get("metric")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CheckError::InvalidRequest("agent metric config requires metric".to_string())
+        })?;
+    if !matches!(
+        metric,
+        "host.load.1"
+            | "host.load.5"
+            | "host.load.15"
+            | "host.uptime_secs"
+            | "host.memory.total_bytes"
+            | "host.memory.available_bytes"
+            | "host.memory.free_bytes"
+            | "host.memory.used_bytes"
+            | "host.memory.used_percent"
+            | "filesystem.use_percent"
+    ) {
+        return Err(CheckError::InvalidRequest(format!(
+            "unsupported agent metric `{metric}`"
+        )));
+    }
+    let operator =
+        AgentMetricOperator::parse(object.get("operator").and_then(Value::as_str).ok_or_else(
+            || CheckError::InvalidRequest("agent metric config requires operator".to_string()),
+        )?)?;
+    let threshold = object
+        .get("threshold")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| {
+            CheckError::InvalidRequest("agent metric config requires threshold".to_string())
+        })?;
+    if !threshold.is_finite() || threshold.abs() > MAX_AGENT_METRIC_THRESHOLD {
+        return Err(CheckError::InvalidRequest(
+            "agent metric threshold is out of range".to_string(),
+        ));
+    }
+
+    let mount_point = object
+        .get("mount_point")
+        .map(|value| {
+            let mount_point = value.as_str().ok_or_else(|| {
+                CheckError::InvalidRequest("agent metric mount_point must be a string".to_string())
+            })?;
+            if mount_point.is_empty()
+                || mount_point.len() > MAX_AGENT_METRIC_MOUNT_BYTES
+                || !mount_point.starts_with('/')
+                || mount_point.contains(['\r', '\n'])
+            {
+                return Err(CheckError::InvalidRequest(
+                    "agent metric mount_point must be an absolute path without newlines"
+                        .to_string(),
+                ));
+            }
+            Ok(mount_point.to_string())
+        })
+        .transpose()?;
+    if metric == "filesystem.use_percent" && mount_point.is_none() {
+        return Err(CheckError::InvalidRequest(
+            "filesystem.use_percent requires mount_point".to_string(),
+        ));
+    }
+    if metric != "filesystem.use_percent" && mount_point.is_some() {
+        return Err(CheckError::InvalidRequest(
+            "mount_point is only valid for filesystem.use_percent".to_string(),
+        ));
+    }
+    if metric.ends_with("percent") && !(0.0..=100.0).contains(&threshold) {
+        return Err(CheckError::InvalidRequest(
+            "percentage metric threshold must be between 0 and 100".to_string(),
+        ));
+    }
+
+    let allowed = ["metric", "operator", "threshold", "mount_point"];
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(CheckError::InvalidRequest(
+            "agent metric config contains an unsupported field".to_string(),
+        ));
+    }
+
+    Ok(AgentMetricConfig {
+        metric: metric.to_string(),
+        operator,
+        threshold,
+        mount_point,
+    })
+}
+
+/// Validate one agent monitor configuration before it reaches PostgreSQL.
+pub fn validate_agent_monitor_config(
+    monitor_type: &str,
+    config: &Value,
+    default_heartbeat_timeout_seconds: u64,
+) -> Result<(), CheckError> {
+    match monitor_type {
+        AGENT_HEARTBEAT_MONITOR_TYPE => {
+            agent_heartbeat_timeout(config, default_heartbeat_timeout_seconds).map(|_| ())
+        }
+        AGENT_METRIC_MONITOR_TYPE => agent_metric_config(config).map(|_| ()),
+        other => Err(CheckError::InvalidRequest(format!(
+            "unsupported agent monitor type `{other}`"
+        ))),
+    }
+}
+
+pub fn run_agent_heartbeat(request: AgentHeartbeatRequest) -> CheckOutcome {
+    let details = json!({
+        "monitor_type": AGENT_HEARTBEAT_MONITOR_TYPE,
+        "agent_id": request.agent_id,
+        "age_seconds": request.age.map(|age| age.as_secs()),
+        "timeout_seconds": request.timeout.as_secs(),
+    });
+    if request.revoked {
+        return outcome(
+            CheckStatus::Failure,
+            Instant::now(),
+            Some("agent certificate is revoked".to_string()),
+            details,
+        );
+    }
+    let Some(age) = request.age else {
+        return outcome(
+            CheckStatus::Failure,
+            Instant::now(),
+            Some("agent has not sent a heartbeat".to_string()),
+            details,
+        );
+    };
+    if age > request.timeout {
+        return outcome(
+            CheckStatus::Failure,
+            Instant::now(),
+            Some(format!("agent heartbeat is {} seconds old", age.as_secs())),
+            details,
+        );
+    }
+    outcome(CheckStatus::Success, Instant::now(), None, details)
+}
+
+pub fn run_agent_metric(request: AgentMetricRequest<'_>) -> CheckOutcome {
+    let started = Instant::now();
+    let config = match agent_metric_config(request.config) {
+        Ok(config) => config,
+        Err(error) => {
+            return outcome(
+                CheckStatus::Error,
+                started,
+                Some(error.to_string()),
+                json!({
+                    "monitor_type": AGENT_METRIC_MONITOR_TYPE,
+                    "agent_id": request.agent_id,
+                }),
+            );
+        }
+    };
+    let Some(inventory) = request.inventory else {
+        return outcome(
+            CheckStatus::Failure,
+            started,
+            Some("agent has no current inventory snapshot".to_string()),
+            metric_details(&request.agent_id, &config, None),
+        );
+    };
+    let value = match agent_metric_value(inventory, &config) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return outcome(
+                CheckStatus::Failure,
+                started,
+                Some(format!("agent metric `{}` is unavailable", config.metric)),
+                metric_details(&request.agent_id, &config, None),
+            );
+        }
+        Err(error) => {
+            return outcome(
+                CheckStatus::Error,
+                started,
+                Some(error.to_string()),
+                metric_details(&request.agent_id, &config, None),
+            );
+        }
+    };
+    let triggered = config.operator.triggers(value, config.threshold);
+    let details = metric_details(&request.agent_id, &config, Some(value));
+    if triggered {
+        outcome(
+            CheckStatus::Failure,
+            started,
+            Some(format!(
+                "agent metric `{}` triggered {} threshold {}",
+                config.metric,
+                config.operator.as_str(),
+                config.threshold
+            )),
+            details,
+        )
+    } else {
+        outcome(CheckStatus::Success, started, None, details)
+    }
+}
+
+fn metric_details(agent_id: &Uuid, config: &AgentMetricConfig, value: Option<f64>) -> Value {
+    json!({
+        "monitor_type": AGENT_METRIC_MONITOR_TYPE,
+        "agent_id": agent_id,
+        "metric": config.metric,
+        "operator": config.operator.as_str(),
+        "threshold": config.threshold,
+        "mount_point": config.mount_point,
+        "value": value,
+    })
+}
+
+fn agent_metric_value(
+    inventory: &Value,
+    config: &AgentMetricConfig,
+) -> Result<Option<f64>, CheckError> {
+    let host = inventory.get("host");
+    let value = match config.metric.as_str() {
+        "host.load.1" => host.and_then(|value| value.get("load")).and_then(|value| {
+            value
+                .get("one")
+                .or_else(|| value.get("1"))
+                .and_then(Value::as_f64)
+        }),
+        "host.load.5" => host.and_then(|value| value.get("load")).and_then(|value| {
+            value
+                .get("five")
+                .or_else(|| value.get("5"))
+                .and_then(Value::as_f64)
+        }),
+        "host.load.15" => host.and_then(|value| value.get("load")).and_then(|value| {
+            value
+                .get("fifteen")
+                .or_else(|| value.get("15"))
+                .and_then(Value::as_f64)
+        }),
+        "host.uptime_secs" => host
+            .and_then(|value| value.get("uptime_secs"))
+            .and_then(Value::as_f64),
+        "host.memory.total_bytes" => host
+            .and_then(|value| value.get("memory"))
+            .and_then(|value| memory_value(value, &["MemTotal", "mem_total_bytes"])),
+        "host.memory.available_bytes" => host
+            .and_then(|value| value.get("memory"))
+            .and_then(|value| memory_value(value, &["MemAvailable", "mem_available_bytes"])),
+        "host.memory.free_bytes" => host
+            .and_then(|value| value.get("memory"))
+            .and_then(|value| memory_value(value, &["MemFree", "mem_free_bytes"])),
+        "host.memory.used_bytes" => host
+            .and_then(|value| value.get("memory"))
+            .and_then(|value| {
+                let total = memory_value(value, &["MemTotal", "mem_total_bytes"])?;
+                let available = memory_value(value, &["MemAvailable", "mem_available_bytes"])
+                    .or_else(|| memory_value(value, &["MemFree", "mem_free_bytes"]))?;
+                Some((total - available).max(0.0))
+            }),
+        "host.memory.used_percent" => {
+            host.and_then(|value| value.get("memory"))
+                .and_then(|value| {
+                    let total = memory_value(value, &["MemTotal", "mem_total_bytes"])?;
+                    if total <= 0.0 {
+                        return None;
+                    }
+                    let available =
+                        memory_value(value, &["MemAvailable", "mem_available_bytes"])
+                            .or_else(|| memory_value(value, &["MemFree", "mem_free_bytes"]))?;
+                    Some(((total - available).max(0.0) / total) * 100.0)
+                })
+        }
+        "filesystem.use_percent" => {
+            let Some(mount_point) = config.mount_point.as_deref() else {
+                return Err(CheckError::InvalidRequest(
+                    "filesystem.use_percent requires mount_point".to_string(),
+                ));
+            };
+            let filesystems = inventory
+                .get("filesystem")
+                .and_then(|value| value.get("filesystems"))
+                .and_then(Value::as_array)
+                .or_else(|| inventory.get("filesystems").and_then(Value::as_array));
+            filesystems.and_then(|values| {
+                values.iter().find_map(|value| {
+                    (value.get("mount_point").and_then(Value::as_str) == Some(mount_point))
+                        .then(|| value.get("use_percent").and_then(Value::as_f64))
+                        .flatten()
+                })
+            })
+        }
+        _ => {
+            return Err(CheckError::InvalidRequest(format!(
+                "unsupported agent metric `{}`",
+                config.metric
+            )));
+        }
+    };
+    Ok(value.filter(|value| value.is_finite()))
+}
+
+fn memory_value(value: &Value, names: &[&str]) -> Option<f64> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(Value::as_f64))
 }
 
 pub async fn run(request: CheckRequest) -> CheckOutcome {
@@ -1014,5 +1438,91 @@ mod tests {
             .validate()
             .expect_err("spaces are invalid in DNS names");
         assert!(error.to_string().contains("DNS name"));
+    }
+
+    #[test]
+    fn agent_heartbeat_check_uses_timeout_and_reports_age() {
+        let agent_id = Uuid::new_v4();
+        let healthy = run_agent_heartbeat(AgentHeartbeatRequest {
+            agent_id,
+            age: Some(Duration::from_secs(29)),
+            timeout: Duration::from_secs(30),
+            revoked: false,
+        });
+        assert_eq!(healthy.status, CheckStatus::Success);
+        assert_eq!(healthy.details["age_seconds"], 29);
+
+        let offline = run_agent_heartbeat(AgentHeartbeatRequest {
+            agent_id,
+            age: Some(Duration::from_secs(31)),
+            timeout: Duration::from_secs(30),
+            revoked: false,
+        });
+        assert_eq!(offline.status, CheckStatus::Failure);
+        assert!(offline.error.unwrap().contains("31 seconds"));
+    }
+
+    #[test]
+    fn agent_metric_check_reads_bounded_host_and_filesystem_metrics() {
+        let agent_id = Uuid::new_v4();
+        let inventory = json!({
+            "host": {
+                "load": {"one": 4.5},
+                "memory": {"MemTotal": 1000, "MemAvailable": 250}
+            },
+            "filesystem": {
+                "filesystems": [{"mount_point": "/", "use_percent": 80}]
+            }
+        });
+        let load = run_agent_metric(AgentMetricRequest {
+            agent_id,
+            inventory: Some(&inventory),
+            config: &json!({"metric": "host.load.1", "operator": "gt", "threshold": 4}),
+        });
+        assert_eq!(load.status, CheckStatus::Failure);
+        assert_eq!(load.details["value"], 4.5);
+
+        let filesystem = run_agent_metric(AgentMetricRequest {
+            agent_id,
+            inventory: Some(&inventory),
+            config: &json!({
+                "metric": "filesystem.use_percent",
+                "mount_point": "/",
+                "operator": "gte",
+                "threshold": 90
+            }),
+        });
+        assert_eq!(filesystem.status, CheckStatus::Success);
+
+        let memory = run_agent_metric(AgentMetricRequest {
+            agent_id,
+            inventory: Some(&inventory),
+            config: &json!({
+                "metric": "host.memory.used_percent",
+                "operator": "gt",
+                "threshold": 70
+            }),
+        });
+        assert_eq!(memory.status, CheckStatus::Failure);
+        assert_eq!(memory.details["value"], 75.0);
+    }
+
+    #[test]
+    fn agent_metric_validation_rejects_dynamic_paths_and_bad_percentages() {
+        let dynamic = agent_metric_config(&json!({
+            "metric": "host.processes.0.rss_bytes",
+            "operator": "gt",
+            "threshold": 1
+        }))
+        .expect_err("dynamic inventory paths must not be queryable");
+        assert!(dynamic.to_string().contains("unsupported agent metric"));
+
+        let percentage = agent_metric_config(&json!({
+            "metric": "host.memory.used_percent",
+            "operator": "gt",
+            "threshold": 101
+        }))
+        .expect_err("percent threshold must be bounded");
+        assert!(percentage.to_string().contains("percentage"));
     }
 }
