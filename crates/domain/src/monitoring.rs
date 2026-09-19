@@ -162,6 +162,40 @@ pub enum HealthConfigError {
     StaleAfterTooLong,
 }
 
+/// Persistable non-derived health state for one monitor.
+///
+/// `underlying_state` intentionally excludes [`HealthState::Stale`]. Stale is
+/// derived again from `last_observed_at` and the restored [`HealthConfig`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthSnapshot {
+    pub underlying_state: HealthState,
+    pub consecutive_failures: u32,
+    pub consecutive_successes: u32,
+    pub last_observed_at: Option<Timestamp>,
+    pub last_success_at: Option<Timestamp>,
+}
+
+/// Error returned when persisted health state cannot be restored safely.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum HealthRestoreError {
+    #[error("underlying health state `{state:?}` cannot be restored")]
+    InvalidUnderlyingState { state: HealthState },
+    #[error(
+        "invalid counters for underlying state `{state:?}`: failures={consecutive_failures}, successes={consecutive_successes}"
+    )]
+    InvalidCounters {
+        state: HealthState,
+        consecutive_failures: u32,
+        consecutive_successes: u32,
+    },
+    #[error("underlying state `{state:?}` requires last_observed_at")]
+    MissingObservedAt { state: HealthState },
+    #[error("underlying state `{state:?}` requires last_success_at")]
+    MissingSuccessAt { state: HealthState },
+    #[error("last_success_at cannot be later than last_observed_at")]
+    SuccessAfterObservation,
+}
+
 /// One structured state event suitable for persistence.
 ///
 /// `from` and `to` are effective states, so a stale transition is visible to
@@ -234,6 +268,43 @@ impl HealthStateMachine {
         self.config
     }
 
+    /// Return the non-derived state needed to reconstruct this machine.
+    pub fn snapshot(&self) -> HealthSnapshot {
+        HealthSnapshot {
+            underlying_state: self.underlying_state,
+            consecutive_failures: self.consecutive_failures,
+            consecutive_successes: self.consecutive_successes,
+            last_observed_at: self.last_observed_at,
+            last_success_at: self.last_success_at,
+        }
+    }
+
+    /// Restore a machine from persisted non-derived state.
+    pub fn from_snapshot(
+        config: HealthConfig,
+        snapshot: HealthSnapshot,
+    ) -> Result<Self, HealthRestoreError> {
+        validate_snapshot(config, &snapshot)?;
+
+        Ok(Self {
+            config,
+            underlying_state: snapshot.underlying_state,
+            consecutive_failures: snapshot.consecutive_failures,
+            consecutive_successes: snapshot.consecutive_successes,
+            last_observed_at: snapshot.last_observed_at,
+            last_success_at: snapshot.last_success_at,
+            last_reported_state: snapshot.underlying_state,
+        })
+    }
+
+    /// Alias for callers that describe reconstruction as restore.
+    pub fn restore(
+        config: HealthConfig,
+        snapshot: HealthSnapshot,
+    ) -> Result<Self, HealthRestoreError> {
+        Self::from_snapshot(config, snapshot)
+    }
+
     /// Return the non-stale state retained by the state machine.
     pub fn state(&self) -> HealthState {
         self.underlying_state
@@ -292,7 +363,7 @@ impl HealthStateMachine {
             vec![self.event(at, previous_state, state, self.underlying_state)]
         };
         self.last_reported_state = state;
-        self.snapshot(events, state)
+        self.update_snapshot(events, state)
     }
 
     fn effective_state_at(&self, at: Timestamp) -> HealthState {
@@ -359,7 +430,7 @@ impl HealthStateMachine {
             vec![self.event(at, previous_state, state, previous_underlying)]
         };
         self.last_reported_state = state;
-        self.snapshot(events, state)
+        self.update_snapshot(events, state)
     }
 
     fn event(
@@ -394,7 +465,7 @@ impl HealthStateMachine {
         }
     }
 
-    fn snapshot(&self, events: Vec<HealthEvent>, state: HealthState) -> HealthUpdate {
+    fn update_snapshot(&self, events: Vec<HealthEvent>, state: HealthState) -> HealthUpdate {
         HealthUpdate {
             state,
             underlying_state: self.underlying_state,
@@ -416,6 +487,72 @@ impl Default for HealthStateMachine {
 
 fn latest_timestamp(current: Option<Timestamp>, candidate: Timestamp) -> Timestamp {
     current.map_or(candidate, |current| current.max(candidate))
+}
+
+fn validate_snapshot(
+    config: HealthConfig,
+    snapshot: &HealthSnapshot,
+) -> Result<(), HealthRestoreError> {
+    let state = snapshot.underlying_state;
+    if state == HealthState::Stale {
+        return Err(HealthRestoreError::InvalidUnderlyingState { state });
+    }
+
+    if let (Some(last_observed_at), Some(last_success_at)) =
+        (snapshot.last_observed_at, snapshot.last_success_at)
+        && last_success_at > last_observed_at
+    {
+        return Err(HealthRestoreError::SuccessAfterObservation);
+    }
+
+    if state == HealthState::Unknown {
+        let has_progress = snapshot.consecutive_failures != 0
+            || snapshot.consecutive_successes != 0
+            || snapshot.last_observed_at.is_some()
+            || snapshot.last_success_at.is_some();
+        if has_progress {
+            return Err(HealthRestoreError::InvalidCounters {
+                state,
+                consecutive_failures: snapshot.consecutive_failures,
+                consecutive_successes: snapshot.consecutive_successes,
+            });
+        }
+        return Ok(());
+    }
+
+    if snapshot.last_observed_at.is_none() {
+        return Err(HealthRestoreError::MissingObservedAt { state });
+    }
+
+    let counters_valid = match state {
+        HealthState::Up => snapshot.consecutive_failures == 0 && snapshot.consecutive_successes > 0,
+        HealthState::Degraded => {
+            snapshot.consecutive_failures > 0
+                && snapshot.consecutive_failures < config.failure_threshold
+                && snapshot.consecutive_successes == 0
+        }
+        HealthState::Down => {
+            (snapshot.consecutive_failures >= config.failure_threshold
+                && snapshot.consecutive_successes == 0)
+                || (snapshot.consecutive_failures == 0
+                    && snapshot.consecutive_successes > 0
+                    && snapshot.consecutive_successes < config.recovery_threshold)
+        }
+        HealthState::Unknown | HealthState::Stale => false,
+    };
+    if !counters_valid {
+        return Err(HealthRestoreError::InvalidCounters {
+            state,
+            consecutive_failures: snapshot.consecutive_failures,
+            consecutive_successes: snapshot.consecutive_successes,
+        });
+    }
+
+    if state == HealthState::Up && snapshot.last_success_at.is_none() {
+        return Err(HealthRestoreError::MissingSuccessAt { state });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -514,6 +651,68 @@ mod tests {
         assert_eq!(machine.state(), HealthState::Up);
         assert_eq!(fresh.state, HealthState::Up);
         assert_eq!(fresh.events[0].kind, HealthEventKind::StaleCleared);
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_recovery_progress_and_future_events() {
+        let mut original = HealthStateMachine::new(config());
+        original.observe(timestamp(0), HealthObservation::Success);
+        original.observe(timestamp(1), HealthObservation::Failure);
+        original.observe(timestamp(2), HealthObservation::Failure);
+        original.observe(timestamp(3), HealthObservation::Failure);
+        original.observe(timestamp(4), HealthObservation::Success);
+
+        let snapshot = original.snapshot();
+        let mut restored = HealthStateMachine::restore(config(), snapshot.clone())
+            .expect("snapshot from state machine is valid");
+
+        assert_eq!(restored.snapshot(), snapshot);
+        assert_eq!(restored.state(), HealthState::Down);
+
+        let original_update = original.observe(timestamp(5), HealthObservation::Success);
+        let restored_update = restored.observe(timestamp(5), HealthObservation::Success);
+
+        assert_eq!(restored_update, original_update);
+        assert_eq!(
+            restored_update.events[0].kind,
+            HealthEventKind::IncidentRecovered
+        );
+    }
+
+    #[test]
+    fn restore_rejects_stale_state_and_invalid_counters() {
+        let stale = HealthSnapshot {
+            underlying_state: HealthState::Stale,
+            consecutive_failures: 0,
+            consecutive_successes: 0,
+            last_observed_at: Some(timestamp(0)),
+            last_success_at: None,
+        };
+        let stale_error =
+            HealthStateMachine::restore(config(), stale).expect_err("stale is derived");
+        assert_eq!(
+            stale_error,
+            HealthRestoreError::InvalidUnderlyingState {
+                state: HealthState::Stale
+            }
+        );
+
+        let invalid_counters = HealthSnapshot {
+            underlying_state: HealthState::Up,
+            consecutive_failures: 1,
+            consecutive_successes: 0,
+            last_observed_at: Some(timestamp(0)),
+            last_success_at: Some(timestamp(0)),
+        };
+        let counter_error =
+            HealthStateMachine::restore(config(), invalid_counters).expect_err("up cannot fail");
+        assert!(matches!(
+            counter_error,
+            HealthRestoreError::InvalidCounters {
+                state: HealthState::Up,
+                ..
+            }
+        ));
     }
 
     #[test]
