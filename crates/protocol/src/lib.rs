@@ -85,6 +85,8 @@ pub enum Message {
     CapabilityAck(CapabilityAck),
     /// Idempotent-friendly, bounded host inventory snapshot.
     InventorySnapshot(InventorySnapshot),
+    /// Server acknowledgement for an inventory snapshot.
+    InventorySnapshotAck(InventorySnapshotAck),
     /// Bounded observations associated with one snapshot collection.
     ObservationBatch(ObservationBatch),
 }
@@ -307,6 +309,15 @@ pub struct InventorySnapshot {
     pub schema_version: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InventorySnapshotAck {
+    pub snapshot_id: Uuid,
+    pub accepted: bool,
+    pub sequence: u64,
+    pub replayed: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationState {
@@ -469,6 +480,12 @@ impl Message {
             Self::CapabilityOffer(offer) => offer.validate(),
             Self::CapabilityAck(ack) => ack.validate(),
             Self::InventorySnapshot(snapshot) => snapshot.validate(),
+            Self::InventorySnapshotAck(ack) => {
+                if let Some(reason) = &ack.reason {
+                    validate_string("reason", reason)?;
+                }
+                Ok(())
+            }
             Self::ObservationBatch(batch) => batch.validate(),
         }
     }
