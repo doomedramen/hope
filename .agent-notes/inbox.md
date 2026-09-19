@@ -68,3 +68,53 @@ Version 0.13 pulled in axum-core 0.4, incompatible with axum 0.8, so upgraded to
 - Status: captured
 
 Threat model, signed development-release pipeline, and real worker job handlers (worker only claims and completes jobs so far).
+
+## No rate limiting on enroll and login
+
+- Created: 2026-09-19
+- Type: concern
+- Area: auth
+- Context: M0 CA pinning / threat model slice
+- Status: captured
+
+No rate limiting on `/enroll` or `/api/v1/login`. Spec §12.3 requires rate limiting.
+
+## Revocation doesn't close open agent connections
+
+- Created: 2026-09-19
+- Type: concern
+- Area: agent
+- Context: M0 CA pinning / threat model slice
+- Status: captured
+
+Revoking an agent blocks new gateway connections only; already-open sessions stay connected.
+
+## Main API listener is plain HTTP
+
+- Created: 2026-09-19
+- Type: note
+- Area: server
+- Context: M0 CA pinning / threat model slice
+- Status: captured
+
+Main API/UI listener has no TLS; documented as requiring a fronting reverse proxy. Agent gateway and enroll listeners do their own TLS.
+
+## CA pinning trust relies on out-of-band fingerprint transfer
+
+- Created: 2026-09-19
+- Type: note
+- Area: agent
+- Context: M0 CA pinning / threat model slice
+- Status: captured
+
+Enrollment trust bottoms out on the operator copying the CA fingerprint/enroll string over a trusted channel. Inherent bootstrap limitation, documented in docs/threat-model.md. SSH install flow (M6) should pass it automatically.
+
+## Handshake integration test not re-run after CA pinning
+
+- Created: 2026-09-19
+- Type: todo
+- Area: testing
+- Context: M0 CA pinning / threat model slice
+- Status: captured
+
+DB-gated test `enroll_connect_hello_heartbeat_replay_expiry_revocation` could not run: Docker Desktop daemon unresponsive. Re-run against postgres:17 before merging m0-foundation.
