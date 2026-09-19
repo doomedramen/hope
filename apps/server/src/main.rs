@@ -254,6 +254,30 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             "/api/v1/service-reviews/{id}/reject",
             post(inventory::service_reviews::reject),
         )
+        .route(
+            "/api/v1/monitor-proposals",
+            get(inventory::monitor_proposals::list).post(inventory::monitor_proposals::generate),
+        )
+        .route(
+            "/api/v1/monitor-proposals/generate",
+            post(inventory::monitor_proposals::generate),
+        )
+        .route(
+            "/api/v1/monitor-proposals/{id}",
+            get(inventory::monitor_proposals::get).patch(inventory::monitor_proposals::patch),
+        )
+        .route(
+            "/api/v1/monitor-proposals/{id}/approve",
+            post(inventory::monitor_proposals::approve),
+        )
+        .route(
+            "/api/v1/monitor-proposals/{id}/reject",
+            post(inventory::monitor_proposals::reject),
+        )
+        .route(
+            "/api/v1/services/{id}/monitor-proposals",
+            post(inventory::monitor_proposals::generate_for_path),
+        )
         .route("/api/v1/changes", get(inventory::changes::list))
         .route("/api/v1/audit", get(inventory::changes::list_audit))
         .route(

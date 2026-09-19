@@ -11,6 +11,7 @@ pub mod evidence;
 pub mod fingerprinting;
 pub mod generic;
 pub mod identity_service;
+pub mod monitor_proposals;
 pub mod pagination;
 pub mod retention;
 pub mod service_reviews;

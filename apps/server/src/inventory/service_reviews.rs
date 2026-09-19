@@ -20,8 +20,8 @@ use sqlx::{Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::auth_mw::CurrentUser;
-use crate::inventory::events::Recorder;
 use crate::inventory::pagination::{decode_cursor, effective_limit, encode_cursor};
+use crate::inventory::{events::Recorder, monitor_proposals};
 use crate::state::AppState;
 
 /// Product candidates at or above this confidence may be projected
@@ -477,6 +477,12 @@ async fn resolve(
         {
             return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
         }
+    }
+
+    // A confirmed product/protocol is a resolved service state. Refresh
+    // durable policy output without executing or creating any monitor.
+    if let Err(error) = monitor_proposals::generate_for_service_tx(&mut tx, service_id).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
 
     if let Err(error) = sqlx::query(

@@ -25,3 +25,11 @@ Applied automatically by `server serve` and `server migrate` via
 M3 adds `service_review_items` in migration `0012_service_review_items.sql`.
 It is durable queue state; fingerprint evidence remains append-only in the
 shared `evidence` table.
+
+M3 monitor proposals land in `0013_monitor_proposals.sql`. Proposals reference
+only canonical `services` and current/history-safe `endpoints` rows, use a
+unique rule/endpoint identity, and preserve manual review decisions and user
+overrides across refresh. This migration adds policy output only: it does not
+create monitor rows, schedule checks, or execute network checks. The upgrade
+test asserts that the proposal table exists after applying the full migration
+set over the M0 schema.

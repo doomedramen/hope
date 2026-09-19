@@ -110,6 +110,12 @@ async fn m0_schema_upgrades_to_m1_without_data_loss() {
         .await
         .expect("service review table exists after upgrade");
     assert_eq!(review_count, 0);
+
+    let proposal_count: i64 = sqlx::query_scalar("select count(*) from monitor_proposals")
+        .fetch_one(&pool)
+        .await
+        .expect("monitor proposal table exists after upgrade");
+    assert_eq!(proposal_count, 0);
 }
 
 /// Build a temp directory containing only the M0 migration files

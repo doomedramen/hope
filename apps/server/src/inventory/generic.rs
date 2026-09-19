@@ -20,6 +20,7 @@ use sqlx::{QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::auth_mw::CurrentUser;
+use crate::inventory::monitor_proposals;
 use crate::inventory::pagination::{ListParams, decode_cursor, effective_limit, encode_cursor};
 use crate::state::AppState;
 
@@ -457,6 +458,9 @@ async fn patch_service(
     };
 
     record_manual_service_evidence(&mut tx, id, user_id, &manual_values)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    monitor_proposals::generate_for_service_tx(&mut tx, id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     tx.commit()

@@ -122,10 +122,42 @@ prevents the same unchanged automatic candidate from repeatedly resurfacing.
 
 ## 4. Monitor proposals
 
-Rules propose monitors from a resolved protocol/product, but do not execute
-checks. A proposal records its generating rule, target endpoint, confidence,
-and whether policy permits automatic creation. User edits become explicit
-overrides so later discovery cannot erase them.
+Rules propose monitors from resolved service protocol/product fields and current
+canonical endpoint rows, but do not execute checks. Migration
+`0013_monitor_proposals.sql` stores one durable proposal per stable
+`(rule_id, endpoint_id)` identity. The row retains the endpoint target
+snapshot, policy rule version, resolved protocol/product, source fingerprint
+evidence when available, confidence, generated check configuration, and whether
+policy permits automatic creation. Historical endpoints and arbitrary
+user-supplied targets cannot create proposals.
+
+The current bounded policy emits `monitor.http.generic` for unresolved HTTP,
+`monitor.https.generic` for unresolved HTTPS, `monitor.tcp.generic` for
+unresolved TCP, and a stable `monitor.<protocol>.product.<slug>` rule for a
+resolved HTTP/HTTPS product. Generic HTTP and TCP proposals remain
+representable even when product fingerprinting finds no signature. The policy
+only persists intent; M4 owns monitor creation, scheduling, and health checks.
+
+Fingerprint reconciliation, confirmed service-review decisions, and manual
+service edits refresh proposals in the same transaction. Refresh updates only
+automatic policy fields. It preserves proposal status, manual decisions, and
+user overrides. User override patches cannot change service, endpoint, rule,
+target, or resolved identity.
+
+The server exposes authenticated, custom-header-CSRF-protected routes:
+
+- `GET /api/v1/monitor-proposals` (pending by default; `status`, service, and
+  cursor filters) and `GET /api/v1/monitor-proposals/{id}`;
+- `POST /api/v1/monitor-proposals/{id}/approve` and `/reject`;
+- `PATCH /api/v1/monitor-proposals/{id}` for versioned user overrides; and
+- `POST /api/v1/monitor-proposals/generate` or
+  `POST /api/v1/services/{id}/monitor-proposals` for an explicit policy
+  refresh.
+
+Approval and rejection record manual decision provenance on the proposal and
+write matching change and audit records. Override changes write the same
+records. Repeating the same decision is idempotent; an opposite decision
+returns a conflict. No route creates a monitor or runs a check.
 
 M3 supports proposal persistence and review only. Continuous scheduling and
 health execution are M4 work.
@@ -135,7 +167,8 @@ health execution are M4 work.
 1. Pure rule engine, checked-in fixtures, and score/explanation tests.
 2. Fingerprint evidence persistence and canonical service reconciliation.
 3. Service-review queue and **Why?** API/UI.
-4. Monitor-proposal policy, persistence, and review UI.
+4. Monitor-proposal policy, persistence, and server review API. Web review UI
+   remains outside this slice.
 5. Safe collector adapters for mDNS/DNS-SD and UPnP, then controlled SNMP.
 
 ## 6. Acceptance evidence

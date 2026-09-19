@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
-use crate::inventory::{events::Recorder, evidence, service_reviews};
+use crate::inventory::{events::Recorder, evidence, monitor_proposals, service_reviews};
 
 /// Evidence attribute written for every processed M2 classification.
 pub const FINGERPRINT_EVIDENCE_ATTRIBUTE: &str = "fingerprint";
@@ -234,6 +234,10 @@ pub async fn reconcile_service_fingerprint_tx(
         )
         .await?;
     }
+
+    // Proposal policy consumes the resolved projection and current canonical
+    // endpoint rows in this same transaction. It performs no network check.
+    monitor_proposals::generate_for_service_tx(tx, service_id).await?;
 
     Ok(Some(ReconcileOutcome {
         service_id,
