@@ -86,7 +86,27 @@ Both actions write audit events. A later `POST /api/v1/networks/{id}/scans`
 requires an idempotency key and a confirmed, enabled scope; it creates a job and
 returns its stable job UUID.
 
-## 6. Test seams
+## 6. Recurring change scans
+
+The server scheduler re-plans due change scans every five minutes and on every
+server start. It reads `full_tcp_interval_seconds` from each scope. A scope is
+eligible only when it is enabled, confirmed, and its confirmed target count
+still matches `target_count`.
+
+The planner skips a scope with a pending/running scan or any scan created
+within its full-TCP cadence. This prevents an operator-triggered initial/full
+scan and a recurring change scan from overlapping. The job idempotency key is
+`discovery.change_scan:{network_id}:{cadence_window}`. The planner creates the
+`discovery.full_tcp` job and its `scan_runs` row in one transaction, with
+`kind = change_scan`, `source = scheduler`, and the current scope version.
+PostgreSQL job idempotency plus the unique `scan_runs.job_id` relation makes
+concurrent scheduler instances safe.
+
+M2 has no persisted quiet-period or maintenance subsystem yet. The planner
+does not invent a bypass; future quiet/maintenance gates must be checked before
+the same transactional enqueue step.
+
+## 7. Test seams
 
 - `domain::discovery::ApprovedScope::parse`: private-range, size, exclusion,
   and exact target-count policy.
