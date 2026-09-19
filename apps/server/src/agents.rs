@@ -202,18 +202,20 @@ async fn recover_health_incident(
 /// Open or update durable offline incidents for agents that missed their
 /// heartbeat deadline. Inventory tables are never touched by this sweep.
 pub async fn sweep_offline(pool: &PgPool, timeout_seconds: i64) -> sqlx::Result<u64> {
-    let timeout_seconds = timeout_seconds.clamp(30, 86_400);
-    let candidate_ids: Vec<(Uuid,)> = sqlx::query_as(
-        "select id from agents \
-         where revoked_at is null \
-           and coalesce(last_heartbeat_at, created_at) < now() - make_interval(secs => $1::double precision)",
+    let fallback_timeout_seconds = timeout_seconds.clamp(30, 86_400);
+    let candidate_ids: Vec<(Uuid, i32)> = sqlx::query_as(
+        "select id, coalesce(nullif(heartbeat_timeout_seconds, 0), $1::integer) \
+         from agents \
+           where revoked_at is null \
+           and coalesce(last_heartbeat_at, created_at) < now() - make_interval(secs => \
+               coalesce(nullif(heartbeat_timeout_seconds, 0), $1::integer)::double precision)",
     )
-    .bind(timeout_seconds as f64)
+    .bind(fallback_timeout_seconds as i32)
     .fetch_all(pool)
     .await?;
 
     let mut opened = 0;
-    for (agent_id,) in candidate_ids {
+    for (agent_id, agent_timeout_seconds) in candidate_ids {
         let mut tx = pool.begin().await?;
         let still_offline: Option<(Uuid,)> = sqlx::query_as(
             "select id from agents where id = $1 and revoked_at is null \
@@ -221,7 +223,7 @@ pub async fn sweep_offline(pool: &PgPool, timeout_seconds: i64) -> sqlx::Result<
                  now() - make_interval(secs => $2::double precision) for update",
         )
         .bind(agent_id)
-        .bind(timeout_seconds as f64)
+        .bind(agent_timeout_seconds as f64)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -245,7 +247,7 @@ pub async fn sweep_offline(pool: &PgPool, timeout_seconds: i64) -> sqlx::Result<
                  '{timeout_seconds}', to_jsonb($2::integer), true) where id = $1",
             )
             .bind(incident_id)
-            .bind(timeout_seconds as i32)
+            .bind(agent_timeout_seconds)
             .execute(&mut *tx)
             .await?;
         } else {
@@ -256,7 +258,7 @@ pub async fn sweep_offline(pool: &PgPool, timeout_seconds: i64) -> sqlx::Result<
                          jsonb_build_object('timeout_seconds', $2::integer))",
             )
             .bind(agent_id)
-            .bind(timeout_seconds as i32)
+            .bind(agent_timeout_seconds)
             .execute(&mut *tx)
             .await?;
             sqlx::query(
@@ -267,7 +269,7 @@ pub async fn sweep_offline(pool: &PgPool, timeout_seconds: i64) -> sqlx::Result<
             .bind(agent_id)
             .bind(serde_json::json!({
                 "state": "open",
-                "timeout_seconds": timeout_seconds,
+                "timeout_seconds": agent_timeout_seconds,
             }))
             .execute(&mut *tx)
             .await?;
@@ -285,4 +287,87 @@ pub async fn revoke(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn pool_or_skip() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn sweep_offline_uses_each_agents_configured_timeout() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+
+        let fast_id: Uuid = sqlx::query_scalar(
+            "insert into agents \
+                (cert_fingerprint, cert_serial, heartbeat_timeout_seconds, last_heartbeat_at) \
+             values ($1, $2, 30, now() - interval '2 minutes') returning id",
+        )
+        .bind(format!("agent-health-fast-{}", Uuid::new_v4()))
+        .bind(format!("serial-fast-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("insert fast-timeout agent");
+        let slow_id: Uuid = sqlx::query_scalar(
+            "insert into agents \
+                (cert_fingerprint, cert_serial, heartbeat_timeout_seconds, last_heartbeat_at) \
+             values ($1, $2, 300, now() - interval '2 minutes') returning id",
+        )
+        .bind(format!("agent-health-slow-{}", Uuid::new_v4()))
+        .bind(format!("serial-slow-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("insert slow-timeout agent");
+
+        sweep_offline(&pool, HEARTBEAT_TIMEOUT_SECONDS)
+            .await
+            .expect("sweep offline agents");
+
+        let fast_state: Option<String> = sqlx::query_scalar(
+            "select state from agent_health_incidents \
+             where agent_id = $1 and state = 'open'",
+        )
+        .bind(fast_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("read fast-timeout incident");
+        let slow_state: Option<String> = sqlx::query_scalar(
+            "select state from agent_health_incidents \
+             where agent_id = $1 and state = 'open'",
+        )
+        .bind(slow_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("read slow-timeout incident");
+
+        assert_eq!(fast_state.as_deref(), Some("open"));
+        assert_eq!(slow_state, None);
+
+        sqlx::query("delete from change_events where entity_id in ($1, $2)")
+            .bind(fast_id)
+            .bind(slow_id)
+            .execute(&pool)
+            .await
+            .expect("delete test change events");
+        sqlx::query("delete from agents where id in ($1, $2)")
+            .bind(fast_id)
+            .bind(slow_id)
+            .execute(&pool)
+            .await
+            .expect("delete test agents");
+    }
 }
