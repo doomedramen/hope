@@ -229,3 +229,12 @@ transactional planning boundary.
   deterministic bounded pacing.
 - Basic classifier: local HTTP, TLS/HTTPS, SSH-banner, generic TCP, bounded
   redirects/body, and sensitive-header fixtures.
+
+The M2 Docker acceptance gate is an ignored server test named
+`m2_docker_high_port_scan_creates_canonical_inventory_records`. Run it with a
+throwaway PostgreSQL database and `--ignored`; it starts a disposable
+`nginx:1.27-alpine` HTTP container on a Docker-assigned high host port, then
+uses the real worker `ConnectScanner` and classifier. It checks open-port
+observations, HTTP service/endpoint/evidence, repeat-scan canonical identity,
+and event deduplication. The test skips only when Docker is unavailable and
+always removes its named container through a drop guard.

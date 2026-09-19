@@ -93,6 +93,27 @@ run them with a throwaway `docker run --rm -d -p 55432:5432 -e
 POSTGRES_PASSWORD=dev postgres:17` and `DATABASE_URL=postgres://postgres:dev@localhost:55432/postgres
 just test`).
 
+### M2 Docker discovery acceptance gate
+
+Run this ignored gate explicitly. It needs `DATABASE_URL` and a reachable
+Docker daemon; normal unit tests never require Docker. The gate starts a
+disposable `nginx:1.27-alpine` HTTP container, lets Docker assign a random
+high host port on a private local interface, runs the real worker scanner and
+classifier against that address, repeats the scan, and removes the container
+on exit:
+
+```sh
+DATABASE_URL=postgres://postgres:dev@localhost:55432/postgres \
+  cargo test -p server m2_docker_high_port_scan_creates_canonical_inventory_records \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The gate skips only when Docker is unavailable. It fails for missing database
+configuration, image pulls, scan failures, or record mismatches. It checks an
+open-port observation, HTTP protocol classification, one canonical socket
+endpoint and service across the repeat scan, per-run evidence, and one
+classification event.
+
 Release signing (agent binaries, spec §7.5/§7.7): see
 `docs/release-signing.md`.
 

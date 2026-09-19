@@ -61,6 +61,18 @@ pub async fn handle(
     worker_id: &str,
     payload: Value,
 ) -> Result<JobOutcome> {
+    handle_inner(pool, job_id, worker_id, payload, None).await
+}
+
+async fn handle_inner(
+    pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
+    payload: Value,
+    ports_override: Option<&[u16]>,
+) -> Result<JobOutcome> {
+    // The ignored Docker gate supplies one published port here so it can
+    // exercise this production path without probing all 65,535 ports.
     let run = load_run(pool, job_id).await?;
     if run.status == "succeeded" && run.complete {
         return Ok(JobOutcome::Completed);
@@ -123,10 +135,13 @@ pub async fn handle(
         Err(error) => return async_fail_run(pool, run.id, error).await,
     };
     let mut device_ids = load_device_ids(pool).await?;
-    let ports: Vec<u16> = (1..=u16::MAX).collect();
+    let expected_port_count = ports_override.map_or(TCP_PORT_COUNT, |ports| ports.len() as i64);
+    let ports: Vec<u16> = ports_override
+        .map(<[u16]>::to_vec)
+        .unwrap_or_else(|| (1..=u16::MAX).collect());
     let expected_ports = run
         .targets_planned
-        .checked_mul(TCP_PORT_COUNT)
+        .checked_mul(expected_port_count)
         .ok_or_else(|| anyhow!("planned TCP probe count overflow"))?;
     if run.ports_planned != expected_ports {
         let error = anyhow!(
@@ -1789,9 +1804,13 @@ impl Drop for CancellationMonitor {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::net::{Ipv4Addr, UdpSocket};
+    use std::process::Command;
     use std::sync::atomic::AtomicUsize;
 
     use super::super::classification::ServiceProtocol;
+    use tokio::net::TcpStream;
+    use tokio::time::{sleep, timeout};
 
     #[test]
     fn target_addresses_match_approved_scope_exclusions() {
@@ -2054,6 +2073,406 @@ mod tests {
         .await
         .expect("count classification events");
         assert_eq!(events.0, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL and a local Docker daemon"]
+    async fn m2_docker_high_port_scan_creates_canonical_inventory_records() {
+        if !docker_daemon_available() {
+            eprintln!("skipping: Docker daemon unavailable");
+            return;
+        }
+
+        let database_url =
+            std::env::var("DATABASE_URL").expect("M2 Docker acceptance gate requires DATABASE_URL");
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+
+        let host_ip = private_host_address()
+            .expect("M2 Docker acceptance gate needs a private host interface address");
+        let target = host_ip.to_string();
+        let container = DockerHttpContainer::start(host_ip)
+            .unwrap_or_else(|error| panic!("start Docker HTTP fixture: {error}"));
+        container.wait_until_ready().await;
+        assert!(
+            container.host_port >= 1024,
+            "Docker assigned privileged host port {}",
+            container.host_port
+        );
+        let ports = [container.host_port];
+        let port_value = json!({
+            "address": &target,
+            "port": container.host_port,
+            "transport": "tcp",
+        });
+
+        let (network_id, job_id, run_id) = test_run_for_address(&pool, &target, 1).await;
+        let outcome = handle_inner(
+            &pool,
+            job_id,
+            "test-worker",
+            json!({"network_id": network_id}),
+            Some(&ports),
+        )
+        .await
+        .expect("scan Docker-published HTTP port");
+        assert_eq!(outcome, JobOutcome::Completed);
+
+        let run_state: (String, bool, i64, i64) = sqlx::query_as(
+            "select status, complete, targets_completed, ports_completed \
+             from scan_runs where id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read first acceptance scan");
+        assert_eq!(run_state, ("succeeded".to_string(), true, 1, 1));
+
+        let (device_id, state): (Uuid, String) = sqlx::query_as(
+            "select device_id, state from port_observations \
+             where scan_run_id = $1 and address = $2::inet and port = $3",
+        )
+        .bind(run_id)
+        .bind(&target)
+        .bind(i32::from(container.host_port))
+        .fetch_one(&pool)
+        .await
+        .expect("read first port observation");
+        assert_eq!(state, "open");
+
+        let (open_evidence,): (i64,) = sqlx::query_as(
+            "select count(*) from evidence \
+             where subject_table = 'devices' and subject_id = $1 \
+               and source_type = 'network_scan' and source_instance = $2 \
+               and attribute = 'open_port' and value = $3 and not absent",
+        )
+        .bind(device_id)
+        .bind(run_id.to_string())
+        .bind(&port_value)
+        .fetch_one(&pool)
+        .await
+        .expect("read first open-port evidence");
+        assert_eq!(open_evidence, 1);
+
+        let (service_count,): (i64,) = sqlx::query_as(
+            "select count(distinct s.id) from services s \
+             join endpoints e on e.service_id = s.id \
+             where s.owner_kind = 'device' and s.owner_id = $1 \
+               and e.address = $2::inet and e.port = $3",
+        )
+        .bind(device_id)
+        .bind(&target)
+        .bind(i32::from(container.host_port))
+        .fetch_one(&pool)
+        .await
+        .expect("count first canonical services");
+        assert_eq!(service_count, 1);
+
+        let (endpoint_count,): (i64,) = sqlx::query_as(
+            "select count(*) from endpoints e \
+             join services s on s.id = e.service_id \
+             where s.owner_kind = 'device' and s.owner_id = $1 \
+               and e.endpoint_type = 'socket' and e.address = $2::inet \
+               and e.port = $3 and e.is_current",
+        )
+        .bind(device_id)
+        .bind(&target)
+        .bind(i32::from(container.host_port))
+        .fetch_one(&pool)
+        .await
+        .expect("count first canonical endpoint");
+        assert_eq!(endpoint_count, 1);
+
+        let (service_id, protocol, endpoint_id, endpoint_type, endpoint_address, endpoint_port): (
+            Uuid,
+            String,
+            Uuid,
+            String,
+            String,
+            i32,
+        ) = sqlx::query_as(
+            "select s.id, s.protocol, e.id, e.endpoint_type, host(e.address), e.port \
+             from services s join endpoints e on e.service_id = s.id \
+             where s.owner_kind = 'device' and s.owner_id = $1 \
+               and e.address = $2::inet and e.port = $3 and e.is_current",
+        )
+        .bind(device_id)
+        .bind(&target)
+        .bind(i32::from(container.host_port))
+        .fetch_one(&pool)
+        .await
+        .expect("read first canonical service endpoint");
+        assert_eq!(protocol, "http");
+        assert_eq!(endpoint_type, "socket");
+        assert_eq!(endpoint_address, target);
+        assert_eq!(endpoint_port, i32::from(container.host_port));
+
+        let (classification_evidence, evidence_protocol): (i64, Option<String>) = sqlx::query_as(
+            "select count(*), max(value->>'protocol') from evidence \
+             where subject_table = 'services' and subject_id = $1 \
+               and source_type = 'network_scan' and source_instance = $2 \
+               and attribute = 'protocol_classification' and not absent",
+        )
+        .bind(service_id)
+        .bind(run_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("read first protocol evidence");
+        assert_eq!(classification_evidence, 1);
+        assert_eq!(evidence_protocol.as_deref(), Some("http"));
+
+        let (classified_events,): (i64,) = sqlx::query_as(
+            "select count(*) from change_events \
+             where entity_kind = 'services' and entity_id = $1 \
+               and category = 'service.classified'",
+        )
+        .bind(service_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count first service classification events");
+        assert_eq!(classified_events, 1);
+
+        let (repeat_network_id, repeat_job_id, repeat_run_id) =
+            test_run_for_address(&pool, &target, 1).await;
+        let repeat_outcome = handle_inner(
+            &pool,
+            repeat_job_id,
+            "test-worker",
+            json!({"network_id": repeat_network_id}),
+            Some(&ports),
+        )
+        .await
+        .expect("repeat scan Docker-published HTTP port");
+        assert_eq!(repeat_outcome, JobOutcome::Completed);
+
+        let (device_count,): (i64,) = sqlx::query_as(
+            "select count(distinct d.id) from devices d \
+             join interfaces i on i.device_id = d.id \
+             join addresses a on a.interface_id = i.id \
+             where a.ip = $1::inet",
+        )
+        .bind(&target)
+        .fetch_one(&pool)
+        .await
+        .expect("count repeat-scan devices");
+        assert_eq!(device_count, 1);
+
+        let (service_count, endpoint_count, current_endpoint_count): (i64, i64, i64) =
+            sqlx::query_as(
+                "select count(distinct s.id), count(distinct e.id), \
+                        count(distinct e.id) filter (where e.is_current) \
+                 from services s join endpoints e on e.service_id = s.id \
+                 where s.owner_kind = 'device' and s.owner_id = $1 \
+                   and e.address = $2::inet and e.port = $3",
+            )
+            .bind(device_id)
+            .bind(&target)
+            .bind(i32::from(container.host_port))
+            .fetch_one(&pool)
+            .await
+            .expect("count repeat-scan canonical records");
+        assert_eq!(
+            (service_count, endpoint_count, current_endpoint_count),
+            (1, 1, 1)
+        );
+
+        let (repeat_service_id, repeat_protocol, repeat_endpoint_id): (Uuid, String, Uuid) =
+            sqlx::query_as(
+                "select s.id, s.protocol, e.id from services s \
+                 join endpoints e on e.service_id = s.id \
+                 where s.owner_kind = 'device' and s.owner_id = $1 \
+                   and e.address = $2::inet and e.port = $3 and e.is_current",
+            )
+            .bind(device_id)
+            .bind(&target)
+            .bind(i32::from(container.host_port))
+            .fetch_one(&pool)
+            .await
+            .expect("read repeat-scan canonical records");
+        assert_eq!(repeat_service_id, service_id);
+        assert_eq!(repeat_endpoint_id, endpoint_id);
+        assert_eq!(repeat_protocol, "http");
+
+        let (first_scan_evidence, repeat_scan_evidence): (i64, i64) = sqlx::query_as(
+            "select \
+                (select count(*) from evidence \
+                 where subject_table = 'services' and subject_id = $1 \
+                   and source_type = 'network_scan' and source_instance = $2 \
+                   and attribute = 'protocol_classification' and not absent), \
+                (select count(*) from evidence \
+                 where subject_table = 'services' and subject_id = $1 \
+                   and source_type = 'network_scan' and source_instance = $3 \
+                   and attribute = 'protocol_classification' and not absent)",
+        )
+        .bind(service_id)
+        .bind(run_id.to_string())
+        .bind(repeat_run_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count repeat-scan protocol evidence");
+        assert_eq!((first_scan_evidence, repeat_scan_evidence), (1, 1));
+
+        let (classified_events,): (i64,) = sqlx::query_as(
+            "select count(*) from change_events \
+             where entity_kind = 'services' and entity_id = $1 \
+               and category = 'service.classified'",
+        )
+        .bind(service_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count repeat-scan service classification events");
+        assert_eq!(classified_events, 1);
+
+        for scan_run_id in [run_id, repeat_run_id] {
+            let (observations, open_evidence): (i64, i64) = sqlx::query_as(
+                "select \
+                    (select count(*) from port_observations \
+                     where scan_run_id = $1 and address = $2::inet and port = $3 \
+                       and state = 'open'), \
+                    (select count(*) from evidence \
+                     where subject_table = 'devices' and subject_id = $4 \
+                       and source_type = 'network_scan' and source_instance = $5 \
+                       and attribute = 'open_port' and value = $6 and not absent)",
+            )
+            .bind(scan_run_id)
+            .bind(&target)
+            .bind(i32::from(container.host_port))
+            .bind(device_id)
+            .bind(scan_run_id.to_string())
+            .bind(&port_value)
+            .fetch_one(&pool)
+            .await
+            .expect("read repeat-scan open-port records");
+            assert_eq!((observations, open_evidence), (1, 1));
+        }
+    }
+
+    fn docker_daemon_available() -> bool {
+        Command::new("docker")
+            .args(["info", "--format", "{{.ServerVersion}}"])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn private_host_address() -> Option<Ipv4Addr> {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        socket.connect((Ipv4Addr::new(192, 0, 2, 1), 80)).ok()?;
+        let address = socket.local_addr().ok()?.ip();
+        match address {
+            IpAddr::V4(address) if is_rfc1918(address) => Some(address),
+            _ => None,
+        }
+    }
+
+    fn is_rfc1918(address: Ipv4Addr) -> bool {
+        let octets = address.octets();
+        (octets[0] == 10)
+            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
+    }
+
+    struct DockerHttpContainer {
+        id: String,
+        host_ip: Ipv4Addr,
+        host_port: u16,
+    }
+
+    impl DockerHttpContainer {
+        fn start(host_ip: Ipv4Addr) -> std::result::Result<Self, String> {
+            let name = format!("hope-m2-{}", Uuid::new_v4());
+            let publish = format!("{host_ip}::80");
+            let output = Command::new("docker")
+                .args([
+                    "run",
+                    "--detach",
+                    "--rm",
+                    "--pull=missing",
+                    "--name",
+                    &name,
+                    "--publish",
+                    &publish,
+                    "nginx:1.27-alpine",
+                ])
+                .output()
+                .map_err(|error| format!("run Docker: {error}"))?;
+            if !output.status.success() {
+                remove_docker_container(&name);
+                return Err(format!(
+                    "docker run failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+
+            let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if id.is_empty() {
+                remove_docker_container(&name);
+                return Err("docker run returned no container ID".to_string());
+            }
+            let mut container = Self {
+                id,
+                host_ip,
+                host_port: 0,
+            };
+            let host_port = container.mapped_port()?;
+            container.host_port = host_port;
+            Ok(container)
+        }
+
+        fn mapped_port(&self) -> std::result::Result<u16, String> {
+            let output = Command::new("docker")
+                .args(["port", &self.id, "80/tcp"])
+                .output()
+                .map_err(|error| format!("inspect Docker port: {error}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "docker port failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.rsplit(':').next()?.trim().parse().ok())
+                .ok_or_else(|| {
+                    format!(
+                        "docker port returned no host port: {}",
+                        String::from_utf8_lossy(&output.stdout).trim()
+                    )
+                })
+        }
+
+        async fn wait_until_ready(&self) {
+            let address = SocketAddr::from((self.host_ip, self.host_port));
+            for _ in 0..100 {
+                let connected = timeout(Duration::from_millis(250), TcpStream::connect(address))
+                    .await
+                    .is_ok_and(|result| result.is_ok());
+                if connected {
+                    return;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+            panic!(
+                "Docker HTTP fixture did not become reachable on {}:{}",
+                self.host_ip, self.host_port
+            );
+        }
+    }
+
+    impl Drop for DockerHttpContainer {
+        fn drop(&mut self) {
+            remove_docker_container(&self.id);
+        }
+    }
+
+    fn remove_docker_container(id_or_name: &str) {
+        let _ = Command::new("docker")
+            .args(["rm", "--force", "--volumes", id_or_name])
+            .status();
     }
 
     #[tokio::test]
