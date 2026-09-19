@@ -40,7 +40,7 @@ impl IdentifierType {
             IdentifierType::Mac => 0.6,
             IdentifierType::Serial => 0.6,
             IdentifierType::SnmpEngineId => 0.5,
-            IdentifierType::Hostname => 0.3,
+            IdentifierType::Hostname => 0.4,
             IdentifierType::InterfaceIpHistory => 0.2,
         }
     }
@@ -80,8 +80,8 @@ pub enum Decision {
     AutoMatch,
     /// Score in [0.4, 0.85): write to the review queue, no graph mutation.
     Suggested,
-    /// Score < 0.4 (or MAC-only, however high its raw weight): treat as a
-    /// new device.
+    /// Score below 0.4 (or MAC-only, however high its raw weight): treat
+    /// as a new device.
     NewDevice,
 }
 
@@ -97,16 +97,12 @@ pub struct Explanation {
 }
 
 pub const AUTO_MATCH_THRESHOLD: f32 = 0.85;
-// Design table (§3) puts hostname's own weight at 0.3, below the
-// documented 0.4 review floor, yet §7's acceptance-gate table requires a
-// hostname-only match to land in the review queue rather than being
-// dropped as a new device ("hostname-only match (weight 0.3) ... appears
-// in GET /identity-suggestions"). The gate is authoritative: the floor is
-// set just under the weakest single-identifier weight (interface/IP
-// history overlap, 0.2) so any real identifier match is at minimum
-// surfaced for review, and only a total absence of matches falls through
-// to NewDevice.
-pub const REVIEW_THRESHOLD: f32 = 0.2;
+// Operator decision (2026-09-19): restore the review floor to the
+// documented 0.4 and raise hostname's own weight to 0.4 to match, so a
+// hostname-only match sits exactly at the review floor and still lands in
+// `identity-suggestions` per §7's acceptance gate, without needing to
+// lower the floor itself.
+pub const REVIEW_THRESHOLD: f32 = 0.4;
 
 /// Score an incoming set of observed identifiers against one candidate
 /// device's known identifiers.
@@ -166,7 +162,7 @@ pub fn score(observed: &[Identifier], candidate: &[Identifier]) -> Explanation {
         || (raw_score >= AUTO_MATCH_THRESHOLD && independent_types >= 2 && !mac_only)
     {
         Decision::AutoMatch
-    } else if raw_score >= REVIEW_THRESHOLD {
+    } else if raw_score >= REVIEW_THRESHOLD - f32::EPSILON * 8.0 {
         Decision::Suggested
     } else {
         Decision::NewDevice
@@ -230,8 +226,8 @@ mod tests {
 
     #[test]
     fn two_independent_weak_types_can_auto_match_above_threshold() {
-        // machine_id (0.9) alone already clears 0.85 with 1 type; combine
-        // with hostname to also exercise the independent-types path.
+        // machine_id (0.9) + hostname (0.4): 1 - (1-0.9)*(1-0.4) = 0.94,
+        // two independent types, clears the 0.85 auto-match band.
         let observed = vec![
             id(IdentifierType::MachineId, "m1"),
             id(IdentifierType::Hostname, "h1"),
@@ -241,6 +237,7 @@ mod tests {
             id(IdentifierType::Hostname, "h1"),
         ];
         let exp = score(&observed, &candidate);
+        assert!((exp.score - 0.94).abs() < 1e-5);
         assert_eq!(exp.decision, Decision::AutoMatch);
     }
 

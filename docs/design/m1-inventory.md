@@ -185,9 +185,9 @@ Confidence & precedence:
 
 ## 3. Identity matching
 
-Scoring: weighted sum over identity-rule types matched between the
-incoming observation and each candidate device, normalized to 0–1.
-Suggested weights (tunable, stored in config not code):
+Scoring: combine identity-rule types matched between the incoming
+observation and each candidate device into a single 0–1 score. Suggested
+weights (tunable, stored in config not code):
 
 | identifier | weight |
 |---|---|
@@ -201,25 +201,45 @@ Suggested weights (tunable, stored in config not code):
 | mac | 0.6 |
 | serial | 0.6 |
 | snmp_engine_id | 0.5 |
-| hostname | 0.3 |
+| hostname | 0.4 |
 | interface/IP history overlap | 0.2 |
+
+Combination function: **probabilistic OR**, `score = 1 - Π(1 - weight_i)`
+over each matched, distinct identifier type (implemented in
+`crates/domain/src/inventory/identity.rs::score`). This was chosen over a
+plain weighted sum/average because:
+- a single weight-1.0 match (agent_id, hardware_uuid) must land at exactly
+  1.0 on its own — a sum or average needs an extra special case to get
+  there, probabilistic OR gets it for free (`1 - (1 - 1.0) = 1.0`);
+- multiple weaker, independent matches should compound (more corroborating
+  identifiers ⇒ higher confidence) without an arbitrary normalization
+  constant or the score exceeding 1.0.
+
+Worked example: an observation carries `machine_id` (weight 0.9) and
+`hostname` (weight 0.4), both matching one candidate device:
+`score = 1 - (1 - 0.9) × (1 - 0.4) = 1 - 0.1 × 0.6 = 1 - 0.06 = 0.94`.
+Two independent identifier types, score ≥ 0.85 ⇒ auto-match. A hostname-only
+match against the same candidate: `score = 1 - (1 - 0.4) = 0.4`, exactly the
+review floor ⇒ suggested match.
 
 Thresholds: score ≥ 0.85 (or any single weight-1.0 exact match) ⇒ **automatic
 match**, merged/attached with an explanation record. 0.4 ≤ score < 0.85 ⇒
 **suggested match**, written to a review queue, no graph mutation. score <
 0.4 ⇒ treated as a new device. A `pinned` identity_rule always short-circuits
 scoring to 1.0 for that identifier and can never itself be outscored — pins
-exist precisely so an operator's manual correction sticks (§4.2).
+exist precisely so an operator's manual correction sticks (§4.2). MAC alone
+never auto-matches regardless of score (Decision 2), even though a single
+MAC hit's raw weight (0.6) clears the auto-match band.
 
 Explainability record (`merge_events.explanation` jsonb, also surfaced from
 `evidence`/`identity_rules` for suggestions not yet acted on):
 
 ```json
 {
-  "score": 0.95,
+  "score": 0.94,
   "matched": [
-    {"rule_type": "agent_id", "weight": 1.0, "candidate_value": "...", "observed_value": "..."},
-    {"rule_type": "hostname", "weight": 0.3, "candidate_value": "docker01", "observed_value": "docker01"}
+    {"rule_type": "machine_id", "weight": 0.9, "candidate_value": "...", "observed_value": "..."},
+    {"rule_type": "hostname", "weight": 0.4, "candidate_value": "docker01", "observed_value": "docker01"}
   ],
   "conflicting": [],
   "threshold": 0.85,
@@ -328,7 +348,7 @@ UI (minimal M1 set, under **Infrastructure**):
 |---|---|---|
 | Device can change IP without duplicate | `addresses` history table, `is_current` flip instead of row mutation; identity matching keyed off non-IP identifiers first | Integration: agent reports same `machine_id` with new IP → same device id, old address row closed, new one current |
 | Strong evidence reconciles two observations to one device | Identity scoring ≥0.85 auto-match path | Integration: two evidence submissions sharing `agent_id` → one `devices` row, `merge_events` or direct-attach recorded |
-| Ambiguous evidence → review suggestion, not silent merge | Score 0.4–0.85 branch writes to suggestion queue only | Integration: hostname-only match (weight 0.3) never triggers auto-merge; appears in `GET /identity-suggestions` |
+| Ambiguous evidence → review suggestion, not silent merge | Score 0.4–0.85 branch writes to suggestion queue only | Integration: hostname-only match (weight 0.4) never triggers auto-merge; appears in `GET /identity-suggestions` |
 | Merge undoable without losing observations | `canonical_of` redirect, non-destructive merge (§4) | Integration: merge two devices, undo, assert every original `evidence`/`interfaces` row unchanged (row count and content) |
 | Manual facts survive expiry of automatic evidence | `confirmed_by` precedence in read-resolution; expiry only affects automatic rows | Integration: confirm a hostname manually, let conflicting automatic evidence expire/mark absent, assert displayed value still the confirmed one |
 
