@@ -170,7 +170,18 @@ limits datagram, record, header, TXT, and text sizes, and parses observations
 without following SSDP `LOCATION` values or initiating unbounded secondary
 requests. Its runtime collects one protocol on an explicitly selected IPv4
 interface for a finite receive window; the persistence adapter remains
-responsible for associating observations with existing inventory records.
+responsible for associating observations with existing inventory records. The
+authenticated `POST /api/v1/networks/{id}/service-collectors` route accepts
+only `mdns` or `ssdp`, requires an idempotency key, and checks the interface
+against the network's enabled, confirmed scope. The worker repeats that scope
+check before collecting.
+
+mDNS observations match current socket or published-port endpoints by address
+and port, with a device-level fallback when no service endpoint matches.
+SSDP observations are retained on the device owning the datagram source
+address. Both paths use the collector job ID as the evidence source instance,
+so retrying a job does not duplicate an unchanged observation. SSDP
+`LOCATION` is stored as observed data only; it is never fetched.
 
 ## 6. Delivery sequence
 
