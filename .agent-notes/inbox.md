@@ -286,3 +286,21 @@ update the logo to be scan-heart
 - Status: captured
 
 top nav seems pointless, everything needed is in the side nav so far.
+## ntfy server address
+
+- Created: 2026-09-19
+- Type: note
+- Area: monitoring
+- Context: M5 agent inventory implementation
+- Status: captured
+
+our ntfy server is [https://ntfy.lab](https://ntfy.lab).rtin.page
+## ntfy server URL correction
+
+- Created: 2026-09-19
+- Type: note
+- Area: monitoring
+- Context: M5 agent inventory implementation
+- Status: captured
+
+The ntfy server URL is `https://ntfy.lab.rtin.page/`
