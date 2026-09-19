@@ -216,6 +216,7 @@ fn run_agent_metric(monitor: &ClaimedMonitor) -> CheckOutcome {
         agent_id,
         inventory: monitor.agent_inventory.as_ref(),
         config: &monitor.config,
+        revoked: monitor.agent_revoked_at.is_some(),
     })
 }
 

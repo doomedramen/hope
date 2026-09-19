@@ -319,6 +319,7 @@ pub struct AgentMetricRequest<'a> {
     pub agent_id: Uuid,
     pub inventory: Option<&'a Value>,
     pub config: &'a Value,
+    pub revoked: bool,
 }
 
 /// Validate heartbeat-only configuration and return its effective timeout.
@@ -519,6 +520,14 @@ pub fn run_agent_metric(request: AgentMetricRequest<'_>) -> CheckOutcome {
             );
         }
     };
+    if request.revoked {
+        return outcome(
+            CheckStatus::Failure,
+            started,
+            Some("agent certificate is revoked".to_string()),
+            metric_details(&request.agent_id, &config, None),
+        );
+    }
     let Some(inventory) = request.inventory else {
         return outcome(
             CheckStatus::Failure,
@@ -1478,6 +1487,7 @@ mod tests {
             agent_id,
             inventory: Some(&inventory),
             config: &json!({"metric": "host.load.1", "operator": "gt", "threshold": 4}),
+            revoked: false,
         });
         assert_eq!(load.status, CheckStatus::Failure);
         assert_eq!(load.details["value"], 4.5);
@@ -1491,6 +1501,7 @@ mod tests {
                 "operator": "gte",
                 "threshold": 90
             }),
+            revoked: false,
         });
         assert_eq!(filesystem.status, CheckStatus::Success);
 
@@ -1502,9 +1513,22 @@ mod tests {
                 "operator": "gt",
                 "threshold": 70
             }),
+            revoked: false,
         });
         assert_eq!(memory.status, CheckStatus::Failure);
         assert_eq!(memory.details["value"], 75.0);
+
+        let revoked = run_agent_metric(AgentMetricRequest {
+            agent_id,
+            inventory: Some(&inventory),
+            config: &json!({"metric": "host.load.1", "operator": "gt", "threshold": 4}),
+            revoked: true,
+        });
+        assert_eq!(revoked.status, CheckStatus::Failure);
+        assert_eq!(
+            revoked.error.as_deref(),
+            Some("agent certificate is revoked")
+        );
     }
 
     #[test]
