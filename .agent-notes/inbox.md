@@ -238,3 +238,23 @@ Repo has no remote, so CI never runs. arm64/amd64 musl agent cross-compile (need
 - Status: captured
 
 cargo-zigbuild 0.23.4 + zig 0.16.0: agent builds for x86_64/aarch64-unknown-linux-musl (static, 3.9M/3.5M release) and both run `--version` in alpine containers. CI signing job itself still unexercised (no remote).
+
+## Identity review threshold conflict in M1 design
+
+- Created: 2026-09-19
+- Type: concern
+- Area: identity
+- Context: M1 inventory implementation, first pass
+- Status: captured
+
+Design §3 gives hostname weight 0.3 (below the 0.4 review floor), but the §7 gate table expects hostname-only matches to reach the review queue. Implementer lowered REVIEW_THRESHOLD to 0.2 in crates/domain/src/inventory/identity.rs. Operator decision was 0.4–0.85 review band.
+
+## Identity score combination is implementer's choice
+
+- Created: 2026-09-19
+- Type: note
+- Area: identity
+- Context: M1 inventory implementation, first pass
+- Status: captured
+
+Scores combine by probabilistic-OR (1 - Π(1-w)) because the design's example numbers weren't internally consistent with a "weighted sum normalized 0-1". Not checked against a canonical example.
