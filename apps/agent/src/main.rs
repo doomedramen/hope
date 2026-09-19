@@ -2,6 +2,7 @@ mod config;
 mod enroll;
 mod identity;
 mod pinning;
+mod release_verify;
 mod run;
 
 use clap::{Parser, Subcommand};
@@ -52,6 +53,18 @@ enum Command {
         #[arg(long, default_value = DEFAULT_STATE_DIR)]
         state_dir: String,
     },
+    /// Verify a downloaded release manifest.json entry + binary against
+    /// this build's embedded trusted public key (spec §7.7), without
+    /// installing anything. Exit code is non-zero on any failure.
+    VerifyRelease {
+        /// Path to a manifest.json produced by `cargo xtask sign`.
+        #[arg(long)]
+        manifest: String,
+        /// Which artifact in the manifest to check (matched by
+        /// platform/arch); defaults to this build's own platform/arch.
+        #[arg(long)]
+        binary: String,
+    },
 }
 
 #[tokio::main]
@@ -85,6 +98,29 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Run { gateway, state_dir }) => {
             run::run(&gateway, &state_dir).await?;
+        }
+        Some(Command::VerifyRelease {
+            manifest: manifest_path,
+            binary: binary_path,
+        }) => {
+            let manifest_json = std::fs::read_to_string(&manifest_path)?;
+            let manifest: release::Manifest = serde_json::from_str(&manifest_json)?;
+            let binary_bytes = std::fs::read(&binary_path)?;
+            let (platform, arch) = release_verify::current_platform_arch();
+
+            let artifact = manifest
+                .artifacts
+                .iter()
+                .find(|a| a.record.platform == platform && a.record.arch == arch)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no {platform}/{arch} artifact in {manifest_path}")
+                })?;
+
+            release_verify::verify_release(&artifact.record, &artifact.signature, &binary_bytes)?;
+            println!(
+                "OK: {} {}/{} verified",
+                artifact.record.version, platform, arch
+            );
         }
         None => {
             println!("agent {}", env!("CARGO_PKG_VERSION"));
