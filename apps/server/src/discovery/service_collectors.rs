@@ -14,6 +14,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use thiserror::Error;
+use tokio::net::UdpSocket;
+use tokio::time::{Instant, timeout_at};
 
 pub const MDNS_IPV4_MULTICAST: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 pub const MDNS_IPV6_MULTICAST: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb);
@@ -109,6 +111,8 @@ pub enum CollectorError {
     DatagramTooLarge,
     #[error("collector limit exceeded: {0}")]
     Limit(&'static str),
+    #[error("collector socket error: {0}")]
+    Socket(String),
     #[error("malformed service datagram: {0}")]
     Malformed(String),
 }
@@ -142,6 +146,121 @@ pub struct SsdpService {
     pub location: Option<String>,
     pub server: Option<String>,
     pub cache_control: Option<String>,
+}
+
+/// One parsed observation received from a multicast collector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectedService {
+    Mdns {
+        source: SocketAddr,
+        service: MdnsService,
+    },
+    Ssdp {
+        source: SocketAddr,
+        service: SsdpService,
+    },
+}
+
+/// Query a single fixed multicast protocol on one explicitly selected IPv4
+/// interface. The caller owns network-scope authorization; this function
+/// never accepts a destination or follows an advertised URL.
+pub async fn collect_multicast(
+    protocol: CollectorProtocol,
+    interface: Ipv4Addr,
+    config: CollectorConfig,
+) -> Result<Vec<CollectedService>, CollectorError> {
+    let config = config.validate()?;
+    let target = match protocol {
+        CollectorProtocol::Mdns => SocketAddr::new(IpAddr::V4(MDNS_IPV4_MULTICAST), MDNS_PORT),
+        CollectorProtocol::Ssdp => SocketAddr::new(IpAddr::V4(SSDP_IPV4_MULTICAST), SSDP_PORT),
+    };
+    if !protocol.allows_target(target) {
+        return Err(CollectorError::InvalidConfig(
+            "collector target is not an allowlisted multicast destination",
+        ));
+    }
+    let multicast = match target {
+        SocketAddr::V4(target) => *target.ip(),
+        SocketAddr::V6(_) => {
+            return Err(CollectorError::InvalidConfig(
+                "IPv6 multicast collection is not enabled",
+            ));
+        }
+    };
+
+    let socket = UdpSocket::bind(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        target.port(),
+    ))
+    .await
+    .map_err(|error| CollectorError::Socket(error.to_string()))?;
+    socket
+        .join_multicast_v4(multicast, interface)
+        .map_err(|error| CollectorError::Socket(error.to_string()))?;
+    socket
+        .set_multicast_loop_v4(false)
+        .map_err(|error| CollectorError::Socket(error.to_string()))?;
+
+    let query = match protocol {
+        CollectorProtocol::Mdns => mdns_query(),
+        CollectorProtocol::Ssdp => ssdp_query(),
+    };
+    socket
+        .send_to(&query, target)
+        .await
+        .map_err(|error| CollectorError::Socket(error.to_string()))?;
+
+    let deadline = Instant::now() + config.receive_window;
+    let mut datagram = vec![0; config.max_datagram_bytes.saturating_add(1)];
+    let mut observations = Vec::new();
+    loop {
+        let received = match timeout_at(deadline, socket.recv_from(&mut datagram)).await {
+            Ok(Ok(received)) => received,
+            Ok(Err(error)) => return Err(CollectorError::Socket(error.to_string())),
+            Err(_) => break,
+        };
+        let (length, source) = received;
+        if length > config.max_datagram_bytes {
+            return Err(CollectorError::DatagramTooLarge);
+        }
+        match protocol {
+            CollectorProtocol::Mdns => {
+                for service in parse_mdns_packet(&datagram[..length], config)? {
+                    observations.push(CollectedService::Mdns { source, service });
+                }
+            }
+            CollectorProtocol::Ssdp => {
+                let service = parse_ssdp_datagram(&datagram[..length], config)?;
+                observations.push(CollectedService::Ssdp { source, service });
+            }
+        }
+        if observations.len() > config.max_records {
+            return Err(CollectorError::Limit("collector observation count"));
+        }
+    }
+    Ok(observations)
+}
+
+fn mdns_query() -> Vec<u8> {
+    let mut query = vec![0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    query.extend_from_slice(&dns_name_bytes("_services._dns-sd._udp.local"));
+    query.extend_from_slice(&12u16.to_be_bytes());
+    query.extend_from_slice(&1u16.to_be_bytes());
+    query
+}
+
+fn dns_name_bytes(name: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for label in name.split('.') {
+        bytes.push(label.len() as u8);
+        bytes.extend_from_slice(label.as_bytes());
+    }
+    bytes.push(0);
+    bytes
+}
+
+fn ssdp_query() -> Vec<u8> {
+    b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n".to_vec()
 }
 
 fn checked_datagram(
@@ -529,6 +648,38 @@ mod tests {
             parse_mdns_packet(&[0; 5], config),
             Err(CollectorError::DatagramTooLarge)
         );
+    }
+
+    #[test]
+    fn rejects_invalid_collector_bounds() {
+        let config = CollectorConfig {
+            receive_window: Duration::ZERO,
+            ..CollectorConfig::default()
+        };
+        assert!(matches!(
+            parse_mdns_packet(&[], config),
+            Err(CollectorError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn builds_fixed_multicast_queries() {
+        let query = mdns_query();
+        assert_eq!(&query[..12], &[0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+        assert!(
+            query
+                .windows(b"_services".len())
+                .any(|window| window == b"_services")
+        );
+
+        let query = ssdp_query();
+        assert!(query.starts_with(b"M-SEARCH * HTTP/1.1\r\n"));
+        assert!(
+            query
+                .windows(b"HOST: 239.255.255.250:1900".len())
+                .any(|window| { window == b"HOST: 239.255.255.250:1900" })
+        );
+        assert!(query.ends_with(b"\r\n\r\n"));
     }
 
     #[test]
