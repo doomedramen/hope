@@ -162,7 +162,17 @@ returns a conflict. No route creates a monitor or runs a check.
 M3 supports proposal persistence and review only. Continuous scheduling and
 health execution are M4 work.
 
-## 5. Delivery sequence
+## 5. Safe multicast collector adapter
+
+`discovery::service_collectors` is the bounded adapter boundary for mDNS/DNS-SD
+and UPnP/SSDP. It accepts only the fixed protocol multicast destinations,
+limits datagram, record, header, TXT, and text sizes, and parses observations
+without following SSDP `LOCATION` values or initiating unbounded secondary
+requests. The parser returns normalized service observations for a later
+network job and evidence persistence adapter; it does not create services or
+endpoints by itself.
+
+## 6. Delivery sequence
 
 1. Pure rule engine, checked-in fixtures, and score/explanation tests.
 2. Fingerprint evidence persistence and canonical service reconciliation.
@@ -171,7 +181,7 @@ health execution are M4 work.
    remains outside this slice.
 5. Safe collector adapters for mDNS/DNS-SD and UPnP, then controlled SNMP.
 
-## 6. Acceptance evidence
+## 7. Acceptance evidence
 
 M3 is complete only when repeated discoveries enrich one service; unknown
 HTTP/TCP remain visible and receive generic proposals; every fingerprint shows
