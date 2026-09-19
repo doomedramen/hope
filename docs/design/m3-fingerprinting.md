@@ -168,9 +168,9 @@ health execution are M4 work.
 and UPnP/SSDP. It accepts only the fixed protocol multicast destinations,
 limits datagram, record, header, TXT, and text sizes, and parses observations
 without following SSDP `LOCATION` values or initiating unbounded secondary
-requests. The parser returns normalized service observations for a later
-network job and evidence persistence adapter; it does not create services or
-endpoints by itself.
+requests. Its runtime collects one protocol on an explicitly selected IPv4
+interface for a finite receive window; the persistence adapter remains
+responsible for associating observations with existing inventory records.
 
 ## 6. Delivery sequence
 
