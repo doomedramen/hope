@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use rustls::RootCertStore;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -18,11 +19,21 @@ use uuid::Uuid;
 use crate::collectors;
 use crate::identity::{Paths, write_private};
 use protocol::{
-    Capability, CapabilityAck, CapabilityOffer, Envelope, Heartbeat, Hello, Message,
+    Capability, CapabilityAck, CapabilityOffer, Envelope, Heartbeat, Hello, InventorySnapshot,
+    MAX_OBSERVATION_BATCH_BYTES, MAX_SNAPSHOT_BYTES, Message, ObservationBatch,
     SUPPORTED_PROTOCOL_VERSIONS, negotiate_capabilities,
 };
 
 const MAX_BACKOFF_SECS: u64 = 60;
+const SNAPSHOT_SEQUENCE_FILE: &str = "snapshot-sequence";
+const PENDING_SNAPSHOT_FILE: &str = "pending-snapshot.json";
+const MAX_PENDING_SNAPSHOT_BYTES: usize = MAX_SNAPSHOT_BYTES + MAX_OBSERVATION_BATCH_BYTES;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingSnapshot {
+    snapshot: InventorySnapshot,
+    observations: ObservationBatch,
+}
 
 /// Base backoff delay (before jitter) for the given zero-indexed retry
 /// attempt: `2^attempt` seconds, capped at `MAX_BACKOFF_SECS`. Pure and
@@ -76,6 +87,7 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     let certs: Vec<_> =
         rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<_, _>>()?;
     let agent_id = load_or_create_agent_id(state_dir, certs.first().map(|cert| cert.as_ref()))?;
+    let pending_snapshot = load_or_collect_pending_snapshot(state_dir, agent_id).await?;
     let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
         .ok_or_else(|| anyhow::anyhow!("no private key found in {}", paths.key.display()))?;
 
@@ -128,6 +140,7 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
     heartbeat_interval.tick().await; // first tick fires immediately
     let mut snapshot_sent = false;
+    let mut pending_snapshot = Some(pending_snapshot);
 
     loop {
         tokio::select! {
@@ -146,8 +159,8 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                 let msg = msg?;
                 if let WsMessage::Text(text) = msg {
                     match serde_json::from_str::<Envelope>(&text) {
-                        Ok(envelope) => {
-                            if let Message::CapabilityAck(ack) = envelope.message {
+                        Ok(envelope) => match envelope.message {
+                            Message::CapabilityAck(ack) => {
                                 if let Some(negotiated) = negotiated_from_ack(&offer, &ack) {
                                     tracing::info!(
                                         protocol_version = negotiated.protocol_version,
@@ -155,29 +168,59 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                                         "agent capabilities negotiated"
                                     );
                                     if !snapshot_sent
-                                        && negotiated.capabilities.contains(&Capability::InventorySnapshots)
+                                        && negotiated
+                                            .capabilities
+                                            .contains(&Capability::InventorySnapshots)
                                     {
-                                        let snapshot = collectors::collect_snapshot(agent_id).await;
-                                        let snapshot_message = Envelope::new(Message::InventorySnapshot(snapshot.clone()));
-                                        write.send(WsMessage::Text(
-                                            protocol::serialize_envelope(&snapshot_message)?,
-                                        )).await?;
-                                        if negotiated.capabilities.contains(&Capability::BoundedObservations) {
-                                            let observations = collectors::observations_from_snapshot(&snapshot);
-                                            let observation_message = Envelope::new(Message::ObservationBatch(observations));
-                                            write.send(WsMessage::Text(
-                                                protocol::serialize_envelope(&observation_message)?,
-                                            )).await?;
+                                        let pending = pending_snapshot
+                                            .as_ref()
+                                            .expect("pending snapshot exists until acknowledged");
+                                        let snapshot_message = Envelope::new(
+                                            Message::InventorySnapshot(pending.snapshot.clone()),
+                                        );
+                                        write
+                                            .send(WsMessage::Text(
+                                                protocol::serialize_envelope(&snapshot_message)?,
+                                            ))
+                                            .await?;
+                                        if negotiated
+                                            .capabilities
+                                            .contains(&Capability::BoundedObservations)
+                                        {
+                                            let observation_message = Envelope::new(
+                                                Message::ObservationBatch(
+                                                    pending.observations.clone(),
+                                                ),
+                                            );
+                                            write
+                                                .send(WsMessage::Text(
+                                                    protocol::serialize_envelope(
+                                                        &observation_message,
+                                                    )?,
+                                                ))
+                                                .await?;
                                         }
                                         snapshot_sent = true;
                                     }
                                 } else {
-                                    tracing::warn!(?ack, "gateway rejected or returned invalid capability negotiation");
+                                    tracing::warn!(
+                                        ?ack,
+                                        "gateway rejected or returned invalid capability negotiation"
+                                    );
                                 }
-                            } else {
-                                tracing::info!(?envelope.message, "received from gateway");
                             }
-                        }
+                            Message::InventorySnapshotAck(ack) => {
+                                let acknowledged = pending_snapshot.as_ref().is_some_and(
+                                    |pending| pending.snapshot.snapshot_id == ack.snapshot_id,
+                                );
+                                if ack.accepted && acknowledged {
+                                    clear_pending_snapshot(state_dir)?;
+                                    pending_snapshot = None;
+                                    snapshot_sent = false;
+                                }
+                            }
+                            other => tracing::info!(?other, "received from gateway"),
+                        },
                         Err(err) => tracing::warn!(error = %err, "malformed envelope from gateway"),
                     }
                 } else if msg.is_close() {
@@ -188,6 +231,98 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn load_or_collect_pending_snapshot(
+    state_dir: &str,
+    agent_id: Uuid,
+) -> anyhow::Result<PendingSnapshot> {
+    if let Some(pending) = load_pending_snapshot(state_dir)? {
+        if pending.snapshot.agent_id != agent_id {
+            anyhow::bail!(
+                "pending snapshot belongs to agent {}, not enrolled agent {agent_id}",
+                pending.snapshot.agent_id
+            );
+        }
+        return Ok(pending);
+    }
+
+    let sequence = next_snapshot_sequence(state_dir)?;
+    let mut snapshot = collectors::collect_snapshot(agent_id).await;
+    snapshot.sequence = sequence;
+    let observations = collectors::observations_from_snapshot(&snapshot);
+    let pending = PendingSnapshot {
+        snapshot,
+        observations,
+    };
+    persist_pending_snapshot(state_dir, &pending)?;
+    Ok(pending)
+}
+
+fn pending_snapshot_path(state_dir: &str) -> PathBuf {
+    Path::new(state_dir).join(PENDING_SNAPSHOT_FILE)
+}
+
+fn snapshot_sequence_path(state_dir: &str) -> PathBuf {
+    Path::new(state_dir).join(SNAPSHOT_SEQUENCE_FILE)
+}
+
+fn load_pending_snapshot(state_dir: &str) -> anyhow::Result<Option<PendingSnapshot>> {
+    let path = pending_snapshot_path(state_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = std::fs::read_to_string(&path)?;
+    if contents.len() > MAX_PENDING_SNAPSHOT_BYTES {
+        anyhow::bail!(
+            "pending snapshot {} exceeds {MAX_PENDING_SNAPSHOT_BYTES} bytes",
+            path.display()
+        );
+    }
+    let pending: PendingSnapshot = serde_json::from_str(&contents)?;
+    pending
+        .snapshot
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid pending snapshot: {error}"))?;
+    pending
+        .observations
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid pending observations: {error}"))?;
+    Ok(Some(pending))
+}
+
+fn persist_pending_snapshot(state_dir: &str, pending: &PendingSnapshot) -> anyhow::Result<()> {
+    let encoded = serde_json::to_string(pending)?;
+    if encoded.len() > MAX_PENDING_SNAPSHOT_BYTES {
+        anyhow::bail!("pending snapshot exceeds {MAX_PENDING_SNAPSHOT_BYTES} bytes");
+    }
+    let path = pending_snapshot_path(state_dir);
+    let temporary = path.with_extension("json.tmp");
+    write_private(&temporary, &encoded)?;
+    std::fs::rename(temporary, path)?;
+    Ok(())
+}
+
+fn clear_pending_snapshot(state_dir: &str) -> anyhow::Result<()> {
+    match std::fs::remove_file(pending_snapshot_path(state_dir)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn next_snapshot_sequence(state_dir: &str) -> anyhow::Result<u64> {
+    let path = snapshot_sequence_path(state_dir);
+    let current = if path.exists() {
+        std::fs::read_to_string(&path)?.trim().parse::<u64>()?
+    } else {
+        0
+    };
+    let next = current
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("snapshot sequence exhausted"))?;
+    write_private(&path, &format!("{next}\n"))?;
+    Ok(next)
 }
 
 fn negotiated_from_ack(
@@ -306,6 +441,27 @@ mod tests {
         let actual = load_or_create_agent_id(directory.to_str().unwrap(), Some(b"different"))
             .expect("load identity");
         assert_eq!(actual, expected);
+        std::fs::remove_dir_all(directory).expect("remove test state directory");
+    }
+
+    #[test]
+    fn snapshot_sequence_is_persistent_and_monotonic() {
+        let directory = std::env::temp_dir().join(format!("hope-agent-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create state directory");
+
+        assert_eq!(
+            next_snapshot_sequence(directory.to_str().unwrap()).unwrap(),
+            1
+        );
+        assert_eq!(
+            next_snapshot_sequence(directory.to_str().unwrap()).unwrap(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join(SNAPSHOT_SEQUENCE_FILE)).unwrap(),
+            "2\n"
+        );
+
         std::fs::remove_dir_all(directory).expect("remove test state directory");
     }
 }
