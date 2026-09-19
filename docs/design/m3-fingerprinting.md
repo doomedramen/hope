@@ -136,7 +136,8 @@ The current bounded policy emits `monitor.http.generic` for unresolved HTTP,
 unresolved TCP, and a stable `monitor.<protocol>.product.<slug>` rule for a
 resolved HTTP/HTTPS product. Generic HTTP and TCP proposals remain
 representable even when product fingerprinting finds no signature. The policy
-only persists intent; M4 owns monitor creation, scheduling, and health checks.
+only persists intent; M4 owns approval-backed monitor creation, scheduling, and
+health checks.
 
 Fingerprint reconciliation, confirmed service-review decisions, and manual
 service edits refresh proposals in the same transaction. Refresh updates only
@@ -157,10 +158,12 @@ The server exposes authenticated, custom-header-CSRF-protected routes:
 Approval and rejection record manual decision provenance on the proposal and
 write matching change and audit records. Override changes write the same
 records. Repeating the same decision is idempotent; an opposite decision
-returns a conflict. No route creates a monitor or runs a check.
+returns a conflict. Approval creates one durable monitor in the same
+transaction, including a `monitor.created` change event; it does not run a
+check or schedule network work.
 
-M3 supports proposal persistence and review only. Continuous scheduling and
-health execution are M4 work.
+M3 supports proposal persistence and review. Continuous scheduling and health
+execution remain M4 work.
 
 ## 5. Safe multicast collector adapter
 

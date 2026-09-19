@@ -33,3 +33,15 @@ overrides across refresh. This migration adds policy output only: it does not
 create monitor rows, schedule checks, or execute network checks. The upgrade
 test asserts that the proposal table exists after applying the full migration
 set over the M0 schema.
+
+M3 collector evidence lands in `0014_collector_evidence.sql`. It extends the
+evidence source allowlist for UPnP/SSDP observations; the collector runtime
+still requires an approved discovery scope and stores `LOCATION` as observed
+data without fetching it.
+
+M4 monitor persistence lands in `0015_monitoring_core.sql`. It adds approved
+monitor intent, bounded check-result history, and one-open-incident-per-monitor
+state. `0016_monitoring_defaults.sql` aligns new monitor rows with the M4
+defaults from spec §8.3: a 30-second interval and three consecutive failures.
+These migrations do not themselves schedule checks or send notifications;
+those behaviours belong to the M4 worker slices.

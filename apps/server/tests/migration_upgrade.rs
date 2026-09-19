@@ -1,4 +1,4 @@
-//! Migration upgrade-path test (migrations/README.md, M1 gate follow-up):
+//! Migration upgrade-path test (migrations/README.md, M1/M4 gate follow-up):
 //! apply the M0 schema (migrations 0001-0003) as if already deployed,
 //! insert sample data, then apply all later migrations on top, and assert the
 //! M0 data survived untouched.
@@ -116,6 +116,44 @@ async fn m0_schema_upgrades_to_m1_without_data_loss() {
         .await
         .expect("monitor proposal table exists after upgrade");
     assert_eq!(proposal_count, 0);
+
+    let monitor_count: i64 = sqlx::query_scalar("select count(*) from monitors")
+        .fetch_one(&pool)
+        .await
+        .expect("monitor table exists after upgrade");
+    assert_eq!(monitor_count, 0);
+
+    let result_count: i64 = sqlx::query_scalar("select count(*) from monitor_results")
+        .fetch_one(&pool)
+        .await
+        .expect("monitor result table exists after upgrade");
+    assert_eq!(result_count, 0);
+
+    let incident_count: i64 = sqlx::query_scalar("select count(*) from incidents")
+        .fetch_one(&pool)
+        .await
+        .expect("incident table exists after upgrade");
+    assert_eq!(incident_count, 0);
+
+    let interval_default: String = sqlx::query_scalar(
+        "select column_default from information_schema.columns \
+         where table_schema = 'public' and table_name = 'monitors' \
+           and column_name = 'interval_seconds'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("monitor interval default exists");
+    assert_eq!(interval_default, "30");
+
+    let failure_default: String = sqlx::query_scalar(
+        "select column_default from information_schema.columns \
+         where table_schema = 'public' and table_name = 'monitors' \
+           and column_name = 'failure_threshold'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("monitor failure default exists");
+    assert_eq!(failure_default, "3");
 }
 
 /// Build a temp directory containing only the M0 migration files

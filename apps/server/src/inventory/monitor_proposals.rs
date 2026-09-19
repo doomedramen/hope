@@ -1,8 +1,9 @@
 //! Durable monitor-proposal policy and review API.
 //!
 //! This module reads only resolved service fields and current canonical
-//! endpoints. It persists policy output for M4; it never probes a target and
-//! never creates or schedules a monitor.
+//! endpoints. It persists policy output for M4 and creates a monitor only
+//! after an operator approves a proposal; it never probes a target or
+//! schedules a check.
 
 use anyhow::{Result, anyhow};
 use axum::Extension;
@@ -17,6 +18,7 @@ use uuid::Uuid;
 use crate::auth_mw::CurrentUser;
 use crate::inventory::events::Recorder;
 use crate::inventory::pagination::{decode_cursor, effective_limit, encode_cursor};
+use crate::monitoring;
 use crate::state::AppState;
 
 pub const GENERIC_HTTP_RULE_ID: &str = "monitor.http.generic";
@@ -570,6 +572,11 @@ async fn resolve(
 
     if status != "pending" {
         if status == requested_status {
+            if requested_status == "approved"
+                && let Err(error) = monitoring::create_from_proposal_tx(&mut tx, id, user_id).await
+            {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+            }
             match proposal_value_tx(&mut tx, id).await {
                 Ok(value) => {
                     if let Err(error) = tx.commit().await {
@@ -600,6 +607,11 @@ async fn resolve(
     .bind(user_id)
     .execute(&mut *tx)
     .await
+    {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    if requested_status == "approved"
+        && let Err(error) = monitoring::create_from_proposal_tx(&mut tx, id, user_id).await
     {
         return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
@@ -895,6 +907,77 @@ mod tests {
         .await
         .expect("read proposal change events");
         assert_eq!(events, 1);
+    }
+
+    #[tokio::test]
+    async fn approving_proposal_creates_monitor_and_reapproval_keeps_state() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let (service_id, endpoint_id) = fixture(&pool, "http", None).await;
+        let proposal_id = generate_for_service(&pool, service_id)
+            .await
+            .expect("generate monitor proposal")[0];
+        let user_id = proposal_user(&pool).await;
+        let state = AppState { pool: pool.clone() };
+
+        let approved = approve(
+            State(state.clone()),
+            Extension(CurrentUser(user_id)),
+            Path(proposal_id),
+        )
+        .await;
+        assert_eq!(approved.0, StatusCode::OK);
+
+        let monitor_id: Uuid = sqlx::query_scalar(
+            "select id from monitors where proposal_id = $1 and service_id = $2 \
+             and endpoint_id = $3",
+        )
+        .bind(proposal_id)
+        .bind(service_id)
+        .bind(endpoint_id)
+        .fetch_one(&pool)
+        .await
+        .expect("approval creates monitor");
+        sqlx::query(
+            "update monitors set state = 'down', consecutive_failures = 4 \
+             where id = $1",
+        )
+        .bind(monitor_id)
+        .execute(&pool)
+        .await
+        .expect("set monitor state for retry");
+
+        let reapproved = approve(
+            State(state),
+            Extension(CurrentUser(user_id)),
+            Path(proposal_id),
+        )
+        .await;
+        assert_eq!(reapproved.0, StatusCode::OK);
+
+        let (monitor_count, state, failures): (i64, String, i32) = sqlx::query_as(
+            "select count(*), max(state), max(consecutive_failures)::integer \
+             from monitors where proposal_id = $1",
+        )
+        .bind(proposal_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read idempotent monitor");
+        assert_eq!(monitor_count, 1);
+        assert_eq!(state, "down");
+        assert_eq!(failures, 4);
+
+        let change_count: i64 = sqlx::query_scalar(
+            "select count(*) from change_events where entity_kind = 'monitors' \
+             and entity_id = $1 and category = 'monitor.created'",
+        )
+        .bind(monitor_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read monitor creation event");
+        assert_eq!(change_count, 1);
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ mod enroll;
 mod gateway;
 mod inventory;
 mod jobs_handlers;
+mod monitoring;
 mod pki;
 mod ratelimit;
 mod routes;
@@ -278,6 +279,8 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             "/api/v1/monitor-proposals/{id}/reject",
             post(inventory::monitor_proposals::reject),
         )
+        .route("/api/v1/monitors", get(monitoring::list))
+        .route("/api/v1/monitors/{id}", get(monitoring::get))
         .route(
             "/api/v1/services/{id}/monitor-proposals",
             post(inventory::monitor_proposals::generate_for_path),
