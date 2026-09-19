@@ -19,7 +19,9 @@ use crate::pki::{self, Ca};
 #[derive(Clone)]
 struct EnrollState {
     pool: PgPool,
-    config: std::sync::Arc<Config>,
+    /// Loaded once at listener startup and reused for every request
+    /// (previously reloaded from disk per request).
+    ca: std::sync::Arc<Ca>,
     ca_cert_pem: std::sync::Arc<String>,
 }
 
@@ -59,19 +61,7 @@ async fn enroll(
         );
     }
 
-    // Re-load the CA from disk per request: simple and correct for M0
-    // volumes; can be cached later if signing throughput matters.
-    let ca: Ca = match pki::load_ca(&state.config) {
-        Ok(ca) => ca,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": err.to_string() })),
-            );
-        }
-    };
-
-    let (cert_pem, serial, fingerprint) = match pki::sign_agent_csr(&ca, &req.csr_pem) {
+    let (cert_pem, serial, fingerprint) = match pki::sign_agent_csr(&state.ca, &req.csr_pem) {
         Ok(v) => v,
         Err(err) => {
             return (
@@ -108,10 +98,11 @@ async fn enroll(
 
 pub async fn serve(config: Config, pool: PgPool) -> anyhow::Result<()> {
     let ca = pki::load_ca(&config)?;
+    let ca_cert_pem = ca.cert.pem();
     let state = EnrollState {
         pool,
-        config: std::sync::Arc::new(config.clone()),
-        ca_cert_pem: std::sync::Arc::new(ca.cert.pem()),
+        ca: std::sync::Arc::new(ca),
+        ca_cert_pem: std::sync::Arc::new(ca_cert_pem),
     };
 
     let app = Router::new()

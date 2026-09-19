@@ -72,10 +72,16 @@ pub fn init(config: &Config) -> anyhow::Result<()> {
     let server_key = KeyPair::generate()?;
     let server_cert = server_params.signed_by(&server_key, &ca_cert, &ca_key)?;
 
+    // The server cert file holds leaf + CA (a full chain), not just the
+    // leaf: clients pinning the CA fingerprint (agent enroll bootstrap)
+    // need the CA cert to actually be present in the TLS handshake's
+    // certificate message to find a match.
+    let server_chain_pem = format!("{}{}", server_cert.pem(), ca_cert.pem());
+
     for (path, contents) in [
         (&config.ca_cert_path, ca_cert.pem()),
         (&config.ca_key_path, ca_key.serialize_pem()),
-        (&config.server_cert_path, server_cert.pem()),
+        (&config.server_cert_path, server_chain_pem),
         (&config.server_key_path, server_key.serialize_pem()),
     ] {
         if let Some(parent) = Path::new(path).parent() {

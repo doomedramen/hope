@@ -140,10 +140,17 @@ async fn main() -> anyhow::Result<()> {
             EnrollTokenAction::Create { ttl_minutes } => {
                 let pool = build_pool(&config).await?;
                 let token = agents::create_enrollment_token(&pool, ttl_minutes).await?;
-                // Deliberately bypasses `tracing` (JSON logs may be
-                // shipped elsewhere): this is the one and only time the
-                // token is available in cleartext.
-                println!("{token}");
+                let ca = pki::load_ca(&config)?;
+                let ca_fingerprint = pki::fingerprint_der(ca.cert.der());
+                // Deliberately bypasses `tracing` (JSON logs may be shipped
+                // elsewhere): this is the one and only time the token is
+                // available in cleartext. The CA fingerprint is not
+                // secret, but is printed alongside it for convenience —
+                // `agent enroll` needs both to pin the enroll TLS
+                // connection (replaces TOFU).
+                println!("token={token}");
+                println!("ca_fingerprint_sha256={ca_fingerprint}");
+                println!("code={token}.{ca_fingerprint}");
             }
         },
         Role::RevokeAgent { agent_id } => {
