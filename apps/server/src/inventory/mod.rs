@@ -5,6 +5,7 @@
 pub mod addresses;
 pub mod changes;
 pub mod devices;
+pub mod discovery_scopes;
 pub mod events;
 pub mod evidence;
 pub mod generic;

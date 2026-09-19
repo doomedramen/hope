@@ -141,6 +141,14 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             get(inventory::generic::networks::get).patch(inventory::generic::networks::patch),
         )
         .route(
+            "/api/v1/networks/{id}/discovery-scope",
+            post(inventory::discovery_scopes::draft),
+        )
+        .route(
+            "/api/v1/networks/{id}/discovery-scope/confirm",
+            post(inventory::discovery_scopes::confirm),
+        )
+        .route(
             "/api/v1/devices",
             get(inventory::devices::list).post(inventory::devices::create),
         )
