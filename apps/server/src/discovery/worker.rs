@@ -22,6 +22,12 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::classification::{ClassificationResult, Classifier};
+#[cfg(test)]
+use super::policy::PacingConfig;
+use super::policy::{
+    NORMAL_CLASSIFICATION_CONCURRENCY, ResolvedScanPolicy, ScanPacer, probe_seed,
+    resolve_scan_policy,
+};
 use super::tcp::{ConnectScanner, ConnectScannerConfig, PortObservation, PortState, Scanner};
 use crate::inventory::{addresses, events::Recorder, evidence};
 
@@ -34,7 +40,7 @@ const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 // Keep classification fan-out independent from TCP scan fan-out. Each
 // classifier already has its own bounded connection budget, so this cap
 // prevents one batch of open ports from causing unbounded re-probing.
-const CLASSIFICATION_CONCURRENCY: usize = 8;
+const CLASSIFICATION_CONCURRENCY: usize = NORMAL_CLASSIFICATION_CONCURRENCY;
 const _: () = assert!(CLASSIFICATION_CONCURRENCY > 1);
 const PORT_EVIDENCE_ATTRIBUTE: &str = "open_port";
 const PORT_EVIDENCE_CONFIDENCE: f32 = 0.9;
@@ -86,7 +92,11 @@ pub async fn handle(
         targets
     };
 
-    let config = match scanner_config(&run) {
+    let policy = match run_policy(&run) {
+        Ok(policy) => policy,
+        Err(error) => return async_fail_run(pool, run.id, error).await,
+    };
+    let config = match scanner_config(&run, policy) {
         Ok(config) => config,
         Err(error) => return async_fail_run(pool, run.id, error).await,
     };
@@ -95,6 +105,16 @@ pub async fn handle(
         global_concurrency = config.global_concurrency(),
         network_concurrency = config.network_concurrency(),
         per_host_concurrency = config.per_host_concurrency(),
+        scan_profile = policy.profile().as_str(),
+        classification_concurrency = policy.classification_concurrency(),
+        tcp_probe_interval_ms = policy.tcp_pacing().interval().as_millis(),
+        tcp_jitter_ms = policy.tcp_pacing().jitter().as_millis(),
+        tcp_backoff_step_ms = policy.tcp_pacing().backoff_step().as_millis(),
+        tcp_backoff_max_ms = policy.tcp_pacing().backoff_max().as_millis(),
+        classification_interval_ms = policy.classification_pacing().interval().as_millis(),
+        classification_jitter_ms = policy.classification_pacing().jitter().as_millis(),
+        classification_backoff_step_ms = policy.classification_pacing().backoff_step().as_millis(),
+        classification_backoff_max_ms = policy.classification_pacing().backoff_max().as_millis(),
         run_id = %run.id,
         "configured TCP discovery scanner"
     );
@@ -155,6 +175,7 @@ struct ScanRun {
     tcp_concurrency: Option<i32>,
     per_host_concurrency: Option<i32>,
     connect_timeout_ms: Option<i32>,
+    scan_profile: Option<String>,
     job_cancel_requested: bool,
 }
 
@@ -168,7 +189,7 @@ async fn load_run(pool: &PgPool, job_id: Uuid) -> Result<ScanRun> {
                 (ds.confirmed_at is not null) as scope_confirmed, \
                 ds.enabled as scope_enabled, ds.version as current_scope_version, \
                 ds.confirmed_target_count, ds.tcp_concurrency, \
-                ds.per_host_concurrency, ds.connect_timeout_ms, \
+                ds.per_host_concurrency, ds.connect_timeout_ms, ds.scan_profile, \
                 j.cancel_requested as job_cancel_requested \
          from scan_runs sr \
          join jobs j on j.id = sr.job_id \
@@ -202,6 +223,7 @@ async fn load_run(pool: &PgPool, job_id: Uuid) -> Result<ScanRun> {
         tcp_concurrency: row.try_get("tcp_concurrency")?,
         per_host_concurrency: row.try_get("per_host_concurrency")?,
         connect_timeout_ms: row.try_get("connect_timeout_ms")?,
+        scan_profile: row.try_get("scan_profile")?,
         job_cancel_requested: row.try_get("job_cancel_requested")?,
     })
 }
@@ -292,7 +314,11 @@ fn target_addresses(scope: &ApprovedScope) -> Vec<IpAddr> {
         .collect()
 }
 
-fn scanner_config(run: &ScanRun) -> Result<ConnectScannerConfig> {
+fn run_policy(run: &ScanRun) -> Result<ResolvedScanPolicy> {
+    let profile = run
+        .scan_profile
+        .as_deref()
+        .ok_or_else(|| anyhow!("discovery scope has no scan profile"))?;
     let tcp_concurrency = usize::try_from(
         run.tcp_concurrency
             .ok_or_else(|| anyhow!("discovery scope has no TCP concurrency"))?,
@@ -303,6 +329,12 @@ fn scanner_config(run: &ScanRun) -> Result<ConnectScannerConfig> {
             .ok_or_else(|| anyhow!("discovery scope has no per-host concurrency"))?,
     )
     .context("discovery scope per-host concurrency is invalid")?;
+
+    resolve_scan_policy(profile, tcp_concurrency, per_host_concurrency)
+        .map_err(|error| anyhow!("invalid discovery scan policy: {error}"))
+}
+
+fn scanner_config(run: &ScanRun, policy: ResolvedScanPolicy) -> Result<ConnectScannerConfig> {
     let connect_timeout_ms = u64::try_from(
         run.connect_timeout_ms
             .ok_or_else(|| anyhow!("discovery scope has no connect timeout"))?,
@@ -311,9 +343,9 @@ fn scanner_config(run: &ScanRun) -> Result<ConnectScannerConfig> {
 
     ConnectScannerConfig::new(
         Duration::from_millis(connect_timeout_ms),
-        tcp_concurrency,
-        tcp_concurrency,
-        per_host_concurrency,
+        policy.tcp_global_concurrency(),
+        policy.tcp_network_concurrency(),
+        policy.tcp_per_host_concurrency(),
     )
     .map_err(|error| anyhow!(error))
 }
@@ -513,6 +545,16 @@ async fn execute_run(
         scanner,
         device_ids,
     } = plan;
+    let policy = match run_policy(&run) {
+        Ok(policy) => policy,
+        Err(error) => return async_fail_run(pool, run.id, error).await,
+    };
+    let run_seed = u64::from_le_bytes(run.id.as_bytes()[..8].try_into().expect("UUID is 16 bytes"));
+    let tcp_pacer = Arc::new(ScanPacer::production(policy.tcp_pacing(), run_seed));
+    let classification_pacer = Arc::new(ScanPacer::production(
+        policy.classification_pacing(),
+        run_seed ^ 0x6a09_e667_f3bc_c909,
+    ));
     let classifier = Classifier::new(Default::default()).map_err(|error| anyhow!(error))?;
     if ports.is_empty() {
         let error = anyhow!("TCP scan has no ports");
@@ -617,6 +659,12 @@ async fn execute_run(
                 &run.network_id.to_string(),
                 *address,
                 batch,
+                ScanBatchContext {
+                    run_seed,
+                    target_index,
+                    batch_index,
+                    pacer: &tcp_pacer,
+                },
                 Arc::clone(&control),
             )
             .await;
@@ -641,11 +689,14 @@ async fn execute_run(
                 address_has_liveness = true;
             }
             if !observations.is_empty() {
-                let classification_batch = classify_open_observations(
+                let classification_batch = classify_open_observations_with_policy(
                     &classifier,
                     &observations,
                     device_ids,
                     Arc::clone(&control),
+                    policy.classification_concurrency(),
+                    Arc::clone(&classification_pacer),
+                    run_seed,
                 )
                 .await;
                 if control.lease_lost() {
@@ -728,6 +779,13 @@ struct BatchResult {
     failure: Option<ProbeFailure>,
 }
 
+struct ScanBatchContext<'a> {
+    run_seed: u64,
+    target_index: usize,
+    batch_index: usize,
+    pacer: &'a ScanPacer,
+}
+
 struct ClassifiedOpenPort {
     address: IpAddr,
     port: u16,
@@ -752,11 +810,33 @@ impl OpenPortClassifier for Classifier {
     }
 }
 
+#[cfg(test)]
 async fn classify_open_observations<C: OpenPortClassifier + ?Sized>(
     classifier: &C,
     observations: &[PortObservation],
     device_ids: &HashMap<IpAddr, Uuid>,
     control: Arc<WorkerControl>,
+) -> ClassificationBatch {
+    classify_open_observations_with_policy(
+        classifier,
+        observations,
+        device_ids,
+        control,
+        CLASSIFICATION_CONCURRENCY,
+        Arc::new(ScanPacer::production(PacingConfig::disabled(), 0)),
+        0,
+    )
+    .await
+}
+
+async fn classify_open_observations_with_policy<C: OpenPortClassifier + ?Sized>(
+    classifier: &C,
+    observations: &[PortObservation],
+    device_ids: &HashMap<IpAddr, Uuid>,
+    control: Arc<WorkerControl>,
+    concurrency: usize,
+    pacer: Arc<ScanPacer>,
+    run_seed: u64,
 ) -> ClassificationBatch {
     let candidates: Vec<(usize, IpAddr, u16, Uuid)> = observations
         .iter()
@@ -773,6 +853,8 @@ async fn classify_open_observations<C: OpenPortClassifier + ?Sized>(
     let mut pending = stream::iter(candidates.into_iter().map(
         |(index, address, port, device_id)| {
             let control = Arc::clone(&control);
+            let pacer = Arc::clone(&pacer);
+            let pacing_attempt = u32::try_from(index / concurrency.max(1)).unwrap_or(u32::MAX);
             async move {
                 let (result, stopped) = tokio::select! {
                     biased;
@@ -784,7 +866,29 @@ async fn classify_open_observations<C: OpenPortClassifier + ?Sized>(
                         };
                         (ClassificationResult::generic_fallback(address, port, Some(reason)), true)
                     }
-                    result = classifier.classify(address, port) => (result, false),
+                    _ = pacer.wait(probe_seed(run_seed, index, 0, port), pacing_attempt) => {
+                        if control.stop_requested() {
+                            let reason = if control.cancellation_requested() {
+                                "cancelled"
+                            } else {
+                                "lease_lost"
+                            };
+                            (ClassificationResult::generic_fallback(address, port, Some(reason)), true)
+                        } else {
+                            tokio::select! {
+                                biased;
+                                _ = wait_for_stop(Arc::clone(&control)) => {
+                                    let reason = if control.cancellation_requested() {
+                                        "cancelled"
+                                    } else {
+                                        "lease_lost"
+                                    };
+                                    (ClassificationResult::generic_fallback(address, port, Some(reason)), true)
+                                }
+                                result = classifier.classify(address, port) => (result, false),
+                            }
+                        }
+                    }
                 };
                 (
                     index,
@@ -799,7 +903,7 @@ async fn classify_open_observations<C: OpenPortClassifier + ?Sized>(
             }
         },
     ))
-    .buffer_unordered(CLASSIFICATION_CONCURRENCY);
+    .buffer_unordered(concurrency.max(1));
 
     let mut indexed = Vec::new();
     let mut cancelled = false;
@@ -841,11 +945,19 @@ async fn scan_batch<S: Scanner + ?Sized>(
     network_key: &str,
     address: IpAddr,
     ports: &[u16],
+    context: ScanBatchContext<'_>,
     control: Arc<WorkerControl>,
 ) -> BatchResult {
+    let ScanBatchContext {
+        run_seed,
+        target_index,
+        batch_index,
+        pacer,
+    } = context;
     let mut observations = Vec::with_capacity(ports.len());
     let mut probes = stream::iter(ports.iter().copied().map(|port| {
         let control = Arc::clone(&control);
+        let seed = probe_seed(run_seed, target_index, batch_index, port);
         async move {
             if control.stop_requested() {
                 return Err(ProbeFailure::Stopped);
@@ -853,8 +965,18 @@ async fn scan_batch<S: Scanner + ?Sized>(
             tokio::select! {
                 biased;
                 _ = wait_for_stop(Arc::clone(&control)) => Err(ProbeFailure::Stopped),
-                result = scanner.scan_scoped(network_key, SocketAddr::new(address, port)) => {
-                    result.map_err(ProbeFailure::Scanner)
+                _ = pacer.wait(seed, batch_index as u32) => {
+                    if control.stop_requested() {
+                        Err(ProbeFailure::Stopped)
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = wait_for_stop(Arc::clone(&control)) => Err(ProbeFailure::Stopped),
+                            result = scanner.scan_scoped(network_key, SocketAddr::new(address, port)) => {
+                                result.map_err(ProbeFailure::Scanner)
+                            }
+                        }
+                    }
                 }
             }
         }

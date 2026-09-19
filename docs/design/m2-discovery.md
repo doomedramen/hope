@@ -26,6 +26,27 @@ low-impact profile, global worker policy inputs, per-host concurrency, connect
 timeout, and discovery/full-TCP cadence. The worker treats these as limits, not
 suggestions.
 
+### 1.1 Low-impact policy
+
+The worker resolves `scan_profile` when it loads a run. `normal` preserves the
+stored TCP global, scope, and per-host limits. `low_impact` applies reductions
+only: global and scope concurrency are capped at 8, per-host concurrency at 1,
+and classification fan-out at 2. Classification fan-out is also bounded by the
+stored TCP and per-host limits, so policy resolution never increases an
+operator limit.
+
+Both profiles keep the complete TCP plan (`1–65535` for every approved
+target). Low-impact work adds a shared per-run start interval, deterministic
+per-probe jitter, and a capped batch backoff. TCP and classification phases use
+separate pacing state. The run UUID seeds the schedule, so concurrent runs do
+not begin with one synchronized delay pattern, while retries of one run remain
+reproducible. Clock, jitter, and sleeper seams make policy tests deterministic.
+
+Pacing waits are cancellation-aware and run outside scanner semaphores. The
+existing cancellation monitor and 60-second lease heartbeat continue during
+long low-impact waits. A cancelled or lease-lost run stops before launching
+the next probe; it never turns pacing into skipped successful work.
+
 ## 2. Scan runs and partial results
 
 The next migration adds `scan_runs` and `port_observations`.
@@ -70,13 +91,15 @@ unchanged and partial UDP work cannot create absence evidence.
 The scan coordinator owns the semaphores in this order: global, scope, then
 host. It checks cancellation before each target and port, heartbeats the job
 lease while a run is active, and records completed work in `jobs.progress`.
-Open-port classification uses a separate fixed concurrency bound of eight;
-each classifier retains its own connection and deadline limits, so a large
-open-port batch cannot create unbounded re-probing. A cancellation signal
-aborts in-flight classifier probes and uses the generic `tcp` fallback for
-open observations that still need persistence. Classification results are
-reordered to observation order before persistence, so service reconciliation
-remains in the same transaction and ordering as the raw port observations.
+Open-port classification uses a separate policy-resolved concurrency bound;
+normal runs cap at eight and low-impact runs cap at two, subject to stored TCP
+and per-host limits. Each classifier retains its own connection and deadline
+limits, so a large open-port batch cannot create unbounded re-probing. A
+cancellation signal aborts in-flight classifier probes and uses the generic
+`tcp` fallback for open observations that still need persistence. Classification
+results are reordered to observation order before persistence, so service
+reconciliation remains in the same transaction and ordering as the raw port
+observations.
 The worker polls cancellation every 100 ms and renews the 60-second job lease
 every 10 seconds with a five-second heartbeat timeout, including progress
 counts while classification is active.
@@ -185,6 +208,11 @@ M2 has no persisted quiet-period or maintenance subsystem yet. The planner
 does not invent a bypass; future quiet/maintenance gates must be checked before
 the same transactional enqueue step.
 
+Low-impact pacing is not a maintenance substitute. It does not pause during a
+quiet period, inspect maintenance events, or change job eligibility. Those
+gates belong to the later maintenance milestone and must be added at the
+transactional planning boundary.
+
 ## 7. Test seams
 
 - `domain::discovery::ApprovedScope::parse`: private-range, size, exclusion,
@@ -196,5 +224,8 @@ the same transactional enqueue step.
   ambiguous transport outcomes; explicit probe-list and concurrency bounds.
 - Run application: partial runs cannot close ports; complete runs emit accurate
   open/closed change events.
+- Scan policy: low-impact resolution only reduces stored limits; complete
+  port plans remain unchanged; injected clock/jitter/sleeper seams verify
+  deterministic bounded pacing.
 - Basic classifier: local HTTP, TLS/HTTPS, SSH-banner, generic TCP, bounded
   redirects/body, and sensitive-header fixtures.

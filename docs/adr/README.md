@@ -17,6 +17,7 @@ Decisions are recorded using the template in [`0000-template.md`](0000-template.
 | [0011](0011-generic-webhook-ntfy-notifications.md) | Generic webhook + ntfy as the v1 notification providers. |
 | [0012](0012-jiff-time-rrule-recurrence.md) | `jiff` for time maths; `rrule` for RFC 5545 recurrence, isolated from `chrono`. |
 | [0013](0013-safe-basic-tcp-classification.md) | Bounded observation-only TCP protocol classification. |
+| [0014](0014-low-impact-discovery-policy.md) | Explicit low-impact scan limits, deterministic pacing, and no M2 maintenance bypass. |
 
 ## Supporting library defaults
 
