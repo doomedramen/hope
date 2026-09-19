@@ -258,3 +258,13 @@ Design §3 gives hostname weight 0.3 (below the 0.4 review floor), but the §7 g
 - Status: captured
 
 Scores combine by probabilistic-OR (1 - Π(1-w)) because the design's example numbers weren't internally consistent with a "weighted sum normalized 0-1". Not checked against a canonical example.
+
+## M1 paused before completion
+
+- Created: 2026-09-19
+- Type: todo
+- Area: m1
+- Context: Stopped early (operator out of credit)
+- Status: captured
+
+Branch m1-inventory at 74928eb, not merged. Done: migrations 0004-0008, identity/merge core (hostname weight 0.4, review floor 0.4), repo + /api/v1 layer, merge/split/undo, review queue, evidence, changes/audit, retention job, seed command; all 5 M1 gate tests pass; cargo check clean. Left: web UI screens, re-run fmt/clippy/web build+lint, confirm design doc update for threshold + probabilistic-OR example, then merge --ff-only into main.
