@@ -1,13 +1,13 @@
 //! Agent runtime: connect to the gateway over mTLS WebSocket, send Hello,
-//! then heartbeat on a fixed interval (ADR-0007/0008). Reconnects with
-//! exponential backoff + jitter on any error or disconnect; the backoff
+//! then heartbeat and periodic inventory refresh (ADR-0007/0008). Reconnects
+//! with exponential backoff + jitter on any error or disconnect; the backoff
 //! counter resets after a session is successfully established.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use rand::Rng;
 use rustls::RootCertStore;
 use serde::{Deserialize, Serialize};
@@ -20,11 +20,15 @@ use crate::collectors;
 use crate::identity::{Paths, write_private};
 use protocol::{
     Capability, CapabilityAck, CapabilityOffer, Envelope, Heartbeat, Hello, InventorySnapshot,
-    MAX_OBSERVATION_BATCH_BYTES, MAX_SNAPSHOT_BYTES, Message, ObservationBatch,
-    SUPPORTED_PROTOCOL_VERSIONS, negotiate_capabilities,
+    InventorySnapshotAck, MAX_OBSERVATION_BATCH_BYTES, MAX_SNAPSHOT_BYTES, Message,
+    ObservationBatch, SUPPORTED_PROTOCOL_VERSIONS, negotiate_capabilities,
 };
 
 const MAX_BACKOFF_SECS: u64 = 60;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+/// Inventory refresh cadence for an established session. Collectors can run
+/// bounded host probes, so inventory refreshes stay slower than heartbeats.
+const INVENTORY_REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const SNAPSHOT_SEQUENCE_FILE: &str = "snapshot-sequence";
 const PENDING_SNAPSHOT_FILE: &str = "pending-snapshot.json";
 const MAX_PENDING_SNAPSHOT_BYTES: usize = MAX_SNAPSHOT_BYTES + MAX_OBSERVATION_BATCH_BYTES;
@@ -49,6 +53,20 @@ fn backoff_delay(attempt: u32) -> Duration {
     let base = backoff_base_secs(attempt);
     let jittered = rand::thread_rng().gen_range(0..=base.max(1));
     Duration::from_secs(jittered)
+}
+
+fn inventory_refresh_interval() -> tokio::time::Interval {
+    let connected_at = tokio::time::Instant::now();
+    let mut interval = tokio::time::interval_at(
+        inventory_refresh_deadline(connected_at),
+        INVENTORY_REFRESH_INTERVAL,
+    );
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
+fn inventory_refresh_deadline(connected_at: tokio::time::Instant) -> tokio::time::Instant {
+    connected_at + INVENTORY_REFRESH_INTERVAL
 }
 
 pub async fn run(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
@@ -137,10 +155,12 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
         .await?;
 
     let start = Instant::now();
-    let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
+    let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat_interval.tick().await; // first tick fires immediately
+    let mut inventory_refresh = inventory_refresh_interval();
     let mut snapshot_sent = false;
     let mut pending_snapshot = Some(pending_snapshot);
+    let mut negotiated_capabilities: Option<Vec<Capability>> = None;
 
     loop {
         tokio::select! {
@@ -150,6 +170,24 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                     uptime_secs: start.elapsed().as_secs(),
                 }));
                 write.send(WsMessage::Text(protocol::serialize_envelope(&hb)?)).await?;
+            }
+            _ = inventory_refresh.tick() => {
+                let Some(capabilities) = negotiated_capabilities.as_deref() else {
+                    continue;
+                };
+                if !capabilities.contains(&Capability::InventorySnapshots) {
+                    continue;
+                }
+
+                if pending_snapshot.is_none() {
+                    pending_snapshot = Some(load_or_collect_pending_snapshot(state_dir, agent_id).await?);
+                }
+
+                let pending = pending_snapshot
+                    .as_ref()
+                    .expect("pending snapshot exists after refresh collection");
+                send_pending_snapshot(&mut write, pending, capabilities).await?;
+                snapshot_sent = true;
             }
             msg = read.next() => {
                 let Some(msg) = msg else {
@@ -167,39 +205,19 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                                         capabilities = ?negotiated.capabilities,
                                         "agent capabilities negotiated"
                                     );
+                                    let inventory_enabled = negotiated
+                                        .capabilities
+                                        .contains(&Capability::InventorySnapshots);
+                                    negotiated_capabilities = Some(negotiated.capabilities);
                                     if !snapshot_sent
-                                        && negotiated
-                                            .capabilities
-                                            .contains(&Capability::InventorySnapshots)
+                                        && inventory_enabled
+                                        && let (Some(pending), Some(capabilities)) = (
+                                            pending_snapshot.as_ref(),
+                                            negotiated_capabilities.as_deref(),
+                                        )
                                     {
-                                        let pending = pending_snapshot
-                                            .as_ref()
-                                            .expect("pending snapshot exists until acknowledged");
-                                        let snapshot_message = Envelope::new(
-                                            Message::InventorySnapshot(pending.snapshot.clone()),
-                                        );
-                                        write
-                                            .send(WsMessage::Text(
-                                                protocol::serialize_envelope(&snapshot_message)?,
-                                            ))
+                                        send_pending_snapshot(&mut write, pending, capabilities)
                                             .await?;
-                                        if negotiated
-                                            .capabilities
-                                            .contains(&Capability::BoundedObservations)
-                                        {
-                                            let observation_message = Envelope::new(
-                                                Message::ObservationBatch(
-                                                    pending.observations.clone(),
-                                                ),
-                                            );
-                                            write
-                                                .send(WsMessage::Text(
-                                                    protocol::serialize_envelope(
-                                                        &observation_message,
-                                                    )?,
-                                                ))
-                                                .await?;
-                                        }
                                         snapshot_sent = true;
                                     }
                                 } else {
@@ -210,12 +228,11 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                                 }
                             }
                             Message::InventorySnapshotAck(ack) => {
-                                let acknowledged = pending_snapshot.as_ref().is_some_and(
-                                    |pending| pending.snapshot.snapshot_id == ack.snapshot_id,
-                                );
-                                if ack.accepted && acknowledged {
-                                    clear_pending_snapshot(state_dir)?;
-                                    pending_snapshot = None;
+                                if acknowledge_pending_snapshot(
+                                    state_dir,
+                                    &mut pending_snapshot,
+                                    &ack,
+                                )? {
                                     snapshot_sent = false;
                                 }
                             }
@@ -231,6 +248,54 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn send_pending_snapshot<S>(
+    write: &mut S,
+    pending: &PendingSnapshot,
+    capabilities: &[Capability],
+) -> anyhow::Result<()>
+where
+    S: Sink<WsMessage> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let snapshot_message = Envelope::new(Message::InventorySnapshot(pending.snapshot.clone()));
+    write
+        .send(WsMessage::Text(protocol::serialize_envelope(
+            &snapshot_message,
+        )?))
+        .await
+        .map_err(|error| anyhow::anyhow!("send inventory snapshot: {error}"))?;
+
+    if capabilities.contains(&Capability::BoundedObservations) {
+        let observation_message =
+            Envelope::new(Message::ObservationBatch(pending.observations.clone()));
+        write
+            .send(WsMessage::Text(protocol::serialize_envelope(
+                &observation_message,
+            )?))
+            .await
+            .map_err(|error| anyhow::anyhow!("send inventory observations: {error}"))?;
+    }
+
+    Ok(())
+}
+
+fn acknowledge_pending_snapshot(
+    state_dir: &str,
+    pending_snapshot: &mut Option<PendingSnapshot>,
+    ack: &InventorySnapshotAck,
+) -> anyhow::Result<bool> {
+    let acknowledged = pending_snapshot
+        .as_ref()
+        .is_some_and(|pending| pending.snapshot.snapshot_id == ack.snapshot_id);
+    if !ack.accepted || !acknowledged {
+        return Ok(false);
+    }
+
+    clear_pending_snapshot(state_dir)?;
+    *pending_snapshot = None;
+    Ok(true)
 }
 
 async fn load_or_collect_pending_snapshot(
@@ -459,6 +524,127 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(directory.join(SNAPSHOT_SEQUENCE_FILE)).unwrap(),
+            "2\n"
+        );
+
+        std::fs::remove_dir_all(directory).expect("remove test state directory");
+    }
+
+    #[test]
+    fn inventory_refresh_interval_starts_after_configured_period() {
+        let connected_at = tokio::time::Instant::now();
+        let first_refresh = inventory_refresh_deadline(connected_at);
+
+        assert_eq!(first_refresh - connected_at, INVENTORY_REFRESH_INTERVAL);
+        assert_eq!(INVENTORY_REFRESH_INTERVAL, Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn pending_snapshot_is_reused_until_ack_then_refreshes_sequence() {
+        let directory = std::env::temp_dir().join(format!("hope-agent-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create state directory");
+        let state_dir = directory.to_str().expect("state directory path");
+        let agent_id = Uuid::from_u128(1);
+        let first = PendingSnapshot {
+            snapshot: InventorySnapshot {
+                agent_id,
+                sequence: 1,
+                collected_at_unix_secs: 123,
+                inventory: serde_json::json!({"host": {"hostname": "test-agent"}}),
+                complete: true,
+                snapshot_id: Uuid::from_u128(2),
+                schema_version: protocol::M5_SCHEMA_VERSION,
+            },
+            observations: ObservationBatch {
+                schema_version: protocol::M5_SCHEMA_VERSION,
+                batch_id: Uuid::from_u128(2),
+                agent_id,
+                collected_at_unix_secs: 123,
+                observations: Vec::new(),
+            },
+        };
+        std::fs::write(snapshot_sequence_path(state_dir), "1\n").expect("write sequence");
+        persist_pending_snapshot(state_dir, &first).expect("persist initial snapshot");
+
+        let retry = load_pending_snapshot(state_dir)
+            .expect("load pending snapshot")
+            .expect("pending snapshot exists");
+        assert_eq!(retry.snapshot, first.snapshot);
+        assert_eq!(retry.observations, first.observations);
+        assert_eq!(
+            std::fs::read_to_string(snapshot_sequence_path(state_dir)).expect("read sequence"),
+            "1\n"
+        );
+
+        let mut pending_snapshot = Some(retry);
+        let rejected = InventorySnapshotAck {
+            snapshot_id: first.snapshot.snapshot_id,
+            accepted: false,
+            sequence: first.snapshot.sequence,
+            replayed: false,
+            reason: Some("retry".into()),
+        };
+        assert!(
+            !acknowledge_pending_snapshot(state_dir, &mut pending_snapshot, &rejected)
+                .expect("keep rejected snapshot pending")
+        );
+        assert!(
+            load_pending_snapshot(state_dir)
+                .expect("load rejected snapshot")
+                .is_some()
+        );
+
+        let mismatched = InventorySnapshotAck {
+            snapshot_id: Uuid::from_u128(99),
+            accepted: true,
+            sequence: first.snapshot.sequence,
+            replayed: false,
+            reason: None,
+        };
+        assert!(
+            !acknowledge_pending_snapshot(state_dir, &mut pending_snapshot, &mismatched)
+                .expect("keep mismatched snapshot pending")
+        );
+
+        let acknowledged = InventorySnapshotAck {
+            accepted: true,
+            reason: None,
+            ..rejected
+        };
+        assert!(
+            acknowledge_pending_snapshot(state_dir, &mut pending_snapshot, &acknowledged)
+                .expect("acknowledge snapshot")
+        );
+        assert!(pending_snapshot.is_none());
+        assert!(
+            load_pending_snapshot(state_dir)
+                .expect("check cleared snapshot")
+                .is_none()
+        );
+
+        assert_eq!(
+            next_snapshot_sequence(state_dir).expect("advance sequence"),
+            2
+        );
+        let refreshed = PendingSnapshot {
+            snapshot: InventorySnapshot {
+                sequence: 2,
+                snapshot_id: Uuid::from_u128(3),
+                ..first.snapshot
+            },
+            observations: ObservationBatch {
+                batch_id: Uuid::from_u128(3),
+                ..first.observations
+            },
+        };
+        persist_pending_snapshot(state_dir, &refreshed).expect("persist refreshed snapshot");
+        let refreshed = load_pending_snapshot(state_dir)
+            .expect("load refreshed snapshot")
+            .expect("refreshed snapshot exists");
+        assert_eq!(refreshed.snapshot.sequence, 2);
+        assert_eq!(refreshed.snapshot.snapshot_id, Uuid::from_u128(3));
+        assert_eq!(
+            std::fs::read_to_string(snapshot_sequence_path(state_dir)).expect("read sequence"),
             "2\n"
         );
 
