@@ -17,6 +17,7 @@ pnpm-lock.yaml.bak
 *.key
 /data/
 /dist/
+deploy/compose/secrets/
 
 # editors / os
 .DS_Store

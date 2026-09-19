@@ -26,8 +26,16 @@ services:
       HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:?set HOPE_DATABASE_URL in .env}
       HOPE_BIND_ADDR: 0.0.0.0:8080
       HOPE_COOKIE_SECURE: ${HOPE_COOKIE_SECURE:-true}
+      HOPE_CREDENTIAL_MASTER_KEY_FILE: /run/secrets/hope_credential_master_key
+      HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:?set HOPE_AGENT_ENROLL_URL in .env}
+      HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:?set HOPE_AGENT_GATEWAY_URL in .env}
+      HOPE_AGENT_BINARY_X86_64: /app/agent-releases/agent-linux-amd64
+      HOPE_AGENT_BINARY_AARCH64: /app/agent-releases/agent-linux-arm64
+    secrets:
+      - hope_credential_master_key
     volumes:
       - server-pki:/app/data/pki
+      - ./agent-releases:/app/agent-releases:ro
     ports:
       - "8080:8080"
       - "8443:8443"
@@ -44,8 +52,22 @@ services:
         condition: service_healthy
     environment:
       HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:?set HOPE_DATABASE_URL in .env}
+      HOPE_CREDENTIAL_MASTER_KEY_FILE: /run/secrets/hope_credential_master_key
+      HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:?set HOPE_AGENT_ENROLL_URL in .env}
+      HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:?set HOPE_AGENT_GATEWAY_URL in .env}
+      HOPE_AGENT_BINARY_X86_64: /app/agent-releases/agent-linux-amd64
+      HOPE_AGENT_BINARY_AARCH64: /app/agent-releases/agent-linux-arm64
+    secrets:
+      - hope_credential_master_key
+    volumes:
+      - server-pki:/app/data/pki:ro
+      - ./agent-releases:/app/agent-releases:ro
     command: ["worker"]
 
 volumes:
   postgres-data:
   server-pki:
+
+secrets:
+  hope_credential_master_key:
+    file: ./secrets/credential-master-key

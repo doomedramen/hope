@@ -29,21 +29,33 @@ track when this lands:
 
 ## 2. Stored credentials
 
-Not implemented in M0 — no `credentials` resource exists yet (spec §14.1
-lists it for a later milestone). Threats to track:
+Implemented in M6 through the encrypted `credentials` resource and external
+master-key source. Threats and current mitigations:
 
 - **Information disclosure**: credentials readable by anyone with DB
   access, or exposed via API responses.
-  *Planned mitigation*: spec §13.3 requires device pages to show
-  "credential associations without secret values" — secrets must never
-  round-trip through the API once stored.
+  *Mitigation*: ChaCha20-Poly1305 ciphertext is stored in PostgreSQL with a
+  32-byte key supplied only through `HOPE_CREDENTIAL_MASTER_KEY` or a mounted
+  file. The normal API returns metadata only; decryption is limited to a
+  worker operation and secret-bearing debug/log paths are redacted.
 - **Elevation of privilege**: a credential meant for one narrow use
   (e.g. a read-only SNMP community string) reused more broadly than
   intended.
-  *Gap*: no secrets-at-rest design exists yet; this needs its own ADR
-  before the credentials resource is built (likely encryption at rest with
-  a key outside the database, e.g. via `secrets` crate placeholder in
-  spec §5.2's suggested layout).
+  *Gap*: in-place key rotation is documented but not yet implemented; keep
+  the old key available until a re-encryption migration exists.
+
+- **SSH MITM / host replacement**: an installer could accept a forged host
+  key on first use or after replacement.
+  *Mitigation*: first-seen, changed, and revoked keys block the SSH job. The
+  operator must explicitly trust the metadata record before a retry can
+  authenticate.
+
+- **Remote command injection / output exfiltration**: a target or credential
+  could cause arbitrary shell execution or unbounded job logs.
+  *Mitigation*: the M6 worker sends a fixed command sequence, quotes all
+  operator/config values, caps captured output at 64 KiB, bounds job time, and
+  never accepts a free-form command field. Enrollment codes are sent on SSH
+  stdin rather than as process arguments.
 
 ## 3. Enrollment (agent bootstrap, ADR-0007)
 
@@ -193,7 +205,7 @@ publish agent binaries).
 
 ## Summary of open gaps (tracked for follow-up milestones)
 
-1. No secrets-at-rest design for the future `credentials` resource.
+1. Credential master-key rotation is not implemented yet.
 2. Rate limiting is per-IP only (no per-account lockout, no
    distributed-attack or shared-NAT mitigation).
 3. Revocation doesn't force-close already-open gateway connections.

@@ -7,6 +7,7 @@ mod release_verify;
 mod run;
 
 use clap::{Parser, Subcommand};
+use std::io::Read;
 
 use crate::config::{Config, DEFAULT_STATE_DIR};
 use crate::enroll::EnrollCode;
@@ -35,12 +36,16 @@ enum Command {
         server: String,
         /// Combined `TOKEN.FINGERPRINT` code, as printed by
         /// `server enroll-token create`.
-        #[arg(long, conflicts_with_all = ["token", "ca_fingerprint"])]
+        #[arg(long, conflicts_with_all = ["token", "ca_fingerprint", "code_stdin"])]
         code: Option<String>,
-        #[arg(long, required_unless_present = "code")]
+        /// Read the combined enrollment code from stdin so it does not
+        /// appear in the remote process list or shell history.
+        #[arg(long, conflicts_with_all = ["code", "token", "ca_fingerprint"])]
+        code_stdin: bool,
+        #[arg(long, required_unless_present_any = ["code", "code_stdin"])]
         token: Option<String>,
         /// SHA-256 fingerprint (hex) of the server's CA certificate.
-        #[arg(long, required_unless_present = "code")]
+        #[arg(long, required_unless_present_any = ["code", "code_stdin"])]
         ca_fingerprint: Option<String>,
         #[arg(long, default_value = DEFAULT_STATE_DIR)]
         state_dir: String,
@@ -82,12 +87,20 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Enroll {
             server,
             code,
+            code_stdin,
             token,
             ca_fingerprint,
             state_dir,
         }) => {
             let code = match code {
                 Some(combined) => EnrollCode::parse_combined(&combined)?,
+                None if code_stdin => {
+                    let mut input = Vec::new();
+                    std::io::stdin().take(8 * 1024).read_to_end(&mut input)?;
+                    let combined = String::from_utf8(input)
+                        .map_err(|_| anyhow::anyhow!("stdin enrollment code is not UTF-8"))?;
+                    EnrollCode::parse_combined(combined.trim())?
+                }
                 None => {
                     let token = token.ok_or_else(|| anyhow::anyhow!("--token is required"))?;
                     let ca_fingerprint = ca_fingerprint

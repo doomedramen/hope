@@ -2,6 +2,7 @@ mod agent_inventory;
 mod agents;
 mod auth_mw;
 mod config;
+mod credentials;
 mod csrf;
 mod discovery;
 mod enroll;
@@ -18,6 +19,8 @@ mod routes;
 mod scheduler;
 mod seed;
 mod session_store;
+mod ssh_install;
+mod ssh_trust;
 mod state;
 
 use std::net::SocketAddr;
@@ -26,6 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use clap::{Parser, Subcommand};
@@ -323,6 +327,38 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             get(notifications::list_routes).post(notifications::create_route),
         )
         .route(
+            "/api/v1/credentials",
+            get(routes::credentials::list).post(routes::credentials::create),
+        )
+        .route(
+            "/api/v1/credentials/{id}",
+            get(routes::credentials::get)
+                .patch(routes::credentials::update)
+                .delete(routes::credentials::delete),
+        )
+        .route(
+            "/api/v1/devices/{id}/agent-install",
+            post(routes::agent_deployment::install),
+        )
+        .route(
+            "/api/v1/devices/{id}/agent-repair",
+            post(routes::agent_deployment::repair),
+        )
+        .route("/api/v1/jobs/{id}", get(routes::agent_deployment::get_job))
+        .route("/api/v1/ssh-host-keys", get(routes::ssh_host_keys::list))
+        .route(
+            "/api/v1/ssh-host-keys/{id}",
+            get(routes::ssh_host_keys::get),
+        )
+        .route(
+            "/api/v1/ssh-host-keys/{id}/trust",
+            post(routes::ssh_host_keys::trust),
+        )
+        .route(
+            "/api/v1/ssh-host-keys/{id}/revoke",
+            post(routes::ssh_host_keys::revoke),
+        )
+        .route(
             "/api/v1/services/{id}/monitor-proposals",
             post(inventory::monitor_proposals::generate_for_path),
         )
@@ -336,6 +372,10 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             "/api/v1/evidence/resolve",
             get(inventory::evidence::resolve_handler),
         )
+        // Credential JSON includes private keys, but must still be bounded
+        // before deserialization so oversized payloads cannot allocate
+        // unbounded secret material in the API process.
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(from_fn(csrf::require_custom_header))
         .layer(from_fn(auth_mw::require_session));
 

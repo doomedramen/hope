@@ -18,6 +18,8 @@ Decisions are recorded using the template in [`0000-template.md`](0000-template.
 | [0012](0012-jiff-time-rrule-recurrence.md) | `jiff` for time maths; `rrule` for RFC 5545 recurrence, isolated from `chrono`. |
 | [0013](0013-safe-basic-tcp-classification.md) | Bounded observation-only TCP protocol classification. |
 | [0014](0014-low-impact-discovery-policy.md) | Explicit low-impact scan limits, deterministic pacing, and no M2 maintenance bypass. |
+| [0015](0015-credential-vault.md) | External-key ChaCha20-Poly1305 credential vault with metadata-only API. |
+| [0016](0016-ssh-agent-deployment.md) | Bounded, host-key-verified SSH install and repair jobs. |
 
 ## Supporting library defaults
 

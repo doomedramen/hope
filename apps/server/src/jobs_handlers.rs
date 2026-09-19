@@ -21,6 +21,7 @@ use crate::inventory::retention;
 use crate::inventory::service_collector_evidence;
 use crate::notifications;
 use crate::session_store::PgSessionStore;
+use crate::{credentials::CredentialStore, ssh_install};
 
 pub use worker::JobOutcome;
 
@@ -291,6 +292,84 @@ impl JobHandler for ServiceCollector {
     }
 }
 
+struct AgentDeployment;
+
+#[async_trait]
+impl JobHandler for AgentDeployment {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let host = payload
+            .get("host")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("agent deployment payload has no host"))?;
+        let port = payload
+            .get("port")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow::anyhow!("agent deployment payload has no port"))?;
+        let credential_id = payload
+            .get("credential_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("agent deployment payload has no credential_id"))
+            .and_then(|value| {
+                Uuid::parse_str(value).map_err(|error| {
+                    anyhow::anyhow!("invalid agent deployment credential_id: {error}")
+                })
+            })?;
+        let device_id = payload
+            .get("device_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("agent deployment payload has no device_id"))
+            .and_then(|value| {
+                Uuid::parse_str(value)
+                    .map_err(|error| anyhow::anyhow!("invalid agent deployment device_id: {error}"))
+            })?;
+        let actor_user_id = payload
+            .get("actor_user_id")
+            .and_then(Value::as_str)
+            .map(Uuid::parse_str)
+            .transpose()?;
+        let repair = payload
+            .get("repair")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let disassociate_after_enrollment = payload
+            .get("disassociate_after_enrollment")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let store = CredentialStore::from_environment(pool.clone())?;
+        let result = ssh_install::install_or_repair(
+            pool,
+            &store,
+            ssh_install::DeploymentRequest {
+                device_id,
+                host: host.to_string(),
+                port: i32::try_from(port).map_err(|_| anyhow::anyhow!("invalid SSH port"))?,
+                credential_id,
+                actor_user_id,
+                repair,
+                disassociate_after_enrollment,
+            },
+        )
+        .await?;
+        tracing::info!(
+            host = %result.host,
+            port = result.port,
+            platform = %result.platform,
+            architecture = %result.architecture,
+            enrolled = result.enrolled,
+            repaired = result.repaired,
+            "agent deployment completed"
+        );
+        Ok(JobOutcome::Completed)
+    }
+}
+
 async fn validate_collector_scope(
     pool: &PgPool,
     network_id: Uuid,
@@ -342,6 +421,8 @@ impl Registry {
         handlers.insert("notifications.deliver", Box::new(NotificationDelivery));
         handlers.insert("discovery.full_tcp", Box::new(FullTcpDiscovery));
         handlers.insert("discovery.service_collectors", Box::new(ServiceCollector));
+        handlers.insert("agent.install", Box::new(AgentDeployment));
+        handlers.insert("agent.repair", Box::new(AgentDeployment));
         Self(handlers)
     }
 
@@ -380,6 +461,8 @@ mod tests {
         assert!(registry.get("notifications.deliver").is_some());
         assert!(registry.get("discovery.full_tcp").is_some());
         assert!(registry.get("discovery.service_collectors").is_some());
+        assert!(registry.get("agent.install").is_some());
+        assert!(registry.get("agent.repair").is_some());
         assert!(registry.get("no.such.kind").is_none());
     }
 
