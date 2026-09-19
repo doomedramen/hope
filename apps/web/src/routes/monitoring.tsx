@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { IncidentList } from "@/components/IncidentList";
 import { MonitorList } from "@/components/MonitorList";
 import { MonitorProposalQueue } from "@/components/MonitorProposalQueue";
 import { ServiceReviewQueue } from "@/components/ServiceReviewQueue";
@@ -15,11 +16,15 @@ function MonitoringPage() {
       <Tabs className="gap-4" defaultValue="monitors">
         <TabsList variant="line">
           <TabsTrigger value="monitors">Monitors</TabsTrigger>
+          <TabsTrigger value="incidents">Incidents</TabsTrigger>
           <TabsTrigger value="services">Service reviews</TabsTrigger>
           <TabsTrigger value="proposals">Monitor proposals</TabsTrigger>
         </TabsList>
         <TabsContent value="monitors">
           <MonitorList />
+        </TabsContent>
+        <TabsContent value="incidents">
+          <IncidentList />
         </TabsContent>
         <TabsContent value="services">
           <ServiceReviewQueue />

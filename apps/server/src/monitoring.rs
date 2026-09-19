@@ -31,6 +31,17 @@ pub struct MonitorListQuery {
     pub limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MonitorResultsQuery {
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IncidentListQuery {
+    pub state: Option<String>,
+    pub limit: Option<i64>,
+}
+
 /// Create one monitor from an approved proposal inside the approval
 /// transaction. Existing monitors for the proposal are returned unchanged so
 /// retries cannot reset state or erase a user's monitor configuration.
@@ -220,6 +231,118 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<Uuid>) -> (Status
     match row {
         Ok(Some((row,))) => (StatusCode::OK, Json(row)),
         Ok(None) => err(StatusCode::NOT_FOUND, "monitor not found"),
+        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+pub async fn results(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<MonitorResultsQuery>,
+) -> (StatusCode, Json<Value>) {
+    let exists: Result<bool, sqlx::Error> =
+        sqlx::query_scalar("select exists(select 1 from monitors where id = $1)")
+            .bind(id)
+            .fetch_one(&state.pool)
+            .await;
+    match exists {
+        Ok(false) => return err(StatusCode::NOT_FOUND, "monitor not found"),
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        Ok(true) => {}
+    }
+
+    let limit = query.limit.unwrap_or(100).clamp(1, 100);
+    let rows: Result<Vec<(Value,)>, sqlx::Error> = sqlx::query_as(
+        "select row_to_json(t) from (\
+           select * from monitor_results\
+            where monitor_id = $1\
+            order by observed_at desc, id desc\
+            limit $2\
+         ) t",
+    )
+    .bind(id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await;
+    match rows {
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(json!({ "items": rows.into_iter().map(|(row,)| row).collect::<Vec<_>>() })),
+        ),
+        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+pub async fn incidents(
+    State(state): State<AppState>,
+    Query(query): Query<IncidentListQuery>,
+) -> (StatusCode, Json<Value>) {
+    let limit = query.limit.unwrap_or(100).clamp(1, 100);
+    let rows: Result<Vec<(Value,)>, sqlx::Error> = sqlx::query_as(
+        "select row_to_json(t) from (\
+           select i.*,\
+                  m.service_id,\
+                  m.endpoint_id,\
+                  m.monitor_type,\
+                  m.state as monitor_state,\
+                  e.address::text as endpoint_address,\
+                  e.port as endpoint_port,\
+                  e.url as endpoint_url,\
+                  e.dns_name as endpoint_dns_name,\
+                  s.name as service_name,\
+                  s.product as service_product\
+             from incidents i\
+             join monitors m on m.id = i.monitor_id\
+             join endpoints e on e.id = m.endpoint_id\
+             join services s on s.id = m.service_id\
+            where ($1::text is null or i.state = $1)\
+            order by i.last_event_at desc, i.id desc\
+            limit $2\
+         ) t",
+    )
+    .bind(query.state)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await;
+    match rows {
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(json!({ "items": rows.into_iter().map(|(row,)| row).collect::<Vec<_>>() })),
+        ),
+        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+pub async fn incident(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> (StatusCode, Json<Value>) {
+    let row: Result<Option<(Value,)>, sqlx::Error> = sqlx::query_as(
+        "select row_to_json(t) from (\
+           select i.*,\
+                  m.service_id,\
+                  m.endpoint_id,\
+                  m.monitor_type,\
+                  m.state as monitor_state,\
+                  e.address::text as endpoint_address,\
+                  e.port as endpoint_port,\
+                  e.url as endpoint_url,\
+                  e.dns_name as endpoint_dns_name,\
+                  s.name as service_name,\
+                  s.product as service_product\
+             from incidents i\
+             join monitors m on m.id = i.monitor_id\
+             join endpoints e on e.id = m.endpoint_id\
+             join services s on s.id = m.service_id\
+            where i.id = $1\
+         ) t",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await;
+    match row {
+        Ok(Some((row,))) => (StatusCode::OK, Json(row)),
+        Ok(None) => err(StatusCode::NOT_FOUND, "incident not found"),
         Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
 }

@@ -273,6 +273,46 @@ export interface Monitor {
   service_product_version: string | null;
 }
 
+export type MonitorResultStatus = "success" | "failure" | "timeout" | "error";
+
+export interface MonitorResult {
+  id: string;
+  monitor_id: string;
+  status: MonitorResultStatus | string;
+  observed_at: string;
+  latency_ms: number | null;
+  error: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
+}
+
+export type IncidentState = "open" | "recovered" | string;
+
+export interface Incident {
+  id: string;
+  monitor_id: string;
+  state: IncidentState;
+  severity: "warning" | "critical" | string;
+  opened_at: string;
+  recovered_at: string | null;
+  last_event_at: string;
+  failure_count: number;
+  last_result_id: string | null;
+  summary: string | null;
+  created_at: string;
+  updated_at: string;
+  service_id: string;
+  endpoint_id: string;
+  monitor_type: string;
+  monitor_state: MonitorState;
+  endpoint_address: string | null;
+  endpoint_port: number | null;
+  endpoint_url: string | null;
+  endpoint_dns_name: string | null;
+  service_name: string | null;
+  service_product: string | null;
+}
+
 export interface ChangeEvent {
   id: string;
   entity_kind: string;
@@ -470,6 +510,26 @@ export async function fetchMonitors(
   return request<{ items: Monitor[] }>(
     `/api/v1/monitors${queryString({ limit: 100, state })}`,
   );
+}
+
+export async function fetchMonitorResults(
+  monitorId: string,
+): Promise<{ items: MonitorResult[] }> {
+  return request<{ items: MonitorResult[] }>(
+    `/api/v1/monitors/${monitorId}/results?limit=100`,
+  );
+}
+
+export async function fetchIncidents(
+  state?: IncidentState,
+): Promise<{ items: Incident[] }> {
+  return request<{ items: Incident[] }>(
+    `/api/v1/incidents${queryString({ limit: 100, state })}`,
+  );
+}
+
+export async function fetchIncident(id: string): Promise<Incident> {
+  return request<Incident>(`/api/v1/incidents/${id}`);
 }
 
 export async function resolveMonitorProposal(

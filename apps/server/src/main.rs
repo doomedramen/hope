@@ -284,6 +284,9 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
         )
         .route("/api/v1/monitors", get(monitoring::list))
         .route("/api/v1/monitors/{id}", get(monitoring::get))
+        .route("/api/v1/monitors/{id}/results", get(monitoring::results))
+        .route("/api/v1/incidents", get(monitoring::incidents))
+        .route("/api/v1/incidents/{id}", get(monitoring::incident))
         .route(
             "/api/v1/services/{id}/monitor-proposals",
             post(inventory::monitor_proposals::generate_for_path),
