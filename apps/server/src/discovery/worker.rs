@@ -1451,6 +1451,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn db_complete_scan_does_not_close_port_for_former_ip_owner() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let octets = Uuid::new_v4().into_bytes();
+        let address = format!("10.{}.{}.{}", octets[0], octets[1], octets[2]);
+        let replacement_address = format!(
+            "10.{}.{}.{}",
+            octets[0],
+            octets[1],
+            octets[2].wrapping_add(1)
+        );
+        let target: IpAddr = address.parse().expect("test target");
+        let port_value = json!({
+            "address": address,
+            "port": 80,
+            "transport": "tcp",
+        });
+
+        let (_, first_job_id, _) = test_run_for_address(&pool, &address, 2).await;
+        let first_run = load_run(&pool, first_job_id)
+            .await
+            .expect("load first test run");
+        let first_scanner = FakeScanner {
+            open_port: Some(80),
+            ..FakeScanner::default()
+        };
+        let mut first_device_ids = HashMap::new();
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id: first_job_id,
+                worker_id: "test-worker",
+            },
+            first_run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &first_scanner,
+                device_ids: &mut first_device_ids,
+            },
+        )
+        .await
+        .expect("complete first test run");
+
+        let (former_device_id, former_interface_id): (Uuid, Uuid) = sqlx::query_as(
+            "select d.id, i.id from devices d \
+             join interfaces i on i.device_id = d.id \
+             join addresses a on a.interface_id = i.id \
+             where a.ip = $1::inet and a.is_current",
+        )
+        .bind(&address)
+        .fetch_one(&pool)
+        .await
+        .expect("resolve former scanned device");
+        addresses::assign_address_tx(
+            &pool,
+            former_interface_id,
+            &replacement_address,
+            Some("dhcp"),
+        )
+        .await
+        .expect("move former device to replacement address");
+
+        let (new_device_id,): (Uuid,) =
+            sqlx::query_as("insert into devices (device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .expect("create replacement device");
+        let (new_interface_id,): (Uuid,) =
+            sqlx::query_as("insert into interfaces (device_id) values ($1) returning id")
+                .bind(new_device_id)
+                .fetch_one(&pool)
+                .await
+                .expect("create replacement interface");
+        addresses::assign_address_tx(&pool, new_interface_id, &address, Some("dhcp"))
+            .await
+            .expect("assign address to replacement device");
+
+        let (_, closing_job_id, closing_run_id) = test_run_for_address(&pool, &address, 2).await;
+        let closing_run = load_run(&pool, closing_job_id)
+            .await
+            .expect("load replacement-owner test run");
+        let closing_scanner = FakeScanner::default();
+        let mut closing_device_ids = HashMap::new();
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id: closing_job_id,
+                worker_id: "test-worker",
+            },
+            closing_run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &closing_scanner,
+                device_ids: &mut closing_device_ids,
+            },
+        )
+        .await
+        .expect("complete replacement-owner test run");
+
+        let (observed_device_id, observation_evidence_id): (Uuid, Option<Uuid>) = sqlx::query_as(
+            "select device_id, evidence_id from port_observations \
+                 where scan_run_id = $1 and address = $2::inet and port = 80",
+        )
+        .bind(closing_run_id)
+        .bind(&address)
+        .fetch_one(&pool)
+        .await
+        .expect("read replacement-owner observation");
+        assert_eq!(observed_device_id, new_device_id);
+        assert!(
+            observation_evidence_id.is_none(),
+            "replacement-owner closed observation must not link former-owner absence evidence"
+        );
+
+        let former_close_events: (i64,) = sqlx::query_as(
+            "select count(*) from change_events \
+             where entity_id = $1 and category = 'port.closed'",
+        )
+        .bind(former_device_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count former-owner close events");
+        assert_eq!(former_close_events.0, 0);
+        let former_absence_evidence: (i64,) = sqlx::query_as(
+            "select count(*) from evidence \
+             where subject_table = 'devices' and subject_id = $1 \
+               and source_type = 'network_scan' and attribute = $2 \
+               and value = $3 and absent",
+        )
+        .bind(former_device_id)
+        .bind(PORT_EVIDENCE_ATTRIBUTE)
+        .bind(&port_value)
+        .fetch_one(&pool)
+        .await
+        .expect("count former-owner absence evidence");
+        assert_eq!(former_absence_evidence.0, 0);
+    }
+
+    #[tokio::test]
     async fn db_failed_run_stays_partial_and_writes_no_closure_evidence() {
         let Some(pool) = pool_or_skip().await else {
             eprintln!("skipping: DATABASE_URL not set");
