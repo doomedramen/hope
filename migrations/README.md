@@ -49,3 +49,8 @@ adds hourly result rollups and a marker that lets the scheduled retention job
 delete raw observations only after compaction. The monitor worker and scheduled
 jobs own execution, retention, and notification behaviour; migrations only
 create the durable state.
+
+M4 notification routing lands in 0019_notifications.sql. It stores provider
+channels, severity/event routes, and idempotent incident deliveries. The
+delivery job sends webhook or ntfy notifications outside the monitor
+transaction and retries provider failures through the normal job queue.

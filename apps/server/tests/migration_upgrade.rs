@@ -180,6 +180,27 @@ async fn m0_schema_upgrades_to_m1_without_data_loss() {
     .await
     .expect("monitor underlying state default exists");
     assert_eq!(underlying_default, "'unknown'::text");
+
+    let notification_channel_count: i64 =
+        sqlx::query_scalar("select count(*) from notification_channels")
+            .fetch_one(&pool)
+            .await
+            .expect("notification channel table exists after upgrade");
+    assert_eq!(notification_channel_count, 0);
+
+    let notification_route_count: i64 =
+        sqlx::query_scalar("select count(*) from notification_routes")
+            .fetch_one(&pool)
+            .await
+            .expect("notification route table exists after upgrade");
+    assert_eq!(notification_route_count, 0);
+
+    let notification_delivery_count: i64 =
+        sqlx::query_scalar("select count(*) from notification_deliveries")
+            .fetch_one(&pool)
+            .await
+            .expect("notification delivery table exists after upgrade");
+    assert_eq!(notification_delivery_count, 0);
 }
 
 /// Build a temp directory containing only the M0 migration files

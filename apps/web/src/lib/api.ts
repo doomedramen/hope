@@ -313,6 +313,31 @@ export interface Incident {
   service_product: string | null;
 }
 
+export type NotificationProvider = "webhook" | "ntfy";
+
+export interface NotificationChannel {
+  id: string;
+  name: string;
+  provider: NotificationProvider | string;
+  config: Record<string, unknown>;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationRoute {
+  id: string;
+  channel_id: string;
+  min_severity: string;
+  event_types: string[];
+  delay_seconds: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  channel_name: string;
+  provider: NotificationProvider | string;
+}
+
 export interface ChangeEvent {
   id: string;
   entity_kind: string;
@@ -530,6 +555,45 @@ export async function fetchIncidents(
 
 export async function fetchIncident(id: string): Promise<Incident> {
   return request<Incident>(`/api/v1/incidents/${id}`);
+}
+
+export async function fetchNotificationChannels(): Promise<{
+  items: NotificationChannel[];
+}> {
+  return request<{ items: NotificationChannel[] }>(
+    "/api/v1/notification-channels?limit=100",
+  );
+}
+
+export async function createNotificationChannel(input: {
+  name: string;
+  provider: NotificationProvider;
+  config: Record<string, string>;
+}): Promise<NotificationChannel> {
+  return request<NotificationChannel>("/api/v1/notification-channels", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function fetchNotificationRoutes(): Promise<{
+  items: NotificationRoute[];
+}> {
+  return request<{ items: NotificationRoute[] }>(
+    "/api/v1/notification-routes?limit=200",
+  );
+}
+
+export async function createNotificationRoute(input: {
+  channel_id: string;
+  min_severity: string;
+  event_types: string[];
+  delay_seconds: number;
+}): Promise<NotificationRoute> {
+  return request<NotificationRoute>("/api/v1/notification-routes", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export async function resolveMonitorProposal(

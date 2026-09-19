@@ -19,6 +19,7 @@ use crate::discovery::service_collectors::{self, CollectorConfig, CollectorProto
 use crate::discovery::worker;
 use crate::inventory::retention;
 use crate::inventory::service_collector_evidence;
+use crate::notifications;
 use crate::session_store::PgSessionStore;
 
 pub use worker::JobOutcome;
@@ -166,6 +167,30 @@ impl JobHandler for MonitorResultRetention {
     }
 }
 
+struct NotificationDelivery;
+
+#[async_trait]
+impl JobHandler for NotificationDelivery {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let delivery_id = payload
+            .get("delivery_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("notification payload has no delivery_id"))
+            .and_then(|value| {
+                Uuid::parse_str(value)
+                    .map_err(|error| anyhow::anyhow!("invalid notification delivery_id: {error}"))
+            })?;
+        notifications::deliver(pool, delivery_id).await?;
+        Ok(JobOutcome::Completed)
+    }
+}
+
 struct FullTcpDiscovery;
 
 #[async_trait]
@@ -290,6 +315,7 @@ impl Registry {
             "monitor_results.retention",
             Box::new(MonitorResultRetention),
         );
+        handlers.insert("notifications.deliver", Box::new(NotificationDelivery));
         handlers.insert("discovery.full_tcp", Box::new(FullTcpDiscovery));
         handlers.insert("discovery.service_collectors", Box::new(ServiceCollector));
         Self(handlers)
@@ -326,6 +352,7 @@ mod tests {
         assert!(registry.get("enrollment_token.purge").is_some());
         assert!(registry.get("diagnostic.echo").is_some());
         assert!(registry.get("monitor_results.retention").is_some());
+        assert!(registry.get("notifications.deliver").is_some());
         assert!(registry.get("discovery.full_tcp").is_some());
         assert!(registry.get("discovery.service_collectors").is_some());
         assert!(registry.get("no.such.kind").is_none());

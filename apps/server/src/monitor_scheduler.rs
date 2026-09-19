@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::inventory::events::Recorder;
 use crate::monitor_checks::{self, CheckOutcome, CheckProtocol, CheckRequest, CheckStatus};
+use crate::notifications;
 
 const CLAIM_LEASE_SECONDS: f64 = 90.0;
 const MAX_BATCH: usize = 32;
@@ -332,6 +333,7 @@ async fn persist_outcome(
     .bind(monitor.id)
     .fetch_optional(&mut *tx)
     .await?;
+    let mut notification_context: Option<(Uuid, &'static str)> = None;
     if update.underlying_state == HealthState::Down {
         let failure_count = i32::try_from(update.consecutive_failures).unwrap_or(i32::MAX);
         if let Some((incident_id, _)) = open_incident {
@@ -345,20 +347,23 @@ async fn persist_outcome(
             .bind(result_id)
             .execute(&mut *tx)
             .await?;
+            notification_context = Some((incident_id, "critical"));
         } else {
-            sqlx::query(
+            let (incident_id,): (Uuid,) = sqlx::query_as(
                 "insert into incidents \
                     (monitor_id, state, severity, opened_at, last_event_at, \
                      failure_count, last_result_id, summary) \
-                 values ($1, 'open', 'critical', $2, $2, $3, $4, $5)",
+                 values ($1, 'open', 'critical', $2, $2, $3, $4, $5)\
+                 returning id",
             )
             .bind(monitor.id)
             .bind(observed_at)
             .bind(failure_count.max(1))
             .bind(result_id)
             .bind(outcome.error.as_deref().unwrap_or("monitor check failed"))
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
+            notification_context = Some((incident_id, "critical"));
         }
     } else if let Some((incident_id, _)) = open_incident {
         sqlx::query(
@@ -371,15 +376,20 @@ async fn persist_outcome(
         .bind(result_id)
         .execute(&mut *tx)
         .await?;
+        notification_context = Some((incident_id, "critical"));
     }
 
     for event in &update.events {
-        let (category, severity) = match event.kind {
-            HealthEventKind::IncidentOpened => ("incident.opened", "critical"),
-            HealthEventKind::IncidentRecovered => ("incident.recovered", "notice"),
-            HealthEventKind::StaleStarted => ("monitor.stale", "warning"),
-            HealthEventKind::StaleCleared => ("monitor.stale_cleared", "notice"),
-            HealthEventKind::StateChanged => ("monitor.state_changed", "notice"),
+        let (category, severity, notification_event) = match event.kind {
+            HealthEventKind::IncidentOpened => {
+                ("incident.opened", "critical", Some("incident.opened"))
+            }
+            HealthEventKind::IncidentRecovered => {
+                ("incident.recovered", "notice", Some("incident.recovered"))
+            }
+            HealthEventKind::StaleStarted => ("monitor.stale", "warning", None),
+            HealthEventKind::StaleCleared => ("monitor.stale_cleared", "notice", None),
+            HealthEventKind::StateChanged => ("monitor.state_changed", "notice", None),
         };
         Recorder::record_change(
             &mut tx,
@@ -403,6 +413,20 @@ async fn persist_outcome(
             Some("monitor"),
         )
         .await?;
+        if let Some(notification_event) = notification_event
+            && let Some((incident_id, notification_severity)) = notification_context
+        {
+            notifications::enqueue_incident_notifications(
+                &mut tx,
+                incident_id,
+                monitor.id,
+                notification_event,
+                notification_severity,
+                result_id,
+                outcome.error.as_deref().unwrap_or("Monitor recovered"),
+            )
+            .await?;
+        }
     }
 
     tx.commit().await?;
@@ -705,6 +729,63 @@ mod tests {
         assert_eq!(row.2, 2);
         assert_eq!(row.3, 1);
         assert_eq!(row.4, 2);
+    }
+
+    #[tokio::test]
+    async fn incident_open_queues_one_matching_notification_delivery() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        isolate_due_monitors(&pool).await;
+        let channel_id: Uuid = sqlx::query_scalar(
+            "insert into notification_channels (name, provider, config) \
+             values ($1, 'webhook', $2) returning id",
+        )
+        .bind(format!("scheduler-notification-{}", Uuid::new_v4()))
+        .bind(json!({"url": "http://127.0.0.1:9/hook"}))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into notification_routes \
+                 (channel_id, min_severity, event_types) \
+             values ($1, 'critical', '[\"incident.opened\"]'::jsonb)",
+        )
+        .bind(channel_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let monitor_id = create_monitor(&pool, port, 1).await;
+        let claimed = claim_due(&pool, "monitor-test")
+            .await
+            .unwrap()
+            .expect("monitor is due");
+        execute_one(&pool, "monitor-test", claimed).await.unwrap();
+
+        let row: (Uuid, i64, i64) = sqlx::query_as(
+            "select i.id, \
+                    (select count(*) from notification_deliveries d \
+                     where d.incident_id = i.id and d.channel_id = $2), \
+                    (select count(*) from jobs \
+                     where job_type = 'notifications.deliver' \
+                       and payload->>'delivery_id' = \
+                           (select d.id::text from notification_deliveries d \
+                            where d.incident_id = i.id and d.channel_id = $2)) \
+             from incidents i \
+             where i.monitor_id = $1 and i.state = 'open'",
+        )
+        .bind(monitor_id)
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2, 1);
     }
 
     #[tokio::test]

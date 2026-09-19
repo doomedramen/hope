@@ -89,5 +89,10 @@ The domain health state machine owns threshold counting and duplicate
 transition suppression. The server worker owns leases, protocol adapters,
 result persistence, incident rows, and stale detection.
 
-DNS, ICMP, TLS-expiry, additional content/API assertion variants, notification
-delivery, and result retention remain subsequent M4 slices.
+DNS, ICMP, and TLS-expiry checks use bounded protocol adapters. The notification
+API stores webhook or ntfy channels and routes incident opened/recovered events
+by minimum severity. Matching deliveries are inserted and queued in the same
+transaction as the incident transition; the worker sends them outside that
+transaction with a stable delivery ID and retries provider failures. Channel
+reads redact tokens. Result retention is a daily job that compacts old
+observations into hourly rollups before deleting raw rows.

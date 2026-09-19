@@ -10,6 +10,7 @@ mod jobs_handlers;
 mod monitor_checks;
 mod monitor_scheduler;
 mod monitoring;
+mod notifications;
 mod pki;
 mod ratelimit;
 mod routes;
@@ -287,6 +288,14 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
         .route("/api/v1/monitors/{id}/results", get(monitoring::results))
         .route("/api/v1/incidents", get(monitoring::incidents))
         .route("/api/v1/incidents/{id}", get(monitoring::incident))
+        .route(
+            "/api/v1/notification-channels",
+            get(notifications::list_channels).post(notifications::create_channel),
+        )
+        .route(
+            "/api/v1/notification-routes",
+            get(notifications::list_routes).post(notifications::create_route),
+        )
         .route(
             "/api/v1/services/{id}/monitor-proposals",
             post(inventory::monitor_proposals::generate_for_path),
