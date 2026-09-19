@@ -16,8 +16,8 @@
 //! third test claiming from the same table was added elsewhere.
 
 use serde_json::Value;
-use sqlx::PgPool;
 use sqlx::Row;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +69,21 @@ pub async fn enqueue(
     idempotency_key: &str,
     payload: Value,
 ) -> Result<Uuid> {
+    let mut transaction = pool.begin().await?;
+    let id = enqueue_in(&mut transaction, job_type, idempotency_key, payload).await?;
+    transaction.commit().await?;
+    Ok(id)
+}
+
+/// Transactional form of [`enqueue`]. Callers that create a durable resource
+/// alongside the queued job use this so the resource cannot point at a job
+/// that failed to commit (or vice versa).
+pub async fn enqueue_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    job_type: &str,
+    idempotency_key: &str,
+    payload: Value,
+) -> Result<Uuid> {
     let row = sqlx::query(
         r#"
         insert into jobs (job_type, idempotency_key, payload)
@@ -81,7 +96,7 @@ pub async fn enqueue(
     .bind(job_type)
     .bind(idempotency_key)
     .bind(payload)
-    .fetch_one(pool)
+    .fetch_one(&mut **transaction)
     .await?;
 
     Ok(row.get::<Uuid, _>("id"))
