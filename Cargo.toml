@@ -6,6 +6,8 @@ members = [
     "crates/domain",
     "crates/protocol",
     "crates/jobs",
+    "crates/release",
+    "xtask",
 ]
 
 [workspace.package]
@@ -46,10 +48,13 @@ futures-util = "0.3"
 time = "0.3"
 async-trait = "0.1"
 governor = "0.7"
+ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
+rand_core = { version = "0.6", features = ["std", "getrandom"] }
 
 domain = { path = "crates/domain" }
 protocol = { path = "crates/protocol" }
 jobs = { path = "crates/jobs" }
+release = { path = "crates/release" }
 
 [profile.release]
 opt-level = "s"
