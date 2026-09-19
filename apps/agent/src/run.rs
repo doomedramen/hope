@@ -1,11 +1,13 @@
 //! Agent runtime: connect to the gateway over mTLS WebSocket, send Hello,
-//! then heartbeat on a fixed interval (ADR-0007/0008). No reconnect/backoff
-//! logic yet — that's a later slice.
+//! then heartbeat on a fixed interval (ADR-0007/0008). Reconnects with
+//! exponential backoff + jitter on any error or disconnect; the backoff
+//! counter resets after a session is successfully established.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use rand::Rng;
 use rustls::RootCertStore;
 use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -14,7 +16,46 @@ use uuid::Uuid;
 use crate::identity::Paths;
 use protocol::{Envelope, Heartbeat, Hello, Message};
 
+const MAX_BACKOFF_SECS: u64 = 60;
+
+/// Base backoff delay (before jitter) for the given zero-indexed retry
+/// attempt: `2^attempt` seconds, capped at `MAX_BACKOFF_SECS`. Pure and
+/// deterministic so it can be unit tested independent of the RNG.
+fn backoff_base_secs(attempt: u32) -> u64 {
+    2u64.saturating_pow(attempt).min(MAX_BACKOFF_SECS)
+}
+
+/// Full-jitter backoff delay: a random duration in `[0, base]`, where
+/// `base` is `backoff_base_secs(attempt)`. Full jitter (rather than
+/// e.g. +/-50%) avoids synchronized reconnect storms across many agents.
+fn backoff_delay(attempt: u32) -> Duration {
+    let base = backoff_base_secs(attempt);
+    let jittered = rand::thread_rng().gen_range(0..=base.max(1));
+    Duration::from_secs(jittered)
+}
+
 pub async fn run(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
+    let mut attempt: u32 = 0;
+
+    loop {
+        match run_session(gateway_url, state_dir).await {
+            Ok(()) => {
+                tracing::info!("gateway session ended cleanly; reconnecting");
+                attempt = 0;
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, attempt, "gateway session failed; reconnecting");
+            }
+        }
+
+        let delay = backoff_delay(attempt);
+        tracing::debug!(delay_secs = delay.as_secs(), "waiting before reconnect");
+        tokio::time::sleep(delay).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     let paths = Paths::new(state_dir);
     if !paths.exist() {
         anyhow::bail!(
@@ -110,4 +151,33 @@ fn hostname_or_unknown() -> String {
         }
     }
     "unknown".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_base_grows_exponentially_then_caps() {
+        assert_eq!(backoff_base_secs(0), 1);
+        assert_eq!(backoff_base_secs(1), 2);
+        assert_eq!(backoff_base_secs(2), 4);
+        assert_eq!(backoff_base_secs(3), 8);
+        assert_eq!(backoff_base_secs(4), 16);
+        assert_eq!(backoff_base_secs(5), 32);
+        assert_eq!(backoff_base_secs(6), MAX_BACKOFF_SECS); // 64 -> capped
+        assert_eq!(backoff_base_secs(20), MAX_BACKOFF_SECS);
+        assert_eq!(backoff_base_secs(u32::MAX), MAX_BACKOFF_SECS);
+    }
+
+    #[test]
+    fn jittered_delay_never_exceeds_base() {
+        for attempt in 0..10 {
+            let base = backoff_base_secs(attempt);
+            for _ in 0..50 {
+                let delay = backoff_delay(attempt).as_secs();
+                assert!(delay <= base, "delay {delay} exceeded base {base}");
+            }
+        }
+    }
 }

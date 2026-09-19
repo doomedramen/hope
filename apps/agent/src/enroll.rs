@@ -2,17 +2,19 @@
 //! operator-supplied single-use token for a signed client cert over the
 //! enroll HTTPS endpoint (ADR-0007).
 //!
-//! TOFU note (TODO for a later slice): at this point the agent has no CA
-//! cert yet, so it cannot verify the enroll server's TLS certificate. We
-//! trust it on first use for this one request, on the strength of the
-//! operator-supplied token; every subsequent connection (the gateway
-//! WebSocket) verifies the server strictly against the CA cert returned
-//! here.
+//! The enroll TLS connection is verified by pinning the CA's SHA-256
+//! fingerprint (printed once by `server enroll-token create` alongside the
+//! token) rather than trusting on first use: `PinnedFingerprintVerifier`
+//! rejects the handshake before the token is ever sent if the presented
+//! chain doesn't include a certificate matching the pinned fingerprint.
+
+use std::sync::Arc;
 
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{Paths, write_private};
+use crate::pinning::PinnedFingerprintVerifier;
 
 #[derive(Debug, Serialize)]
 struct EnrollRequest {
@@ -29,7 +31,34 @@ struct EnrollResponse {
     ca_cert_pem: String,
 }
 
-pub async fn run(server_url: &str, token: &str, state_dir: &str) -> anyhow::Result<()> {
+/// A single-use enrollment code, either as separate token + CA fingerprint,
+/// or the combined `token.fingerprint` form printed by
+/// `server enroll-token create`.
+pub struct EnrollCode {
+    pub token: String,
+    pub ca_fingerprint_hex: String,
+}
+
+impl EnrollCode {
+    pub fn new(token: String, ca_fingerprint_hex: String) -> Self {
+        Self {
+            token,
+            ca_fingerprint_hex: ca_fingerprint_hex.to_lowercase(),
+        }
+    }
+
+    pub fn parse_combined(code: &str) -> anyhow::Result<Self> {
+        let (token, fingerprint) = code
+            .split_once('.')
+            .ok_or_else(|| anyhow::anyhow!("--code must be in TOKEN.FINGERPRINT form"))?;
+        Ok(Self {
+            token: token.to_string(),
+            ca_fingerprint_hex: fingerprint.to_lowercase(),
+        })
+    }
+}
+
+pub async fn run(server_url: &str, code: &EnrollCode, state_dir: &str) -> anyhow::Result<()> {
     let key = KeyPair::generate()?;
     let mut params = CertificateParams::new(Vec::<String>::new())?;
     let mut dn = DistinguishedName::new();
@@ -39,21 +68,34 @@ pub async fn run(server_url: &str, token: &str, state_dir: &str) -> anyhow::Resu
     let csr = params.serialize_request(&key)?;
     let csr_pem = csr.pem()?;
 
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = PinnedFingerprintVerifier::new(code.ca_fingerprint_hex.clone(), provider);
+
+    let tls_config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth();
+
     let client = reqwest::Client::builder()
-        // See module doc: TOFU for this one bootstrap request only.
-        .danger_accept_invalid_certs(true)
+        .use_preconfigured_tls(tls_config)
         .build()?;
 
     let url = format!("{}/enroll", server_url.trim_end_matches('/'));
     let response = client
         .post(url)
         .json(&EnrollRequest {
-            token: token.to_string(),
+            token: code.token.clone(),
             csr_pem,
             hostname: Some(hostname),
         })
         .send()
-        .await?;
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "connecting to enroll endpoint failed (this is expected if --ca-fingerprint is wrong): {err}"
+            )
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
