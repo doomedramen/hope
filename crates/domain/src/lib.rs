@@ -12,6 +12,7 @@ use uuid::Uuid;
 pub mod discovery;
 pub mod fingerprinting;
 pub mod inventory;
+pub mod monitoring;
 
 /// A user account, as created by the setup/bootstrap flow.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
