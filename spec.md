@@ -336,7 +336,7 @@ The server must reject accidentally broad public ranges by default and clearly d
 ### 6.2 Discovery pipeline
 
 1. Discover live or recently known addresses using ARP/NDP where local, ICMP, and selected TCP probes.
-2. Match the address/interface to an existing device or create an unconfirmed device.
+2. For TCP discovery, resolve the address/interface only after definitive liveness evidence (`open` or `closed`/connection refused); filtered-only or unresponsive targets retain raw observations but create no device or address.
 3. Run a full TCP scan across `1–65535` for a new device.
 4. Fingerprint each open port.
 5. Reconcile endpoints and services with agent, Docker, API, mDNS, UPnP, SNMP, and prior evidence.

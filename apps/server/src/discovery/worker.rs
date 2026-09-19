@@ -453,10 +453,7 @@ async fn execute_run(
             .await;
         }
 
-        let device_id = addresses::ensure_scanned_address(pool, *address)
-            .await
-            .with_context(|| format!("resolve scanned address {address}"))?;
-        device_ids.insert(*address, device_id);
+        let mut address_has_liveness = false;
 
         let port_offset = if target_index == first_target {
             initial_port_offset
@@ -505,6 +502,14 @@ async fn execute_run(
             } else {
                 None
             };
+            if !address_has_liveness && observations.iter().any(observation_proves_liveness) {
+                let device_id = addresses::ensure_scanned_address(pool, *address)
+                    .await
+                    .with_context(|| format!("resolve live scanned address {address}"))?;
+                device_ids.insert(*address, device_id);
+                attach_run_observations_to_device(pool, run.id, *address, device_id).await?;
+                address_has_liveness = true;
+            }
             if !observations.is_empty() {
                 let next_ports_completed = ports_completed
                     .checked_add(observations.len() as i64)
@@ -738,16 +743,14 @@ async fn persist_observations(
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     for observation in observations {
-        let device_id = device_ids
-            .get(&observation.address)
-            .copied()
-            .ok_or_else(|| {
+        let device_id = device_ids.get(&observation.address).copied();
+        let evidence_id = if observation.state == PortState::Open {
+            let device_id = device_id.ok_or_else(|| {
                 anyhow!(
-                    "no inventory device for scanned address {}",
+                    "open observation has no resolved device for scanned address {}",
                     observation.address
                 )
             })?;
-        let evidence_id = if observation.state == PortState::Open {
             Some(record_open_port_evidence(&mut tx, run_id, device_id, observation).await?)
         } else {
             None
@@ -786,6 +789,28 @@ async fn persist_observations(
     Ok(())
 }
 
+fn observation_proves_liveness(observation: &PortObservation) -> bool {
+    matches!(observation.state, PortState::Open | PortState::Closed)
+}
+
+async fn attach_run_observations_to_device(
+    pool: &PgPool,
+    run_id: Uuid,
+    address: IpAddr,
+    device_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        "update port_observations set device_id = $3 \
+         where scan_run_id = $1 and address = $2::inet and device_id is null",
+    )
+    .bind(run_id)
+    .bind(address.to_string())
+    .bind(device_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn complete_run(
     pool: &PgPool,
     run_id: Uuid,
@@ -807,7 +832,8 @@ async fn complete_run(
 
     let scanned_device_rows: Vec<(String, Option<Uuid>)> = sqlx::query_as(
         "select distinct host(address), device_id from port_observations \
-         where scan_run_id = $1 and transport = 'tcp'",
+         where scan_run_id = $1 and transport = 'tcp' \
+           and state in ('open', 'closed')",
     )
     .bind(run_id)
     .fetch_all(&mut *tx)
@@ -1279,6 +1305,188 @@ mod tests {
             .expect("read job progress");
         assert_eq!(progress.0["status"], "succeeded");
         assert_eq!(progress.0["ports_completed"], 2);
+    }
+
+    #[tokio::test]
+    async fn db_filtered_only_run_keeps_observations_without_discovering_address() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let octets = Uuid::new_v4().into_bytes();
+        let address = format!("10.{}.{}.{}", octets[0], octets[1], octets[2]);
+        let target: IpAddr = address.parse().expect("test target");
+        let (_, job_id, run_id) = test_run_for_address(&pool, &address, 2).await;
+        let run = load_run(&pool, job_id)
+            .await
+            .expect("load filtered test run");
+        let scanner = FakeScanner {
+            filtered_ports: [80, 443].into_iter().collect(),
+            ..FakeScanner::default()
+        };
+        let mut device_ids = HashMap::new();
+
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id,
+                worker_id: "test-worker",
+            },
+            run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &scanner,
+                device_ids: &mut device_ids,
+            },
+        )
+        .await
+        .expect("complete filtered test run");
+
+        let run_state: (String, bool, i64, i64) = sqlx::query_as(
+            "select status, complete, targets_completed, ports_completed from scan_runs where id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read filtered run");
+        assert_eq!(run_state, ("succeeded".to_string(), true, 1, 2));
+
+        let observations: (i64, i64) = sqlx::query_as(
+            "select count(*), count(*) filter (where device_id is null) \
+             from port_observations where scan_run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read filtered observations");
+        assert_eq!(observations, (2, 2));
+        assert!(device_ids.is_empty());
+
+        let addresses: (i64,) =
+            sqlx::query_as("select count(*) from addresses where ip = $1::inet")
+                .bind(&address)
+                .fetch_one(&pool)
+                .await
+                .expect("count filtered addresses");
+        assert_eq!(addresses.0, 0);
+        let evidence: (i64,) = sqlx::query_as(
+            "select count(*) from evidence \
+             where source_type = 'network_scan' and value->>'address' = $1",
+        )
+        .bind(&address)
+        .fetch_one(&pool)
+        .await
+        .expect("count filtered evidence");
+        assert_eq!(evidence.0, 0);
+    }
+
+    #[tokio::test]
+    async fn db_closed_then_open_discovery_refreshes_one_device() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let octets = Uuid::new_v4().into_bytes();
+        let address = format!("10.{}.{}.{}", octets[0], octets[1], octets[2]);
+        let target: IpAddr = address.parse().expect("test target");
+
+        let (_, first_job_id, _) = test_run_for_address(&pool, &address, 2).await;
+        let first_run = load_run(&pool, first_job_id)
+            .await
+            .expect("load closed test run");
+        let first_scanner = FakeScanner::default();
+        let mut first_device_ids = HashMap::new();
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id: first_job_id,
+                worker_id: "test-worker",
+            },
+            first_run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &first_scanner,
+                device_ids: &mut first_device_ids,
+            },
+        )
+        .await
+        .expect("complete closed test run");
+
+        let (device_id,): (Uuid,) = sqlx::query_as(
+            "select d.id from devices d \
+             join interfaces i on i.device_id = d.id \
+             join addresses a on a.interface_id = i.id \
+             where a.ip = $1::inet and a.is_current",
+        )
+        .bind(&address)
+        .fetch_one(&pool)
+        .await
+        .expect("resolve closed device");
+
+        let (_, second_job_id, second_run_id) = test_run_for_address(&pool, &address, 2).await;
+        let second_run = load_run(&pool, second_job_id)
+            .await
+            .expect("load open refresh test run");
+        let second_scanner = FakeScanner {
+            open_port: Some(443),
+            ..FakeScanner::default()
+        };
+        let mut second_device_ids = HashMap::new();
+        execute_run(
+            ExecutionContext {
+                pool: &pool,
+                job_id: second_job_id,
+                worker_id: "test-worker",
+            },
+            second_run,
+            ScanPlan {
+                targets: &[target],
+                ports: &[80, 443],
+                scanner: &second_scanner,
+                device_ids: &mut second_device_ids,
+            },
+        )
+        .await
+        .expect("complete open refresh test run");
+
+        assert_eq!(second_device_ids.get(&target), Some(&device_id));
+        let device_count: (i64,) = sqlx::query_as(
+            "select count(distinct d.id) from devices d \
+             join interfaces i on i.device_id = d.id \
+             join addresses a on a.interface_id = i.id \
+             where a.ip = $1::inet",
+        )
+        .bind(&address)
+        .fetch_one(&pool)
+        .await
+        .expect("count refreshed devices");
+        assert_eq!(device_count.0, 1);
+
+        let open_evidence: (i64,) = sqlx::query_as(
+            "select count(*) from evidence \
+             where subject_table = 'devices' and subject_id = $1 \
+               and source_type = 'network_scan' and attribute = $2 \
+               and value->>'address' = $3 and not absent",
+        )
+        .bind(device_id)
+        .bind(PORT_EVIDENCE_ATTRIBUTE)
+        .bind(&address)
+        .fetch_one(&pool)
+        .await
+        .expect("count refreshed open evidence");
+        assert_eq!(open_evidence.0, 1);
+        let observations: (i64, i64) = sqlx::query_as(
+            "select count(*), count(*) filter (where device_id = $2) \
+             from port_observations where scan_run_id = $1",
+        )
+        .bind(second_run_id)
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read refreshed observations");
+        assert_eq!(observations, (2, 2));
     }
 
     #[tokio::test]
@@ -1823,6 +2031,7 @@ mod tests {
     struct FakeScanner {
         fail_port: Option<u16>,
         open_port: Option<u16>,
+        filtered_ports: HashSet<u16>,
         calls: AtomicUsize,
     }
 
@@ -1839,7 +2048,9 @@ mod tests {
             Ok(PortObservation {
                 address: target.ip(),
                 port: target.port(),
-                state: if self.open_port == Some(target.port()) {
+                state: if self.filtered_ports.contains(&target.port()) {
+                    PortState::Filtered
+                } else if self.open_port == Some(target.port()) {
                     PortState::Open
                 } else {
                     PortState::Closed

@@ -74,23 +74,35 @@ The scanner never performs authentication, protocol writes, or exploit probes.
 
 ## 4. Observation application
 
-For each address, the worker resolves or creates an unconfirmed `unknown`
-device with one current M1 interface/address record. An open TCP port appends a
-`network_scan` evidence row with attribute `open_port` and value
-`{"address":"...","port":443,"transport":"tcp"}`. It emits a
-`port.opened` change event only when the latest matching scan evidence was
-absent or missing; repeated positive observations refresh evidence without
-duplicating the event.
+The worker records every TCP result for every approved address. `open` and
+`closed` (connection refused) prove address liveness. Only after the first
+definitive result for a previously unresolved address does the worker resolve
+an owner or create an unconfirmed `unknown` device with one current M1
+interface/address record. A new address whose complete result set is only
+`filtered` or unresponsive keeps raw `port_observations` with a nullable
+`device_id`; it creates no device, interface, address, or device evidence.
+Previously known address owners may keep their existing association, but a
+filtered-only result does not refresh or discover an owner. If filtered
+observations were written before a later port proves liveness, the worker
+attaches those observations to the resolved device in the same run.
+
+An open TCP port appends a `network_scan` evidence row with attribute
+`open_port` and value `{"address":"...","port":443,"transport":"tcp"}`.
+It emits a `port.opened` change event only when the latest matching scan
+evidence was absent or missing; repeated positive observations refresh evidence
+without duplicating the event.
 
 A full, complete scan can append absent evidence and a `port.closed` change
 event for a previously observed port only when the historical evidence belongs
 to the same device observed at that address by the run, after resolving
-`canonical_of` redirects. If the address has a different or ambiguous owner,
-the run retains its raw observation but writes no absence evidence or closure
-event for the prior owner. Closure reconciliation runs in the same transaction
-that marks the run `succeeded`. Partial, failed, and cancelled runs only retain
-raw observations and refresh positive evidence; they never write absence
-evidence or closure events.
+`canonical_of` redirects. Closure reconciliation considers only addresses with
+at least one definitive `open` or `closed` result, so a filtered-only or
+unresponsive address cannot close historical open-port evidence. If the address
+has a different or ambiguous owner, the run retains its raw observation but
+writes no absence evidence or closure event for the prior owner. Closure
+reconciliation runs in the same transaction that marks the run `succeeded`.
+Partial, failed, and cancelled runs only retain raw observations and refresh
+positive evidence; they never write absence evidence or closure events.
 
 M3 consumes the open-port evidence for HTTP, TLS, SSH, and generic TCP
 classification. M2 does not create product or service guesses.
