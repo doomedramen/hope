@@ -158,3 +158,33 @@ No per-account lockout. `X-Forwarded-For` trust is off by default and must be en
 - Status: captured
 
 At ba7965b, full workspace tests passed against postgres:17 incl. `enroll_connect_hello_heartbeat_replay_expiry_revocation` and jobs tests. Hand-rolled `PgSessionStore` has no DB-gated test yet, so still unverified against real Postgres.
+
+## Agent release key rotation not implemented
+
+- Created: 2026-09-19
+- Type: todo
+- Area: release
+- Context: M0 signed release pipeline slice
+- Status: captured
+
+Multi-key agent trust for rotation is only planned in docs/release-signing.md. Must be implemented before any real key rotation (spec §7.7) and before first public release.
+
+## CI signing uses ephemeral key without secrets
+
+- Created: 2026-09-19
+- Type: note
+- Area: release
+- Context: M0 signed release pipeline slice
+- Status: captured
+
+Without configured signing secrets, CI generates a per-run key (workflow warns). Those artifacts are not trustable releases. Real release key must be set up as a CI secret.
+
+## HOPE_RELEASE_PUBLIC_KEY_FILE path is relative to apps/agent
+
+- Created: 2026-09-19
+- Type: note
+- Area: release
+- Context: M0 signed release pipeline slice
+- Status: captured
+
+build.rs resolves the path relative to apps/agent, not repo root. Documented; missing/unreadable file now panics instead of silently falling back to dev mode.
