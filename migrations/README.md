@@ -44,6 +44,8 @@ monitor intent, bounded check-result history, and one-open-incident-per-monitor
 state. `0016_monitoring_defaults.sql` aligns new monitor rows with the M4
 defaults from spec §8.3: a 30-second interval and three consecutive failures.
 `0017_monitoring_underlying_state.sql` preserves the non-stale state needed to
-reconstruct the health state machine after a worker restart. These migrations
-do not themselves schedule checks or send notifications; those behaviours
-belong to the M4 worker slices.
+reconstruct the health state machine after a worker restart. `0018_monitor_result_rollups.sql`
+adds hourly result rollups and a marker that lets the scheduled retention job
+delete raw observations only after compaction. The monitor worker and scheduled
+jobs own execution, retention, and notification behaviour; migrations only
+create the durable state.

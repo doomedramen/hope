@@ -135,6 +135,22 @@ async fn m0_schema_upgrades_to_m1_without_data_loss() {
         .expect("incident table exists after upgrade");
     assert_eq!(incident_count, 0);
 
+    let rollup_count: i64 = sqlx::query_scalar("select count(*) from monitor_result_rollups")
+        .fetch_one(&pool)
+        .await
+        .expect("monitor result rollup table exists after upgrade");
+    assert_eq!(rollup_count, 0);
+
+    let rolled_up_column: String = sqlx::query_scalar(
+        "select data_type from information_schema.columns \
+         where table_schema = 'public' and table_name = 'monitor_results' \
+           and column_name = 'rolled_up_at'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("monitor result rollup marker exists");
+    assert_eq!(rolled_up_column, "timestamp with time zone");
+
     let interval_default: String = sqlx::query_scalar(
         "select column_default from information_schema.columns \
          where table_schema = 'public' and table_name = 'monitors' \

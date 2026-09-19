@@ -27,8 +27,9 @@ transaction. The proposal decision writes its own change and audit records.
 
 ## 2. Stored state
 
-Migrations `0015_monitoring_core.sql`, `0016_monitoring_defaults.sql`, and
-`0017_monitoring_underlying_state.sql` add:
+Migrations `0015_monitoring_core.sql`, `0016_monitoring_defaults.sql`,
+`0017_monitoring_underlying_state.sql`, and
+`0018_monitor_result_rollups.sql` add:
 
 ```text
 monitors(id, proposal_id, service_id, endpoint_id, monitor_type, config,
@@ -43,11 +44,15 @@ monitor_results(id, monitor_id, status, observed_at, latency_ms, error,
 
 incidents(id, monitor_id, state, severity, opened_at, recovered_at,
           last_event_at, failure_count, last_result_id, summary, timestamps)
+
+monitor_result_rollups(monitor_id, bucket_start, counts, latency summary,
+                       last_status, timestamps)
 ```
 
 The database allows at most one open incident per monitor. Results are
-append-only observations; monitor state and incident rows are projections
-updated by the check worker.
+append-only observations until the scheduled retention job marks them rolled
+up and deletes rows outside the raw-result window. Monitor state and incident
+rows are projections updated by the check worker.
 
 ## 3. API slice
 

@@ -411,6 +411,8 @@ async fn main() -> anyhow::Result<()> {
             let scheduler_task = tokio::spawn(scheduler::run(
                 scheduler_pool,
                 config.change_event_retention_days,
+                config.monitor_result_retention_days,
+                config.monitor_result_rollup_after_days,
             ));
 
             let api_task = axum::serve(
@@ -587,6 +589,8 @@ mod handshake_tests {
             cookie_secure: false,
             trust_proxy_headers: false,
             change_event_retention_days: 365,
+            monitor_result_retention_days: 90,
+            monitor_result_rollup_after_days: 7,
         }
     }
 

@@ -127,6 +127,45 @@ impl JobHandler for ChangeEventRetention {
     }
 }
 
+/// Compact old monitor observations into hourly rollups, then delete raw rows
+/// outside the configured history window. The handler keeps the two windows in
+/// the job payload so operators can change them without rebuilding workers.
+struct MonitorResultRetention;
+
+#[async_trait]
+impl JobHandler for MonitorResultRetention {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let rollup_after_days = payload
+            .get("rollup_after_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(7)
+            .max(1);
+        let retention_days = payload
+            .get("retention_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(90)
+            .max(rollup_after_days + 1);
+        let rolled_up = retention::rollup_monitor_results(pool, rollup_after_days).await?;
+        let deleted = retention::purge_old_monitor_results(pool, retention_days).await?;
+        if rolled_up > 0 || deleted > 0 {
+            tracing::info!(
+                rolled_up,
+                deleted,
+                rollup_after_days,
+                retention_days,
+                "compacted monitor results"
+            );
+        }
+        Ok(JobOutcome::Completed)
+    }
+}
+
 struct FullTcpDiscovery;
 
 #[async_trait]
@@ -247,6 +286,10 @@ impl Registry {
         handlers.insert("enrollment_token.purge", Box::new(EnrollmentTokenPurge));
         handlers.insert("diagnostic.echo", Box::new(DiagnosticEcho));
         handlers.insert("change_events.retention", Box::new(ChangeEventRetention));
+        handlers.insert(
+            "monitor_results.retention",
+            Box::new(MonitorResultRetention),
+        );
         handlers.insert("discovery.full_tcp", Box::new(FullTcpDiscovery));
         handlers.insert("discovery.service_collectors", Box::new(ServiceCollector));
         Self(handlers)
@@ -282,6 +325,7 @@ mod tests {
         assert!(registry.get("session.cleanup").is_some());
         assert!(registry.get("enrollment_token.purge").is_some());
         assert!(registry.get("diagnostic.echo").is_some());
+        assert!(registry.get("monitor_results.retention").is_some());
         assert!(registry.get("discovery.full_tcp").is_some());
         assert!(registry.get("discovery.service_collectors").is_some());
         assert!(registry.get("no.such.kind").is_none());

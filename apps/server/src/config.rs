@@ -46,6 +46,14 @@ pub struct Config {
     /// §5, Decision 5). The `change_events.retention` worker job deletes
     /// rows older than this many days, in bounded batches.
     pub change_event_retention_days: i64,
+
+    /// Raw monitor results older than this many days are deleted after they
+    /// have been included in an hourly rollup.
+    pub monitor_result_retention_days: i64,
+
+    /// Raw monitor results older than this many days are compacted into
+    /// hourly rollups.
+    pub monitor_result_rollup_after_days: i64,
 }
 
 fn defaults() -> Config {
@@ -62,6 +70,8 @@ fn defaults() -> Config {
         cookie_secure: true,
         trust_proxy_headers: false,
         change_event_retention_days: 365,
+        monitor_result_retention_days: 90,
+        monitor_result_rollup_after_days: 7,
     }
 }
 

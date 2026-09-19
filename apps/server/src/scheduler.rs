@@ -30,7 +30,12 @@ fn daily_period_key(prefix: &str) -> String {
     format!("{prefix}-{day_bucket}")
 }
 
-pub(crate) async fn enqueue_periodic_jobs(pool: &PgPool, change_event_retention_days: i64) {
+pub(crate) async fn enqueue_periodic_jobs(
+    pool: &PgPool,
+    change_event_retention_days: i64,
+    monitor_result_retention_days: i64,
+    monitor_result_rollup_after_days: i64,
+) {
     let session_cleanup_key = hourly_period_key("hourly");
     if let Err(err) = jobs::enqueue(
         pool,
@@ -58,8 +63,23 @@ pub(crate) async fn enqueue_periodic_jobs(pool: &PgPool, change_event_retention_
     let retention_key = daily_period_key("daily");
     if let Err(err) = jobs::enqueue(
         pool,
-        "change_events.retention",
+        "monitor_results.retention",
         &retention_key,
+        serde_json::json!({
+            "retention_days": monitor_result_retention_days,
+            "rollup_after_days": monitor_result_rollup_after_days,
+        }),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "failed to enqueue monitor_results.retention");
+    }
+
+    let change_event_retention_key = daily_period_key("daily-change-events");
+    if let Err(err) = jobs::enqueue(
+        pool,
+        "change_events.retention",
+        &change_event_retention_key,
         serde_json::json!({"retention_days": change_event_retention_days}),
     )
     .await
@@ -188,9 +208,20 @@ async fn enqueue_change_scan_for_scope(pool: &PgPool, network_id: Uuid) -> anyho
 /// `CHECK_INTERVAL`. Enqueuing immediately on startup means a
 /// short-lived/restarted server doesn't wait a full interval before the
 /// first check-and-enqueue.
-pub async fn run(pool: PgPool, change_event_retention_days: i64) {
+pub async fn run(
+    pool: PgPool,
+    change_event_retention_days: i64,
+    monitor_result_retention_days: i64,
+    monitor_result_rollup_after_days: i64,
+) {
     loop {
-        enqueue_periodic_jobs(&pool, change_event_retention_days).await;
+        enqueue_periodic_jobs(
+            &pool,
+            change_event_retention_days,
+            monitor_result_retention_days,
+            monitor_result_rollup_after_days,
+        )
+        .await;
         tokio::time::sleep(CHECK_INTERVAL).await;
     }
 }
@@ -226,14 +257,14 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool, 365).await;
+        enqueue_periodic_jobs(&pool, 365, 90, 7).await;
         let after_first: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
 
-        enqueue_periodic_jobs(&pool, 365).await;
+        enqueue_periodic_jobs(&pool, 365, 90, 7).await;
         let after_second: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
@@ -252,7 +283,7 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool, 365).await;
+        enqueue_periodic_jobs(&pool, 365, 90, 7).await;
 
         let session_cleanup: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
@@ -264,9 +295,16 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
+        let monitor_retention: (i64,) = sqlx::query_as(
+            "select count(*) from jobs where job_type = 'monitor_results.retention'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
         assert!(session_cleanup.0 >= 1);
         assert!(token_purge.0 >= 1);
+        assert!(monitor_retention.0 >= 1);
     }
 
     async fn create_test_scope(pool: &PgPool, enabled: bool, confirmed: bool) -> Uuid {
