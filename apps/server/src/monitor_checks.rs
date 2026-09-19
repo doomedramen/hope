@@ -768,7 +768,11 @@ pub enum CheckError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{CertificateParams, KeyPair};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use std::sync::Arc;
     use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
 
     fn request(protocol: CheckProtocol, port: u16) -> CheckRequest {
         CheckRequest {
@@ -929,6 +933,48 @@ mod tests {
         assert_eq!(outcome.status, CheckStatus::Success);
         assert_eq!(outcome.details["answers"], 1);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tls_expiry_check_reads_the_leaf_certificate() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let key = KeyPair::generate().unwrap();
+        let params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let certificate = params.self_signed(&key).unwrap();
+        let certs = vec![CertificateDer::from(certificate.der().to_vec())];
+        let private_key = PrivateKeyDer::try_from(key.serialize_der()).unwrap();
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, private_key)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = acceptor.accept(stream).await;
+        });
+
+        let outcome = run(CheckRequest {
+            protocol: CheckProtocol::Tls,
+            address: address.ip(),
+            port: address.port(),
+            path: None,
+            host: Some("localhost".to_string()),
+            expected_status: None,
+            body_contains: None,
+            dns_name: None,
+            dns_record_type: None,
+            tls_min_valid_days: Some(0),
+            timeout: Duration::from_secs(1),
+        })
+        .await;
+
+        assert_eq!(outcome.status, CheckStatus::Success);
+        assert!(outcome.details["not_after"].is_string());
+        assert_eq!(outcome.details["certificate_trust"], "not_validated");
     }
 
     #[test]
