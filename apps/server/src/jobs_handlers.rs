@@ -5,15 +5,20 @@
 //! message rather than retrying forever (see `jobs::fail_permanently`).
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use std::str::FromStr;
 
 use async_trait::async_trait;
+use domain::discovery::ApprovedScope;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::agents;
+use crate::discovery::service_collectors::{self, CollectorConfig, CollectorProtocol};
 use crate::discovery::worker;
 use crate::inventory::retention;
+use crate::inventory::service_collector_evidence;
 use crate::session_store::PgSessionStore;
 
 pub use worker::JobOutcome;
@@ -137,6 +142,102 @@ impl JobHandler for FullTcpDiscovery {
     }
 }
 
+struct ServiceCollector;
+
+#[async_trait]
+impl JobHandler for ServiceCollector {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let network_id = payload
+            .get("network_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("service collector payload has no network_id"))
+            .and_then(|value| {
+                Uuid::parse_str(value).map_err(|error| {
+                    anyhow::anyhow!("invalid service collector network_id: {error}")
+                })
+            })?;
+        let protocol = payload
+            .get("protocol")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("service collector payload has no protocol"))?;
+        let protocol = match protocol {
+            "mdns" => CollectorProtocol::Mdns,
+            "ssdp" => CollectorProtocol::Ssdp,
+            other => anyhow::bail!("unsupported service collector protocol `{other}`"),
+        };
+        let interface = payload
+            .get("interface")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("service collector payload has no interface"))
+            .and_then(|value| {
+                Ipv4Addr::from_str(value).map_err(|error| {
+                    anyhow::anyhow!("invalid service collector interface: {error}")
+                })
+            })?;
+
+        validate_collector_scope(pool, network_id, interface).await?;
+        let observations =
+            service_collectors::collect_multicast(protocol, interface, CollectorConfig::default())
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?;
+        let outcome = service_collector_evidence::persist_collected_observations(
+            pool,
+            &job_id.to_string(),
+            &observations,
+        )
+        .await?;
+        tracing::info!(
+            %job_id,
+            %network_id,
+            observations = outcome.observations,
+            evidence_rows_added = outcome.evidence_rows_added,
+            unmatched = outcome.unmatched,
+            "service collector job completed"
+        );
+        Ok(JobOutcome::Completed)
+    }
+}
+
+async fn validate_collector_scope(
+    pool: &PgPool,
+    network_id: Uuid,
+    interface: Ipv4Addr,
+) -> anyhow::Result<()> {
+    let scope: Option<(String, bool, bool, Value)> = sqlx::query_as(
+        "select n.cidr::text, coalesce(ds.enabled, false), \
+                (ds.confirmed_at is not null), coalesce(ds.excluded_cidrs, '[]'::jsonb) \
+         from networks n \
+         left join discovery_scopes ds on ds.network_id = n.id \
+         where n.id = $1",
+    )
+    .bind(network_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((cidr, enabled, confirmed, excluded_cidrs)) = scope else {
+        anyhow::bail!("network {network_id} not found");
+    };
+    if !enabled || !confirmed {
+        anyhow::bail!("network {network_id} has no enabled, confirmed discovery scope");
+    }
+    let excluded_cidrs: Vec<String> = serde_json::from_value(excluded_cidrs)?;
+    let scope = ApprovedScope::parse(&cidr, &excluded_cidrs)?;
+    if !scope.cidr().contains(&interface)
+        || scope
+            .exclusions()
+            .iter()
+            .any(|excluded| excluded.contains(&interface))
+    {
+        anyhow::bail!("collector interface is outside the confirmed discovery scope");
+    }
+    Ok(())
+}
+
 pub struct Registry(HashMap<&'static str, Box<dyn JobHandler>>);
 
 impl Registry {
@@ -147,6 +248,7 @@ impl Registry {
         handlers.insert("diagnostic.echo", Box::new(DiagnosticEcho));
         handlers.insert("change_events.retention", Box::new(ChangeEventRetention));
         handlers.insert("discovery.full_tcp", Box::new(FullTcpDiscovery));
+        handlers.insert("discovery.service_collectors", Box::new(ServiceCollector));
         Self(handlers)
     }
 
@@ -181,6 +283,7 @@ mod tests {
         assert!(registry.get("enrollment_token.purge").is_some());
         assert!(registry.get("diagnostic.echo").is_some());
         assert!(registry.get("discovery.full_tcp").is_some());
+        assert!(registry.get("discovery.service_collectors").is_some());
         assert!(registry.get("no.such.kind").is_none());
     }
 
