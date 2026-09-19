@@ -188,3 +188,43 @@ Without configured signing secrets, CI generates a per-run key (workflow warns).
 - Status: captured
 
 build.rs resolves the path relative to apps/agent, not repo root. Documented; missing/unreadable file now panics instead of silently falling back to dev mode.
+
+## DB-gated tests must run single-threaded
+
+- Created: 2026-09-19
+- Type: concern
+- Area: testing
+- Context: M0 worker handlers / compose slice
+- Status: captured
+
+`jobs::claim()` is table-wide, so parallel DB-gated tests steal each other's jobs. Workaround: `--test-threads=1` in justfile/CI. Better fix later: per-test database/schema, or claim filtered by queue/kind.
+
+## Migration upgrade-path test needed from M1
+
+- Created: 2026-09-19
+- Type: todo
+- Area: database
+- Context: M0 worker handlers / compose slice
+- Status: captured
+
+M0 gate "upgrade from previous test schema" not testable yet (no prior schema; see migrations/README.md). When M1 adds migrations, add a test applying through the last tagged schema then new ones on top.
+
+## Compose runs on plain HTTP with insecure cookies
+
+- Created: 2026-09-19
+- Type: note
+- Area: deploy
+- Context: M0 worker handlers / compose slice
+- Status: captured
+
+`.env.example` sets `HOPE_COOKIE_SECURE=false` so login works over the compose stack's plain HTTP. Production config needs TLS in front and secure cookies on.
+
+## CI-only M0 gates unverified locally
+
+- Created: 2026-09-19
+- Type: todo
+- Area: ci
+- Context: Local-only development, no remote
+- Status: captured
+
+Repo has no remote, so CI never runs. arm64/amd64 musl agent cross-compile (needs cargo-zigbuild, not installed) and the CI signing job are unverified.
