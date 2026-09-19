@@ -805,6 +805,27 @@ async fn complete_run(
     .await?;
     let current_open: HashSet<(String, i32, String)> = open_observations.into_iter().collect();
 
+    let scanned_device_rows: Vec<(String, Option<Uuid>)> = sqlx::query_as(
+        "select distinct host(address), device_id from port_observations \
+         where scan_run_id = $1 and transport = 'tcp'",
+    )
+    .bind(run_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut scanned_device_ids = HashMap::new();
+    let mut ambiguous_addresses = HashSet::new();
+    for (address, device_id) in scanned_device_rows {
+        let Some(device_id) = device_id else {
+            ambiguous_addresses.insert(address);
+            continue;
+        };
+        if let Some(previous) = scanned_device_ids.insert(address.clone(), device_id)
+            && previous != device_id
+        {
+            ambiguous_addresses.insert(address);
+        }
+    }
+
     let previous_open: Vec<(Uuid, Value, bool)> = sqlx::query_as(
         "select distinct on (subject_id, value) subject_id, value, absent \
          from evidence \
@@ -819,6 +840,7 @@ async fn complete_run(
     .await?;
 
     let source_instance = run_id.to_string();
+    let mut canonical_ids = HashMap::new();
     for (device_id, value, absent) in previous_open {
         if absent {
             continue;
@@ -839,6 +861,19 @@ async fn complete_run(
         if !target_address_set.contains(address)
             || !ports.iter().any(|candidate| i32::from(*candidate) == port)
         {
+            continue;
+        }
+        if ambiguous_addresses.contains(address) {
+            continue;
+        }
+        let Some(scanned_device_id) = scanned_device_ids.get(address).copied() else {
+            continue;
+        };
+        let scanned_device_id =
+            canonical_device_id_in_tx(&mut tx, scanned_device_id, &mut canonical_ids).await?;
+        let evidence_device_id =
+            canonical_device_id_in_tx(&mut tx, device_id, &mut canonical_ids).await?;
+        if scanned_device_id != evidence_device_id {
             continue;
         }
         let key = (address.to_string(), port, transport.to_string());
@@ -899,6 +934,37 @@ async fn complete_run(
     }
     tx.commit().await?;
     Ok(())
+}
+
+async fn canonical_device_id_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    cache: &mut HashMap<Uuid, Uuid>,
+) -> Result<Uuid> {
+    if let Some(canonical_id) = cache.get(&id).copied() {
+        return Ok(canonical_id);
+    }
+
+    let mut current = id;
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(current) {
+            return Err(anyhow!(
+                "device canonical redirect cycle includes {current}"
+            ));
+        }
+        let next: Option<(Option<Uuid>,)> =
+            sqlx::query_as("select canonical_of from devices where id = $1 for key share")
+                .bind(current)
+                .fetch_optional(&mut **tx)
+                .await?;
+        match next {
+            Some((Some(canonical_of),)) if canonical_of != current => current = canonical_of,
+            _ => break,
+        }
+    }
+    cache.insert(id, current);
+    Ok(current)
 }
 
 fn port_state_name(state: PortState) -> &'static str {
