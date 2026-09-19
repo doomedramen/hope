@@ -205,6 +205,27 @@ pub async fn complete(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<bo
     Ok(result.rows_affected() > 0)
 }
 
+/// Mark a cooperatively cancelled job terminal without retrying it.
+pub async fn cancel(pool: &PgPool, job_id: Uuid, worker_id: &str) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        update jobs
+        set status = 'cancelled',
+            locked_by = null,
+            locked_at = null,
+            lease_expires_at = null,
+            updated_at = now()
+        where id = $1 and locked_by = $2 and status = 'running'
+        "#,
+    )
+    .bind(job_id)
+    .bind(worker_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 /// Fail a job. If attempts remain, re-queues with exponential backoff;
 /// otherwise marks it permanently failed.
 pub async fn fail(pool: &PgPool, job_id: Uuid, worker_id: &str, error: &str) -> Result<bool> {
@@ -451,5 +472,32 @@ mod tests {
 
         let job = get(&pool, id).await.unwrap().unwrap();
         assert_eq!(job.status, JobStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn cancel_marks_running_job_terminal() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let key = Uuid::new_v4().to_string();
+        let id = enqueue(&pool, "cancel_test", &key, json!({}))
+            .await
+            .unwrap();
+        sqlx::query(
+            "update jobs set status = 'running', locked_by = 'cancel-worker', \
+                lease_expires_at = now() + interval '1 minute' where id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(cancel(&pool, id, "cancel-worker").await.unwrap());
+        assert_eq!(
+            get(&pool, id).await.unwrap().unwrap().status,
+            JobStatus::Cancelled
+        );
+        assert!(!cancel(&pool, id, "cancel-worker").await.unwrap());
     }
 }

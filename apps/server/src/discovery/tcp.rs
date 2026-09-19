@@ -5,10 +5,6 @@
 //! scan jobs own those policies. The bulk API applies global, network, and
 //! per-host semaphores in that order, matching ADR-0010 and the M2 design.
 
-// The committed scan-run schema and enqueue path land before the worker
-// coordinator. Keep this allowance scoped to the uncalled transport module.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
@@ -73,6 +69,8 @@ pub enum ScannerError {
     InvalidNetworkKey,
     #[error("scanner concurrency limiter closed")]
     LimiterClosed,
+    #[error("scanner returned no observation")]
+    NoObservation,
 }
 
 /// Limits for one [`ConnectScanner`].
@@ -144,6 +142,18 @@ impl Default for ConnectScannerConfig {
 pub trait Scanner: Send + Sync {
     /// Probe one TCP endpoint. Implementations must not write application data.
     async fn scan(&self, target: SocketAddr) -> Result<PortObservation, ScannerError>;
+
+    /// Probe one TCP endpoint under an approved network's concurrency limits.
+    ///
+    /// Alternate scanner implementations can use the simpler [`Scanner::scan`]
+    /// seam when they do not need network- or host-specific throttling.
+    async fn scan_scoped(
+        &self,
+        _network_key: &str,
+        target: SocketAddr,
+    ) -> Result<PortObservation, ScannerError> {
+        self.scan(target).await
+    }
 }
 
 /// Native asynchronous TCP connect scanner.
@@ -193,6 +203,19 @@ impl ConnectScanner {
             .await
             .map_err(|_| ScannerError::LimiterClosed)?;
         self.probe(target).await
+    }
+
+    /// Probe one endpoint under global, network, and per-host bounds.
+    pub async fn scan_scoped(
+        &self,
+        network_key: &str,
+        target: SocketAddr,
+    ) -> Result<PortObservation, ScannerError> {
+        self.scan_ports(network_key.to_owned(), target.ip(), &[target.port()])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(ScannerError::NoObservation)
     }
 
     /// Scan ports for one host with global, network, and per-host bounds.
@@ -297,6 +320,14 @@ impl Clone for ConnectScanner {
 impl Scanner for ConnectScanner {
     async fn scan(&self, target: SocketAddr) -> Result<PortObservation, ScannerError> {
         ConnectScanner::scan(self, target).await
+    }
+
+    async fn scan_scoped(
+        &self,
+        network_key: &str,
+        target: SocketAddr,
+    ) -> Result<PortObservation, ScannerError> {
+        ConnectScanner::scan_scoped(self, network_key, target).await
     }
 }
 
@@ -454,10 +485,4 @@ mod tests {
             })
         }
     }
-
-    #[allow(dead_code)]
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    #[allow(dead_code)]
-    fn _future_is_send<T: Future + Send>(_: Pin<Box<T>>) {}
 }

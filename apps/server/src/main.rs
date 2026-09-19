@@ -442,10 +442,15 @@ async fn main() -> anyhow::Result<()> {
                         tracing::info!(job_id = %job.id, job_type = %job.job_type, "claimed job");
 
                         match registry.get(&job.job_type) {
-                            Some(handler) => match handler.handle(&pool, job.payload.clone()).await
+                            Some(handler) => match handler
+                                .handle(&pool, job.id, "worker", job.payload.clone())
+                                .await
                             {
-                                Ok(()) => {
+                                Ok(jobs_handlers::JobOutcome::Completed) => {
                                     jobs::complete(&pool, job.id, "worker").await?;
+                                }
+                                Ok(jobs_handlers::JobOutcome::Cancelled) => {
+                                    jobs::cancel(&pool, job.id, "worker").await?;
                                 }
                                 Err(err) => {
                                     tracing::warn!(job_id = %job.id, error = %err, "job failed");

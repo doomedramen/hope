@@ -9,14 +9,24 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde_json::Value;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::agents;
+use crate::discovery::worker;
 use crate::inventory::retention;
 use crate::session_store::PgSessionStore;
 
+pub use worker::JobOutcome;
+
 #[async_trait]
 pub trait JobHandler: Send + Sync {
-    async fn handle(&self, pool: &PgPool, payload: Value) -> anyhow::Result<()>;
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        job_id: Uuid,
+        worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome>;
 }
 
 /// Delete expired session rows (spec §12.3 secure sessions). Previously a
@@ -27,13 +37,19 @@ struct SessionCleanup;
 
 #[async_trait]
 impl JobHandler for SessionCleanup {
-    async fn handle(&self, pool: &PgPool, _payload: Value) -> anyhow::Result<()> {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        _payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
         let store = PgSessionStore::new(pool.clone());
         let deleted = store.delete_expired().await?;
         if deleted > 0 {
             tracing::info!(count = deleted, "deleted expired sessions");
         }
-        Ok(())
+        Ok(JobOutcome::Completed)
     }
 }
 
@@ -42,12 +58,18 @@ struct EnrollmentTokenPurge;
 
 #[async_trait]
 impl JobHandler for EnrollmentTokenPurge {
-    async fn handle(&self, pool: &PgPool, _payload: Value) -> anyhow::Result<()> {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        _payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
         let deleted = agents::purge_expired_tokens(pool).await?;
         if deleted > 0 {
             tracing::info!(count = deleted, "purged expired/used enrollment tokens");
         }
-        Ok(())
+        Ok(JobOutcome::Completed)
     }
 }
 
@@ -59,9 +81,15 @@ struct DiagnosticEcho;
 
 #[async_trait]
 impl JobHandler for DiagnosticEcho {
-    async fn handle(&self, _pool: &PgPool, payload: Value) -> anyhow::Result<()> {
+    async fn handle(
+        &self,
+        _pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
         tracing::info!(?payload, "diagnostic.echo");
-        Ok(())
+        Ok(JobOutcome::Completed)
     }
 }
 
@@ -75,7 +103,13 @@ struct ChangeEventRetention;
 
 #[async_trait]
 impl JobHandler for ChangeEventRetention {
-    async fn handle(&self, pool: &PgPool, payload: Value) -> anyhow::Result<()> {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
         let retention_days = payload
             .get("retention_days")
             .and_then(Value::as_i64)
@@ -84,7 +118,22 @@ impl JobHandler for ChangeEventRetention {
         if deleted > 0 {
             tracing::info!(count = deleted, retention_days, "purged old change_events");
         }
-        Ok(())
+        Ok(JobOutcome::Completed)
+    }
+}
+
+struct FullTcpDiscovery;
+
+#[async_trait]
+impl JobHandler for FullTcpDiscovery {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        job_id: Uuid,
+        worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        worker::handle(pool, job_id, worker_id, payload).await
     }
 }
 
@@ -97,6 +146,7 @@ impl Registry {
         handlers.insert("enrollment_token.purge", Box::new(EnrollmentTokenPurge));
         handlers.insert("diagnostic.echo", Box::new(DiagnosticEcho));
         handlers.insert("change_events.retention", Box::new(ChangeEventRetention));
+        handlers.insert("discovery.full_tcp", Box::new(FullTcpDiscovery));
         Self(handlers)
     }
 
@@ -130,6 +180,7 @@ mod tests {
         assert!(registry.get("session.cleanup").is_some());
         assert!(registry.get("enrollment_token.purge").is_some());
         assert!(registry.get("diagnostic.echo").is_some());
+        assert!(registry.get("discovery.full_tcp").is_some());
         assert!(registry.get("no.such.kind").is_none());
     }
 
@@ -142,7 +193,12 @@ mod tests {
         let registry = Registry::new();
         let handler = registry.get("diagnostic.echo").unwrap();
         handler
-            .handle(&pool, serde_json::json!({"hello": "world"}))
+            .handle(
+                &pool,
+                Uuid::new_v4(),
+                "test-worker",
+                serde_json::json!({"hello": "world"}),
+            )
             .await
             .unwrap();
     }
@@ -164,7 +220,10 @@ mod tests {
 
         let registry = Registry::new();
         let handler = registry.get("session.cleanup").unwrap();
-        handler.handle(&pool, serde_json::json!({})).await.unwrap();
+        handler
+            .handle(&pool, Uuid::new_v4(), "test-worker", serde_json::json!({}))
+            .await
+            .unwrap();
 
         let remaining: (i64,) =
             sqlx::query_as("select count(*) from sessions where expiry_date < now()")
@@ -191,7 +250,10 @@ mod tests {
 
         let registry = Registry::new();
         let handler = registry.get("enrollment_token.purge").unwrap();
-        handler.handle(&pool, serde_json::json!({})).await.unwrap();
+        handler
+            .handle(&pool, Uuid::new_v4(), "test-worker", serde_json::json!({}))
+            .await
+            .unwrap();
 
         let remaining: (i64,) =
             sqlx::query_as("select count(*) from enrollment_tokens where expires_at < now()")
