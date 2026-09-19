@@ -203,6 +203,38 @@ export interface ServiceReviewItem {
   updated_at: string;
 }
 
+export type MonitorProposalStatus = "pending" | "approved" | "rejected";
+
+export interface MonitorProposal {
+  id: string;
+  service_id: string;
+  endpoint_id: string;
+  rule_id: string;
+  rule_version: number;
+  target_identity: string;
+  target: Record<string, unknown>;
+  protocol: string;
+  product: string | null;
+  product_version: string | null;
+  check_type: "http" | "tcp" | string;
+  check_config: Record<string, unknown>;
+  confidence: number;
+  auto_create_allowed: boolean;
+  resolved_from: Record<string, unknown>;
+  source_evidence_id: string | null;
+  source_rule_id: string | null;
+  status: MonitorProposalStatus;
+  decision_source: "automatic" | "manual" | string;
+  decided_by: string | null;
+  decided_at: string | null;
+  user_overrides: Record<string, unknown>;
+  override_by: string | null;
+  override_at: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ChangeEvent {
   id: string;
   entity_kind: string;
@@ -383,6 +415,24 @@ export async function fetchChanges(filters?: {
 }): Promise<ApiPage<ChangeEvent>> {
   return request<ApiPage<ChangeEvent>>(
     `/api/v1/changes${queryString({ ...filters, limit: 100 })}`,
+  );
+}
+
+export async function fetchMonitorProposals(
+  status: MonitorProposalStatus = "pending",
+): Promise<ApiPage<MonitorProposal>> {
+  return request<ApiPage<MonitorProposal>>(
+    `/api/v1/monitor-proposals${queryString({ limit: 100, status })}`,
+  );
+}
+
+export async function resolveMonitorProposal(
+  id: string,
+  decision: "approve" | "reject",
+): Promise<MonitorProposal> {
+  return request<MonitorProposal>(
+    `/api/v1/monitor-proposals/${id}/${decision}`,
+    { method: "POST" },
   );
 }
 

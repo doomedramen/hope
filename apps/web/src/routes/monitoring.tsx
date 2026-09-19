@@ -1,5 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { MonitorProposalQueue } from "@/components/MonitorProposalQueue";
 import { ServiceReviewQueue } from "@/components/ServiceReviewQueue";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 export const Route = createFileRoute("/monitoring")({
   component: MonitoringPage,
@@ -16,7 +18,18 @@ function MonitoringPage() {
           Service fingerprints
         </h1>
       </div>
-      <ServiceReviewQueue />
+      <Tabs className="gap-4" defaultValue="services">
+        <TabsList variant="line">
+          <TabsTrigger value="services">Service reviews</TabsTrigger>
+          <TabsTrigger value="proposals">Monitor proposals</TabsTrigger>
+        </TabsList>
+        <TabsContent value="services">
+          <ServiceReviewQueue />
+        </TabsContent>
+        <TabsContent value="proposals">
+          <MonitorProposalQueue />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
