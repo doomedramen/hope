@@ -7,6 +7,8 @@ mod enroll;
 mod gateway;
 mod inventory;
 mod jobs_handlers;
+mod monitor_checks;
+mod monitor_scheduler;
 mod monitoring;
 mod pki;
 mod ratelimit;
@@ -33,6 +35,7 @@ use tower_http::trace::TraceLayer;
 use tower_sessions::cookie::SameSite;
 use tower_sessions::{Expiry, SessionManagerLayer};
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::ratelimit::RateLimitState;
@@ -480,6 +483,17 @@ async fn main() -> anyhow::Result<()> {
                 });
             }
 
+            let monitor_owner = format!("monitor-{}", Uuid::new_v4());
+            let monitor_pool = pool.clone();
+            let monitor_requested = shutdown_requested.clone();
+            let monitor_shutdown = shutdown_notify.clone();
+            let monitor_task = tokio::spawn(monitor_scheduler::run(
+                monitor_pool,
+                monitor_owner,
+                monitor_requested,
+                monitor_shutdown,
+            ));
+
             loop {
                 if shutdown_requested.load(Ordering::SeqCst) {
                     tracing::info!("worker stopped");
@@ -521,6 +535,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            let _ = monitor_task.await;
         }
     }
 

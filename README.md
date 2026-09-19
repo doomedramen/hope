@@ -41,7 +41,8 @@ docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d
 
 This starts three services: `postgres`, `server` (API + web UI + agent
 gateway/enroll listeners; applies migrations on startup), and `worker`
-(background job queue consumer — same image, `worker` command).
+(background job queue consumer plus the in-memory monitor scheduler — same
+image, `worker` command).
 
 Verify:
 

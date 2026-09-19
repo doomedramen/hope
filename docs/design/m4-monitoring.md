@@ -27,12 +27,14 @@ transaction. The proposal decision writes its own change and audit records.
 
 ## 2. Stored state
 
-Migration `0015_monitoring_core.sql` adds:
+Migrations `0015_monitoring_core.sql`, `0016_monitoring_defaults.sql`, and
+`0017_monitoring_underlying_state.sql` add:
 
 ```text
 monitors(id, proposal_id, service_id, endpoint_id, monitor_type, config,
          interval_seconds, timeout_ms, failure_threshold, recovery_threshold,
          enabled, state, consecutive_failures, consecutive_successes,
+         underlying_state,
          last_result_at, last_success_at, last_failure_at, next_run_at,
          lease_owner, lease_expires_at, version, created_by, timestamps)
 
@@ -45,7 +47,7 @@ incidents(id, monitor_id, state, severity, opened_at, recovered_at,
 
 The database allows at most one open incident per monitor. Results are
 append-only observations; monitor state and incident rows are projections
-updated by the check worker in a later slice.
+updated by the check worker.
 
 ## 3. API slice
 
@@ -55,19 +57,32 @@ The authenticated inventory router exposes:
 - `GET /api/v1/monitors/{id}`; and
 - the existing proposal approval route, which creates the monitor.
 
-The list and detail responses are the persisted monitor rows. Check execution,
-leases, notifications, and pagination beyond the bounded first page are not
-part of this slice.
+The list and detail responses are the persisted monitor rows. Notifications
+and pagination beyond the bounded first page are not part of this slice.
 
-## 4. Execution boundary
+## 4. Execution boundary and first worker slice
 
-The worker must select due enabled monitors with a lease, enforce the stored
-timeout, write exactly one result for each completed check, and update health
-state and incidents transactionally. It must never probe a target before a
-monitor exists, and it must use the monitor's canonical service/endpoint
-association rather than creating a second target model.
+The worker's in-memory scheduler selects due enabled monitors in batches of at
+most 32, leases each row in PostgreSQL, and runs checks outside the database
+transaction. It applies a deterministic ±10% interval jitter when scheduling
+the next run. A lost lease rolls back the result transaction so another worker
+can retry the check after lease expiry.
+
+The first execution slice supports bounded TCP connect and HTTP/HTTPS GET
+checks. It uses the monitor's canonical service/endpoint association, sends no
+credentials, follows no redirects, and bounds paths, headers, response body,
+and assertion text. A result, health-state projection, and incident update
+are committed together. One transient failure leaves the monitor below its
+incident threshold; reaching the threshold opens the single permitted open
+incident, and the configured recovery count closes it.
+
+The scheduler also derives `stale` from the last result age without replacing
+the persisted underlying state. A stale transition is recorded as a warning
+change event and the next successful check can clear it.
 
 The domain health state machine owns threshold counting and duplicate
 transition suppression. The server worker owns leases, protocol adapters,
-result persistence, incident rows, notification delivery, stale detection,
-and retention.
+result persistence, incident rows, and stale detection.
+
+DNS, ICMP, TLS-expiry, additional content/API assertion variants, notification
+delivery, and result retention remain subsequent M4 slices.

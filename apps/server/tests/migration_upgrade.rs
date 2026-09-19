@@ -154,6 +154,16 @@ async fn m0_schema_upgrades_to_m1_without_data_loss() {
     .await
     .expect("monitor failure default exists");
     assert_eq!(failure_default, "3");
+
+    let underlying_default: String = sqlx::query_scalar(
+        "select column_default from information_schema.columns \
+         where table_schema = 'public' and table_name = 'monitors' \
+           and column_name = 'underlying_state'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("monitor underlying state default exists");
+    assert_eq!(underlying_default, "'unknown'::text");
 }
 
 /// Build a temp directory containing only the M0 migration files
