@@ -3,13 +3,17 @@ mod config;
 mod csrf;
 mod enroll;
 mod gateway;
+mod jobs_handlers;
 mod pki;
 mod ratelimit;
 mod routes;
+mod scheduler;
 mod session_store;
 mod state;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -17,6 +21,7 @@ use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use clap::{Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
+use tokio::signal::unix::{SignalKind, signal};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -214,20 +219,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
-            let session_cleanup_pool = pool.clone();
-            let session_cleanup_task = tokio::spawn(async move {
-                let store = PgSessionStore::new(session_cleanup_pool);
-                loop {
-                    tokio::time::sleep(Duration::from_secs(3600)).await;
-                    match store.delete_expired().await {
-                        Ok(count) if count > 0 => {
-                            tracing::info!(count, "deleted expired sessions")
-                        }
-                        Ok(_) => {}
-                        Err(err) => tracing::warn!(error = %err, "session cleanup failed"),
-                    }
-                }
-            });
+            // Session cleanup and enrollment-token purge run as scheduled
+            // jobs (worker role), not a bespoke timer here — see
+            // scheduler.rs and jobs_handlers.rs.
+            let scheduler_pool = pool.clone();
+            let scheduler_task = tokio::spawn(scheduler::run(scheduler_pool));
 
             let api_task = axum::serve(
                 listener,
@@ -238,28 +234,101 @@ async fn main() -> anyhow::Result<()> {
                 res = api_task => { res?; }
                 _ = gateway_task => {}
                 _ = enroll_task => {}
-                _ = session_cleanup_task => {}
+                _ = scheduler_task => {}
             }
         }
         Role::Worker => {
             let pool = build_pool(&config).await?;
+            // The worker can start before (or independent of) `server
+            // serve` -- e.g. as its own compose service with no ordering
+            // guarantee beyond "postgres is healthy" -- so it must not
+            // assume migrations have already been applied.
+            // `sqlx::migrate!` is safe to call concurrently from multiple
+            // processes (it takes an advisory lock).
+            run_migrations(&pool).await?;
+            let registry = jobs_handlers::Registry::new();
             tracing::info!("worker started");
 
+            // Cooperative shutdown: stop claiming new jobs on SIGTERM, but
+            // let whatever job is already in flight finish naturally
+            // (spec §17 M0's job framework should survive a restart
+            // without losing/corrupting in-progress work).
+            let shutdown_requested = Arc::new(AtomicBool::new(false));
+            let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+            {
+                let shutdown_requested = shutdown_requested.clone();
+                let shutdown_notify = shutdown_notify.clone();
+                tokio::spawn(async move {
+                    let mut sigterm =
+                        signal(SignalKind::terminate()).expect("install SIGTERM handler");
+                    sigterm.recv().await;
+                    tracing::info!("SIGTERM received: finishing any in-flight job, then stopping");
+                    shutdown_requested.store(true, Ordering::SeqCst);
+                    shutdown_notify.notify_waiters();
+                });
+            }
+
+            // Lease reaper: a separate periodic loop (not tied to the
+            // claim/dispatch cycle below) so a worker that's been busy
+            // processing one long job for a while still reaps other
+            // workers' abandoned leases promptly.
+            {
+                let pool = pool.clone();
+                let shutdown_notify = shutdown_notify.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                                match jobs::reap_expired_leases(&pool).await {
+                                    Ok(count) if count > 0 => {
+                                        tracing::info!(count, "reaped expired job leases");
+                                    }
+                                    Ok(_) => {}
+                                    Err(err) => {
+                                        tracing::warn!(error = %err, "lease reaper failed");
+                                    }
+                                }
+                            }
+                            _ = shutdown_notify.notified() => break,
+                        }
+                    }
+                });
+            }
+
             loop {
-                let reaped = jobs::reap_expired_leases(&pool).await?;
-                if reaped > 0 {
-                    tracing::info!(count = reaped, "reaped expired job leases");
+                if shutdown_requested.load(Ordering::SeqCst) {
+                    tracing::info!("worker stopped");
+                    break;
                 }
 
                 match jobs::claim(&pool, "worker", 60).await? {
                     Some(job) => {
                         tracing::info!(job_id = %job.id, job_type = %job.job_type, "claimed job");
-                        // Milestone 0: no job handlers registered yet; mark
-                        // claimed jobs complete so the queue plumbing is
-                        // exercised end-to-end without doing real work.
-                        jobs::complete(&pool, job.id, "worker").await?;
+
+                        match registry.get(&job.job_type) {
+                            Some(handler) => match handler.handle(&pool, job.payload.clone()).await
+                            {
+                                Ok(()) => {
+                                    jobs::complete(&pool, job.id, "worker").await?;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(job_id = %job.id, error = %err, "job failed");
+                                    jobs::fail(&pool, job.id, "worker", &err.to_string()).await?;
+                                }
+                            },
+                            None => {
+                                let message = format!("unknown job kind: {}", job.job_type);
+                                tracing::error!(job_id = %job.id, %message);
+                                jobs::fail_permanently(&pool, job.id, "worker", &message).await?;
+                            }
+                        }
                     }
-                    None => tokio::time::sleep(Duration::from_secs(2)).await,
+                    None => {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                            _ = shutdown_notify.notified() => {}
+                        }
+                    }
                 }
             }
         }

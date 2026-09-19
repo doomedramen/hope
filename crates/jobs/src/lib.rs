@@ -5,6 +5,15 @@
 //! Deliberately uses runtime-checked `sqlx::query` (not the `query!` macro)
 //! so the workspace builds without a live database connection at compile
 //! time.
+//!
+//! `claim()` picks the oldest pending job across the *entire* table (real
+//! multi-worker queues need that), so DB-gated tests across this and
+//! other crates/modules are not isolated from each other when run in
+//! parallel against the same database — one test's `claim()` can grab
+//! another concurrently-running test's job. Run DB-gated tests with
+//! `cargo test -- --test-threads=1` (see `justfile`/CI); this was found
+//! and fixed after two jobs tests started intermittently failing once a
+//! third test claiming from the same table was added elsewhere.
 
 use serde_json::Value;
 use sqlx::PgPool;
@@ -239,6 +248,31 @@ pub async fn fail(pool: &PgPool, job_id: Uuid, worker_id: &str, error: &str) -> 
     Ok(true)
 }
 
+/// Mark a job permanently failed without going through the retry/backoff
+/// logic in [`fail`] — for cases where retrying can never succeed, such
+/// as an unrecognized job type. Regardless of attempts/max_attempts.
+pub async fn fail_permanently(
+    pool: &PgPool,
+    job_id: Uuid,
+    worker_id: &str,
+    error: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        update jobs
+        set status = 'failed', last_error = $3, updated_at = now()
+        where id = $1 and locked_by = $2
+        "#,
+    )
+    .bind(job_id)
+    .bind(worker_id)
+    .bind(error)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 /// Request cancellation of a job; the worker executing it is expected to
 /// poll `cancel_requested` and stop cooperatively.
 pub async fn request_cancel(pool: &PgPool, job_id: Uuid) -> Result<bool> {
@@ -371,6 +405,34 @@ mod tests {
         assert_eq!(claimed.id, id);
 
         fail(&pool, id, "worker-1", "boom").await.unwrap();
+
+        let job = get(&pool, id).await.unwrap().unwrap();
+        assert_eq!(job.status, JobStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn fail_permanently_ignores_remaining_attempts() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+
+        let key = Uuid::new_v4().to_string();
+        let id = enqueue(&pool, "unknown_kind", &key, json!({}))
+            .await
+            .unwrap();
+
+        let claimed = claim(&pool, "worker-1", 30).await.unwrap().unwrap();
+        assert_eq!(claimed.attempts, 1);
+        assert!(
+            claimed.max_attempts > 1,
+            "sanity: retries would normally remain"
+        );
+
+        fail_permanently(&pool, id, "worker-1", "unknown job kind")
+            .await
+            .unwrap();
 
         let job = get(&pool, id).await.unwrap().unwrap();
         assert_eq!(job.status, JobStatus::Failed);

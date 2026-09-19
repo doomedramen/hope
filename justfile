@@ -13,7 +13,7 @@ lint:
     pnpm -C apps/web lint
 
 test:
-    cargo test --workspace
+    cargo test --workspace -- --test-threads=1
     pnpm -C apps/web test -- --run
 
 dev:

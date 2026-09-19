@@ -62,6 +62,21 @@ pub async fn consume_enrollment_token(pool: &PgPool, token: &str) -> sqlx::Resul
     Ok(result.rows_affected() == 1)
 }
 
+/// Delete enrollment tokens that are no longer useful to keep around:
+/// already expired (whether or not they were used), or already used
+/// (regardless of expiry — a consumed token has no further purpose).
+/// Returns how many rows were removed. Intended to run as a periodic
+/// scheduled job (see `scheduler.rs` / `jobs_handlers.rs`), not on a
+/// bespoke timer.
+pub async fn purge_expired_tokens(pool: &PgPool) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        r#"delete from enrollment_tokens where expires_at < now() or used_at is not null"#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub struct AgentRecord {
     pub id: Uuid,
     pub revoked_at: Option<time::OffsetDateTime>,
