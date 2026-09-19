@@ -995,18 +995,49 @@ async fn project_service_endpoint(
     // An agent-reported published port can corroborate a network-discovered
     // endpoint. Reuse that service before creating an agent-owned duplicate.
     if endpoint_type == "published_port"
-        && let (Some(address), Some(port)) = (address.as_deref(), port)
+        && let Some(port) = port
     {
-        service_id = sqlx::query_scalar(
-            "select s.id from services s join endpoints e on e.service_id = s.id \
-             where e.address = $1::inet and e.port = $2 and e.is_current \
-               and lower(coalesce(s.protocol, '')) = $3 limit 1",
-        )
-        .bind(address)
-        .bind(i32::from(port))
-        .bind(&protocol)
-        .fetch_optional(&mut **tx)
-        .await?;
+        let wildcard_address = address.as_deref().is_none_or(is_unspecified_ip);
+        service_id = if wildcard_address {
+            sqlx::query_scalar(
+                "select s.id from services s join endpoints e on e.service_id = s.id \
+                 where e.port = $1 and e.is_current \
+                   and lower(coalesce(s.protocol, '')) = $2 \
+                   and ((s.owner_kind = 'device' and s.owner_id = $3) \
+                        or (s.owner_kind = 'workload' and exists ( \
+                            select 1 from workloads w where w.id = s.owner_id \
+                              and w.host_device_id = $3))) \
+                   and exists (select 1 from addresses a \
+                                join interfaces i on i.id = a.interface_id \
+                               where i.device_id = $3 and a.is_current and a.ip = e.address) \
+                 limit 1",
+            )
+            .bind(i32::from(port))
+            .bind(&protocol)
+            .bind(device_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        } else {
+            let Some(address) = address.as_deref() else {
+                unreachable!("non-wildcard endpoint address must be present")
+            };
+            sqlx::query_scalar(
+                "select s.id from services s join endpoints e on e.service_id = s.id \
+                 where e.address = $1::inet and e.port = $2 and e.is_current \
+                   and lower(coalesce(s.protocol, '')) = $3 \
+                   and ((s.owner_kind = 'device' and s.owner_id = $4) \
+                        or (s.owner_kind = 'workload' and exists ( \
+                            select 1 from workloads w where w.id = s.owner_id \
+                              and w.host_device_id = $4))) \
+                 limit 1",
+            )
+            .bind(address)
+            .bind(i32::from(port))
+            .bind(&protocol)
+            .bind(device_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        };
     }
 
     let service_id = if let Some(service_id) = service_id {
@@ -1236,6 +1267,12 @@ fn normalize_ip(value: &str) -> Option<String> {
     IpAddr::from_str(value).ok().map(|value| value.to_string())
 }
 
+fn is_unspecified_ip(value: &str) -> bool {
+    IpAddr::from_str(value)
+        .map(|address| address.is_unspecified())
+        .unwrap_or(false)
+}
+
 fn normalize_mac(value: &str) -> Option<String> {
     let compact = value.replace('-', ":").to_ascii_lowercase();
     let parts: Vec<&str> = compact.split(':').collect();
@@ -1274,7 +1311,10 @@ pub async fn list_agents(
                    case when a.revoked_at is not null then 'revoked' \
                         when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
                              now() - make_interval(secs => a.heartbeat_timeout_seconds::double precision) \
-                             then 'offline' else 'online' end as status, \
+                             then 'offline' \
+                        when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
+                             now() - make_interval(secs => (a.heartbeat_timeout_seconds / 2)::double precision) \
+                             then 'stale' else 'online' end as status, \
                    (select ir.device_id from identity_rules ir where ir.rule_type = 'agent_id' \
                      and ir.value = a.id::text order by ir.created_at limit 1) as device_id, \
                    a.created_at \
@@ -1372,7 +1412,10 @@ pub async fn get_agent_health(
                    a.revoked_at, case when a.revoked_at is not null then 'revoked' \
                      when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
                        now() - make_interval(secs => a.heartbeat_timeout_seconds::double precision) \
-                     then 'offline' else 'online' end as status, \
+                     then 'offline' \
+                     when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
+                       now() - make_interval(secs => (a.heartbeat_timeout_seconds / 2)::double precision) \
+                     then 'stale' else 'online' end as status, \
                    (select row_to_json(i) from (select * from agent_health_incidents \
                      where agent_id = a.id order by opened_at desc limit 1) i) as incident \
               from agents a where a.id = $1 \
@@ -1414,7 +1457,10 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
                    case when a.revoked_at is not null then 'revoked' \
                      when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
                        now() - make_interval(secs => a.heartbeat_timeout_seconds::double precision) \
-                     then 'offline' else 'online' end as status, \
+                     then 'offline' \
+                     when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
+                       now() - make_interval(secs => (a.heartbeat_timeout_seconds / 2)::double precision) \
+                     then 'stale' else 'online' end as status, \
                    (select ir.device_id from identity_rules ir where ir.rule_type = 'agent_id' \
                      and ir.value = a.id::text order by ir.created_at limit 1) as device_id, \
                    a.created_at, a.updated_at \
@@ -1677,7 +1723,11 @@ mod tests {
         insert_test_agent(&pool, agent_id, false).await;
         let report = snapshot(agent_id, 1);
         let first = ingest_snapshot(&pool, agent_id, &report).await.unwrap();
-        let second = ingest_snapshot(&pool, agent_id, &report).await.unwrap();
+        let mut retransmission = report.clone();
+        retransmission.message_id = Uuid::new_v4();
+        let second = ingest_snapshot(&pool, agent_id, &retransmission)
+            .await
+            .unwrap();
         assert!(!first.replayed);
         assert!(second.replayed);
         assert_eq!(first.snapshot_id, second.snapshot_id);
@@ -1697,6 +1747,33 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(device_count, 1);
+    }
+
+    #[tokio::test]
+    async fn wildcard_published_port_reuses_existing_service() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let agent_id = Uuid::new_v4();
+        insert_test_agent(&pool, agent_id, false).await;
+
+        let first = snapshot(agent_id, 1);
+        let first_outcome = ingest_snapshot(&pool, agent_id, &first).await.unwrap();
+        let device_id = first_outcome.device_id.unwrap();
+
+        let mut followup = snapshot(agent_id, 2);
+        followup.inventory["containers"][0]["published_ports"][0]["host_ip"] = json!("0.0.0.0");
+        ingest_snapshot(&pool, agent_id, &followup).await.unwrap();
+
+        let service_count: i64 = sqlx::query_scalar(
+            "select count(*) from services s join workloads w on w.id = s.owner_id \
+             where s.owner_kind = 'workload' and w.host_device_id = $1",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(service_count, 1);
     }
 
     #[tokio::test]
