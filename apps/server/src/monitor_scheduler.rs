@@ -176,11 +176,25 @@ fn build_request(monitor: &ClaimedMonitor) -> Result<CheckRequest> {
         .unwrap_or_default()
         .parse::<IpAddr>()
         .context("monitor endpoint address is invalid")?;
-    let port = monitor
-        .port
-        .and_then(|port| u16::try_from(port).ok())
-        .ok_or_else(|| anyhow!("monitor endpoint port is invalid"))?;
     let protocol = CheckProtocol::parse(&monitor.monitor_type)?;
+    let port = match protocol {
+        CheckProtocol::Icmp => monitor
+            .port
+            .and_then(|port| u16::try_from(port).ok())
+            .unwrap_or(0),
+        CheckProtocol::Dns => monitor
+            .port
+            .and_then(|port| u16::try_from(port).ok())
+            .unwrap_or(53),
+        CheckProtocol::Tls => monitor
+            .port
+            .and_then(|port| u16::try_from(port).ok())
+            .unwrap_or(443),
+        CheckProtocol::Tcp | CheckProtocol::Http | CheckProtocol::Https => monitor
+            .port
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or_else(|| anyhow!("monitor endpoint port is invalid"))?,
+    };
     let object = monitor.config.as_object();
     let method = object
         .and_then(|config| config.get("method"))
@@ -206,6 +220,17 @@ fn build_request(monitor: &ClaimedMonitor) -> Result<CheckRequest> {
         .and_then(|config| config.get("body_contains"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let dns_name = object
+        .and_then(|config| config.get("dns_name"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let dns_record_type = object
+        .and_then(|config| config.get("record_type"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let tls_min_valid_days = object
+        .and_then(|config| config.get("min_valid_days"))
+        .and_then(Value::as_i64);
     let timeout_ms = u64::try_from(monitor.timeout_ms).context("monitor timeout is invalid")?;
 
     Ok(CheckRequest {
@@ -216,6 +241,9 @@ fn build_request(monitor: &ClaimedMonitor) -> Result<CheckRequest> {
         host,
         expected_status,
         body_contains,
+        dns_name,
+        dns_record_type,
+        tls_min_valid_days,
         timeout: Duration::from_millis(timeout_ms),
     })
 }
