@@ -12,6 +12,7 @@ import {
   fetchChanges,
   fetchDevices,
   fetchIdentitySuggestions,
+  fetchServiceReviews,
 } from "@/lib/api";
 import { formatRelative, labelize, shortId } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
@@ -38,6 +39,10 @@ function OverviewPage() {
     queryKey: ["identity-suggestions"],
     queryFn: fetchIdentitySuggestions,
   });
+  const serviceReviewsQuery = useQuery({
+    queryKey: ["service-reviews", "pending"],
+    queryFn: () => fetchServiceReviews(),
+  });
   const changesQuery = useQuery({
     queryKey: ["changes", "overview"],
     queryFn: () => fetchChanges(),
@@ -45,9 +50,12 @@ function OverviewPage() {
   const devices = devicesQuery.data?.items ?? [];
   const suggestions = suggestionsQuery.data?.items ?? [];
   const changes = changesQuery.data?.items ?? [];
+  const pendingReviews =
+    suggestions.length + (serviceReviewsQuery.data?.items.length ?? 0);
   const loading =
     devicesQuery.isLoading ||
     suggestionsQuery.isLoading ||
+    serviceReviewsQuery.isLoading ||
     changesQuery.isLoading;
 
   return (
@@ -72,9 +80,9 @@ function OverviewPage() {
         <OverviewMetric
           icon={<ShieldCheckIcon />}
           label="Pending review"
-          value={suggestions.length}
-          detail="Ambiguous matches"
-          to="/infrastructure"
+          value={pendingReviews}
+          detail="Identity and service matches"
+          to="/monitoring"
         />
         <OverviewMetric
           icon={<NetworkIcon />}
@@ -130,7 +138,9 @@ function OverviewPage() {
         <Card>
           <CardHeader>
             <CardTitle>Identity review</CardTitle>
-            <CardDescription>Review low-confidence matches.</CardDescription>
+            <CardDescription>
+              Review low-confidence device matches.
+            </CardDescription>
             <CardAction>
               <Badge variant={suggestions.length ? "outline" : "secondary"}>
                 {suggestions.length} pending
@@ -183,7 +193,7 @@ function OverviewMetric({
   label: string;
   value: number;
   detail: string;
-  to: "/" | "/infrastructure" | "/changes";
+  to: "/" | "/infrastructure" | "/monitoring" | "/changes";
 }) {
   return (
     <Link to={to}>

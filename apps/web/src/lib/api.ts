@@ -160,6 +160,49 @@ export interface IdentitySuggestion {
   updated_at: string;
 }
 
+export type ServiceReviewStatus = "pending" | "confirmed" | "rejected";
+
+export interface FingerprintEvidenceField {
+  path: string;
+  value: string;
+}
+
+export interface FingerprintCandidate {
+  rule_id: string;
+  fixture_version: number;
+  protocol: string;
+  product: string | null;
+  version: string | null;
+  product_version?: string | null;
+  confidence: number;
+  evidence_fields: FingerprintEvidenceField[];
+  reasons: string[];
+}
+
+export interface ServiceReviewItem {
+  id: string;
+  service_id: string;
+  fingerprint_evidence_id: string;
+  source_instance: string | null;
+  candidate_key: string;
+  candidate: FingerprintCandidate;
+  candidates: FingerprintCandidate[];
+  evidence: {
+    m2: Record<string, unknown>;
+    fingerprint: Record<string, unknown>;
+  };
+  rule_id: string;
+  fixture_version: number;
+  confidence: number;
+  reason: "low_confidence" | "conflict" | string;
+  policy_threshold: number;
+  status: ServiceReviewStatus;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ChangeEvent {
   id: string;
   entity_kind: string;
@@ -313,6 +356,25 @@ export async function fetchIdentitySuggestions(): Promise<
   return request<ApiPage<IdentitySuggestion>>(
     "/api/v1/identity-suggestions?limit=100",
   );
+}
+
+export async function fetchServiceReviews(
+  status: ServiceReviewStatus = "pending",
+): Promise<ApiPage<ServiceReviewItem>> {
+  return request<ApiPage<ServiceReviewItem>>(
+    `/api/v1/service-reviews${queryString({ limit: 100, status })}`,
+  );
+}
+
+export async function resolveServiceReview(
+  id: string,
+  decision: "confirm" | "reject",
+): Promise<{ id: string; service_id: string; status: ServiceReviewStatus }> {
+  return request<{
+    id: string;
+    service_id: string;
+    status: ServiceReviewStatus;
+  }>(`/api/v1/service-reviews/${id}/${decision}`, { method: "POST" });
 }
 
 export async function fetchChanges(filters?: {
