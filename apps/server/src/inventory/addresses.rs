@@ -247,6 +247,12 @@ mod gate_tests {
             eprintln!("skipping: DATABASE_URL not set");
             return;
         };
+        let seed = Uuid::new_v4();
+        let bytes = seed.as_bytes();
+        let octet_a = bytes[0] % 254 + 1;
+        let octet_b = bytes[1] % 254 + 1;
+        let old_ip = format!("10.{octet_a}.{octet_b}.5");
+        let new_ip = format!("10.{octet_a}.{octet_b}.9");
 
         let (device_id,): (Uuid,) = sqlx::query_as(
             "insert into devices (device_type) values ('physical_host') returning id",
@@ -262,10 +268,10 @@ mod gate_tests {
         .await
         .unwrap();
 
-        assign_address_tx(&pool, interface_id, "10.0.0.5", Some("dhcp"))
+        assign_address_tx(&pool, interface_id, &old_ip, Some("dhcp"))
             .await
             .unwrap();
-        assign_address_tx(&pool, interface_id, "10.0.0.9", Some("dhcp"))
+        assign_address_tx(&pool, interface_id, &new_ip, Some("dhcp"))
             .await
             .unwrap();
 
@@ -288,9 +294,10 @@ mod gate_tests {
         assert_eq!(current.0, 1, "exactly one current address");
 
         let closed_old: (String, bool) = sqlx::query_as(
-            "select host(ip), is_current from addresses where interface_id = $1 and ip = '10.0.0.5'::inet",
+            "select host(ip), is_current from addresses where interface_id = $1 and ip = $2::inet",
         )
         .bind(interface_id)
+        .bind(&old_ip)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -309,5 +316,21 @@ mod gate_tests {
             total.0, 2,
             "history preserved: old + new row, not one row overwritten"
         );
+
+        sqlx::query("delete from addresses where interface_id = $1")
+            .bind(interface_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("delete from interfaces where id = $1")
+            .bind(interface_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("delete from devices where id = $1")
+            .bind(device_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }
