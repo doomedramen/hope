@@ -160,7 +160,9 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     let mut inventory_refresh = inventory_refresh_interval();
     let mut snapshot_sent = false;
     let mut pending_snapshot = Some(pending_snapshot);
-    let mut negotiated_capabilities: Option<Vec<Capability>> = None;
+    let mut snapshot_acknowledged = false;
+    let mut observations_acknowledged = false;
+    let mut negotiated_capabilities: Option<protocol::NegotiatedCapabilities> = None;
 
     loop {
         tokio::select! {
@@ -172,21 +174,31 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                 write.send(WsMessage::Text(protocol::serialize_envelope(&hb)?)).await?;
             }
             _ = inventory_refresh.tick() => {
-                let Some(capabilities) = negotiated_capabilities.as_deref() else {
+                let Some(negotiated) = negotiated_capabilities.as_ref() else {
                     continue;
                 };
-                if !capabilities.contains(&Capability::InventorySnapshots) {
+                if !negotiated.capabilities.contains(&Capability::InventorySnapshots) {
                     continue;
                 }
 
                 if pending_snapshot.is_none() {
                     pending_snapshot = Some(load_or_collect_pending_snapshot(state_dir, agent_id).await?);
+                    snapshot_acknowledged = false;
+                    observations_acknowledged = !negotiated
+                        .capabilities
+                        .contains(&Capability::BoundedObservations);
                 }
 
                 let pending = pending_snapshot
                     .as_ref()
                     .expect("pending snapshot exists after refresh collection");
-                send_pending_snapshot(&mut write, pending, capabilities).await?;
+                send_pending_snapshot(
+                    &mut write,
+                    pending,
+                    negotiated.protocol_version,
+                    &negotiated.capabilities,
+                )
+                .await?;
                 snapshot_sent = true;
             }
             msg = read.next() => {
@@ -208,16 +220,24 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                                     let inventory_enabled = negotiated
                                         .capabilities
                                         .contains(&Capability::InventorySnapshots);
-                                    negotiated_capabilities = Some(negotiated.capabilities);
+                                    observations_acknowledged = !negotiated
+                                        .capabilities
+                                        .contains(&Capability::BoundedObservations);
+                                    negotiated_capabilities = Some(negotiated);
                                     if !snapshot_sent
                                         && inventory_enabled
-                                        && let (Some(pending), Some(capabilities)) = (
+                                        && let (Some(pending), Some(negotiated)) = (
                                             pending_snapshot.as_ref(),
-                                            negotiated_capabilities.as_deref(),
+                                            negotiated_capabilities.as_ref(),
                                         )
                                     {
-                                        send_pending_snapshot(&mut write, pending, capabilities)
-                                            .await?;
+                                        send_pending_snapshot(
+                                            &mut write,
+                                            pending,
+                                            negotiated.protocol_version,
+                                            &negotiated.capabilities,
+                                        )
+                                        .await?;
                                         snapshot_sent = true;
                                     }
                                 } else {
@@ -228,12 +248,41 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                                 }
                             }
                             Message::InventorySnapshotAck(ack) => {
+                                if ack.accepted
+                                    && pending_snapshot.as_ref().is_some_and(|pending| {
+                                        pending.snapshot.snapshot_id == ack.snapshot_id
+                                    })
+                                {
+                                    snapshot_acknowledged = true;
+                                }
                                 if acknowledge_pending_snapshot(
                                     state_dir,
                                     &mut pending_snapshot,
                                     &ack,
+                                    observations_acknowledged,
                                 )? {
                                     snapshot_sent = false;
+                                    snapshot_acknowledged = false;
+                                    observations_acknowledged = false;
+                                }
+                            }
+                            Message::ObservationBatchAck(ack) => {
+                                if ack.accepted
+                                    && pending_snapshot.as_ref().is_some_and(|pending| {
+                                        pending.observations.batch_id == ack.batch_id
+                                    })
+                                {
+                                    observations_acknowledged = true;
+                                }
+                                if acknowledge_pending_observations(
+                                    state_dir,
+                                    &mut pending_snapshot,
+                                    &ack,
+                                    snapshot_acknowledged,
+                                )? {
+                                    snapshot_sent = false;
+                                    snapshot_acknowledged = false;
+                                    observations_acknowledged = false;
                                 }
                             }
                             other => tracing::info!(?other, "received from gateway"),
@@ -253,13 +302,17 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
 async fn send_pending_snapshot<S>(
     write: &mut S,
     pending: &PendingSnapshot,
+    protocol_version: u32,
     capabilities: &[Capability],
 ) -> anyhow::Result<()>
 where
     S: Sink<WsMessage> + Unpin,
     S::Error: std::fmt::Display,
 {
-    let snapshot_message = Envelope::new(Message::InventorySnapshot(pending.snapshot.clone()));
+    let snapshot_message = Envelope::with_protocol_version(
+        protocol_version,
+        Message::InventorySnapshot(pending.snapshot.clone()),
+    );
     write
         .send(WsMessage::Text(protocol::serialize_envelope(
             &snapshot_message,
@@ -268,8 +321,10 @@ where
         .map_err(|error| anyhow::anyhow!("send inventory snapshot: {error}"))?;
 
     if capabilities.contains(&Capability::BoundedObservations) {
-        let observation_message =
-            Envelope::new(Message::ObservationBatch(pending.observations.clone()));
+        let observation_message = Envelope::with_protocol_version(
+            protocol_version,
+            Message::ObservationBatch(pending.observations.clone()),
+        );
         write
             .send(WsMessage::Text(protocol::serialize_envelope(
                 &observation_message,
@@ -285,11 +340,30 @@ fn acknowledge_pending_snapshot(
     state_dir: &str,
     pending_snapshot: &mut Option<PendingSnapshot>,
     ack: &InventorySnapshotAck,
+    observations_acknowledged: bool,
 ) -> anyhow::Result<bool> {
     let acknowledged = pending_snapshot
         .as_ref()
         .is_some_and(|pending| pending.snapshot.snapshot_id == ack.snapshot_id);
-    if !ack.accepted || !acknowledged {
+    if !ack.accepted || !acknowledged || !observations_acknowledged {
+        return Ok(false);
+    }
+
+    clear_pending_snapshot(state_dir)?;
+    *pending_snapshot = None;
+    Ok(true)
+}
+
+fn acknowledge_pending_observations(
+    state_dir: &str,
+    pending_snapshot: &mut Option<PendingSnapshot>,
+    ack: &protocol::ObservationBatchAck,
+    snapshot_acknowledged: bool,
+) -> anyhow::Result<bool> {
+    let acknowledged = pending_snapshot
+        .as_ref()
+        .is_some_and(|pending| pending.observations.batch_id == ack.batch_id);
+    if !ack.accepted || !acknowledged || !snapshot_acknowledged {
         return Ok(false);
     }
 
@@ -585,7 +659,7 @@ mod tests {
             reason: Some("retry".into()),
         };
         assert!(
-            !acknowledge_pending_snapshot(state_dir, &mut pending_snapshot, &rejected)
+            !acknowledge_pending_snapshot(state_dir, &mut pending_snapshot, &rejected, false)
                 .expect("keep rejected snapshot pending")
         );
         assert!(
@@ -602,7 +676,7 @@ mod tests {
             reason: None,
         };
         assert!(
-            !acknowledge_pending_snapshot(state_dir, &mut pending_snapshot, &mismatched)
+            !acknowledge_pending_snapshot(state_dir, &mut pending_snapshot, &mismatched, false)
                 .expect("keep mismatched snapshot pending")
         );
 
@@ -612,8 +686,26 @@ mod tests {
             ..rejected
         };
         assert!(
-            acknowledge_pending_snapshot(state_dir, &mut pending_snapshot, &acknowledged)
+            !acknowledge_pending_snapshot(state_dir, &mut pending_snapshot, &acknowledged, false)
                 .expect("acknowledge snapshot")
+        );
+        assert!(pending_snapshot.is_some());
+
+        let observation_ack = protocol::ObservationBatchAck {
+            batch_id: first.observations.batch_id,
+            accepted: true,
+            observation_count: 0,
+            replayed: false,
+            reason: None,
+        };
+        assert!(
+            acknowledge_pending_observations(
+                state_dir,
+                &mut pending_snapshot,
+                &observation_ack,
+                true,
+            )
+            .expect("acknowledge observations")
         );
         assert!(pending_snapshot.is_none());
         assert!(
