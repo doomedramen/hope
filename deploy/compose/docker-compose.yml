@@ -25,8 +25,27 @@ services:
     environment:
       HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:?set HOPE_DATABASE_URL in .env}
       HOPE_BIND_ADDR: 0.0.0.0:8080
+      HOPE_COOKIE_SECURE: ${HOPE_COOKIE_SECURE:-true}
+    volumes:
+      - server-pki:/app/data/pki
     ports:
       - "8080:8080"
+      - "8443:8443"
+      - "8444:8444"
+    command: ["serve"]
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:?set HOPE_DATABASE_URL in .env}
+    command: ["worker"]
 
 volumes:
   postgres-data:
+  server-pki:
