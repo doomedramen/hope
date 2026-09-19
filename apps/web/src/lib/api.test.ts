@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelScanRun,
   confirmDiscoveryScope,
   draftDiscoveryScope,
+  fetchScanRun,
   fetchHealthReady,
   launchNetworkScan,
 } from "./api";
@@ -120,6 +122,59 @@ describe("fetchHealthReady", () => {
     );
     const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
     expect(headers.get("idempotency-key")).toBe("scan-network-1-unique-key");
+    expect(headers.get("x-requested-with")).toBe("hope");
+  });
+
+  it("fetches scan progress and requests cancellation with CSRF headers", async () => {
+    const run = {
+      id: "run-1",
+      network_id: "network-1",
+      job_id: "job-1",
+      kind: "initial_discovery",
+      status: "running",
+      targets_planned: 252,
+      targets_completed: 12,
+      ports_planned: 16_515_420,
+      ports_completed: 786_420,
+      complete: false,
+      authoritative: false,
+      error: null,
+    };
+    const cancelled = {
+      ...run,
+      status: "cancelled",
+      cancellation_requested: true,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(run), {
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(cancelled), {
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const current = await fetchScanRun("run-1");
+    const result = await cancelScanRun("run-1");
+
+    expect(current.ports_completed).toBe(786_420);
+    expect(result.status).toBe("cancelled");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/scans/run-1",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/scans/run-1/cancel",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const headers = new Headers(fetchMock.mock.calls[1][1]?.headers);
     expect(headers.get("x-requested-with")).toBe("hope");
   });
 });

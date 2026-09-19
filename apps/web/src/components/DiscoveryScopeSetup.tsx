@@ -1,14 +1,17 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckIcon,
   CircleAlertIcon,
   NetworkIcon,
   PlayIcon,
+  XIcon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
+  cancelScanRun,
   confirmDiscoveryScope,
   draftDiscoveryScope,
+  fetchScanRun,
   launchNetworkScan,
   type DiscoveryScope,
   type Network,
@@ -558,7 +561,9 @@ function ScopeForm({
   );
 }
 
-function ScanLaunch({
+const SCAN_RUN_POLL_INTERVAL_MS = 2_500;
+
+export function ScanLaunch({
   network,
   run,
   targetCount,
@@ -573,6 +578,27 @@ function ScanLaunch({
   error: unknown;
   onLaunch: () => void;
 }) {
+  const queryClient = useQueryClient();
+  const runQuery = useQuery({
+    queryKey: ["scan-run", run?.id],
+    queryFn: () => fetchScanRun(run!.id),
+    enabled: Boolean(run),
+    refetchInterval: (query) => {
+      const currentRun = query.state.data ?? run;
+      return currentRun && isActiveScanRun(currentRun.status)
+        ? SCAN_RUN_POLL_INTERVAL_MS
+        : false;
+    },
+  });
+  const cancelMutation = useMutation({
+    mutationFn: cancelScanRun,
+    onSuccess: (updatedRun) => {
+      queryClient.setQueryData(["scan-run", updatedRun.id], updatedRun);
+    },
+  });
+  const currentRun = runQuery.data ?? run;
+  const canCancel = currentRun && isActiveScanRun(currentRun.status);
+
   return (
     <div className="flex flex-col gap-4 rounded-lg border bg-muted/20 p-4">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
@@ -600,7 +626,59 @@ function ScanLaunch({
         </p>
       ) : null}
       {error ? <ScanLaunchError error={error} /> : null}
-      {run ? <ScanRunStatus run={run} targetCount={targetCount} /> : null}
+      {currentRun ? (
+        <ScanRunStatus run={currentRun} targetCount={targetCount} />
+      ) : null}
+      {canCancel ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-muted-foreground">
+            {currentRun.cancellation_requested
+              ? "Cancellation requested. Waiting for the worker to stop."
+              : "You can cancel this scan while it is queued or running."}
+          </p>
+          <Button
+            disabled={
+              cancelMutation.isPending || currentRun.cancellation_requested
+            }
+            onClick={() => cancelMutation.mutate(currentRun.id)}
+            type="button"
+            variant="outline"
+          >
+            {cancelMutation.isPending ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <XIcon data-icon="inline-start" />
+            )}
+            {cancelMutation.isPending
+              ? "Requesting cancellation…"
+              : currentRun.cancellation_requested
+                ? "Cancellation requested"
+                : "Cancel scan"}
+          </Button>
+        </div>
+      ) : null}
+      {cancelMutation.error ? (
+        <Alert variant="destructive">
+          <CircleAlertIcon />
+          <AlertTitle>Scan cancellation failed</AlertTitle>
+          <AlertDescription>
+            {cancelMutation.error instanceof Error
+              ? cancelMutation.error.message
+              : "Server returned no cancellation error details."}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {runQuery.error ? (
+        <Alert variant="destructive">
+          <CircleAlertIcon />
+          <AlertTitle>Scan status update failed</AlertTitle>
+          <AlertDescription>
+            {runQuery.error instanceof Error
+              ? runQuery.error.message
+              : "Server returned no scan status error details."}
+          </AlertDescription>
+        </Alert>
+      ) : null}
     </div>
   );
 }
@@ -614,6 +692,7 @@ function ScanRunStatus({
 }) {
   const completedTargets = formatCount(run.targets_completed);
   const plannedTargets = targetCount ?? formatCount(run.targets_planned);
+  const portProgress = `${formatCount(run.ports_completed)} of ${formatCount(run.ports_planned)} ports completed.`;
 
   switch (run.status) {
     case "pending":
@@ -623,7 +702,7 @@ function ScanRunStatus({
           <AlertTitle>Initial discovery queued</AlertTitle>
           <AlertDescription>
             Server accepted scan for {plannedTargets} confirmed targets. Work
-            has not started yet.
+            has not started yet. {portProgress}
           </AlertDescription>
         </Alert>
       );
@@ -633,7 +712,8 @@ function ScanRunStatus({
           <NetworkIcon />
           <AlertTitle>Initial discovery running</AlertTitle>
           <AlertDescription>
-            {completedTargets} of {plannedTargets} confirmed targets completed.
+            {completedTargets} of {plannedTargets} confirmed targets completed.{" "}
+            {portProgress}
           </AlertDescription>
         </Alert>
       );
@@ -641,9 +721,11 @@ function ScanRunStatus({
       return (
         <Alert aria-live="polite">
           <CheckIcon />
-          <AlertTitle>Initial discovery complete</AlertTitle>
+          <AlertTitle>Initial discovery completed</AlertTitle>
           <AlertDescription>
-            Full TCP scan completed for {plannedTargets} confirmed targets.
+            {run.authoritative && run.complete
+              ? `Full TCP scan completed for ${plannedTargets} confirmed targets. Results are authoritative.`
+              : "Server reported success without a complete authoritative result."}
           </AlertDescription>
         </Alert>
       );
@@ -654,7 +736,8 @@ function ScanRunStatus({
           <AlertTitle>Initial discovery failed</AlertTitle>
           <AlertDescription>
             {run.error ??
-              "Server marked scan run failed without an error message."}
+              "Server marked scan run failed without an error message."}{" "}
+            {portProgress} Partial results are not authoritative.
           </AlertDescription>
         </Alert>
       );
@@ -665,11 +748,16 @@ function ScanRunStatus({
           <AlertTitle>Initial discovery cancelled</AlertTitle>
           <AlertDescription>
             Scan stopped after {completedTargets} of {plannedTargets} confirmed
-            targets completed.
+            targets completed. {portProgress} Partial results are not
+            authoritative.
           </AlertDescription>
         </Alert>
       );
   }
+}
+
+function isActiveScanRun(status: ScanRun["status"]): boolean {
+  return status === "pending" || status === "running";
 }
 
 function ScanLaunchError({ error }: { error: unknown }) {

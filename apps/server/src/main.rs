@@ -150,6 +150,8 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             post(inventory::discovery_scopes::confirm),
         )
         .route("/api/v1/networks/{id}/scans", post(discovery::runs::create))
+        .route("/api/v1/scans/{id}", get(discovery::runs::get))
+        .route("/api/v1/scans/{id}/cancel", post(discovery::runs::cancel))
         .route(
             "/api/v1/devices",
             get(inventory::devices::list).post(inventory::devices::create),

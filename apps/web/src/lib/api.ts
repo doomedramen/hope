@@ -56,6 +56,7 @@ export interface ScanRun {
   ports_planned: number;
   ports_completed: number;
   complete: boolean;
+  authoritative: boolean;
   cancellation_requested: boolean;
   requested_by: string | null;
   source: "operator" | "scheduler" | "system";
@@ -285,6 +286,16 @@ export async function launchNetworkScan(
     method: "POST",
     headers: { "Idempotency-Key": input.idempotencyKey },
     body: JSON.stringify({ kind: input.kind }),
+  });
+}
+
+export async function fetchScanRun(id: string): Promise<ScanRun> {
+  return request<ScanRun>(`/api/v1/scans/${id}`);
+}
+
+export async function cancelScanRun(id: string): Promise<ScanRun> {
+  return request<ScanRun>(`/api/v1/scans/${id}/cancel`, {
+    method: "POST",
   });
 }
 

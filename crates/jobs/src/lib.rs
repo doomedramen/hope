@@ -312,10 +312,23 @@ pub async fn fail_permanently(
 /// Request cancellation of a job; the worker executing it is expected to
 /// poll `cancel_requested` and stop cooperatively.
 pub async fn request_cancel(pool: &PgPool, job_id: Uuid) -> Result<bool> {
+    let mut transaction = pool.begin().await?;
+    let requested = request_cancel_in(&mut transaction, job_id).await?;
+    transaction.commit().await?;
+    Ok(requested)
+}
+
+/// Transactional form of [`request_cancel`]. Callers that update a durable
+/// resource alongside the job use this so cancellation intent cannot split
+/// across the two rows.
+pub async fn request_cancel_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+) -> Result<bool> {
     let result =
         sqlx::query(r#"update jobs set cancel_requested = true, updated_at = now() where id = $1"#)
             .bind(job_id)
-            .execute(pool)
+            .execute(&mut **transaction)
             .await?;
 
     Ok(result.rows_affected() > 0)
