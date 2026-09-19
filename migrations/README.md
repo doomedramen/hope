@@ -54,3 +54,10 @@ M4 notification routing lands in 0019_notifications.sql. It stores provider
 channels, severity/event routes, and idempotent incident deliveries. The
 delivery job sends webhook or ntfy notifications outside the monitor
 transaction and retries provider failures through the normal job queue.
+
+M5 agent persistence lands in 0020_agent_inventory.sql. It extends enrolled
+agent metadata, keeps one current inventory snapshot plus bounded replay
+history, projects agent observations into the canonical inventory tables, and
+stores one durable open/recovered heartbeat incident per agent. Offline sweeps
+run through the worker queue; recovery updates incident state without deleting
+the agent's current or historical inventory.

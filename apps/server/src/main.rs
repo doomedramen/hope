@@ -1,3 +1,4 @@
+mod agent_inventory;
 mod agents;
 mod auth_mw;
 mod config;
@@ -138,6 +139,24 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
     // subject to the same CSRF custom-header check as every other
     // mutating `/api/v1` route (see csrf.rs doc comment).
     let inventory_router = Router::new()
+        .route("/api/v1/agents", get(agent_inventory::list_agents))
+        .route("/api/v1/agents/{id}", get(agent_inventory::get_agent))
+        .route(
+            "/api/v1/agents/{id}/inventory",
+            get(agent_inventory::get_agent_inventory),
+        )
+        .route(
+            "/api/v1/agents/{id}/inventory/history",
+            get(agent_inventory::get_agent_inventory_history),
+        )
+        .route(
+            "/api/v1/agents/{id}/health",
+            get(agent_inventory::get_agent_health),
+        )
+        .route(
+            "/api/v1/agents/{id}/version",
+            get(agent_inventory::get_agent_version),
+        )
         .route(
             "/api/v1/networks",
             get(inventory::generic::networks::list).post(inventory::generic::networks::create),
@@ -727,15 +746,19 @@ mod handshake_tests {
         .unwrap();
         let (mut write, mut read) = ws_stream.split();
 
-        let hello = protocol::Envelope::new(protocol::Message::Hello(protocol::Hello {
-            agent_id: Uuid::new_v4(),
-            agent_version: "0.1.0".into(),
-            hostname: "test-agent-1".into(),
-            os: "linux".into(),
-            arch: "x86_64".into(),
-        }));
+        let hello = serde_json::json!({
+            "type": "hello",
+            "message_id": Uuid::new_v4(),
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "agent_id": enrolled.agent_id,
+            "agent_version": "0.1.0",
+            "hostname": "test-agent-1",
+            "os": "linux",
+            "arch": "x86_64",
+            "capabilities": ["host", "network", "docker"]
+        });
         write
-            .send(WsMessage::Text(serde_json::to_string(&hello).unwrap()))
+            .send(WsMessage::Text(hello.to_string()))
             .await
             .unwrap();
 
@@ -760,6 +783,45 @@ mod handshake_tests {
             .unwrap();
         let ack = read.next().await.unwrap().unwrap();
         assert!(matches!(ack, WsMessage::Text(_)));
+
+        let snapshot = serde_json::json!({
+            "type": "inventory_snapshot",
+            "message_id": Uuid::new_v4(),
+            "protocol_version": protocol::PROTOCOL_VERSION,
+            "agent_id": enrolled.agent_id,
+            "sequence": 1,
+            "collected_at_unix_secs": time::OffsetDateTime::now_utc().unix_timestamp(),
+            "complete": true,
+            "inventory": {
+                "hostname": "test-agent-1",
+                "machine_id": format!("machine-{}", enrolled.agent_id),
+                "hardware_uuid": format!("hardware-{}", enrolled.agent_id),
+                "interfaces": [{
+                    "name": "eth0",
+                    "mac": "aa:bb:cc:dd:ee:11",
+                    "addresses": [{"ip": "192.0.2.11", "type": "dhcp"}]
+                }],
+                "containers": [{
+                    "id": format!("container-{}", enrolled.agent_id),
+                    "name": "web",
+                    "image": "nginx:latest",
+                    "status": "running",
+                    "published_ports": [{"host_ip": "192.0.2.11", "host_port": 8080, "protocol": "tcp"}]
+                }],
+                "sockets": [{"address": "127.0.0.1", "port": 22, "protocol": "tcp"}]
+            }
+        });
+        write
+            .send(WsMessage::Text(snapshot.to_string()))
+            .await
+            .unwrap();
+        let inventory_ack = read.next().await.unwrap().unwrap();
+        let WsMessage::Text(inventory_ack) = inventory_ack else {
+            panic!("expected inventory acknowledgement")
+        };
+        let inventory_ack: serde_json::Value = serde_json::from_str(&inventory_ack).unwrap();
+        assert_eq!(inventory_ack["type"], "inventory_snapshot_ack");
+        assert_eq!(inventory_ack["accepted"], true);
 
         let record = agents::find_by_fingerprint(
             &pool,
@@ -786,6 +848,23 @@ mod handshake_tests {
             last_seen.is_some(),
             "last_seen should be set after heartbeat"
         );
+        let capabilities: serde_json::Value =
+            sqlx::query_scalar("select capabilities from agents where id = $1")
+                .bind(enrolled.agent_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            capabilities,
+            serde_json::json!(["host", "network", "docker"])
+        );
+        let current_inventory: i64 =
+            sqlx::query_scalar("select count(*) from agent_inventory_current where agent_id = $1")
+                .bind(enrolled.agent_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(current_inventory, 1);
 
         drop(write);
 

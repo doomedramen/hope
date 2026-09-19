@@ -79,6 +79,29 @@ impl JobHandler for EnrollmentTokenPurge {
     }
 }
 
+struct AgentHealthSweep;
+
+#[async_trait]
+impl JobHandler for AgentHealthSweep {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let timeout_seconds = payload
+            .get("timeout_seconds")
+            .and_then(Value::as_i64)
+            .unwrap_or(agents::HEARTBEAT_TIMEOUT_SECONDS);
+        let opened = agents::sweep_offline(pool, timeout_seconds).await?;
+        if opened > 0 {
+            tracing::info!(opened, timeout_seconds, "opened offline agent incidents");
+        }
+        Ok(JobOutcome::Completed)
+    }
+}
+
 /// No-op handler for exercising the queue/worker pipeline end to end
 /// (enqueue -> claim -> dispatch -> complete) without any real side
 /// effect. Logs its payload so a test/operator can confirm it actually
@@ -309,6 +332,7 @@ impl Registry {
         let mut handlers: HashMap<&'static str, Box<dyn JobHandler>> = HashMap::new();
         handlers.insert("session.cleanup", Box::new(SessionCleanup));
         handlers.insert("enrollment_token.purge", Box::new(EnrollmentTokenPurge));
+        handlers.insert("agent_health.sweep", Box::new(AgentHealthSweep));
         handlers.insert("diagnostic.echo", Box::new(DiagnosticEcho));
         handlers.insert("change_events.retention", Box::new(ChangeEventRetention));
         handlers.insert(
@@ -350,6 +374,7 @@ mod tests {
         let registry = Registry::new();
         assert!(registry.get("session.cleanup").is_some());
         assert!(registry.get("enrollment_token.purge").is_some());
+        assert!(registry.get("agent_health.sweep").is_some());
         assert!(registry.get("diagnostic.echo").is_some());
         assert!(registry.get("monitor_results.retention").is_some());
         assert!(registry.get("notifications.deliver").is_some());

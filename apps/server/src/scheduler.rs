@@ -23,6 +23,11 @@ fn hourly_period_key(prefix: &str) -> String {
     format!("{prefix}-{hour_bucket}")
 }
 
+fn five_minute_period_key(prefix: &str) -> String {
+    let period_bucket = jiff::Timestamp::now().as_second() / 300;
+    format!("{prefix}-{period_bucket}")
+}
+
 /// Which day-long period `now` falls in -- `change_events.retention`
 /// doesn't need to run more than once a day.
 fn daily_period_key(prefix: &str) -> String {
@@ -58,6 +63,18 @@ pub(crate) async fn enqueue_periodic_jobs(
     .await
     {
         tracing::warn!(error = %err, "failed to enqueue enrollment_token.purge");
+    }
+
+    let agent_health_key = five_minute_period_key("five-minute-agent-health");
+    if let Err(err) = jobs::enqueue(
+        pool,
+        "agent_health.sweep",
+        &agent_health_key,
+        serde_json::json!({ "timeout_seconds": crate::agents::HEARTBEAT_TIMEOUT_SECONDS }),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "failed to enqueue agent_health.sweep");
     }
 
     let retention_key = daily_period_key("daily");
