@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { MonitorList } from "@/components/MonitorList";
 import { MonitorProposalQueue } from "@/components/MonitorProposalQueue";
 import { ServiceReviewQueue } from "@/components/ServiceReviewQueue";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -10,19 +11,16 @@ export const Route = createFileRoute("/monitoring")({
 function MonitoringPage() {
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
-      <div>
-        <p className="text-sm text-muted-foreground">
-          Monitoring / Service review
-        </p>
-        <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-          Service fingerprints
-        </h1>
-      </div>
-      <Tabs className="gap-4" defaultValue="services">
+      <h1 className="text-3xl font-semibold tracking-tight">Monitoring</h1>
+      <Tabs className="gap-4" defaultValue="monitors">
         <TabsList variant="line">
+          <TabsTrigger value="monitors">Monitors</TabsTrigger>
           <TabsTrigger value="services">Service reviews</TabsTrigger>
           <TabsTrigger value="proposals">Monitor proposals</TabsTrigger>
         </TabsList>
+        <TabsContent value="monitors">
+          <MonitorList />
+        </TabsContent>
         <TabsContent value="services">
           <ServiceReviewQueue />
         </TabsContent>

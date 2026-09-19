@@ -5,6 +5,7 @@ import {
   draftDiscoveryScope,
   fetchScanRun,
   fetchHealthReady,
+  fetchMonitors,
   launchNetworkScan,
 } from "./api";
 
@@ -176,5 +177,32 @@ describe("fetchHealthReady", () => {
     );
     const headers = new Headers(fetchMock.mock.calls[1][1]?.headers);
     expect(headers.get("x-requested-with")).toBe("hope");
+  });
+
+  it("fetches monitor rows with the bounded list size", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: "monitor-1",
+              state: "up",
+              service_name: "Router",
+              endpoint_address: "192.0.2.10/32",
+            },
+          ],
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchMonitors();
+
+    expect(result.items[0]?.state).toBe("up");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/monitors?limit=100",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
   });
 });

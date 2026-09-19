@@ -235,6 +235,44 @@ export interface MonitorProposal {
   updated_at: string;
 }
 
+export type MonitorState =
+  "unknown" | "up" | "degraded" | "down" | "stale" | string;
+
+export interface Monitor {
+  id: string;
+  proposal_id: string | null;
+  service_id: string;
+  endpoint_id: string;
+  monitor_type: "icmp" | "tcp" | "http" | "https" | "dns" | "tls" | string;
+  config: Record<string, unknown>;
+  interval_seconds: number;
+  timeout_ms: number;
+  failure_threshold: number;
+  recovery_threshold: number;
+  enabled: boolean;
+  state: MonitorState;
+  underlying_state: Exclude<MonitorState, "stale">;
+  consecutive_failures: number;
+  consecutive_successes: number;
+  last_result_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  next_run_at: string | null;
+  lease_owner: string | null;
+  lease_expires_at: string | null;
+  version: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  endpoint_address: string | null;
+  endpoint_port: number | null;
+  endpoint_url: string | null;
+  endpoint_dns_name: string | null;
+  service_name: string | null;
+  service_product: string | null;
+  service_product_version: string | null;
+}
+
 export interface ChangeEvent {
   id: string;
   entity_kind: string;
@@ -423,6 +461,14 @@ export async function fetchMonitorProposals(
 ): Promise<ApiPage<MonitorProposal>> {
   return request<ApiPage<MonitorProposal>>(
     `/api/v1/monitor-proposals${queryString({ limit: 100, status })}`,
+  );
+}
+
+export async function fetchMonitors(
+  state?: MonitorState,
+): Promise<{ items: Monitor[] }> {
+  return request<{ items: Monitor[] }>(
+    `/api/v1/monitors${queryString({ limit: 100, state })}`,
   );
 }
 

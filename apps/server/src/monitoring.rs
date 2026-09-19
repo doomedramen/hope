@@ -167,9 +167,22 @@ pub async fn list(
 ) -> (StatusCode, Json<Value>) {
     let limit = query.limit.unwrap_or(100).clamp(1, 100);
     let rows: Result<Vec<(Value,)>, sqlx::Error> = sqlx::query_as(
-        "select row_to_json(t) from (select * from monitors \
-         where ($1::text is null or state = $1) \
-         order by created_at desc, id desc limit $2) t",
+        "select row_to_json(t) from (\
+           select m.*,\
+                  e.address::text as endpoint_address,\
+                  e.port as endpoint_port,\
+                  e.url as endpoint_url,\
+                  e.dns_name as endpoint_dns_name,\
+                  s.name as service_name,\
+                  s.product as service_product,\
+                  s.product_version as service_product_version\
+             from monitors m\
+             join endpoints e on e.id = m.endpoint_id\
+             join services s on s.id = m.service_id\
+            where ($1::text is null or m.state = $1)\
+            order by m.created_at desc, m.id desc\
+            limit $2\
+         ) t",
     )
     .bind(query.state)
     .bind(limit)
@@ -185,11 +198,25 @@ pub async fn list(
 }
 
 pub async fn get(State(state): State<AppState>, Path(id): Path<Uuid>) -> (StatusCode, Json<Value>) {
-    let row: Result<Option<(Value,)>, sqlx::Error> =
-        sqlx::query_as("select row_to_json(t) from (select * from monitors where id = $1) t")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await;
+    let row: Result<Option<(Value,)>, sqlx::Error> = sqlx::query_as(
+        "select row_to_json(t) from (\
+               select m.*,\
+                      e.address::text as endpoint_address,\
+                      e.port as endpoint_port,\
+                      e.url as endpoint_url,\
+                      e.dns_name as endpoint_dns_name,\
+                      s.name as service_name,\
+                      s.product as service_product,\
+                      s.product_version as service_product_version\
+                 from monitors m\
+                 join endpoints e on e.id = m.endpoint_id\
+                 join services s on s.id = m.service_id\
+                where m.id = $1\
+             ) t",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await;
     match row {
         Ok(Some((row,))) => (StatusCode::OK, Json(row)),
         Ok(None) => err(StatusCode::NOT_FOUND, "monitor not found"),
