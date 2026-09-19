@@ -1,24 +1,32 @@
 mod agents;
 mod config;
+mod csrf;
 mod enroll;
 mod gateway;
 mod pki;
+mod ratelimit;
 mod routes;
+mod session_store;
 mod state;
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::Router;
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use clap::{Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
-use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
+use tower_sessions::cookie::SameSite;
+use tower_sessions::{Expiry, SessionManagerLayer};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
+use crate::ratelimit::RateLimitState;
+use crate::session_store::PgSessionStore;
 use crate::state::AppState;
 
 #[derive(Parser)]
@@ -91,17 +99,39 @@ async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn app_router(state: AppState, web_dist_dir: &str) -> Router {
-    let session_store = MemoryStore::default();
-    let session_layer = SessionManagerLayer::new(session_store).with_expiry(Expiry::OnInactivity(
-        tower_sessions::cookie::time::Duration::hours(12),
-    ));
+fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
+    let session_store = PgSessionStore::new(state.pool.clone());
+    let session_layer = SessionManagerLayer::new(session_store)
+        .with_expiry(Expiry::OnInactivity(
+            tower_sessions::cookie::time::Duration::hours(12),
+        ))
+        .with_http_only(true)
+        .with_same_site(SameSite::Lax)
+        .with_secure(config.cookie_secure);
+
+    // Setup/login aren't cookie-authenticated (they establish the
+    // session), so CSRF's usual "attacker rides the victim's cookie"
+    // premise doesn't strictly apply to them — but the header check is
+    // applied uniformly so every future mutating /api/v1 route inherits
+    // it without needing to remember to add it (see csrf.rs doc comment).
+    let setup_limiter = RateLimitState::new(10, config.trust_proxy_headers);
+    let login_limiter = RateLimitState::new(10, config.trust_proxy_headers);
 
     let api = Router::new()
         .route("/health/live", get(routes::health::live))
         .route("/health/ready", get(routes::health::ready))
-        .route("/api/v1/setup", post(routes::auth::setup))
-        .route("/api/v1/login", post(routes::auth::login))
+        .route(
+            "/api/v1/setup",
+            post(routes::auth::setup)
+                .layer(from_fn(csrf::require_custom_header))
+                .layer(from_fn_with_state(setup_limiter, ratelimit::enforce)),
+        )
+        .route(
+            "/api/v1/login",
+            post(routes::auth::login)
+                .layer(from_fn(csrf::require_custom_header))
+                .layer(from_fn_with_state(login_limiter, ratelimit::enforce)),
+        )
         .with_state(state);
 
     let index = format!("{web_dist_dir}/index.html");
@@ -163,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
             run_migrations(&pool).await?;
 
             let state = AppState { pool: pool.clone() };
-            let app = app_router(state, &config.web_dist_dir);
+            let app = app_router(state, &config.web_dist_dir, &config);
 
             let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
             tracing::info!(addr = %config.bind_addr, "server listening");
@@ -184,12 +214,31 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
 
-            let api_task = axum::serve(listener, app);
+            let session_cleanup_pool = pool.clone();
+            let session_cleanup_task = tokio::spawn(async move {
+                let store = PgSessionStore::new(session_cleanup_pool);
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                    match store.delete_expired().await {
+                        Ok(count) if count > 0 => {
+                            tracing::info!(count, "deleted expired sessions")
+                        }
+                        Ok(_) => {}
+                        Err(err) => tracing::warn!(error = %err, "session cleanup failed"),
+                    }
+                }
+            });
+
+            let api_task = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            );
 
             tokio::select! {
                 res = api_task => { res?; }
                 _ = gateway_task => {}
                 _ = enroll_task => {}
+                _ = session_cleanup_task => {}
             }
         }
         Role::Worker => {
@@ -261,6 +310,8 @@ mod handshake_tests {
                 .join("server-key.pem")
                 .to_string_lossy()
                 .to_string(),
+            cookie_secure: false,
+            trust_proxy_headers: false,
         }
     }
 

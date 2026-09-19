@@ -29,6 +29,18 @@ pub struct Config {
     pub ca_key_path: String,
     pub server_cert_path: String,
     pub server_key_path: String,
+
+    /// Whether the session cookie gets the `Secure` attribute. Defaults to
+    /// true; set to false only for plain-HTTP local development, where a
+    /// browser would otherwise silently drop the cookie.
+    pub cookie_secure: bool,
+
+    /// Whether to trust `X-Forwarded-For` for rate-limiting's client-IP
+    /// determination. Only enable this when the server sits behind a
+    /// reverse proxy that overwrites/strips that header itself — otherwise
+    /// a client can spoof their rate-limit bucket. Defaults to false (use
+    /// the TCP peer address).
+    pub trust_proxy_headers: bool,
 }
 
 fn defaults() -> Config {
@@ -42,6 +54,8 @@ fn defaults() -> Config {
         ca_key_path: "data/pki/ca-key.pem".to_string(),
         server_cert_path: "data/pki/server-cert.pem".to_string(),
         server_key_path: "data/pki/server-key.pem".to_string(),
+        cookie_secure: true,
+        trust_proxy_headers: false,
     }
 }
 
