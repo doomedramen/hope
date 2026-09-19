@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { fetchHealthReady } from "../lib/api";
 import { Badge } from "./ui/badge";
+import { StatusDot, type StatusTone } from "./ui/status-dot";
 
 export function HealthIndicator() {
   const { data, isLoading, isError } = useQuery({
@@ -24,14 +25,16 @@ export function HealthIndicator() {
         ? "Checking..."
         : "Server unreachable";
 
+  const tone: StatusTone =
+    state === "ready"
+      ? "healthy"
+      : state === "checking"
+        ? "attention"
+        : "critical";
+
   return (
-    <Badge
-      data-testid="health-indicator"
-      variant={state === "down" ? "destructive" : "outline"}
-    >
-      <span
-        className={`size-1.5 rounded-full ${state === "ready" ? "bg-emerald-500" : state === "checking" ? "bg-amber-500" : "bg-destructive"}`}
-      />
+    <Badge data-testid="health-indicator" variant={tone}>
+      <StatusDot tone={tone} />
       {label}
     </Badge>
   );

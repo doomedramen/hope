@@ -5,6 +5,7 @@ import {
   CalendarDaysIcon,
   GitCompareArrowsIcon,
   LayoutDashboardIcon,
+  SearchIcon,
   RadioTowerIcon,
   ServerIcon,
   Settings2Icon,
@@ -102,6 +103,15 @@ function RootLayout() {
           <header className="flex h-14 items-center justify-between border-b px-5 md:hidden">
             <span className="font-medium">Hope</span>
             <HealthIndicator />
+          </header>
+          <header className="hidden h-14 items-center justify-end border-b bg-card/70 px-8 md:flex">
+            <Link
+              className="flex h-8 w-full max-w-sm items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+              to="/infrastructure"
+            >
+              <SearchIcon className="size-4" />
+              Search devices, services, or networks
+            </Link>
           </header>
           <main className="flex-1 p-5 md:p-8">
             <Outlet />
