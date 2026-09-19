@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod inventory;
+
 /// A user account, as created by the setup/bootstrap flow.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserId(pub Uuid);
