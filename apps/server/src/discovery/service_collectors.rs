@@ -3,11 +3,6 @@
 //! This module parses datagrams and defines the only multicast destinations
 //! that a future network collector may use. It never follows an advertised
 //! URL, sends credentials, or turns a response into a unicast probe.
-//
-// The parser/target boundary is intentionally exposed before a job
-// orchestrator and persistence adapter wire it into discovery. Keep the
-// standalone seam lint-clean until that integration lands.
-#![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
