@@ -238,3 +238,42 @@ uses the real worker `ConnectScanner` and classifier. It checks open-port
 observations, HTTP service/endpoint/evidence, repeat-scan canonical identity,
 and event deduplication. The test skips only when Docker is unavailable and
 always removes its named container through a drop guard.
+
+## 8. Milestone review — 2026-09-19
+
+M2 is complete against its listed deliverables. The current boundary is:
+
+- confirmed RFC1918 IPv4 scopes with exclusions and exact target-count
+  confirmation;
+- complete TCP scanning, bounded by global, network, and host limits, with a
+  low-impact policy that only reduces operator limits;
+- durable initial and recurring change runs with progress, lease renewal,
+  cooperative cancellation, retries, and non-authoritative partial results;
+- evidence-backed address discovery, canonical device/service reconciliation,
+  port open/close events, and safe TCP/HTTP/HTTPS/TLS/SSH classification;
+- targeted UDP primitives with `open`, `closed`, and `open_or_filtered`
+  states; and
+- scan read/cancel controls with polling UI status.
+
+The acceptance evidence run on this revision was:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace -- --test-threads=1
+pnpm --dir apps/web test -- --run
+pnpm --dir apps/web lint
+pnpm --dir apps/web build
+DATABASE_URL=postgres://postgres:dev@127.0.0.1:55432/postgres \
+  cargo test -p server m2_docker_high_port_scan_creates_canonical_inventory_records \
+  -- --ignored --nocapture --test-threads=1
+```
+
+All commands passed. The Docker gate exercised a disposable nginx service on
+a Docker-assigned arbitrary high port and verified the real scan, HTTP
+classification, canonical repeat scan, and cleanup. The partial, cancelled,
+filtered-only, and IP-owner-replacement cases are covered by the worker test
+suite.
+
+Deferred deliberately to M3 or later: product signatures, version detection,
+mDNS/DNS-SD, UPnP, SNMP, broad UDP jobs, and maintenance/quiet-period gates.
