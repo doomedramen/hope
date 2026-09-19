@@ -29,7 +29,7 @@ use super::policy::{
     resolve_scan_policy,
 };
 use super::tcp::{ConnectScanner, ConnectScannerConfig, PortObservation, PortState, Scanner};
-use crate::inventory::{addresses, events::Recorder, evidence};
+use crate::inventory::{addresses, events::Recorder, evidence, fingerprinting};
 
 const TCP_PORT_COUNT: i64 = 65_535;
 const SCAN_BATCH_SIZE: usize = 256;
@@ -1314,6 +1314,21 @@ async fn reconcile_service_classification(
         .bind(result.protocol.as_str())
         .execute(&mut **tx)
         .await?;
+    }
+
+    // M3 consumes the M2 evidence just written and projects product/version
+    // (plus any justified protocol correction) onto this same service.
+    let fingerprint_outcome =
+        fingerprinting::reconcile_service_fingerprint_tx(tx, service_id, Some(&source_instance))
+            .await?;
+    if let Some(outcome) = &fingerprint_outcome {
+        tracing::debug!(
+            service_id = %outcome.service_id,
+            fingerprint_evidence_id = %outcome.fingerprint_evidence_id,
+            rule_id = %outcome.candidate.rule_id,
+            changed_fields = ?outcome.changed_fields,
+            "reconciled service fingerprint"
+        );
     }
 
     if created_service {

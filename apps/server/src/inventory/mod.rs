@@ -8,6 +8,7 @@ pub mod devices;
 pub mod discovery_scopes;
 pub mod events;
 pub mod evidence;
+pub mod fingerprinting;
 pub mod generic;
 pub mod identity_service;
 pub mod pagination;
