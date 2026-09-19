@@ -14,12 +14,10 @@ Applied automatically by `server serve` and `server migrate` via
   a throwaway `postgres:17` container with no prior state, and the
   clean-start `docker compose up` walkthrough (README quickstart) does
   the same against a fresh named volume.
-- **Upgrade from the previous test schema**: **not meaningfully testable
-  yet**. This milestone (M0) is the project's first, so there is no
-  earlier released schema to upgrade *from* — `0001_init.sql`,
-  `0002_agents.sql`, and `0003_sessions.sql` have all only ever been
-  applied together, never independently released and then upgraded.
-  Once M1 ships a new migration on top of an M0 database that's already
-  been deployed, add a test/CI step that applies migrations through the
-  last released version, then applies the new one(s) on top, and asserts
-  it succeeds without data loss.
+- **Upgrade from the previous test schema**: covered from M1 onward by
+  `apps/server/tests/migration_upgrade.rs` (DB-gated, `DATABASE_URL`
+  required): applies migrations 0001-0003 (the M0 schema) as if already
+  deployed, inserts sample data, then applies 0004-0007 (M1) on top and
+  asserts the M0 data is unchanged and the new tables exist. Extend this
+  test's M0/M1 migration lists as later milestones add releases to
+  upgrade from.
