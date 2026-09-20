@@ -55,7 +55,7 @@ export function AuthPanel({
             <div className="mb-4 flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
               <KeyRoundIcon />
             </div>
-            <CardTitle>
+            <CardTitle render={<h1 />}>
               {mode === "login" ? "Sign in" : "Create operator account"}
             </CardTitle>
             <CardDescription>
@@ -65,7 +65,11 @@ export function AuthPanel({
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <form className="flex flex-col gap-5" onSubmit={submit}>
+            <form
+              aria-busy={isBusy}
+              className="flex flex-col gap-5"
+              onSubmit={submit}
+            >
               <FieldGroup>
                 <Field>
                   <FieldLabel htmlFor="email">Email</FieldLabel>
@@ -99,8 +103,8 @@ export function AuthPanel({
                 </Field>
               </FieldGroup>
               {error ? (
-                <Alert variant="destructive">
-                  <ShieldCheckIcon />
+                <Alert aria-live="assertive" variant="destructive">
+                  <ShieldCheckIcon aria-hidden="true" />
                   <AlertTitle>Could not continue</AlertTitle>
                   <AlertDescription>{error}</AlertDescription>
                 </Alert>
@@ -141,9 +145,9 @@ export function AuthPanel({
           Hope
         </div>
         <div className="max-w-md">
-          <h1 className="mt-3 text-4xl font-semibold tracking-tight">
+          <h2 className="mt-3 text-4xl font-semibold tracking-tight">
             Infrastructure inventory
-          </h1>
+          </h2>
           <p className="mt-4 text-lg leading-8 text-primary-foreground/75">
             Devices, interfaces, addresses, and identity evidence.
           </p>

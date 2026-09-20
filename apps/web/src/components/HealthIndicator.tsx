@@ -33,7 +33,13 @@ export function HealthIndicator() {
         : "critical";
 
   return (
-    <Badge data-testid="health-indicator" variant={tone}>
+    <Badge
+      aria-atomic="true"
+      aria-live="polite"
+      data-testid="health-indicator"
+      role="status"
+      variant={tone}
+    >
       <StatusDot tone={tone} />
       {label}
     </Badge>

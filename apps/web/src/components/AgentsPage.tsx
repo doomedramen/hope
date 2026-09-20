@@ -163,18 +163,18 @@ export function AgentsPage() {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.8fr)]">
-        <Card className="min-w-0">
-          <CardHeader className="border-b">
+        <Card aria-busy={agentsQuery.isLoading} className="min-w-0">
+          <CardHeader className="border-b max-sm:grid-cols-1">
             <CardTitle>Enrolled agents</CardTitle>
             <CardDescription>
               {visibleAgents.length} shown of {agents.length}
             </CardDescription>
-            <CardAction>
+            <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-stretch">
               <div className="relative">
                 <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   aria-label="Search agents"
-                  className="w-56 pl-8"
+                  className="w-full pl-8 sm:w-56"
                   onChange={(event) => setSearch(event.target.value)}
                   placeholder="Search agents"
                   value={search}
@@ -285,34 +285,31 @@ function AgentTable({
       <TableBody>
         {agents.map((agent) => (
           <TableRow
-            aria-label={`Select ${agent.hostname ?? "unnamed agent"}`}
+            aria-selected={agent.id === selectedAgentId}
             className="cursor-pointer"
             data-state={agent.id === selectedAgentId ? "selected" : undefined}
             key={agent.id}
             onClick={() => selectAgent(agent.id)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                selectAgent(agent.id);
-              }
-            }}
-            role="button"
-            tabIndex={0}
           >
             <TableCell className="min-w-48">
-              <div className="flex min-w-0 items-center gap-2">
+              <button
+                aria-pressed={agent.id === selectedAgentId}
+                className="flex min-w-0 w-full items-center gap-2 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                onClick={() => selectAgent(agent.id)}
+                type="button"
+              >
                 <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted">
-                  <ServerIcon className="size-3.5" />
+                  <ServerIcon aria-hidden="true" className="size-3.5" />
                 </span>
                 <div className="min-w-0">
                   <p className="truncate font-medium">
                     {agent.hostname || "Unnamed agent"}
                   </p>
-                  <p className="font-mono text-xs text-muted-foreground">
+                  <p className="truncate font-mono text-xs text-muted-foreground">
                     {shortId(agent.id)}
                   </p>
                 </div>
-              </div>
+              </button>
             </TableCell>
             <TableCell>
               <AgentStatusBadge status={agent.status} />
@@ -445,7 +442,11 @@ function AgentDetailPanel({
         </div>
 
         <Tabs className="min-w-0" defaultValue="overview">
-          <TabsList className="w-full overflow-x-auto" variant="line">
+          <TabsList
+            aria-label="Agent inventory views"
+            className="w-full flex-wrap justify-start"
+            variant="line"
+          >
             <TabsTrigger value="overview">
               <ShieldCheckIcon data-icon="inline-start" />
               Evidence

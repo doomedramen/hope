@@ -20,6 +20,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -29,6 +35,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 
 export const Route = createFileRoute("/settings")({
   component: SettingsPage,
@@ -94,7 +102,7 @@ function SettingsPage() {
     <div className="mx-auto flex max-w-5xl flex-col gap-6">
       <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
       {channelsQuery.isError || routesQuery.isError ? (
-        <Alert variant="destructive">
+        <Alert aria-live="assertive" variant="destructive">
           <CircleAlertIcon />
           <AlertTitle>Notification settings unavailable</AlertTitle>
           <AlertDescription>
@@ -104,23 +112,40 @@ function SettingsPage() {
                 ? routesQuery.error.message
                 : "Notification settings could not be loaded."}
           </AlertDescription>
+          <Button
+            onClick={() => {
+              void channelsQuery.refetch();
+              void routesQuery.refetch();
+            }}
+            size="sm"
+            variant="outline"
+          >
+            Retry
+          </Button>
         </Alert>
       ) : null}
       <Card>
-        <CardHeader className="border-b">
+        <CardHeader className="border-b max-sm:grid-cols-1">
           <CardTitle>Notification channels</CardTitle>
-          <CardAction>
+          <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-start">
             <Badge variant={channels.length ? "outline" : "secondary"}>
               {channels.length}
             </Badge>
           </CardAction>
         </CardHeader>
         <CardContent className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,0.8fr)]">
-          <div className="divide-y">
-            {channels.length === 0 ? (
-              <p className="py-4 text-sm text-muted-foreground">
-                No notification channels
-              </p>
+          <div aria-busy={channelsQuery.isLoading} className="min-w-0 divide-y">
+            {channelsQuery.isLoading ? (
+              renderSettingsListLoading()
+            ) : channels.length === 0 ? (
+              <Empty className="min-h-32 border-0 p-4">
+                <EmptyHeader>
+                  <EmptyTitle>No notification channels</EmptyTitle>
+                  <EmptyDescription>
+                    Add a channel to route incident notifications.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
             ) : (
               channels.map((channel) => (
                 <div
@@ -246,7 +271,7 @@ function SettingsPage() {
               </div>
             </div>
             {createMutation.isError ? (
-              <Alert variant="destructive">
+              <Alert aria-live="assertive" variant="destructive">
                 <CircleAlertIcon />
                 <AlertTitle>Channel was not created</AlertTitle>
                 <AlertDescription>
@@ -257,25 +282,35 @@ function SettingsPage() {
               </Alert>
             ) : null}
             <Button disabled={createMutation.isPending} type="submit">
+              {createMutation.isPending ? (
+                <Spinner data-icon="inline-start" />
+              ) : null}
               {createMutation.isPending ? "Saving..." : "Save channel"}
             </Button>
           </form>
         </CardContent>
       </Card>
       <Card>
-        <CardHeader className="border-b">
+        <CardHeader className="border-b max-sm:grid-cols-1">
           <CardTitle>Notification routes</CardTitle>
-          <CardAction>
+          <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-start">
             <Badge variant={routes.length ? "outline" : "secondary"}>
               {routes.length}
             </Badge>
           </CardAction>
         </CardHeader>
         <CardContent>
-          {routes.length === 0 ? (
-            <p className="py-4 text-sm text-muted-foreground">
-              No notification routes
-            </p>
+          {routesQuery.isLoading ? (
+            renderSettingsListLoading()
+          ) : routes.length === 0 ? (
+            <Empty className="min-h-32 border-0 p-4">
+              <EmptyHeader>
+                <EmptyTitle>No notification routes</EmptyTitle>
+                <EmptyDescription>
+                  Routes appear after you add a notification channel.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
           ) : (
             <div className="divide-y">
               {routes.map((route) => (
@@ -307,6 +342,20 @@ function SettingsPage() {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function renderSettingsListLoading() {
+  return (
+    <div
+      aria-label="Loading notification settings"
+      className="flex flex-col gap-3 py-4"
+      role="status"
+    >
+      {Array.from({ length: 3 }, (_, index) => (
+        <Skeleton className="h-12 w-full" key={index} />
+      ))}
     </div>
   );
 }

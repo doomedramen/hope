@@ -44,7 +44,7 @@ export function MonitorList() {
   const monitors = monitorsQuery.data?.items ?? [];
 
   return (
-    <Card className="overflow-hidden">
+    <Card aria-busy={monitorsQuery.isLoading} className="overflow-hidden">
       <CardHeader className="border-b">
         <CardTitle>Monitors</CardTitle>
         <CardAction>

@@ -43,11 +43,12 @@ export function IncidentList() {
   const incidents = incidentsQuery.data?.items ?? [];
 
   return (
-    <Card className="overflow-hidden">
+    <Card aria-busy={incidentsQuery.isLoading} className="overflow-hidden">
       <CardHeader className="border-b">
         <CardTitle>Incidents</CardTitle>
         <CardAction>
           <ToggleGroup
+            aria-label="Filter incidents by state"
             onValueChange={(values) => {
               const next = values[0] as IncidentFilter | undefined;
               if (next) setFilter(next);

@@ -14,7 +14,11 @@ function MonitoringPage() {
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
       <h1 className="text-3xl font-semibold tracking-tight">Monitoring</h1>
       <Tabs className="gap-4" defaultValue="monitors">
-        <TabsList variant="line">
+        <TabsList
+          aria-label="Monitoring views"
+          className="w-full flex-wrap justify-start"
+          variant="line"
+        >
           <TabsTrigger value="monitors">Monitors</TabsTrigger>
           <TabsTrigger value="incidents">Incidents</TabsTrigger>
           <TabsTrigger value="services">Service reviews</TabsTrigger>

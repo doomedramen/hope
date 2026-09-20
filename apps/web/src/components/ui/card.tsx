@@ -34,19 +34,25 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
 
 function CardTitle({
   className,
-  render: _render,
+  render,
   ...props
-}: React.ComponentProps<"h3"> & { render?: unknown }) {
-  return (
-    <h3
-      data-slot="card-title"
-      className={cn(
-        "font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm",
-        className,
-      )}
-      {...props}
-    />
+}: React.ComponentProps<"h3"> & {
+  render?: React.ReactElement<{ className?: string }>;
+}) {
+  const titleClassName = cn(
+    "font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm",
+    className,
+    render?.props.className,
   );
+
+  if (render) {
+    return React.cloneElement(render, {
+      ...props,
+      className: titleClassName,
+    });
+  }
+
+  return <h3 data-slot="card-title" className={titleClassName} {...props} />;
 }
 
 function CardDescription({ className, ...props }: React.ComponentProps<"div">) {

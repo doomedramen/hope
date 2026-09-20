@@ -93,9 +93,9 @@ export function ServiceReviewQueue() {
   }
 
   return (
-    <Card className="overflow-hidden">
+    <Card aria-busy={reviewsQuery.isLoading} className="overflow-hidden">
       <CardHeader className="border-b">
-        <div className="flex items-start gap-3">
+        <div className="flex min-w-0 items-start gap-3">
           <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
             <ShieldQuestionIcon className="size-4" />
           </span>
@@ -220,7 +220,7 @@ function ReviewListItem({
   return (
     <button
       aria-pressed={selected}
-      className="w-full px-4 py-4 text-left transition-colors hover:bg-muted/50 aria-pressed:bg-muted"
+      className="w-full px-4 py-4 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 aria-pressed:bg-muted"
       onClick={onSelect}
       type="button"
     >

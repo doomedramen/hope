@@ -4,6 +4,7 @@ import {
   ActivityIcon,
   ArrowRightIcon,
   BellRingIcon,
+  CircleAlertIcon,
   GitCompareArrowsIcon,
   NetworkIcon,
   RadioTowerIcon,
@@ -34,8 +35,9 @@ import {
   type MonitorResult,
 } from "@/lib/api";
 import { formatDate, labelize, shortId } from "@/lib/format";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardAction,
@@ -49,6 +51,7 @@ import {
   ChartTooltip,
   ChartTooltipContent,
 } from "@/components/ui/chart";
+import { Empty, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import {
@@ -105,15 +108,23 @@ function OverviewDashboard() {
     queryKey: ["changes", "overview"],
     queryFn: () => fetchChanges(),
   });
+  const dashboardQueries = [
+    devicesQuery,
+    networksQuery,
+    agentsQuery,
+    monitorsQuery,
+    suggestionsQuery,
+    serviceReviewsQuery,
+    monitorProposalsQuery,
+    changesQuery,
+  ];
   const monitors = monitorsQuery.data?.items ?? [];
   const resultQueries = useQueries({
-    queries: monitors
-      .slice(0, 12)
-      .map((monitor) => ({
-        queryKey: ["monitor-results", monitor.id],
-        queryFn: () => fetchMonitorResults(monitor.id),
-        staleTime: 30_000,
-      })),
+    queries: monitors.slice(0, 12).map((monitor) => ({
+      queryKey: ["monitor-results", monitor.id],
+      queryFn: () => fetchMonitorResults(monitor.id),
+      staleTime: 30_000,
+    })),
   });
   const results = resultQueries.flatMap((query) => query.data?.items ?? []);
   const devices = devicesQuery.data?.items ?? [];
@@ -130,16 +141,10 @@ function OverviewDashboard() {
   const down = monitors.filter((monitor) => monitor.state === "down").length;
   const pendingReviews =
     suggestions.length + serviceReviews.length + monitorProposals.length;
-  const loading = [
-    devicesQuery,
-    networksQuery,
-    agentsQuery,
-    monitorsQuery,
-    suggestionsQuery,
-    serviceReviewsQuery,
-    monitorProposalsQuery,
-    changesQuery,
-  ].some((query) => query.isLoading);
+  const dashboardError = [...dashboardQueries, ...resultQueries].find(
+    (query) => query.isError,
+  )?.error;
+  const loading = dashboardQueries.some((query) => query.isLoading);
   const attentionItems: AttentionItem[] = [
     ...suggestions.map((item) => ({
       id: item.id,
@@ -168,19 +173,39 @@ function OverviewDashboard() {
     <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-5">
       <section className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
         <div>
-          <p className="text-sm text-muted-foreground">Good morning</p>
           <h1 className="text-3xl font-semibold tracking-tight">
             Infrastructure overview
           </h1>
-          <p className="mt-1 text-muted-foreground">
-            A live view of your infrastructure, services, and overall health.
-          </p>
         </div>
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
           <StatusDot tone="healthy" />
           Data refreshes as monitors report
         </p>
       </section>
+      {dashboardError ? (
+        <Alert variant="destructive">
+          <CircleAlertIcon />
+          <AlertTitle>Some dashboard data is unavailable</AlertTitle>
+          <AlertDescription>
+            {dashboardError instanceof Error
+              ? dashboardError.message
+              : "Refresh to try loading the missing data again."}
+          </AlertDescription>
+          <Button
+            onClick={() => {
+              void Promise.all(
+                [...dashboardQueries, ...resultQueries].map((query) =>
+                  query.refetch(),
+                ),
+              );
+            }}
+            size="sm"
+            variant="outline"
+          >
+            Retry
+          </Button>
+        </Alert>
+      ) : null}
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           detail={`${networks.length} networks`}
@@ -274,7 +299,10 @@ function MetricCard({
               {detail}
             </p>
           </div>
-          <ArrowRightIcon className="mt-1 size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+          <ArrowRightIcon
+            aria-hidden="true"
+            className="mt-1 size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5"
+          />
         </CardContent>
       </Card>
     </Link>
@@ -469,7 +497,7 @@ function TopologyCard({
         </div>
         <CardAction>
           <Link
-            className="text-sm font-medium text-primary hover:underline"
+            className="rounded-sm text-sm font-medium text-primary outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
             to="/infrastructure"
           >
             View map
@@ -503,7 +531,7 @@ function NeedsAttentionCard({
         </div>
         <CardAction>
           <Link
-            className="text-sm font-medium text-primary hover:underline"
+            className="rounded-sm text-sm font-medium text-primary outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
             to="/monitoring"
           >
             View all
@@ -568,7 +596,7 @@ function RecentChangesCard({
         </div>
         <CardAction>
           <Link
-            className="text-sm font-medium text-primary hover:underline"
+            className="rounded-sm text-sm font-medium text-primary outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
             to="/changes"
           >
             View all changes
@@ -668,17 +696,29 @@ function HealthCount({
 }
 function EmptyChart({ label }: { label: string }) {
   return (
-    <div className="grid h-48 place-items-center rounded-lg border border-dashed text-sm text-muted-foreground">
-      {label}
-    </div>
+    <Empty className="h-48 min-h-0 rounded-lg p-4">
+      <EmptyHeader>
+        <EmptyTitle>{label}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
   );
 }
 function EmptyState({ label }: { label: string }) {
-  return <p className="py-6 text-sm text-muted-foreground">{label}</p>;
+  return (
+    <Empty className="min-h-32 rounded-lg p-4">
+      <EmptyHeader>
+        <EmptyTitle>{label}</EmptyTitle>
+      </EmptyHeader>
+    </Empty>
+  );
 }
 function LoadingRows({ count }: { count: number }) {
   return (
-    <div className="grid gap-3">
+    <div
+      aria-label="Loading dashboard data"
+      className="grid gap-3"
+      role="status"
+    >
       {Array.from({ length: count }, (_, index) => (
         <Skeleton className="h-10 w-full" key={index} />
       ))}

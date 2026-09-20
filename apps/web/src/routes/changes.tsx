@@ -102,9 +102,13 @@ function ChangesPage() {
             <Badge variant="outline">{changes.length} events</Badge>
           </CardAction>
         </CardHeader>
-        <CardContent className="flex flex-col gap-5">
+        <CardContent
+          aria-busy={changesQuery.isLoading}
+          className="flex flex-col gap-5"
+        >
           <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
             <ToggleGroup
+              aria-label="Filter changes by severity"
               onValueChange={(values) => {
                 const next = values[0];
                 if (next) setSeverity(next as (typeof SEVERITIES)[number]);
@@ -125,7 +129,11 @@ function ChangesPage() {
               }}
               value={category}
             >
-              <SelectTrigger className="w-full md:w-48">
+              <SelectTrigger
+                aria-label="Filter changes by category"
+                className="w-full md:w-48"
+                id="change-category"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -216,7 +224,10 @@ function ChangeRow({ change }: { change: ChangeEvent }) {
         : "secondary";
   return (
     <article className="flex gap-3 py-4">
-      <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
+      <span
+        aria-hidden="true"
+        className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground"
+      >
         <ActivityIcon className="size-4" />
       </span>
       <div className="min-w-0 flex-1">
@@ -232,9 +243,9 @@ function ChangeRow({ change }: { change: ChangeEvent }) {
             {formatRelative(change.occurred_at)}
           </time>
         </div>
-        <h2 className="mt-2 font-medium">
+        <h3 className="mt-2 font-medium">
           {labelize(change.entity_kind)} record changed
-        </h2>
+        </h3>
         <p className="mt-1 text-sm text-muted-foreground">
           {summary || "An event was recorded without field snapshots."}
         </p>
@@ -248,7 +259,7 @@ function ChangeRow({ change }: { change: ChangeEvent }) {
           </span>
           {change.entity_kind === "devices" ? (
             <Link
-              className="inline-flex items-center gap-1 text-foreground hover:underline"
+              className="inline-flex items-center gap-1 rounded-sm text-foreground outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
               to="/infrastructure"
             >
               Open inventory <ExternalLinkIcon className="size-3" />
@@ -282,7 +293,11 @@ function summarize(
 
 function LoadingFeed() {
   return (
-    <div className="flex flex-col gap-4">
+    <div
+      aria-label="Loading changes"
+      className="flex flex-col gap-4"
+      role="status"
+    >
       {Array.from({ length: 6 }, (_, index) => (
         <Skeleton className="h-20 w-full" key={index} />
       ))}

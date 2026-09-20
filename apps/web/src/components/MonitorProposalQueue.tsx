@@ -101,15 +101,15 @@ export function MonitorProposalQueue() {
   }
 
   return (
-    <Card className="overflow-hidden">
+    <Card aria-busy={proposalsQuery.isLoading} className="overflow-hidden">
       <CardHeader className="border-b">
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
           <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
             <ListChecksIcon className="size-4" />
           </span>
           <CardTitle>Pending monitor proposals</CardTitle>
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           {proposals.length > 1 ? (
             <Button
               disabled={bulkApproveMutation.isPending}
@@ -248,7 +248,7 @@ function ProposalListItem({
   return (
     <button
       aria-pressed={selected}
-      className="w-full px-4 py-4 text-left transition-colors hover:bg-muted/50 aria-pressed:bg-muted"
+      className="w-full px-4 py-4 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50 aria-pressed:bg-muted"
       onClick={onSelect}
       type="button"
     >

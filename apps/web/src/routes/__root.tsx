@@ -44,9 +44,19 @@ function RootLayout() {
 
   if (sessionQuery.isLoading && !authenticatedThisVisit) {
     return (
-      <main className="grid min-h-screen place-items-center bg-background">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <ShieldCheckIcon className="size-4 animate-pulse" />
+      <main
+        aria-busy="true"
+        aria-live="polite"
+        className="grid min-h-screen place-items-center bg-background"
+      >
+        <div
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+          role="status"
+        >
+          <ShieldCheckIcon
+            aria-hidden="true"
+            className="size-4 animate-pulse"
+          />
           Connecting to Hope
         </div>
       </main>
@@ -65,59 +75,97 @@ function RootLayout() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
+      <a
+        className="fixed top-2 left-4 z-50 -translate-y-16 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground transition-transform focus:translate-y-0 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+        href="#main-content"
+      >
+        Skip to content
+      </a>
       <div className="flex min-h-screen">
         <aside className="hidden w-60 shrink-0 border-r bg-sidebar p-4 text-sidebar-foreground md:flex md:flex-col">
           <Link
-            className="mb-8 flex items-center gap-2 px-2 text-lg font-semibold tracking-tight"
+            aria-label="Hope overview"
+            className="mb-8 flex items-center gap-2 rounded-lg px-2 text-lg font-semibold tracking-tight outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
             to="/"
           >
             <span className="grid size-8 place-items-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-              <ShieldCheckIcon className="size-4" />
+              <ShieldCheckIcon aria-hidden="true" className="size-4" />
             </span>
             Hope
           </Link>
-          <nav className="flex flex-1 flex-col gap-1">
-            {NAV_ITEMS.map((item) => {
-              const Icon = item.icon;
-              return (
-                <Link
-                  activeProps={{
-                    className:
-                      "bg-sidebar-accent text-sidebar-accent-foreground",
-                  }}
-                  className="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                  key={item.to}
-                  to={item.to}
-                >
-                  <Icon className="size-4" />
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
+          {renderPrimaryNavigation()}
           <div className="border-t pt-4">
             <HealthIndicator />
           </div>
         </aside>
         <div className="flex min-w-0 flex-1 flex-col">
           <header className="flex h-14 items-center justify-between border-b px-5 md:hidden">
-            <span className="font-medium">Hope</span>
+            <Link
+              aria-label="Hope overview"
+              className="rounded-lg font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+              to="/"
+            >
+              Hope
+            </Link>
             <HealthIndicator />
           </header>
+          {renderPrimaryNavigation({ mobile: true })}
           <header className="hidden h-14 items-center justify-end border-b bg-card/70 px-8 md:flex">
             <Link
-              className="flex h-8 w-full max-w-sm items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+              aria-label="Search devices, services, or networks"
+              className="flex h-8 w-full max-w-sm items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
               to="/infrastructure"
             >
-              <SearchIcon className="size-4" />
+              <SearchIcon aria-hidden="true" className="size-4" />
               Search devices, services, or networks
             </Link>
           </header>
-          <main className="flex-1 p-5 md:p-8">
+          <main
+            className="min-w-0 flex-1 scroll-mt-4 p-4 sm:p-5 md:p-8"
+            id="main-content"
+            tabIndex={-1}
+          >
             <Outlet />
           </main>
         </div>
       </div>
     </div>
+  );
+}
+
+function renderPrimaryNavigation({
+  mobile = false,
+}: { mobile?: boolean } = {}) {
+  return (
+    <nav
+      aria-label="Primary navigation"
+      className={
+        mobile
+          ? "grid grid-cols-2 gap-1 border-b px-3 py-2 md:hidden"
+          : "flex flex-1 flex-col gap-1"
+      }
+    >
+      {NAV_ITEMS.map((item) => {
+        const Icon = item.icon;
+        return (
+          <Link
+            activeProps={{
+              "aria-current": "page",
+              className: "bg-sidebar-accent text-sidebar-accent-foreground",
+            }}
+            className={
+              mobile
+                ? "flex min-h-10 items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+                : "flex min-h-10 items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-sidebar-foreground/70 outline-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+            }
+            key={item.to}
+            to={item.to}
+          >
+            <Icon aria-hidden="true" className="size-4 shrink-0" />
+            {item.label}
+          </Link>
+        );
+      })}
+    </nav>
   );
 }

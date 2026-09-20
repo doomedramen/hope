@@ -77,6 +77,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Progress,
+  ProgressLabel,
+  ProgressValue,
+} from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -285,15 +290,16 @@ function InfrastructurePage() {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_25rem]">
-        <Card>
-          <CardHeader className="border-b">
+        <Card aria-busy={devicesQuery.isLoading}>
+          <CardHeader className="border-b max-sm:grid-cols-1">
             <CardTitle>Devices</CardTitle>
             <CardDescription>{visibleDevices.length} shown</CardDescription>
-            <CardAction>
+            <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-stretch">
               <div className="relative">
                 <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
-                  className="w-56 pl-8"
+                  aria-label="Search devices"
+                  className="w-full pl-8 sm:w-56"
                   onChange={(event) => setSearch(event.target.value)}
                   placeholder="Search inventory"
                   value={search}
@@ -308,6 +314,7 @@ function InfrastructurePage() {
               <LoadError
                 error={devicesQuery.error}
                 retry={() => devicesQuery.refetch()}
+                title="Devices unavailable"
               />
             ) : visibleDevices.length === 0 ? (
               <NoDevices onCreate={() => setDialog("create")} />
@@ -324,6 +331,7 @@ function InfrastructurePage() {
                 <TableBody>
                   {visibleDevices.map((device) => (
                     <TableRow
+                      aria-selected={device.id === selectedId}
                       className="cursor-pointer"
                       data-state={
                         device.id === selectedId ? "selected" : undefined
@@ -332,19 +340,27 @@ function InfrastructurePage() {
                       onClick={() => setRequestedDeviceId(device.id)}
                     >
                       <TableCell>
-                        <div className="flex items-center gap-2">
+                        <button
+                          aria-pressed={device.id === selectedId}
+                          className="flex min-w-0 w-full items-center gap-2 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                          onClick={() => setRequestedDeviceId(device.id)}
+                          type="button"
+                        >
                           <span className="grid size-7 place-items-center rounded-md bg-muted">
-                            <ServerIcon className="size-3.5" />
+                            <ServerIcon
+                              aria-hidden="true"
+                              className="size-3.5"
+                            />
                           </span>
-                          <div>
-                            <p className="font-medium">
+                          <div className="min-w-0">
+                            <p className="truncate font-medium">
                               {device.name || "Unnamed device"}
                             </p>
-                            <p className="font-mono text-xs text-muted-foreground">
+                            <p className="truncate font-mono text-xs text-muted-foreground">
                               {shortId(device.id)}
                             </p>
                           </div>
-                        </div>
+                        </button>
                       </TableCell>
                       <TableCell>{labelize(device.device_type)}</TableCell>
                       <TableCell>
@@ -362,6 +378,7 @@ function InfrastructurePage() {
         </Card>
 
         <DeviceDetail
+          addressError={addressesQuery.error}
           addresses={addressesQuery.data?.items ?? EMPTY_ADDRESSES}
           detail={detailQuery.data}
           error={detailQuery.error}
@@ -383,6 +400,7 @@ function InfrastructurePage() {
             ? resolveSuggestionMutation.variables?.id
             : null
         }
+        mutationError={resolveSuggestionMutation.error}
         resolve={(id, decision) =>
           resolveSuggestionMutation.mutate({ id, decision })
         }
@@ -490,6 +508,7 @@ function StatusBadge({ value }: { value: string }) {
 }
 
 function DeviceDetail({
+  addressError,
   addresses,
   detail,
   loading,
@@ -500,6 +519,7 @@ function DeviceDetail({
   onUndo,
   undoPending,
 }: {
+  addressError: unknown;
   addresses: Address[];
   detail: DeviceDetail | undefined;
   loading: boolean;
@@ -524,7 +544,7 @@ function DeviceDetail({
     return (
       <Card>
         <CardContent>
-          <LoadError error={error} />
+          <LoadError error={error} title="Device detail unavailable" />
         </CardContent>
       </Card>
     );
@@ -586,6 +606,14 @@ function DeviceDetail({
         </section>
         <section>
           <h3 className="mb-2 text-sm font-medium">Interfaces & IP history</h3>
+          {addressError ? (
+            <div className="mb-3">
+              <LoadError
+                error={addressError}
+                title="Address history unavailable"
+              />
+            </div>
+          ) : null}
           {detail.interfaces.length ? (
             <div className="flex flex-col gap-2">
               {detail.interfaces.map((networkInterface) => (
@@ -703,6 +731,7 @@ function ReviewQueue({
   devices,
   loading,
   error,
+  mutationError,
   pendingId,
   resolve,
 }: {
@@ -710,6 +739,7 @@ function ReviewQueue({
   devices: Device[];
   loading: boolean;
   error: unknown;
+  mutationError: unknown;
   pendingId: string | null;
   resolve: (id: string, decision: "confirm" | "reject") => void;
 }) {
@@ -728,10 +758,15 @@ function ReviewQueue({
         </CardAction>
       </CardHeader>
       <CardContent>
+        {mutationError ? (
+          <div className="mb-4">
+            <MutationError error={mutationError} />
+          </div>
+        ) : null}
         {loading ? (
           <TableSkeleton rows={3} />
         ) : error ? (
-          <LoadError error={error} />
+          <LoadError error={error} title="Identity review queue unavailable" />
         ) : suggestions.length === 0 ? (
           <Empty>
             <EmptyHeader>
@@ -899,14 +934,16 @@ function EditDeviceDialog({
               />
             </Field>
             <Field>
-              <FieldLabel>Lifecycle state</FieldLabel>
+              <FieldLabel htmlFor="edit-device-status">
+                Lifecycle state
+              </FieldLabel>
               <Select
                 onValueChange={(value) => {
                   if (value) setStatus(value);
                 }}
                 value={status}
               >
-                <SelectTrigger>
+                <SelectTrigger id="edit-device-status">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -977,18 +1014,22 @@ function MergeDialog({
           >
             <FieldGroup>
               <Field>
-                <FieldLabel>Absorb</FieldLabel>
-                <Input disabled value={source.name || shortId(source.id)} />
+                <FieldLabel htmlFor="merge-source">Absorb</FieldLabel>
+                <Input
+                  disabled
+                  id="merge-source"
+                  value={source.name || shortId(source.id)}
+                />
               </Field>
               <Field>
-                <FieldLabel>Into survivor</FieldLabel>
+                <FieldLabel htmlFor="merge-target">Into survivor</FieldLabel>
                 <Select
                   onValueChange={(value) => {
                     if (value) setTarget(value);
                   }}
                   value={target}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id="merge-target">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -1138,14 +1179,14 @@ function DeviceTypeField({
 }) {
   return (
     <Field>
-      <FieldLabel>Device type</FieldLabel>
+      <FieldLabel htmlFor="device-type">Device type</FieldLabel>
       <Select
         onValueChange={(next) => {
           if (next) onChange(next);
         }}
         value={value}
       >
-        <SelectTrigger>
+        <SelectTrigger id="device-type">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -1173,16 +1214,12 @@ function ConfidenceMeter({ value }: { value: number }) {
   const percentage = Math.round(Math.max(0, Math.min(1, value)) * 100);
   return (
     <div className="mt-3">
-      <div className="mb-1 flex justify-between text-xs text-muted-foreground">
-        <span>Evidence strength</span>
-        <span>{percentage}%</span>
-      </div>
-      <div className="h-2 overflow-hidden rounded-full bg-muted">
-        <div
-          className="h-full rounded-full bg-primary transition-[width]"
-          style={{ width: `${percentage}%` }}
-        />
-      </div>
+      <Progress value={percentage}>
+        <div className="flex w-full items-center gap-2">
+          <ProgressLabel>Evidence strength</ProgressLabel>
+          <ProgressValue />
+        </div>
+      </Progress>
       <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
         <span>New</span>
         <span>Review 40%</span>
@@ -1205,11 +1242,19 @@ function MutationError({ error }: { error: unknown }) {
   );
 }
 
-function LoadError({ error, retry }: { error: unknown; retry?: () => void }) {
+function LoadError({
+  error,
+  retry,
+  title = "Inventory unavailable",
+}: {
+  error: unknown;
+  retry?: () => void;
+  title?: string;
+}) {
   return (
     <Alert variant="destructive">
       <CircleAlertIcon />
-      <AlertTitle>Inventory unavailable</AlertTitle>
+      <AlertTitle>{title}</AlertTitle>
       <AlertDescription>
         {error instanceof Error ? error.message : "Try again."}
       </AlertDescription>
