@@ -187,7 +187,7 @@ jobs:
   docker-build:
     name: build and publish server image
     runs-on: ubuntu-latest
-    needs: [rust-checks, web]
+    needs: [rust-checks, web, web-e2e]
     permissions:
       contents: read
       packages: write
