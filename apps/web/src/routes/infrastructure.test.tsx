@@ -261,6 +261,37 @@ describe("create dialogs", () => {
     expect(screen.getByLabelText("CIDR")).toHaveValue("");
   });
 
+  it("loads network fields when editing an existing network", () => {
+    render(
+      <AddNetworkDialog
+        error={null}
+        network={{
+          cidr: "192.168.1.0/24",
+          created_at: "2026-09-20T10:00:00Z",
+          gateway: "192.168.1.1",
+          id: "network-1",
+          name: "Lab network",
+          scan_policy: {},
+          site_id: null,
+          updated_at: "2026-09-20T10:00:00Z",
+          version: 3,
+          vlan: 20,
+        }}
+        onOpenChange={vi.fn()}
+        open
+        pending={false}
+        submit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Name")).toHaveValue("Lab network");
+    expect(screen.getByLabelText("CIDR")).toHaveValue("192.168.1.0/24");
+    expect(screen.getByLabelText("VLAN")).toHaveValue(20);
+    expect(
+      screen.getByRole("button", { name: "Save network" }),
+    ).toBeInTheDocument();
+  });
+
   it("validates CIDR, gateway, and VLAN before submitting", () => {
     const submit = vi.fn();
     render(

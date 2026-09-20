@@ -683,12 +683,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   const contentType = res.headers.get("content-type") ?? "";
-  const body = contentType.includes("json")
-    ? ((await res.json()) as T & {
-        error?: string;
-        field_errors?: Record<string, string>;
-      })
-    : null;
+  const body =
+    res.status === 204
+      ? null
+      : contentType.includes("json")
+        ? ((await res.json()) as T & {
+            error?: string;
+            field_errors?: Record<string, string>;
+          })
+        : null;
   if (!res.ok) {
     throw new ApiError(
       res.status,
@@ -770,6 +773,26 @@ export async function createNetwork(input: {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function patchNetwork(
+  id: string,
+  input: {
+    version: number;
+    cidr?: string;
+    name?: string | null;
+    gateway?: string | null;
+    vlan?: number | null;
+  },
+): Promise<Network> {
+  return request<Network>(`/api/v1/networks/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteNetwork(id: string): Promise<void> {
+  await request<unknown>(`/api/v1/networks/${id}`, { method: "DELETE" });
 }
 
 export async function draftDiscoveryScope(

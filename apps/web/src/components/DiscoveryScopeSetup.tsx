@@ -3,8 +3,10 @@ import {
   CheckIcon,
   CircleAlertIcon,
   NetworkIcon,
+  PencilIcon,
   PlusIcon,
   PlayIcon,
+  Trash2Icon,
   XIcon,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -83,12 +85,18 @@ export function DiscoveryScopeSetup({
   networks,
   loading,
   error,
+  actionError,
   onAddNetwork,
+  onDeleteNetwork,
+  onEditNetwork,
 }: {
   networks: Network[];
   loading: boolean;
   error: unknown;
+  actionError?: unknown;
   onAddNetwork?: () => void;
+  onDeleteNetwork?: (network: Network) => void;
+  onEditNetwork?: (network: Network) => void;
 }) {
   const [selectedNetworkId, setSelectedNetworkId] = useState<string | null>(
     null,
@@ -245,6 +253,11 @@ export function DiscoveryScopeSetup({
           </div>
         </CardAction>
       </CardHeader>
+      {actionError ? (
+        <CardContent className="pb-0">
+          <ScopeError error={actionError} />
+        </CardContent>
+      ) : null}
       <CardContent className="grid gap-6 pt-5 lg:grid-cols-[minmax(13rem,0.8fr)_minmax(0,1.2fr)]">
         {networks.length === 0 ? (
           <div className="lg:col-span-2">
@@ -282,34 +295,60 @@ export function DiscoveryScopeSetup({
                         ),
                       )
                     : false;
+                  const networkLabel = network.name || "Unnamed network";
                   return (
-                    <Button
-                      aria-pressed={network.id === selectedNetwork?.id}
-                      className="h-auto justify-start px-3 py-2 text-left"
-                      key={network.id}
-                      onClick={() => {
-                        setSelectedNetworkId(network.id);
-                        draftMutation.reset();
-                        confirmMutation.reset();
-                        scanMutation.reset();
-                      }}
-                      variant={
-                        network.id === selectedNetwork?.id
-                          ? "secondary"
-                          : "ghost"
-                      }
-                    >
-                      <NetworkIcon data-icon="inline-start" />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate font-medium">
-                          {network.name || "Unnamed network"}
+                    <div className="flex items-center gap-1" key={network.id}>
+                      <Button
+                        aria-pressed={network.id === selectedNetwork?.id}
+                        className="h-auto min-w-0 flex-1 justify-start px-3 py-2 text-left"
+                        onClick={() => {
+                          setSelectedNetworkId(network.id);
+                          draftMutation.reset();
+                          confirmMutation.reset();
+                          scanMutation.reset();
+                        }}
+                        variant={
+                          network.id === selectedNetwork?.id
+                            ? "secondary"
+                            : "ghost"
+                        }
+                      >
+                        <NetworkIcon data-icon="inline-start" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-medium">
+                            {networkLabel}
+                          </span>
+                          <span className="block font-mono text-xs text-muted-foreground">
+                            {network.cidr}
+                          </span>
                         </span>
-                        <span className="block font-mono text-xs text-muted-foreground">
-                          {network.cidr}
-                        </span>
-                      </span>
-                      {confirmed ? <CheckIcon data-icon="inline-end" /> : null}
-                    </Button>
+                        {confirmed ? (
+                          <CheckIcon data-icon="inline-end" />
+                        ) : null}
+                      </Button>
+                      {onEditNetwork ? (
+                        <Button
+                          aria-label={`Edit ${networkLabel}`}
+                          onClick={() => onEditNetwork(network)}
+                          size="icon-sm"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <PencilIcon />
+                        </Button>
+                      ) : null}
+                      {onDeleteNetwork ? (
+                        <Button
+                          aria-label={`Delete ${networkLabel}`}
+                          onClick={() => onDeleteNetwork(network)}
+                          size="icon-sm"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <Trash2Icon />
+                        </Button>
+                      ) : null}
+                    </div>
                   );
                 })}
               </div>

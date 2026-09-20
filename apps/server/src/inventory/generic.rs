@@ -475,6 +475,35 @@ pub async fn patch_generic(
     }
 }
 
+pub async fn delete_generic(
+    resource: &Resource,
+    state: &AppState,
+    id: Uuid,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let result = sqlx::query(&format!("delete from {} where id = $1", resource.table))
+        .bind(id)
+        .execute(&state.pool)
+        .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => Ok(()),
+        Ok(_) => Err(err(StatusCode::NOT_FOUND, "not found")),
+        Err(error) => {
+            let foreign_key = error
+                .as_database_error()
+                .and_then(|database_error| database_error.code())
+                .is_some_and(|code| code == "23503");
+            if foreign_key {
+                Err(err(
+                    StatusCode::CONFLICT,
+                    "cannot delete a resource with dependent records",
+                ))
+            } else {
+                Err(err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+            }
+        }
+    }
+}
+
 // Service PATCH keeps projection and confirmed manual provenance in one
 // optimistic-concurrency transaction. Other resources retain generic PATCH.
 async fn patch_service(
@@ -673,6 +702,17 @@ macro_rules! resource_handlers {
                     Err((status, body)) => (status, body),
                 }
             }
+
+            #[allow(dead_code)]
+            pub async fn delete(
+                State(state): State<AppState>,
+                Path(id): Path<Uuid>,
+            ) -> (StatusCode, Json<Value>) {
+                match delete_generic(&$resource, &state, id).await {
+                    Ok(()) => (StatusCode::NO_CONTENT, Json(Value::Null)),
+                    Err((status, body)) => (status, body),
+                }
+            }
         }
     };
 }
@@ -815,6 +855,33 @@ mod tests {
             .execute(&pool)
             .await
             .expect("delete network fixture");
+    }
+
+    #[tokio::test]
+    async fn network_delete_removes_the_requested_boundary() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let state = AppState { pool: pool.clone() };
+        let name = format!("delete-network-{}", Uuid::new_v4());
+        let id: (Uuid,) = sqlx::query_as(
+            "insert into networks (cidr, name) values ('203.0.113.0/24', $1) returning id",
+        )
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .expect("insert network fixture");
+
+        delete_generic(&NETWORKS, &state, id.0)
+            .await
+            .expect("delete network fixture");
+        let remaining: Option<(Uuid,)> = sqlx::query_as("select id from networks where id = $1")
+            .bind(id.0)
+            .fetch_optional(&pool)
+            .await
+            .expect("read deleted network");
+        assert!(remaining.is_none());
     }
 
     #[tokio::test]

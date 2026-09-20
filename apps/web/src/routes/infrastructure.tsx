@@ -23,7 +23,9 @@ import {
   fetchDevices,
   fetchIdentitySuggestions,
   fetchNetworks,
+  deleteNetwork,
   mergeDevice,
+  patchNetwork,
   patchDevice,
   resolveIdentitySuggestion,
   splitDevice,
@@ -34,6 +36,7 @@ import {
   type Device,
   type DeviceDetail,
   type IdentitySuggestion,
+  type Network,
 } from "@/lib/api";
 import { displayValue, labelize, shortId } from "@/lib/format";
 import {
@@ -138,8 +141,15 @@ export function InfrastructurePage() {
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("focus") === "search";
   const [dialog, setDialog] = useState<
-    "create" | "network-create" | "edit" | "merge" | "split" | null
+    | "create"
+    | "network-create"
+    | "network-edit"
+    | "edit"
+    | "merge"
+    | "split"
+    | null
   >(null);
+  const [networkTarget, setNetworkTarget] = useState<Network | null>(null);
   const devicesQuery = useQuery({
     queryKey: ["devices"],
     queryFn: fetchDevices,
@@ -204,7 +214,29 @@ export function InfrastructurePage() {
     mutationFn: createNetwork,
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["networks"] });
+      setNetworkTarget(null);
       setDialog(null);
+    },
+  });
+  const networkPatchMutation = useMutation({
+    mutationFn: ({
+      id,
+      input,
+    }: {
+      id: string;
+      input: Parameters<typeof patchNetwork>[1];
+    }) => patchNetwork(id, input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["networks"] });
+      setNetworkTarget(null);
+      setDialog(null);
+    },
+  });
+  const networkDeleteMutation = useMutation({
+    mutationFn: deleteNetwork,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["networks"] });
+      setNetworkTarget(null);
     },
   });
   const editMutation = useMutation({
@@ -300,10 +332,29 @@ export function InfrastructurePage() {
       </div>
 
       <DiscoveryScopeSetup
+        actionError={networkDeleteMutation.error}
         error={networksQuery.error}
         loading={networksQuery.isLoading}
         networks={networksQuery.data?.items ?? []}
-        onAddNetwork={() => setDialog("network-create")}
+        onAddNetwork={() => {
+          networkCreateMutation.reset();
+          setNetworkTarget(null);
+          setDialog("network-create");
+        }}
+        onDeleteNetwork={(network) => {
+          if (
+            window.confirm(
+              `Delete ${network.name || network.cidr}? Dependent discovery data must be removed first.`,
+            )
+          ) {
+            networkDeleteMutation.mutate(network.id);
+          }
+        }}
+        onEditNetwork={(network) => {
+          networkPatchMutation.reset();
+          setNetworkTarget(network);
+          setDialog("network-edit");
+        }}
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -465,11 +516,38 @@ export function InfrastructurePage() {
         }
       />
       <AddNetworkDialog
-        error={networkCreateMutation.error}
-        onOpenChange={(open) => !open && setDialog(null)}
-        open={dialog === "network-create"}
-        pending={networkCreateMutation.isPending}
-        submit={(input) => networkCreateMutation.mutate(input)}
+        error={
+          dialog === "network-edit"
+            ? networkPatchMutation.error
+            : networkCreateMutation.error
+        }
+        network={dialog === "network-edit" ? networkTarget : null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setNetworkTarget(null);
+            setDialog(null);
+          }
+        }}
+        open={dialog === "network-create" || dialog === "network-edit"}
+        pending={
+          networkCreateMutation.isPending || networkPatchMutation.isPending
+        }
+        submit={(input) => {
+          if (dialog === "network-edit" && networkTarget) {
+            networkPatchMutation.mutate({
+              id: networkTarget.id,
+              input: {
+                version: networkTarget.version,
+                cidr: input.cidr,
+                gateway: input.gateway ?? null,
+                name: input.name ?? null,
+                vlan: input.vlan ?? null,
+              },
+            });
+          } else {
+            networkCreateMutation.mutate(input);
+          }
+        }}
       />
       {detailQuery.data ? (
         <EditDeviceDialog
@@ -954,12 +1032,14 @@ export function CreateDeviceDialog({
 
 export function AddNetworkDialog({
   open,
+  network = null,
   onOpenChange,
   submit,
   pending,
   error,
 }: {
   open: boolean;
+  network?: Network | null;
   onOpenChange: (open: boolean) => void;
   submit: (input: {
     cidr: string;
@@ -979,13 +1059,13 @@ export function AddNetworkDialog({
   >({});
   useEffect(() => {
     if (open) {
-      setName("");
-      setCidr("");
-      setGateway("");
-      setVlan("");
+      setName(network?.name ?? "");
+      setCidr(network?.cidr ?? "");
+      setGateway(network?.gateway ?? "");
+      setVlan(network?.vlan == null ? "" : String(network.vlan));
       setFieldErrors({});
     }
-  }, [open]);
+  }, [network, open]);
   const serverFieldError = (field: NetworkField) =>
     error instanceof ApiError ? error.fieldErrors[field] : undefined;
   const cidrError = fieldErrors.cidr ?? serverFieldError("cidr");
@@ -996,7 +1076,7 @@ export function AddNetworkDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add network</DialogTitle>
+          <DialogTitle>{network ? "Edit network" : "Add network"}</DialogTitle>
           <DialogDescription>
             Define the CIDR boundary that discovery can scan.
           </DialogDescription>
@@ -1094,7 +1174,7 @@ export function AddNetworkDialog({
               ) : (
                 <PlusIcon data-icon="inline-start" />
               )}
-              Add network
+              {network ? "Save network" : "Add network"}
             </Button>
           </DialogFooter>
         </form>

@@ -3,6 +3,7 @@ import {
   cancelScanRun,
   confirmDiscoveryScope,
   createNetwork,
+  deleteNetwork,
   draftDiscoveryScope,
   fetchAgent,
   fetchAgents,
@@ -10,6 +11,7 @@ import {
   fetchHealthReady,
   fetchMonitors,
   launchNetworkScan,
+  patchNetwork,
   ApiError,
 } from "./api";
 
@@ -211,6 +213,52 @@ describe("fetchHealthReady", () => {
     );
     const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
     expect(headers.get("x-requested-with")).toBe("hope");
+  });
+
+  it("edits and deletes a network through its lifecycle endpoints", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "network-1",
+            cidr: "192.168.2.0/24",
+            version: 2,
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await patchNetwork("network-1", {
+      version: 1,
+      cidr: "192.168.2.0/24",
+      gateway: null,
+      name: "Updated LAN",
+      vlan: null,
+    });
+    await deleteNetwork("network-1");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/networks/network-1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          version: 1,
+          cidr: "192.168.2.0/24",
+          gateway: null,
+          name: "Updated LAN",
+          vlan: null,
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/networks/network-1",
+      expect.objectContaining({ method: "DELETE" }),
+    );
   });
 
   it("preserves field-level network validation errors", async () => {

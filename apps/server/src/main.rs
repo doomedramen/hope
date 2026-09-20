@@ -202,7 +202,9 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
         )
         .route(
             "/api/v1/networks/{id}",
-            get(inventory::generic::networks::get).patch(inventory::generic::networks::patch),
+            get(inventory::generic::networks::get)
+                .patch(inventory::generic::networks::patch)
+                .delete(inventory::generic::networks::delete),
         )
         .route(
             "/api/v1/networks/{id}/discovery-scope",

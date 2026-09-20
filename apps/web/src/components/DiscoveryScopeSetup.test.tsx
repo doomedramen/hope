@@ -154,6 +154,35 @@ describe("ScanLaunch", () => {
 });
 
 describe("DiscoveryScopeSetup", () => {
+  it("exposes edit and delete actions for configured networks", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false },
+        queries: { retry: false },
+      },
+    });
+    const onEditNetwork = vi.fn();
+    const onDeleteNetwork = vi.fn();
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DiscoveryScopeSetup
+          error={null}
+          loading={false}
+          networks={[network]}
+          onDeleteNetwork={onDeleteNetwork}
+          onEditNetwork={onEditNetwork}
+        />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit Lab network" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete Lab network" }));
+
+    expect(onEditNetwork).toHaveBeenCalledWith(network);
+    expect(onDeleteNetwork).toHaveBeenCalledWith(network);
+  });
+
   it("identifies invalid exclusion CIDRs before calculating targets", () => {
     const queryClient = new QueryClient({
       defaultOptions: {
