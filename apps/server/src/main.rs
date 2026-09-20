@@ -559,6 +559,9 @@ async fn main() -> anyhow::Result<()> {
                 config.change_event_retention_days,
                 config.monitor_result_retention_days,
                 config.monitor_result_rollup_after_days,
+                config.monitor_result_rollup_retention_days,
+                config.audit_event_retention_days,
+                config.job_retention_days,
             ));
 
             let api_task = axum::serve(
@@ -735,8 +738,11 @@ mod handshake_tests {
             cookie_secure: false,
             trust_proxy_headers: false,
             change_event_retention_days: 365,
-            monitor_result_retention_days: 90,
+            monitor_result_retention_days: 30,
             monitor_result_rollup_after_days: 7,
+            monitor_result_rollup_retention_days: 365,
+            audit_event_retention_days: 365,
+            job_retention_days: 30,
         }
     }
 

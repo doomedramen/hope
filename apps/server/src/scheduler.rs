@@ -40,6 +40,9 @@ pub(crate) async fn enqueue_periodic_jobs(
     change_event_retention_days: i64,
     monitor_result_retention_days: i64,
     monitor_result_rollup_after_days: i64,
+    monitor_result_rollup_retention_days: i64,
+    audit_event_retention_days: i64,
+    job_retention_days: i64,
 ) {
     let session_cleanup_key = hourly_period_key("hourly");
     if let Err(err) = jobs::enqueue(
@@ -121,6 +124,7 @@ pub(crate) async fn enqueue_periodic_jobs(
         serde_json::json!({
             "retention_days": monitor_result_retention_days,
             "rollup_after_days": monitor_result_rollup_after_days,
+            "rollup_retention_days": monitor_result_rollup_retention_days,
         }),
     )
     .await
@@ -138,6 +142,30 @@ pub(crate) async fn enqueue_periodic_jobs(
     .await
     {
         tracing::warn!(error = %err, "failed to enqueue change_events.retention");
+    }
+
+    let audit_event_retention_key = daily_period_key("daily-audit-events");
+    if let Err(err) = jobs::enqueue(
+        pool,
+        "audit_events.retention",
+        &audit_event_retention_key,
+        serde_json::json!({"retention_days": audit_event_retention_days}),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "failed to enqueue audit_events.retention");
+    }
+
+    let job_retention_key = daily_period_key("daily-jobs");
+    if let Err(err) = jobs::enqueue(
+        pool,
+        "jobs.retention",
+        &job_retention_key,
+        serde_json::json!({"retention_days": job_retention_days}),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "failed to enqueue jobs.retention");
     }
 
     match enqueue_due_change_scans(pool).await {
@@ -266,6 +294,9 @@ pub async fn run(
     change_event_retention_days: i64,
     monitor_result_retention_days: i64,
     monitor_result_rollup_after_days: i64,
+    monitor_result_rollup_retention_days: i64,
+    audit_event_retention_days: i64,
+    job_retention_days: i64,
 ) {
     loop {
         enqueue_periodic_jobs(
@@ -273,6 +304,9 @@ pub async fn run(
             change_event_retention_days,
             monitor_result_retention_days,
             monitor_result_rollup_after_days,
+            monitor_result_rollup_retention_days,
+            audit_event_retention_days,
+            job_retention_days,
         )
         .await;
         tokio::time::sleep(CHECK_INTERVAL).await;
@@ -310,14 +344,14 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool, 365, 90, 7).await;
+        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30).await;
         let after_first: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
 
-        enqueue_periodic_jobs(&pool, 365, 90, 7).await;
+        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30).await;
         let after_second: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
@@ -336,7 +370,7 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool, 365, 90, 7).await;
+        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30).await;
 
         let session_cleanup: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
@@ -354,10 +388,33 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        let audit_retention: (i64,) =
+            sqlx::query_as("select count(*) from jobs where job_type = 'audit_events.retention'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let job_retention: (i64,) =
+            sqlx::query_as("select count(*) from jobs where job_type = 'jobs.retention'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
         assert!(session_cleanup.0 >= 1);
         assert!(token_purge.0 >= 1);
         assert!(monitor_retention.0 >= 1);
+        assert!(audit_retention.0 >= 1);
+        assert!(job_retention.0 >= 1);
+
+        let monitor_payload: (serde_json::Value,) = sqlx::query_as(
+            "select payload from jobs where job_type = 'monitor_results.retention' \
+             order by created_at desc limit 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(monitor_payload.0["retention_days"], 30);
+        assert_eq!(monitor_payload.0["rollup_after_days"], 7);
+        assert_eq!(monitor_payload.0["rollup_retention_days"], 365);
     }
 
     async fn create_test_scope(pool: &PgPool, enabled: bool, confirmed: bool) -> Uuid {

@@ -16,6 +16,11 @@ use uuid::Uuid;
 
 use crate::agent_updates;
 use crate::agents;
+use crate::config::{
+    DEFAULT_AUDIT_EVENT_RETENTION_DAYS, DEFAULT_CHANGE_EVENT_RETENTION_DAYS,
+    DEFAULT_JOB_RETENTION_DAYS, DEFAULT_MONITOR_ROLLUP_AFTER_DAYS,
+    DEFAULT_MONITOR_ROLLUP_RETENTION_DAYS, DEFAULT_RAW_MONITOR_RETENTION_DAYS,
+};
 use crate::dependency_graph;
 use crate::discovery::service_collectors::{self, CollectorConfig, CollectorProtocol};
 use crate::discovery::worker;
@@ -146,7 +151,9 @@ impl JobHandler for ChangeEventRetention {
         let retention_days = payload
             .get("retention_days")
             .and_then(Value::as_i64)
-            .unwrap_or(365);
+            .unwrap_or(DEFAULT_CHANGE_EVENT_RETENTION_DAYS);
+        let retention_days =
+            retention::validate_retention_days(retention_days, "change event retention")?;
         let deleted = retention::purge_old_change_events(pool, retention_days).await?;
         if deleted > 0 {
             tracing::info!(count = deleted, retention_days, "purged old change_events");
@@ -172,23 +179,93 @@ impl JobHandler for MonitorResultRetention {
         let rollup_after_days = payload
             .get("rollup_after_days")
             .and_then(Value::as_i64)
-            .unwrap_or(7)
-            .max(1);
+            .unwrap_or(DEFAULT_MONITOR_ROLLUP_AFTER_DAYS);
+        let rollup_after_days =
+            retention::validate_retention_days(rollup_after_days, "monitor result rollup age")?;
         let retention_days = payload
             .get("retention_days")
             .and_then(Value::as_i64)
-            .unwrap_or(90)
-            .max(rollup_after_days + 1);
+            .unwrap_or(DEFAULT_RAW_MONITOR_RETENTION_DAYS);
+        let retention_days =
+            retention::validate_retention_days(retention_days, "monitor result retention")?;
+        if retention_days <= rollup_after_days {
+            anyhow::bail!("monitor result retention must exceed monitor result rollup age");
+        }
+        let rollup_retention_days = payload
+            .get("rollup_retention_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_MONITOR_ROLLUP_RETENTION_DAYS);
+        let rollup_retention_days = retention::validate_retention_days(
+            rollup_retention_days,
+            "monitor result rollup retention",
+        )?;
         let rolled_up = retention::rollup_monitor_results(pool, rollup_after_days).await?;
         let deleted = retention::purge_old_monitor_results(pool, retention_days).await?;
-        if rolled_up > 0 || deleted > 0 {
+        let rollups_deleted =
+            retention::purge_old_monitor_rollups(pool, rollup_retention_days).await?;
+        if rolled_up > 0 || deleted > 0 || rollups_deleted > 0 {
             tracing::info!(
                 rolled_up,
                 deleted,
+                rollups_deleted,
                 rollup_after_days,
                 retention_days,
+                rollup_retention_days,
                 "compacted monitor results"
             );
+        }
+        Ok(JobOutcome::Completed)
+    }
+}
+
+/// Delete old audit events while retaining records needed by open incidents
+/// and active maintenance operations.
+struct AuditEventRetention;
+
+#[async_trait]
+impl JobHandler for AuditEventRetention {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let retention_days = payload
+            .get("retention_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_AUDIT_EVENT_RETENTION_DAYS);
+        let retention_days =
+            retention::validate_retention_days(retention_days, "audit event retention")?;
+        let deleted = retention::purge_old_audit_events(pool, retention_days).await?;
+        if deleted > 0 {
+            tracing::info!(count = deleted, retention_days, "purged old audit_events");
+        }
+        Ok(JobOutcome::Completed)
+    }
+}
+
+/// Delete old terminal job records. The retention query excludes pending and
+/// running work and protects rows still needed by active operations.
+struct JobRetention;
+
+#[async_trait]
+impl JobHandler for JobRetention {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let retention_days = payload
+            .get("retention_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_JOB_RETENTION_DAYS);
+        let retention_days = retention::validate_retention_days(retention_days, "job retention")?;
+        let deleted = retention::purge_old_jobs(pool, retention_days).await?;
+        if deleted > 0 {
+            tracing::info!(count = deleted, retention_days, "purged old terminal jobs");
         }
         Ok(JobOutcome::Completed)
     }
@@ -520,6 +597,8 @@ impl Registry {
             "monitor_results.retention",
             Box::new(MonitorResultRetention),
         );
+        handlers.insert("audit_events.retention", Box::new(AuditEventRetention));
+        handlers.insert("jobs.retention", Box::new(JobRetention));
         handlers.insert("notifications.deliver", Box::new(NotificationDelivery));
         handlers.insert(
             "notifications.deliver_maintenance",
@@ -563,7 +642,10 @@ mod tests {
         assert!(registry.get("enrollment_token.purge").is_some());
         assert!(registry.get("agent_health.sweep").is_some());
         assert!(registry.get("diagnostic.echo").is_some());
+        assert!(registry.get("change_events.retention").is_some());
         assert!(registry.get("monitor_results.retention").is_some());
+        assert!(registry.get("audit_events.retention").is_some());
+        assert!(registry.get("jobs.retention").is_some());
         assert!(registry.get("notifications.deliver").is_some());
         assert!(registry.get("notifications.deliver_maintenance").is_some());
         assert!(registry.get("discovery.full_tcp").is_some());
