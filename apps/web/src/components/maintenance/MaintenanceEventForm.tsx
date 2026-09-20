@@ -73,6 +73,41 @@ interface FormState {
 }
 
 const RESOURCE_ROLES = ["target", "required", "affected", "exclusive"] as const;
+const RECURRENCE_FREQUENCIES = [
+  "DAILY",
+  "WEEKLY",
+  "MONTHLY",
+  "YEARLY",
+] as const;
+const RECURRENCE_WEEKDAYS = [
+  ["MO", "Monday"],
+  ["TU", "Tuesday"],
+  ["WE", "Wednesday"],
+  ["TH", "Thursday"],
+  ["FR", "Friday"],
+  ["SA", "Saturday"],
+  ["SU", "Sunday"],
+] as const;
+
+type RecurrenceFrequency = (typeof RECURRENCE_FREQUENCIES)[number];
+
+interface GuidedRecurrence {
+  frequency: RecurrenceFrequency | "";
+  interval: string;
+  weekdays: string[];
+  end: "never" | "count";
+  count: string;
+}
+
+function emptyGuidedRecurrence(): GuidedRecurrence {
+  return {
+    frequency: "",
+    interval: "1",
+    weekdays: [],
+    end: "never",
+    count: "3",
+  };
+}
 
 function pad(value: number) {
   return String(value).padStart(2, "0");
@@ -281,6 +316,79 @@ function recurrenceValidationError(value: string) {
   return null;
 }
 
+function parseGuidedRecurrence(value: string): GuidedRecurrence | null {
+  const rule = value.trim().replace(/^RRULE:/i, "");
+  if (!rule) return emptyGuidedRecurrence();
+  const properties = new Map<string, string>();
+  for (const field of rule.split(";")) {
+    const [key, fieldValue, ...rest] = field.split("=");
+    if (!key || !fieldValue || rest.length > 0) return null;
+    properties.set(key.toUpperCase(), fieldValue);
+  }
+  const allowedProperties = new Set(["FREQ", "INTERVAL", "BYDAY", "COUNT"]);
+  if ([...properties.keys()].some((key) => !allowedProperties.has(key))) {
+    return null;
+  }
+  const frequency = properties.get("FREQ")?.toUpperCase();
+  if (
+    !frequency ||
+    !RECURRENCE_FREQUENCIES.includes(frequency as RecurrenceFrequency)
+  ) {
+    return null;
+  }
+  const intervalValue = Number.parseInt(properties.get("INTERVAL") ?? "1", 10);
+  if (
+    !Number.isFinite(intervalValue) ||
+    intervalValue < 1 ||
+    String(intervalValue) !== (properties.get("INTERVAL") ?? "1")
+  ) {
+    return null;
+  }
+  const rawWeekdays = properties.get("BYDAY") ?? "";
+  const weekdays = rawWeekdays ? rawWeekdays.split(",") : [];
+  if (
+    weekdays.some((day) => !RECURRENCE_WEEKDAYS.some(([code]) => code === day))
+  ) {
+    return null;
+  }
+  const count = Number.parseInt(properties.get("COUNT") ?? "", 10);
+  if (
+    properties.has("COUNT") &&
+    (!Number.isFinite(count) ||
+      count < 1 ||
+      String(count) !== properties.get("COUNT"))
+  ) {
+    return null;
+  }
+  return {
+    frequency: frequency as RecurrenceFrequency,
+    interval: String(intervalValue),
+    weekdays,
+    end: Number.isFinite(count) && count > 0 ? "count" : "never",
+    count: Number.isFinite(count) && count > 0 ? String(count) : "3",
+  };
+}
+
+function buildGuidedRecurrence(recurrence: GuidedRecurrence) {
+  if (!recurrence.frequency) return "";
+  const fields = [`FREQ=${recurrence.frequency}`];
+  const interval = Number.parseInt(recurrence.interval, 10);
+  if (Number.isFinite(interval) && interval > 1) {
+    fields.push(`INTERVAL=${interval}`);
+  }
+  if (recurrence.frequency === "WEEKLY" && recurrence.weekdays.length > 0) {
+    const weekdays = RECURRENCE_WEEKDAYS.map(([code]) => code).filter((code) =>
+      recurrence.weekdays.includes(code),
+    );
+    if (weekdays.length > 0) fields.push(`BYDAY=${weekdays.join(",")}`);
+  }
+  if (recurrence.end === "count") {
+    const count = Number.parseInt(recurrence.count, 10);
+    if (Number.isFinite(count) && count > 0) fields.push(`COUNT=${count}`);
+  }
+  return fields.join(";");
+}
+
 export function MaintenanceEventForm({
   open,
   event,
@@ -298,16 +406,47 @@ export function MaintenanceEventForm({
 }) {
   const [form, setForm] = useState<FormState>(() => formStateFor(event));
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [recurrenceMode, setRecurrenceMode] = useState<"guided" | "advanced">(
+    "guided",
+  );
+  const [guidedRecurrence, setGuidedRecurrence] = useState<GuidedRecurrence>(
+    emptyGuidedRecurrence,
+  );
 
   useEffect(() => {
     if (open) {
-      setForm(formStateFor(event));
+      const nextForm = formStateFor(event);
+      const parsedRecurrence = parseGuidedRecurrence(nextForm.recurrence_rule);
+      setForm(nextForm);
+      setGuidedRecurrence(parsedRecurrence ?? emptyGuidedRecurrence());
+      setRecurrenceMode(
+        parsedRecurrence || !nextForm.recurrence_rule ? "guided" : "advanced",
+      );
       setValidationError(null);
     }
   }, [event, open]);
 
   function update<K extends keyof FormState>(field: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function updateGuidedRecurrence(patch: Partial<GuidedRecurrence>) {
+    const next = { ...guidedRecurrence, ...patch };
+    setGuidedRecurrence(next);
+    update("recurrence_rule", buildGuidedRecurrence(next));
+  }
+
+  function switchRecurrenceMode(value: string | null) {
+    if (value === "advanced") {
+      setRecurrenceMode("advanced");
+      return;
+    }
+    if (value !== "guided") return;
+    const parsed =
+      parseGuidedRecurrence(form.recurrence_rule) ?? emptyGuidedRecurrence();
+    setGuidedRecurrence(parsed);
+    update("recurrence_rule", buildGuidedRecurrence(parsed));
+    setRecurrenceMode("guided");
   }
 
   function submit(eventObject: FormEvent<HTMLFormElement>) {
@@ -357,7 +496,7 @@ export function MaintenanceEventForm({
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-h-[min(90vh,60rem)] max-w-3xl overflow-y-auto">
+      <DialogContent className="max-h-[min(90vh,60rem)] max-w-5xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
             {event ? "Edit maintenance event" : "Create maintenance event"}
@@ -483,23 +622,211 @@ export function MaintenanceEventForm({
               </Field>
             </div>
 
+            <section
+              aria-labelledby="maintenance-recurrence-title"
+              className="flex flex-col gap-3 rounded-lg border p-4"
+            >
+              <div>
+                <h3
+                  className="text-sm font-medium"
+                  id="maintenance-recurrence-title"
+                >
+                  Recurrence
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Build a common schedule, or enter an advanced RRULE. Expansion
+                  horizon is 90 days.
+                </p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field>
+                  <FieldLabel htmlFor="maintenance-recurrence-mode">
+                    Recurrence input mode
+                  </FieldLabel>
+                  <Select
+                    onValueChange={switchRecurrenceMode}
+                    value={recurrenceMode}
+                  >
+                    <SelectTrigger id="maintenance-recurrence-mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="guided">Guided builder</SelectItem>
+                      <SelectItem value="advanced">Advanced RRULE</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </div>
+              {recurrenceMode === "guided" ? (
+                <div className="flex flex-col gap-4">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field>
+                      <FieldLabel htmlFor="maintenance-recurrence-frequency">
+                        Frequency
+                      </FieldLabel>
+                      <Select
+                        onValueChange={(value) => {
+                          if (value === "none") {
+                            updateGuidedRecurrence({ frequency: "" });
+                          } else if (
+                            RECURRENCE_FREQUENCIES.includes(
+                              value as RecurrenceFrequency,
+                            )
+                          ) {
+                            updateGuidedRecurrence({
+                              frequency: value as RecurrenceFrequency,
+                            });
+                          }
+                        }}
+                        value={guidedRecurrence.frequency || "none"}
+                      >
+                        <SelectTrigger
+                          aria-label="Recurrence frequency"
+                          id="maintenance-recurrence-frequency"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">Does not repeat</SelectItem>
+                          {RECURRENCE_FREQUENCIES.map((frequency) => (
+                            <SelectItem key={frequency} value={frequency}>
+                              {frequency[0] + frequency.slice(1).toLowerCase()}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    {guidedRecurrence.frequency ? (
+                      <Field>
+                        <FieldLabel htmlFor="maintenance-recurrence-interval">
+                          Repeat every
+                        </FieldLabel>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            aria-label="Repeat every"
+                            id="maintenance-recurrence-interval"
+                            min="1"
+                            onChange={(eventObject) =>
+                              updateGuidedRecurrence({
+                                interval: eventObject.target.value,
+                              })
+                            }
+                            type="number"
+                            value={guidedRecurrence.interval}
+                          />
+                          <span className="text-sm text-muted-foreground">
+                            {guidedRecurrence.frequency.toLowerCase()}
+                          </span>
+                        </div>
+                      </Field>
+                    ) : null}
+                  </div>
+                  {guidedRecurrence.frequency === "WEEKLY" ? (
+                    <fieldset className="grid gap-2">
+                      <legend className="text-sm font-medium">
+                        Days of week
+                      </legend>
+                      <div className="flex flex-wrap gap-3">
+                        {RECURRENCE_WEEKDAYS.map(([code, label]) => (
+                          <label
+                            className="flex items-center gap-2 text-sm"
+                            key={code}
+                          >
+                            <Checkbox
+                              aria-label={label}
+                              checked={guidedRecurrence.weekdays.includes(code)}
+                              onCheckedChange={(checked) =>
+                                updateGuidedRecurrence({
+                                  weekdays:
+                                    checked === true
+                                      ? [...guidedRecurrence.weekdays, code]
+                                      : guidedRecurrence.weekdays.filter(
+                                          (day) => day !== code,
+                                        ),
+                                })
+                              }
+                            />
+                            {label}
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  ) : null}
+                  {guidedRecurrence.frequency ? (
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <Field>
+                        <FieldLabel htmlFor="maintenance-recurrence-end">
+                          Recurrence end
+                        </FieldLabel>
+                        <Select
+                          onValueChange={(value) => {
+                            if (value === "never" || value === "count") {
+                              updateGuidedRecurrence({
+                                end: value,
+                              });
+                            }
+                          }}
+                          value={guidedRecurrence.end}
+                        >
+                          <SelectTrigger
+                            aria-label="Recurrence end"
+                            id="maintenance-recurrence-end"
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="never">Never ends</SelectItem>
+                            <SelectItem value="count">
+                              After a fixed number of occurrences
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                      {guidedRecurrence.end === "count" ? (
+                        <Field>
+                          <FieldLabel htmlFor="maintenance-recurrence-count">
+                            Occurrences
+                          </FieldLabel>
+                          <Input
+                            aria-label="Occurrences"
+                            id="maintenance-recurrence-count"
+                            min="1"
+                            onChange={(eventObject) =>
+                              updateGuidedRecurrence({
+                                count: eventObject.target.value,
+                              })
+                            }
+                            type="number"
+                            value={guidedRecurrence.count}
+                          />
+                        </Field>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <p className="text-xs text-muted-foreground">
+                    Generated rule: {form.recurrence_rule || "One-time event"}
+                  </p>
+                </div>
+              ) : (
+                <Field>
+                  <FieldLabel htmlFor="maintenance-recurrence">
+                    Advanced recurrence rule
+                  </FieldLabel>
+                  <Input
+                    id="maintenance-recurrence"
+                    onChange={(eventObject) =>
+                      update("recurrence_rule", eventObject.target.value)
+                    }
+                    placeholder="FREQ=WEEKLY;BYDAY=SA"
+                    value={form.recurrence_rule}
+                  />
+                  <FieldDescription>
+                    Optional RRULE content for advanced schedules.
+                  </FieldDescription>
+                </Field>
+              )}
+            </section>
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field>
-                <FieldLabel htmlFor="maintenance-recurrence">
-                  Recurrence rule
-                </FieldLabel>
-                <Input
-                  id="maintenance-recurrence"
-                  onChange={(eventObject) =>
-                    update("recurrence_rule", eventObject.target.value)
-                  }
-                  placeholder="FREQ=WEEKLY;BYDAY=SA"
-                  value={form.recurrence_rule}
-                />
-                <FieldDescription>
-                  Optional RRULE content. Expansion horizon is 90 days.
-                </FieldDescription>
-              </Field>
               <div className="flex flex-col justify-end gap-3 rounded-lg border p-3">
                 <div className="flex items-center justify-between gap-3">
                   <Label htmlFor="maintenance-disruptive">
