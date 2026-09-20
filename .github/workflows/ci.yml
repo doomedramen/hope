@@ -80,7 +80,6 @@ jobs:
     env:
       HOPE_DATABASE_URL: postgres://hope:hope@localhost:5432/hope
       E2E_BASE_URL: http://127.0.0.1:8080
-      E2E_PKI_DIR: ${{ runner.temp }}/hope-e2e-pki
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -96,11 +95,12 @@ jobs:
       - run: pnpm -C apps/web build
       - name: Initialize server PKI
         run: |
-          mkdir -p "$E2E_PKI_DIR"
-          HOPE_CA_CERT_PATH="$E2E_PKI_DIR/ca-cert.pem" \
-          HOPE_CA_KEY_PATH="$E2E_PKI_DIR/ca-key.pem" \
-          HOPE_SERVER_CERT_PATH="$E2E_PKI_DIR/server-cert.pem" \
-          HOPE_SERVER_KEY_PATH="$E2E_PKI_DIR/server-key.pem" \
+          e2e_pki_dir="$RUNNER_TEMP/hope-e2e-pki"
+          mkdir -p "$e2e_pki_dir"
+          HOPE_CA_CERT_PATH="$e2e_pki_dir/ca-cert.pem" \
+          HOPE_CA_KEY_PATH="$e2e_pki_dir/ca-key.pem" \
+          HOPE_SERVER_CERT_PATH="$e2e_pki_dir/server-cert.pem" \
+          HOPE_SERVER_KEY_PATH="$e2e_pki_dir/server-key.pem" \
           ./target/debug/server ca init
       - name: Start server
         run: |
@@ -109,10 +109,10 @@ jobs:
           HOPE_GATEWAY_BIND_ADDR=127.0.0.1:18443 \
           HOPE_ENROLL_BIND_ADDR=127.0.0.1:18444 \
           HOPE_COOKIE_SECURE=false \
-          HOPE_CA_CERT_PATH="$E2E_PKI_DIR/ca-cert.pem" \
-          HOPE_CA_KEY_PATH="$E2E_PKI_DIR/ca-key.pem" \
-          HOPE_SERVER_CERT_PATH="$E2E_PKI_DIR/server-cert.pem" \
-          HOPE_SERVER_KEY_PATH="$E2E_PKI_DIR/server-key.pem" \
+          HOPE_CA_CERT_PATH="$RUNNER_TEMP/hope-e2e-pki/ca-cert.pem" \
+          HOPE_CA_KEY_PATH="$RUNNER_TEMP/hope-e2e-pki/ca-key.pem" \
+          HOPE_SERVER_CERT_PATH="$RUNNER_TEMP/hope-e2e-pki/server-cert.pem" \
+          HOPE_SERVER_KEY_PATH="$RUNNER_TEMP/hope-e2e-pki/server-key.pem" \
           ./target/debug/server serve >"$RUNNER_TEMP/hope-e2e-server.log" 2>&1 &
           echo $! >"$RUNNER_TEMP/hope-e2e-server.pid"
           for attempt in {1..60}; do
