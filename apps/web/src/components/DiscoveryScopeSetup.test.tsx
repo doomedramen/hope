@@ -275,6 +275,96 @@ describe("DiscoveryScopeSetup", () => {
     ).toBeDisabled();
   });
 
+  it("summarizes scan cost and supports one-step confirmation and launch", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false },
+        queries: { retry: false },
+      },
+    });
+    const scope = {
+      network_id: network.id,
+      excluded_cidrs: [],
+      scan_profile: "normal",
+      target_count: 252,
+      confirmed_target_count: null,
+      confirmed_at: null,
+      enabled: true,
+    };
+    const confirmedScope = {
+      ...scope,
+      confirmed_target_count: 252,
+      confirmed_at: "2026-09-19T10:00:00Z",
+    };
+    const pendingRun = makeRun("pending", {
+      targets_planned: 252,
+      ports_planned: 16_514_820,
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/discovery-state")) {
+        return Promise.resolve(jsonResponse({ scope: null, scan_run: null }));
+      }
+      if (path.endsWith("/discovery-scope/confirm")) {
+        return Promise.resolve(jsonResponse(confirmedScope));
+      }
+      if (path.endsWith("/discovery-scope")) {
+        return Promise.resolve(jsonResponse(scope));
+      }
+      if (path.endsWith("/scans") && init?.method === "POST") {
+        return Promise.resolve(jsonResponse(pendingRun));
+      }
+      if (path.endsWith("/scans/run-1")) {
+        return Promise.resolve(jsonResponse(pendingRun));
+      }
+      return Promise.resolve(jsonResponse({ scope: null, scan_run: null }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DiscoveryScopeSetup
+          error={null}
+          loading={false}
+          networks={[network]}
+        />
+      </QueryClientProvider>,
+    );
+
+    const calculateButton = await screen.findByRole("button", {
+      name: "Calculate targets",
+    });
+    await waitFor(() => expect(calculateButton).not.toBeDisabled());
+    fireEvent.submit(calculateButton.closest("form")!);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("16,514,820 TCP probes"),
+    );
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Confirm and launch initial discovery",
+      }),
+    );
+
+    expect(
+      await screen.findByText("Initial discovery queued"),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(
+        ([path, init]) =>
+          String(path).endsWith("/discovery-scope/confirm") &&
+          init?.method === "POST",
+      ),
+    ).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(
+        ([path, init]) =>
+          String(path).endsWith("/scans") && init?.method === "POST",
+      ),
+    ).toBe(true);
+  });
+
   it("gives an empty inventory a path to add its first network", () => {
     const queryClient = new QueryClient({
       defaultOptions: {

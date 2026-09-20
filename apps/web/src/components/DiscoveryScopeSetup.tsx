@@ -106,6 +106,7 @@ export function DiscoveryScopeSetup({
     Record<string, ScopeDraftState>
   >({});
   const hydratedNetworkIds = useRef(new Set<string>());
+  const launchKeysByNetwork = useRef(new Map<string, string>());
   const selectedNetwork =
     networks.find((network) => network.id === selectedNetworkId) ??
     networks[0] ??
@@ -161,6 +162,7 @@ export function DiscoveryScopeSetup({
         scan_profile: scanProfile,
       }),
     onSuccess: (scope, variables) => {
+      launchKeysByNetwork.current.delete(variables.networkId);
       setScopeStates((current) => ({
         ...current,
         [variables.networkId]: {
@@ -169,26 +171,6 @@ export function DiscoveryScopeSetup({
           scope,
           appliedExcludedCidrs: variables.excludedCidrs,
           appliedScanProfile: variables.scanProfile,
-          acknowledged: false,
-          scanRun: null,
-        },
-      }));
-    },
-  });
-  const confirmMutation = useMutation({
-    mutationFn: ({
-      networkId,
-      targetCount,
-    }: {
-      networkId: string;
-      targetCount: number;
-    }) => confirmDiscoveryScope(networkId, targetCount),
-    onSuccess: (scope, variables) => {
-      setScopeStates((current) => ({
-        ...current,
-        [variables.networkId]: {
-          ...(current[variables.networkId] ?? DEFAULT_SCOPE_STATE),
-          scope,
           acknowledged: false,
           scanRun: null,
         },
@@ -208,6 +190,7 @@ export function DiscoveryScopeSetup({
         idempotencyKey,
       }),
     onSuccess: (scanRun, variables) => {
+      launchKeysByNetwork.current.delete(variables.networkId);
       setScopeStates((current) => ({
         ...current,
         [variables.networkId]: {
@@ -215,6 +198,37 @@ export function DiscoveryScopeSetup({
           scanRun,
         },
       }));
+    },
+  });
+  const confirmMutation = useMutation({
+    mutationFn: ({
+      networkId,
+      targetCount,
+    }: {
+      networkId: string;
+      targetCount: number;
+      launch: boolean;
+    }) => confirmDiscoveryScope(networkId, targetCount),
+    onSuccess: (scope, variables) => {
+      setScopeStates((current) => ({
+        ...current,
+        [variables.networkId]: {
+          ...(current[variables.networkId] ?? DEFAULT_SCOPE_STATE),
+          scope,
+          acknowledged: false,
+          scanRun: null,
+        },
+      }));
+      if (variables.launch) {
+        const idempotencyKey =
+          launchKeysByNetwork.current.get(variables.networkId) ??
+          createIdempotencyKey();
+        launchKeysByNetwork.current.set(variables.networkId, idempotencyKey);
+        scanMutation.mutate({
+          networkId: variables.networkId,
+          idempotencyKey,
+        });
+      }
     },
   });
 
@@ -246,7 +260,8 @@ export function DiscoveryScopeSetup({
     selectedState.scope !== null &&
     !scopeIsDirty &&
     selectedState.acknowledged &&
-    !confirmMutation.isPending;
+    !confirmMutation.isPending &&
+    !scanMutation.isPending;
 
   if (loading) {
     return (
@@ -441,6 +456,23 @@ export function DiscoveryScopeSetup({
                     confirmMutation.mutate({
                       networkId: selectedNetwork.id,
                       targetCount: selectedState.scope.target_count,
+                      launch: false,
+                    });
+                  }
+                }}
+                onConfirmAndLaunch={() => {
+                  if (selectedState.scope) {
+                    const idempotencyKey =
+                      launchKeysByNetwork.current.get(selectedNetwork.id) ??
+                      createIdempotencyKey();
+                    launchKeysByNetwork.current.set(
+                      selectedNetwork.id,
+                      idempotencyKey,
+                    );
+                    confirmMutation.mutate({
+                      networkId: selectedNetwork.id,
+                      targetCount: selectedState.scope.target_count,
+                      launch: true,
                     });
                   }
                 }}
@@ -496,6 +528,7 @@ function ScopeForm({
   onAcknowledge,
   onDraft,
   onConfirm,
+  onConfirmAndLaunch,
   onLaunch,
 }: {
   network: Network;
@@ -518,6 +551,7 @@ function ScopeForm({
   onAcknowledge: (value: boolean) => void;
   onDraft: () => void;
   onConfirm: () => void;
+  onConfirmAndLaunch: () => void;
   onLaunch: () => void;
 }) {
   const confirmed = isScopeConfirmed(scope, isDirty);
@@ -622,11 +656,14 @@ function ScopeForm({
       {scope ? (
         <Alert>
           <NetworkIcon />
-          <AlertTitle>{targetCount} scan targets</AlertTitle>
+          <AlertTitle>
+            {targetCount} scan targets ·{" "}
+            {formatCount(scope.target_count * 65_535)} TCP probes
+          </AlertTitle>
           <AlertDescription>
             {isDirty
               ? "Scope settings changed. Calculate targets again before confirming."
-              : `Server calculated this count from ${network.cidr} and your exclusions. Review it before confirming.`}
+              : `Server calculated this scope from ${network.cidr} and your exclusions. A full TCP sweep checks every port on each target; duration depends on the network and ${profile === "low_impact" ? "low-impact" : "normal"} profile.`}
           </AlertDescription>
         </Alert>
       ) : null}
@@ -646,7 +683,7 @@ function ScopeForm({
           />
           <FieldContent>
             <FieldLabel htmlFor={`scope-confirm-${network.id}`}>
-              I reviewed the target count
+              I reviewed the target and probe count
             </FieldLabel>
             <FieldDescription>
               Confirm the scope to enable discovery.
@@ -658,18 +695,33 @@ function ScopeForm({
       <ScopeError error={error} />
 
       {scope && !confirmed ? (
-        <Button
-          disabled={stateLoading || !canConfirm}
-          onClick={onConfirm}
-          type="button"
-        >
-          {confirmPending ? (
-            <Spinner data-icon="inline-start" />
-          ) : (
+        <div className="flex flex-wrap gap-2">
+          <Button
+            disabled={stateLoading || !canConfirm}
+            onClick={onConfirmAndLaunch}
+            type="button"
+          >
+            {confirmPending || scanPending ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <PlayIcon data-icon="inline-start" />
+            )}
+            {confirmPending
+              ? "Confirming scope…"
+              : scanPending
+                ? "Queueing initial discovery…"
+                : "Confirm and launch initial discovery"}
+          </Button>
+          <Button
+            disabled={stateLoading || !canConfirm}
+            onClick={onConfirm}
+            type="button"
+            variant="outline"
+          >
             <CheckIcon data-icon="inline-start" />
-          )}
-          Confirm scope
-        </Button>
+            Confirm scope only
+          </Button>
+        </div>
       ) : null}
       {confirmed ? (
         <>
