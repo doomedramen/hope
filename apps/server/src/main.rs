@@ -11,6 +11,7 @@ mod enroll;
 mod gateway;
 mod inventory;
 mod jobs_handlers;
+pub mod maintenance;
 mod monitor_checks;
 mod monitor_scheduler;
 mod monitoring;
@@ -368,6 +369,30 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
         .route(
             "/api/v1/notification-routes",
             get(notifications::list_routes).post(notifications::create_route),
+        )
+        .route(
+            "/api/v1/maintenance-events",
+            get(maintenance::list).post(maintenance::create),
+        )
+        .route(
+            "/api/v1/maintenance-events/{id}",
+            get(maintenance::get).patch(maintenance::patch),
+        )
+        .route(
+            "/api/v1/maintenance-events/{id}/start",
+            post(maintenance::start),
+        )
+        .route(
+            "/api/v1/maintenance-events/{id}/complete",
+            post(maintenance::complete),
+        )
+        .route(
+            "/api/v1/maintenance-events/{id}/cancel",
+            post(maintenance::cancel),
+        )
+        .route(
+            "/api/v1/maintenance-events/{id}/conflicts",
+            get(maintenance::conflicts),
         )
         .route(
             "/api/v1/credentials",

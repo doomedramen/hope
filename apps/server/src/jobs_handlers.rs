@@ -21,6 +21,7 @@ use crate::discovery::service_collectors::{self, CollectorConfig, CollectorProto
 use crate::discovery::worker;
 use crate::inventory::retention;
 use crate::inventory::service_collector_evidence;
+use crate::maintenance;
 use crate::notifications;
 use crate::session_store::PgSessionStore;
 use crate::{credentials::CredentialStore, ssh_install};
@@ -213,6 +214,30 @@ impl JobHandler for NotificationDelivery {
                     .map_err(|error| anyhow::anyhow!("invalid notification delivery_id: {error}"))
             })?;
         notifications::deliver(pool, delivery_id).await?;
+        Ok(JobOutcome::Completed)
+    }
+}
+
+struct MaintenanceNotificationDelivery;
+
+#[async_trait]
+impl JobHandler for MaintenanceNotificationDelivery {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let delivery_id = payload
+            .get("delivery_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("maintenance notification payload has no delivery_id"))
+            .and_then(|value| {
+                Uuid::parse_str(value)
+                    .map_err(|error| anyhow::anyhow!("invalid maintenance delivery_id: {error}"))
+            })?;
+        notifications::deliver_maintenance(pool, delivery_id).await?;
         Ok(JobOutcome::Completed)
     }
 }
@@ -418,6 +443,25 @@ impl JobHandler for DependencyGraphReconcile {
     }
 }
 
+struct MaintenanceReconcile;
+
+#[async_trait]
+impl JobHandler for MaintenanceReconcile {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        _payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let changed = maintenance::reconcile(pool).await?;
+        if changed > 0 {
+            tracing::info!(changed, "reconciled maintenance events");
+        }
+        Ok(JobOutcome::Completed)
+    }
+}
+
 async fn validate_collector_scope(
     pool: &PgPool,
     network_id: Uuid,
@@ -466,6 +510,10 @@ impl Registry {
             "dependency_graph.reconcile",
             Box::new(DependencyGraphReconcile),
         );
+        handlers.insert(
+            maintenance::MAINTENANCE_RECONCILE_JOB_TYPE,
+            Box::new(MaintenanceReconcile),
+        );
         handlers.insert("diagnostic.echo", Box::new(DiagnosticEcho));
         handlers.insert("change_events.retention", Box::new(ChangeEventRetention));
         handlers.insert(
@@ -473,6 +521,10 @@ impl Registry {
             Box::new(MonitorResultRetention),
         );
         handlers.insert("notifications.deliver", Box::new(NotificationDelivery));
+        handlers.insert(
+            "notifications.deliver_maintenance",
+            Box::new(MaintenanceNotificationDelivery),
+        );
         handlers.insert("discovery.full_tcp", Box::new(FullTcpDiscovery));
         handlers.insert("discovery.service_collectors", Box::new(ServiceCollector));
         handlers.insert("agent.install", Box::new(AgentDeployment));
@@ -513,6 +565,7 @@ mod tests {
         assert!(registry.get("diagnostic.echo").is_some());
         assert!(registry.get("monitor_results.retention").is_some());
         assert!(registry.get("notifications.deliver").is_some());
+        assert!(registry.get("notifications.deliver_maintenance").is_some());
         assert!(registry.get("discovery.full_tcp").is_some());
         assert!(registry.get("discovery.service_collectors").is_some());
         assert!(registry.get("agent.install").is_some());
