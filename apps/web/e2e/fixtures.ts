@@ -34,6 +34,7 @@ export const test = base.extend<WorkerFixtures>({
         if (process.env.E2E_AGENT_TARGET_SKIP_BUILD !== "1") {
           await runDocker(["build", "--tag", image, targetDir]);
         }
+        const port = await reserveTcpPort();
 
         const dockerArgs = [
           "run",
@@ -48,7 +49,7 @@ export const test = base.extend<WorkerFixtures>({
           "--volume",
           "/sys/fs/cgroup:/sys/fs/cgroup:rw",
           "--publish",
-          "127.0.0.1::22",
+          `127.0.0.1:${port}:22/tcp`,
           image,
         ];
         // Docker Desktop already provides a reachable IPv4
@@ -65,7 +66,6 @@ export const test = base.extend<WorkerFixtures>({
         }
         const result = await runDocker(dockerArgs);
         containerId = result.stdout.trim();
-        const port = await publishedPort(containerName);
         await waitForPort("127.0.0.1", port, 30_000);
 
         // This is Playwright's fixture callback, not a React hook.
@@ -116,25 +116,20 @@ async function runDocker(
   }
 }
 
-async function publishedPort(containerName: string): Promise<number> {
-  const deadline = Date.now() + 30_000;
-  let lastError: unknown;
-
-  while (Date.now() < deadline) {
-    try {
-      const result = await runDocker(["port", containerName, "22/tcp"]);
-      const match = result.stdout.match(/:(\d+)\s*$/m);
-      if (match) return Number(match[1]);
-      lastError = new Error("Docker returned no published SSH port");
-    } catch (error) {
-      lastError = error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+async function reserveTcpPort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+  if (!address || typeof address === "string") {
+    throw new Error("Could not reserve a localhost TCP port");
   }
-
-  throw new Error(
-    `Timed out waiting for Docker to publish SSH port for ${containerName}: ${String(lastError)}`,
-  );
+  return address.port;
 }
 
 async function waitForPort(host: string, port: number, timeoutMs: number) {
