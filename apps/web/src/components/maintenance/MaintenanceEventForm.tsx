@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -668,19 +669,22 @@ export function MaintenanceEventForm({
                         <Trash2Icon />
                       </Button>
                     </div>
-                    <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-                      <input
+                    <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+                      <Checkbox
                         checked={resource.expected_failure}
-                        className="size-4 accent-primary"
-                        onChange={(eventObject) =>
+                        id={`maintenance-resource-expected-failure-${index}`}
+                        onCheckedChange={(checked) =>
                           updateResource(setForm, index, {
-                            expected_failure: eventObject.target.checked,
+                            expected_failure: checked === true,
                           })
                         }
-                        type="checkbox"
                       />
-                      Expected monitor failure during reservation
-                    </label>
+                      <Label
+                        htmlFor={`maintenance-resource-expected-failure-${index}`}
+                      >
+                        Expected monitor failure during reservation
+                      </Label>
+                    </div>
                   </div>
                 ))}
               </div>
