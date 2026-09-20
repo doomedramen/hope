@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MaintenancePage } from "./MaintenancePage";
 import type { MaintenanceEvent } from "@/lib/api";
@@ -71,6 +71,38 @@ afterEach(() => {
 });
 
 describe("MaintenancePage", () => {
+  it("sends the scheduled state when scheduling a draft event", async () => {
+    const draftEvent = { ...event, state: "draft" as const };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith("/event-1") && init?.method === "PATCH") {
+        return Promise.resolve(
+          response({ ...draftEvent, state: "scheduled", version: 2 }),
+        );
+      }
+      return Promise.resolve(
+        path.includes("/conflicts")
+          ? response({ items: [], next_cursor: null })
+          : response({ items: [draftEvent], next_cursor: null }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Schedule" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/v1/maintenance-events/event-1",
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ version: 1, state: "scheduled" }),
+        }),
+      ),
+    );
+  });
+
   it("shows timeline, calendar, list, event details, and create dialog", async () => {
     vi.stubGlobal(
       "fetch",

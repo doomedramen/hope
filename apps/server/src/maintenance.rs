@@ -2391,6 +2391,7 @@ mod tests {
 
     #[test]
     fn lifecycle_state_machine_rejects_illegal_transitions() {
+        assert!(legal_transition("draft", "scheduled"));
         assert!(legal_transition("scheduled", "active"));
         assert!(legal_transition("upcoming", "active"));
         assert!(legal_transition("active", "overrunning"));
