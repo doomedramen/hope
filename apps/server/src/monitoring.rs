@@ -507,12 +507,49 @@ pub async fn incidents(
                   s.name as service_name,
                   s.product as service_product,
                   m.agent_id, a.hostname as agent_hostname,
-                  (select coalesce(jsonb_agg(row_to_json(suppression) order by suppression.created_at), '[]'::jsonb)
-                     from (select sns.id, sns.root_incident_id, sns.dependency_edge_id,
+                  (select coalesce(jsonb_agg(row_to_json(suppression) order by suppression.created_at, suppression.id), '[]'::jsonb)
+                     from (
+                           select sns.id, 'dependency'::text as suppression_type,
+                                  sns.root_incident_id, sns.dependency_edge_id,
                                   sns.dependency_path, sns.provider_kind, sns.provider_id,
+                                  null::uuid as maintenance_event_id,
+                                  null::uuid as maintenance_occurrence_id,
+                                  null::text as maintenance_name,
+                                  null::text as maintenance_state,
+                                  null::timestamptz as maintenance_start_at,
+                                  null::timestamptz as maintenance_end_at,
+                                  null::text as resource_role,
+                                  null::text as resource_kind,
+                                  null::uuid as resource_id,
+                                  null::text as resource_key,
+                                  null::boolean as expected_failure,
                                   sns.event_type, sns.reason, sns.created_at
                              from incident_notification_suppressions sns
-                            where sns.incident_id = i.id) suppression)
+                            where sns.incident_id = i.id
+                           union all
+                           select mns.id, 'maintenance'::text as suppression_type,
+                                  null::uuid as root_incident_id,
+                                  null::uuid as dependency_edge_id,
+                                  null::jsonb as dependency_path,
+                                  null::text as provider_kind,
+                                  null::uuid as provider_id,
+                                  mns.maintenance_event_id,
+                                  mns.maintenance_occurrence_id,
+                                  me.name as maintenance_name,
+                                  me.state as maintenance_state,
+                                  mo.start_at as maintenance_start_at,
+                                  mo.end_at as maintenance_end_at,
+                                  mns.resource_role,
+                                  mns.resource_kind,
+                                  mns.resource_id,
+                                  mns.resource_key,
+                                  mns.expected_failure,
+                                  mns.event_type, mns.reason, mns.created_at
+                             from maintenance_notification_suppressions mns
+                             join maintenance_events me on me.id = mns.maintenance_event_id
+                             join maintenance_occurrences mo on mo.id = mns.maintenance_occurrence_id
+                            where mns.incident_id = i.id
+                     ) suppression)
                     as notification_suppressions
              from incidents i
              join monitors m on m.id = i.monitor_id
@@ -557,12 +594,49 @@ pub async fn incident(
                   s.name as service_name,
                   s.product as service_product,
                   m.agent_id, a.hostname as agent_hostname,
-                  (select coalesce(jsonb_agg(row_to_json(suppression) order by suppression.created_at), '[]'::jsonb)
-                     from (select sns.id, sns.root_incident_id, sns.dependency_edge_id,
+                  (select coalesce(jsonb_agg(row_to_json(suppression) order by suppression.created_at, suppression.id), '[]'::jsonb)
+                     from (
+                           select sns.id, 'dependency'::text as suppression_type,
+                                  sns.root_incident_id, sns.dependency_edge_id,
                                   sns.dependency_path, sns.provider_kind, sns.provider_id,
+                                  null::uuid as maintenance_event_id,
+                                  null::uuid as maintenance_occurrence_id,
+                                  null::text as maintenance_name,
+                                  null::text as maintenance_state,
+                                  null::timestamptz as maintenance_start_at,
+                                  null::timestamptz as maintenance_end_at,
+                                  null::text as resource_role,
+                                  null::text as resource_kind,
+                                  null::uuid as resource_id,
+                                  null::text as resource_key,
+                                  null::boolean as expected_failure,
                                   sns.event_type, sns.reason, sns.created_at
                              from incident_notification_suppressions sns
-                            where sns.incident_id = i.id) suppression)
+                            where sns.incident_id = i.id
+                           union all
+                           select mns.id, 'maintenance'::text as suppression_type,
+                                  null::uuid as root_incident_id,
+                                  null::uuid as dependency_edge_id,
+                                  null::jsonb as dependency_path,
+                                  null::text as provider_kind,
+                                  null::uuid as provider_id,
+                                  mns.maintenance_event_id,
+                                  mns.maintenance_occurrence_id,
+                                  me.name as maintenance_name,
+                                  me.state as maintenance_state,
+                                  mo.start_at as maintenance_start_at,
+                                  mo.end_at as maintenance_end_at,
+                                  mns.resource_role,
+                                  mns.resource_kind,
+                                  mns.resource_id,
+                                  mns.resource_key,
+                                  mns.expected_failure,
+                                  mns.event_type, mns.reason, mns.created_at
+                             from maintenance_notification_suppressions mns
+                             join maintenance_events me on me.id = mns.maintenance_event_id
+                             join maintenance_occurrences mo on mo.id = mns.maintenance_occurrence_id
+                            where mns.incident_id = i.id
+                     ) suppression)
                     as notification_suppressions
              from incidents i
              join monitors m on m.id = i.monitor_id

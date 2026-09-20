@@ -18,10 +18,12 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::dependency_graph;
+use crate::maintenance::ActiveMaintenanceImpact;
 use crate::state::AppState;
 
 const EVENT_OPENED: &str = "incident.opened";
 const EVENT_RECOVERED: &str = "incident.recovered";
+pub const EVENT_MAINTENANCE_OVERRUN: &str = "maintenance.overrun";
 const MAX_CHANNELS: i64 = 100;
 const MAX_ROUTES: i64 = 200;
 
@@ -338,19 +340,22 @@ pub async fn create_route(
     }
 }
 
-/// Queue matching notification deliveries in the same transaction as the
-/// incident transition. Replaying the transition cannot duplicate a delivery.
-pub async fn enqueue_incident_notifications(
+/// Queue matching notification deliveries, retaining a durable reason when
+/// an expected failure falls inside an active maintenance reservation.
+pub async fn enqueue_incident_notifications_with_maintenance(
     tx: &mut Transaction<'_, Postgres>,
     notification: IncidentNotification<'_>,
     suppressions: &[SuppressionReason],
+    maintenance_suppressions: &[ActiveMaintenanceImpact],
 ) -> Result<()> {
     if !matches!(notification.event_type, EVENT_OPENED | EVENT_RECOVERED)
         || !severity_is_valid(notification.severity)
     {
         return Err(anyhow!("invalid notification event"));
     }
-    if notification.event_type == EVENT_OPENED && !suppressions.is_empty() {
+    if notification.event_type == EVENT_OPENED
+        && (!suppressions.is_empty() || !maintenance_suppressions.is_empty())
+    {
         for suppression in suppressions {
             sqlx::query(
                 "insert into incident_notification_suppressions \
@@ -366,6 +371,29 @@ pub async fn enqueue_incident_notifications(
             .bind(serde_json::to_value(&suppression.dependency_path)?)
             .bind(&suppression.provider_kind)
             .bind(suppression.provider_id)
+            .bind(notification.event_type)
+            .bind(&suppression.reason)
+            .execute(&mut **tx)
+            .await?;
+        }
+        for suppression in maintenance_suppressions {
+            sqlx::query(
+                "insert into maintenance_notification_suppressions \
+                    (incident_id, maintenance_event_id, maintenance_occurrence_id, \
+                     resource_role, resource_kind, resource_id, resource_key, \
+                     expected_failure, event_type, reason) \
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+                 on conflict (incident_id, maintenance_occurrence_id, resource_role, event_type) \
+                 do nothing",
+            )
+            .bind(notification.incident_id)
+            .bind(suppression.event_id)
+            .bind(suppression.occurrence_id)
+            .bind(&suppression.resource_role)
+            .bind(&suppression.resource_kind)
+            .bind(suppression.resource_id)
+            .bind(&suppression.resource_key)
+            .bind(suppression.expected_failure)
             .bind(notification.event_type)
             .bind(&suppression.reason)
             .execute(&mut **tx)
@@ -432,6 +460,78 @@ pub async fn enqueue_incident_notifications(
     Ok(())
 }
 
+/// Queue one idempotent notification for a maintenance occurrence that has
+/// overrun while an expected incident remains open.
+pub async fn enqueue_maintenance_overrun_notifications(
+    tx: &mut Transaction<'_, Postgres>,
+    event_id: Uuid,
+    occurrence_id: Uuid,
+    event_name: &str,
+    planned_end: &str,
+) -> Result<()> {
+    let payload = json!({
+        "event": EVENT_MAINTENANCE_OVERRUN,
+        "maintenance_event_id": event_id,
+        "maintenance_occurrence_id": occurrence_id,
+        "maintenance_name": event_name,
+        "planned_end": planned_end,
+        "severity": "warning",
+        "summary": format!("Maintenance overrun: {event_name}"),
+    });
+    let routes: Vec<(Uuid, i32, String)> = sqlx::query_as(
+        "select r.channel_id, r.delay_seconds, r.min_severity \
+           from notification_routes r \
+           join notification_channels c on c.id = r.channel_id \
+          where r.enabled and c.enabled and r.event_types ? $1",
+    )
+    .bind(EVENT_MAINTENANCE_OVERRUN)
+    .fetch_all(&mut **tx)
+    .await?;
+    for (channel_id, delay_seconds, min_severity) in routes {
+        if severity_rank("warning") < severity_rank(&min_severity) {
+            continue;
+        }
+        let delivery: Option<(Uuid,)> = sqlx::query_as(
+            "insert into maintenance_notification_deliveries \
+                 (maintenance_event_id, maintenance_occurrence_id, channel_id, \
+                  event_type, severity, payload) \
+             values ($1, $2, $3, $4, $5, $6) \
+             on conflict (maintenance_event_id, maintenance_occurrence_id, channel_id, event_type) \
+             do nothing \
+             returning id",
+        )
+        .bind(event_id)
+        .bind(occurrence_id)
+        .bind(channel_id)
+        .bind(EVENT_MAINTENANCE_OVERRUN)
+        .bind("warning")
+        .bind(&payload)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some((delivery_id,)) = delivery else {
+            continue;
+        };
+        let job_id = jobs::enqueue_in(
+            tx,
+            "notifications.deliver_maintenance",
+            &format!("maintenance-notification:{delivery_id}"),
+            json!({ "delivery_id": delivery_id }),
+        )
+        .await?;
+        if delay_seconds > 0 {
+            sqlx::query(
+                "update jobs set run_at = now() + make_interval(secs => $2) \
+                 where id = $1",
+            )
+            .bind(job_id)
+            .bind(f64::from(delay_seconds))
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, FromRow)]
 struct Delivery {
     id: Uuid,
@@ -444,14 +544,28 @@ struct Delivery {
 /// Deliver one queued notification. The job layer retries provider failures;
 /// the delivery row makes the send idempotent at the application boundary.
 pub async fn deliver(pool: &sqlx::PgPool, delivery_id: Uuid) -> Result<()> {
+    deliver_from_table(pool, delivery_id, "notification_deliveries").await
+}
+
+/// Deliver one queued maintenance notification. The provider and retry
+/// semantics are identical to incident notifications.
+pub async fn deliver_maintenance(pool: &sqlx::PgPool, delivery_id: Uuid) -> Result<()> {
+    deliver_from_table(pool, delivery_id, "maintenance_notification_deliveries").await
+}
+
+async fn deliver_from_table(pool: &sqlx::PgPool, delivery_id: Uuid, table: &str) -> Result<()> {
+    let table = match table {
+        "notification_deliveries" | "maintenance_notification_deliveries" => table,
+        _ => return Err(anyhow!("unsupported notification delivery table")),
+    };
     let mut tx = pool.begin().await?;
-    let Some(delivery): Option<Delivery> = sqlx::query_as(
+    let Some(delivery): Option<Delivery> = sqlx::query_as(&format!(
         "select d.id, c.provider, c.config, d.payload, d.status \
-           from notification_deliveries d \
+           from {table} d \
            join notification_channels c on c.id = d.channel_id \
           where d.id = $1 \
           for update",
-    )
+    ))
     .bind(delivery_id)
     .fetch_optional(&mut *tx)
     .await?
@@ -462,11 +576,11 @@ pub async fn deliver(pool: &sqlx::PgPool, delivery_id: Uuid) -> Result<()> {
         tx.commit().await?;
         return Ok(());
     }
-    sqlx::query(
-        "update notification_deliveries \
+    sqlx::query(&format!(
+        "update {table} \
             set status = 'sending', attempts = attempts + 1, updated_at = now() \
           where id = $1",
-    )
+    ))
     .bind(delivery.id)
     .execute(&mut *tx)
     .await?;
@@ -475,12 +589,12 @@ pub async fn deliver(pool: &sqlx::PgPool, delivery_id: Uuid) -> Result<()> {
     let result = send_delivery(&delivery).await;
     match result {
         Ok(()) => {
-            sqlx::query(
-                "update notification_deliveries \
+            sqlx::query(&format!(
+                "update {table} \
                     set status = 'sent', delivered_at = now(), last_error = null, \
                         updated_at = now() \
                   where id = $1",
-            )
+            ))
             .bind(delivery.id)
             .execute(pool)
             .await?;
@@ -488,11 +602,11 @@ pub async fn deliver(pool: &sqlx::PgPool, delivery_id: Uuid) -> Result<()> {
         }
         Err(error) => {
             let message = error.to_string();
-            sqlx::query(
-                "update notification_deliveries \
+            sqlx::query(&format!(
+                "update {table} \
                     set status = 'pending', last_error = $2, updated_at = now() \
                   where id = $1",
-            )
+            ))
             .bind(delivery.id)
             .bind(&message)
             .execute(pool)
@@ -629,9 +743,12 @@ fn config_string<'a>(config: &'a Value, key: &str) -> Result<&'a str> {
 fn event_types_are_valid(event_types: &[String]) -> bool {
     !event_types.is_empty()
         && event_types.iter().collect::<HashSet<_>>().len() == event_types.len()
-        && event_types
-            .iter()
-            .all(|event| matches!(event.as_str(), EVENT_OPENED | EVENT_RECOVERED))
+        && event_types.iter().all(|event| {
+            matches!(
+                event.as_str(),
+                EVENT_OPENED | EVENT_RECOVERED | EVENT_MAINTENANCE_OVERRUN
+            )
+        })
 }
 
 fn severity_is_valid(value: &str) -> bool {

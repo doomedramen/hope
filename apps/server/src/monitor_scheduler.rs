@@ -25,6 +25,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::inventory::events::Recorder;
+use crate::maintenance;
 use crate::monitor_checks::{self, CheckOutcome, CheckProtocol, CheckRequest, CheckStatus};
 use crate::notifications;
 
@@ -364,6 +365,22 @@ async fn persist_outcome(
     } else {
         Vec::new()
     };
+    let maintenance_suppressions = if update
+        .events
+        .iter()
+        .any(|event| event.kind == HealthEventKind::IncidentOpened)
+    {
+        match monitor.service_id {
+            Some(service_id) => maintenance::active_maintenance_for_service(pool, service_id)
+                .await?
+                .into_iter()
+                .filter(|impact| impact.expected_failure)
+                .collect(),
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
 
     let mut tx = pool.begin().await?;
     let result_id: Uuid = sqlx::query_scalar(
@@ -495,7 +512,7 @@ async fn persist_outcome(
         if let Some(notification_event) = notification_event
             && let Some((incident_id, notification_severity)) = notification_context
         {
-            notifications::enqueue_incident_notifications(
+            notifications::enqueue_incident_notifications_with_maintenance(
                 &mut tx,
                 notifications::IncidentNotification {
                     incident_id,
@@ -507,6 +524,11 @@ async fn persist_outcome(
                 },
                 if notification_event == "incident.opened" {
                     &suppression_reasons
+                } else {
+                    &[]
+                },
+                if notification_event == "incident.opened" {
+                    &maintenance_suppressions
                 } else {
                     &[]
                 },
