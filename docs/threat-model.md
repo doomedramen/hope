@@ -1,234 +1,246 @@
-# Threat model (Milestones 0–6)
+# Threat model
 
-Status: reviewed through Milestone 6. Revisit at each later milestone as
-agent updates, dependency-aware alerting, and maintenance execution land.
+Status: reviewed through Milestone 10. M9 adds maintenance reservations,
+expected-failure suppression, and overrun delivery. M10 adds operational
+backup, restore, upgrade, release, and Compose guidance; it does not add a new
+runtime security boundary.
 
-Scope: the control-plane server, the agent, the network between them, and
-the operator's browser session. Out of scope for this pass: supply-chain
-attacks on upstream crates/base images, and physical access to the host
-running the server.
+Scope: the control-plane server, PostgreSQL, worker, agent, release
+repository, operator browser session, deployment host, and network between
+them. Out of scope: physical host compromise, upstream crate or base-image
+supply-chain attacks, and security controls provided by an operator's reverse
+proxy, secret manager, firewall, or backup platform.
 
-Method: STRIDE per component, with current mitigation and honest gaps.
+Method: STRIDE per component, with current mitigation and honest gaps. A
+documented procedure is not an enforced control; operators must apply it.
 
-## 1. Network scanning (discovery/monitoring subsystem)
+## 1. Network scanning and monitoring
 
-Implemented across M2–M4. The scope and rate-limit controls in spec
-§6.1/§6.3 mitigate a compromised or misconfigured scanner causing
-collateral damage (scanning networks outside the approved CIDR, overwhelming
-fragile devices, or triggering IDS/IPS on someone else's network).
+Implemented across M2–M4. Scope approval, target-count display, bounded
+concurrency and rate limits, safe protocol payloads, and cancellation reduce
+the risk of a compromised or misconfigured worker scanning outside the
+approved CIDR or overwhelming fragile devices. Scan duration, source,
+completeness, observations, and change events remain attributable in
+PostgreSQL.
 
-- **Tampering / DoS**: unbounded or unapproved-scope scanning.
-  *Mitigation*: explicit scope approval, target-count display before first
-  scan, bounded concurrency/rate limits (§6.1, §6.3), and cancellation.
-- **Repudiation**: scan activity not attributable.
-  *Mitigation*: scan duration/source/completeness retained (§6.3).
+The agent gateway also accepts bounded host metrics and collector data from
+enrolled agents. Agent revocation is checked before accepting a new gateway
+connection.
 
 ## 2. Stored credentials
 
-Implemented in M6 through the encrypted `credentials` resource and external
-master-key source. Threats and current mitigations:
+M6 stores credential ciphertext in PostgreSQL using ChaCha20-Poly1305 and a
+32-byte external master key. The normal API returns metadata only. A worker
+operation decrypts a selected credential for the fixed SSH install, repair, or
+update path; secret-bearing logs and job payloads are redacted or excluded.
 
-- **Information disclosure**: credentials readable by anyone with DB
-  access, or exposed via API responses.
-  *Mitigation*: ChaCha20-Poly1305 ciphertext is stored in PostgreSQL with a
-  32-byte key supplied only through `HOPE_CREDENTIAL_MASTER_KEY` or a mounted
-  file. The normal API returns metadata only; decryption is limited to a
-  worker operation and secret-bearing debug/log paths are redacted.
-- **Elevation of privilege**: a credential meant for one narrow use
-  (e.g. a read-only SNMP community string) reused more broadly than
-  intended.
-  *Gap*: in-place key rotation is documented but not yet implemented; keep
-  the old key available until a re-encryption migration exists.
+The Compose example mounts the key as a read-only container secret at
+`/run/secrets/hope_credential_master_key`. The key is not in `.env`, the image,
+or PostgreSQL. A database backup without the exact key cannot restore
+credential use.
 
-- **SSH MITM / host replacement**: an installer could accept a forged host
-  key on first use or after replacement.
-  *Mitigation*: first-seen, changed, and revoked keys block the SSH job. The
-  operator must explicitly trust the metadata record before a retry can
-  authenticate.
+*Gap*: in-place master-key rotation and re-encryption are not implemented.
+Keep the old key available until a future controlled migration exists.
 
-- **Remote command injection / output exfiltration**: a target or credential
-  could cause arbitrary shell execution or unbounded job logs.
-  *Mitigation*: the M6 worker sends a fixed command sequence, quotes all
-  operator/config values, caps captured output at 64 KiB, bounds job time, and
-  never accepts a free-form command field. Enrollment codes are sent on SSH
-  stdin rather than as process arguments.
+*Gap*: an operator or deployment process that can read both the database and
+the master key can decrypt credentials. Use separate host permissions and a
+secret-management process; the application does not remove that trust.
 
-## 3. Enrollment (agent bootstrap, ADR-0007)
+SSH first-use, changed, and revoked host keys block deployment until the
+operator explicitly trusts the durable metadata record. The worker executes a
+fixed, quoted command sequence, bounds output and duration, and never accepts
+a free-form shell command.
 
-This is the most security-relevant thing the agent bootstrap path implements.
+## 3. Enrollment and server identity
 
-**Flow**: operator runs `server enroll-token create`, which prints a
-single-use token, the CA's SHA-256 fingerprint, and a combined
-`token.fingerprint` code. The operator transfers that out-of-band (SSH,
-password manager, etc.) to the target host. `agent enroll` uses the
-fingerprint to pin the enroll TLS connection, then sends the token + a
-locally-generated CSR; the server verifies and consumes the token
-atomically, signs the CSR, and returns a client cert + the CA cert.
+The operator creates a short-lived, single-use enrollment token. The command
+prints the token, the CA SHA-256 fingerprint, and a combined transfer code.
+The agent pins the supplied fingerprint before sending the token or CSR. The
+server signs only the submitted public key and derives CA status, usages, and
+validity itself. Enrollment is rate-limited per client IP.
 
-- **Spoofing (of the server)**: an attacker positioned to intercept the
-  enroll HTTPS connection (network MITM, DNS hijack, rogue AP) could
-  serve their own TLS cert and harvest the token.
-  *Mitigation*: the agent pins the CA SHA-256 fingerprint (supplied by the
-  operator out-of-band) via a custom `rustls::client::danger::ServerCertVerifier`
-  and rejects the handshake — before the token is ever sent — if the
-  presented chain doesn't include a certificate matching that fingerprint.
-  This replaced an earlier TOFU (`danger_accept_invalid_certs`) design in
-  this same milestone.
-  *Gap*: the fingerprint itself must be transferred over a channel the
-  operator trusts (SSH session, secrets manager). If that channel is
-  compromised, pinning doesn't help — this is inherent to any
-  bootstrap-of-trust problem and is judged acceptable for a homelab-scale
-  v1.
-- **Spoofing (of the agent) / replay**: an attacker who intercepts a
-  token could enroll their own device as if it were the real one.
-  *Mitigation*: tokens are single-use, consumed atomically
-  (`update ... where used_at is null and expires_at > now()`, so a
-  concurrent replay cannot also succeed), and time-limited (operator-set
-  TTL, default 15 minutes). Enrollment doesn't require client auth (the
-  agent has no cert yet), so this token is the only enrollment-time
-  secret — treat it like a password.
-  *Mitigation*: the `/enroll` endpoint is rate limited per client IP (20
-  requests/minute, `apps/server/src/ratelimit.rs`), bounding how many
-  guesses an attacker gets while a token's TTL window is open. Given token
-  entropy (32 random bytes), this is comfortably defense-in-depth rather
-  than the primary control.
-- **Tampering**: a CSR requesting attributes beyond "this is a client
-  cert for this key" (e.g. requesting CA:true).
-  *Mitigation*: the server ignores/overwrites `is_ca`, key usage, and
-  validity fields on the incoming CSR params before signing — it only
-  trusts the public key and re-derives everything else itself.
-- **Information disclosure**: tokens or private keys in logs.
-  *Mitigation*: tokens are printed via `println!`, deliberately bypassing
-  `tracing` (which emits structured JSON that may be shipped to a log
-  aggregator); private keys are never logged and are written to disk with
-  `0600` permissions.
-- **Denial of service**: the enroll listener has no auth prior to a valid
-  token, so it's reachable by anyone who can route to it.
-  *Mitigation*: per-IP rate limiting (above). *Gap*: the limiter's client-IP
-  determination trusts the raw TCP peer address by default; behind a
-  reverse proxy, `trust_proxy_headers` must be explicitly enabled (and the
-  proxy must strip any client-supplied `X-Forwarded-For`) or every request
-  appears to come from the proxy's IP and shares one bucket. Not yet
-  load-tested at scale.
+The CA key, CA certificate, server certificate, and server key live in the
+`server-pki` volume. They are identity material, not disposable container
+state. Losing the CA key or replacing the CA changes the fingerprint and
+strands existing agents until each agent is re-enrolled.
+
+*Gap*: the fingerprint must cross a trusted operator channel. A compromised
+bootstrap channel can defeat pinning before enrollment.
+
+*Gap*: the current client certificate lifetime is 30 days and there is no
+renewal flow. Operators must re-enroll before expiry.
+
+*Gap*: revocation blocks the next gateway connection but does not force-close
+an already open connection. There is no CRL or OCSP enforcement at the TLS
+layer; application checks enforce revocation after the handshake.
 
 ## 4. Agent privilege and runtime
 
-- **Elevation of privilege**: the agent process, once installed, has
-  whatever OS-level privilege the operator grants it. M6's installer creates
-  a dedicated non-login service account and a `0700` state directory, but
-  host-specific collectors may still need additional read privileges.
-  *Mitigation*: the installer never grants sudo or arbitrary command
-  execution; the service unit uses `NoNewPrivileges`, `ProtectHome`, and
-  `ProtectSystem`.
-- **Tampering (of agent identity)**: agent private key at
-  `/var/lib/hope/agent-key.pem` (default state dir) readable only by
-  the key's owner (`0600`), but anyone with root or the same UID can read
-  it. No hardware-backed key storage (TPM, secure enclave) is required in
-  this milestone.
-- **Spoofing (revoked agent reconnecting)**: `server revoke-agent`
-  marks an agent's cert revoked in the `agents` table.
-  *Mitigation*: the gateway checks `revoked_at` on every new connection
-  (after mTLS handshake, before accepting the WebSocket) and closes the
-  connection if set.
-  *Gap*: revocation doesn't force-close an *already open* connection —
-  only blocks the next connection attempt. Also, there's no CRL/OCSP at
-  the TLS layer itself, so a revoked cert still completes a valid mTLS
-  handshake; revocation is enforced at the application layer only.
+Manual installation creates a dedicated non-login service account, a `0700`
+state directory, and a root-owned executable. The documented systemd unit
+uses `NoNewPrivileges`, `ProtectHome`, and `ProtectSystem`. The agent private
+key is `0600` and remains on its host.
 
-## 5. Update supply chain
+*Gap*: collectors may need host-specific read privileges, and root or the same
+UID can still read the agent key. No TPM, secure enclave, or hardware-backed
+identity is required.
 
-Milestone 7 adds a filesystem-backed central release repository and a durable
-update worker. The server and worker verify the detached manifest signature,
-per-artifact Ed25519 signatures, platform/architecture, protocol floor, size,
-and SHA-256 before an artifact can be selected. Signed channel metadata keeps
-automatic stable/canary selection from being changed by an untrusted operator
-or file edit. The worker sends the verified bytes over the M6 trusted SSH
-path, atomically swaps the service binary, waits for a fresh target-version
-gateway hello, and restores the previous binary on failure.
+*Gap*: the Compose runtime image does not declare a non-root `USER`. Treat the
+container host and its mounted secret/PKI volumes as privileged deployment
+surfaces until a later hardening change proves a non-root runtime compatible.
 
-- **Tampering**: a compromised build step or artifact host could serve a
-  malicious agent binary as if it were official.
-  *Mitigation*: unsigned, tampered, incompatible, missing, symlinked, and
-  oversized artifacts are rejected before upload. Trusted public keys are
-  bounded and support a documented rotation window. The repository is local
-  to the control plane, so monitored hosts do not contact GitHub or another
-  internet release service.
-- **Rollback failure**: a deliberately broken release can leave an agent
-  offline if restart or check-in fails.
-  *Mitigation*: the previous binary is retained until a fresh target-version
-  check-in meets the deadline. The worker restores it and can invoke the
-  existing bounded SSH repair path when rollback itself fails.
-  *Gap*: signing-key compromise still requires key rotation and fleet
-  recovery; it cannot be solved by the update worker alone.
+If an agent state directory loses its private key, client certificate, or CA
+certificate, that host cannot authenticate or verify the gateway. Re-enroll the
+host with a new token; never copy another host's private key.
 
-## 6. Web authentication
+## 5. Signed agent updates and release repository
 
-- **Spoofing / credential stuffing**: `/api/v1/setup` creates the single
-  admin account (only when none exists) with an argon2 password hash;
-  `/api/v1/login` verifies against it.
-  *Mitigation*: argon2 (memory-hard, resistant to GPU cracking) via the
-  `argon2` crate's defaults, plus per-IP rate limiting (10 requests/minute
-  on each of `/api/v1/setup` and `/api/v1/login`, same mechanism as
-  `/enroll` — see `apps/server/src/ratelimit.rs`).
-  *Gap*: rate limiting is per-IP, not per-account, so an attacker
-  distributed across many IPs (or behind carrier-grade NAT sharing one IP
-  with legitimate users) isn't meaningfully slowed. No account lockout.
-- **Session handling**: `tower-sessions` with a hand-rolled Postgres-backed
-  `SessionStore` (`apps/server/src/session_store.rs` — `tower-sessions-sqlx-store`
-  0.15.0 depends on `tower-sessions-core` 0.14, incompatible with our
-  `tower-sessions` 0.15/`tower-sessions-core` 0.15, so it doesn't actually
-  satisfy `SessionManagerLayer`; rolled our own against a `sessions`
-  table instead). An hourly background task deletes expired rows
-  (`Role::Serve`'s `session_cleanup_task` in `main.rs`). The cookie is
-  `HttpOnly`, `SameSite=Lax`, and `Secure` (configurable via
-  `cookie_secure`, defaulting to `true`; set to `false` only for
-  plain-HTTP local dev, where a browser would otherwise silently drop a
-  `Secure` cookie).
-  *Gap*: sessions now survive a restart and work across replicas sharing
-  the DB (previously flagged as a gap; resolved this slice). No
-  session-fixation-specific handling beyond what `tower-sessions` does by
-  default (new session ID issued on login isn't explicitly verified).
-- **Transport**: the main HTTP API (`/api/v1/*`, `/health/*`) currently
-  serves plain HTTP, not TLS — unlike the gateway/enroll listeners.
-  *Gap*: session cookies and login credentials travel in cleartext unless
-  TLS is terminated in front of the server (e.g. a reverse proxy), and
-  `cookie_secure` must then be left at its default `true` so the browser
-  won't send the cookie over that same plain-HTTP hop by mistake. This is
-  a real gap for any non-localhost deployment; documenting the expectation
-  that operators front the API with TLS (or that a future milestone adds
-  it directly) is necessary before this ships beyond a dev environment.
-- **CSRF**: mitigated via two layers (`apps/server/src/csrf.rs`): the
-  session cookie is `SameSite=Lax` (stops it riding along on most
-  cross-site requests), and a middleware requires a custom
-  `X-Requested-With: hope` header on every unsafe-method (`POST`/`PUT`/
-  `PATCH`/`DELETE`) request under `/api/v1/*` — a plain cross-site
-  form/image/link CSRF attack cannot attach custom headers, and a
-  cross-origin `fetch` that tried to would need a CORS preflight the
-  server doesn't grant.
-  *Gap*: no cookie-authenticated *mutating* route exists yet to actually
-  exercise this against (`/api/v1/setup` and `/api/v1/login` establish a
-  session rather than using one, so classic CSRF's premise doesn't fully
-  apply to them). The mechanism is verified to compile and apply to those
-  two routes, but hasn't been proven end-to-end against a real
-  authenticated mutation — do that as soon as the first such route lands.
+M7 verifies the detached manifest signature, each artifact signature, size,
+SHA-256, regular-file status, platform, architecture, release version,
+protocol floor, and signed channel metadata. The server and worker use the
+same filesystem-backed repository. Compose mounts it read-only. The private
+Ed25519 signing key remains outside the server and worker.
 
-## Summary of open gaps (tracked for follow-up milestones)
+The configured public-key file or bounded public-key list is trust
+configuration. During rotation, both old and new keys can be accepted until
+agents cross the dual-trust release boundary. The worker re-verifies the
+artifact immediately before SSH transfer, atomically installs it, waits for a
+target-version gateway hello, and restores the previous binary when the
+check-in deadline fails. A separate repair path exists when rollback cannot
+restore service.
 
-1. Credential master-key rotation is not implemented yet.
-2. Rate limiting is per-IP only (no per-account lockout, no
-   distributed-attack or shared-NAT mitigation).
-3. Revocation doesn't force-close already-open gateway connections.
-4. No signed-release / checksum pipeline for agent binaries.
-5. Main API listener has no TLS of its own (assumes a fronting proxy);
-   `cookie_secure` must stay `true` in that setup.
-6. CSRF middleware exists but has no real mutating route to prove itself
-   against yet — verify end-to-end once one lands.
-7. No least-privilege guidance for the agent's OS-level install.
-8. Agent client cert has a fixed 30-day lifetime with no renewal flow yet
-   (see `apps/server/src/pki.rs`).
+If the repository or public trust file is missing, signed release selection and
+updates stop; already-running agents keep their current binary. If the private
+signing key is missing, existing signed bundles remain verifiable but no new
+bundle can be signed under that key. Never replace a missing trust key with an
+unreviewed key: that changes the update trust root.
 
-Resolved this slice (previously listed here): sessions were in-memory
-only — now Postgres-backed with expiry cleanup; `/enroll` and
-`/api/v1/login`+`/setup` had no rate limiting — now per-IP limited;
-CSRF had no defenses at all — now has SameSite cookie + custom-header
-middleware (see gap 6 above for what's still unverified about it).
+*Gap*: signing-key compromise requires key rotation and fleet recovery. The
+update worker cannot revoke a malicious release already trusted by an agent.
+
+*Gap*: release publication is an operator-controlled filesystem step. The
+repository is not an internet download service and has no independent
+multi-party approval or transparency log.
+
+## 6. Web authentication and transport
+
+`/api/v1/setup` creates the first admin account only when no account exists.
+`/api/v1/login` verifies an Argon2 password hash. Setup and login are
+rate-limited per client IP. Sessions are stored in PostgreSQL, use `HttpOnly`
+and `SameSite=Lax`, expire after 12 hours of inactivity, and are cleaned by a
+worker job.
+
+Every unsafe `/api/v1` mutation requires `X-Requested-With: hope` in addition
+to the session boundary. M9 maintenance and other authenticated mutation
+routes use this middleware. Audit and change-event records attribute operator
+and worker actions.
+
+*Gap*: rate limiting is per IP, not per account or distributed identity. There
+is no account lockout or distributed attack mitigation.
+
+*Gap*: the main API listener (`/api/v1/*`, `/health/*`, and the web SPA) is
+plain HTTP. The Compose example publishes it to localhost by default, but any
+non-local deployment must put a TLS reverse proxy in front and keep
+`HOPE_COOKIE_SECURE=true`. The 8443 mTLS gateway must use TCP passthrough so
+the server sees the client certificate. Preserve the server certificate and CA
+fingerprint for enrollment on 8444 as well.
+
+*Gap*: `HOPE_TRUST_PROXY_HEADERS` must remain false unless the proxy strips and
+rewrites forwarded headers. A client-controlled `X-Forwarded-For` can otherwise
+spoof rate-limit buckets.
+
+## 7. Dependency-aware alerting
+
+M8 stores confirmed dependency edges and bounds graph traversal. When a child
+incident notification is suppressed, PostgreSQL retains the child incident,
+monitor result, dependency path, target, event, and technical reason. The
+operator can inspect the suppression instead of losing evidence.
+
+*Gap*: a wrong confirmed edge or stale operator decision can suppress a useful
+downstream notification. Keep confirmation review and graph reconciliation in
+the operator workflow; suppression does not replace incident investigation.
+
+## 8. Maintenance planning and overrun delivery
+
+M9 stores events, normalized resources, and expanded occurrences in
+PostgreSQL. Creation and edits take a transaction-scoped advisory lock and
+compare reservation windows against shared resources, affected/required
+relationships, confirmed dependency paths, and the default global disruptive
+lock. Optimistic versions prevent stale edits. Recurrence is bounded to a
+90-day default horizon and at most 366 configured days; ambiguous or
+nonexistent local times are rejected.
+
+Expected-failure resources can suppress only the matching incident notification
+for the exact event and occurrence. The incident and recovery remain durable.
+An open expected incident past the planned end changes the event to
+`overrunning`, retains its reservation, and queues an idempotent
+`maintenance.overrun` delivery through configured webhook or ntfy channels.
+
+*Gap*: an operator can intentionally mark a real failure as expected and hide
+its downstream notification. The exact suppression record and audit trail make
+this reviewable, but they do not prevent misuse.
+
+*Gap*: the M9 backend API exists before a calendar/timeline UI. Operators must
+use the API or another client to review conflicts, lifecycle state, and
+overruns.
+
+## 9. Backup, restore, and upgrade operations
+
+M10 documents a repeatable logical PostgreSQL dump plus exact restoration of
+the credential master key, `server-pki` volume, release repository, public trust
+configuration, and deployment environment. Clean restore uses a new Compose
+project so the old volumes remain available during validation.
+
+*Gap*: there is no automatic backup, WAL/PITR, backup encryption, immutable
+backup retention, or scheduled restore test in the application. Those controls
+belong to the operator's backup platform until implemented.
+
+Migrations are forward-only and embedded in the image. The server and worker
+can both run them under the SQL migration lock. M10 defines a target of two
+supported application versions (`N` and `N-1`), but the repository does not yet
+prove every version pair or offer automatic schema downgrade. Treat upgrades as
+lockstep server/worker changes with a tested backup and forward-recovery plan.
+
+The Compose server healthcheck proves container liveness. `/health/ready`
+checks PostgreSQL reachability and must be used by the reverse proxy or
+operator for readiness.
+
+## 10. Telemetry and data egress
+
+Anonymous telemetry, analytics, crash reporting, and phone-home behavior are
+off. The repository has no external telemetry endpoint or opt-in telemetry
+setting. Agent operational observations flow to the configured Hope control
+plane as product functionality, not anonymous telemetry.
+
+Configured webhook and ntfy channels can intentionally send incident,
+maintenance-overrun, or other operational payloads to external systems. The
+operator controls those destinations and must review their data handling.
+Container logs go to the deployment's stdout/logging system; Docker or a host
+log shipper can export them independently of Hope.
+
+## Open security gaps
+
+1. Credential master-key rotation and re-encryption are not implemented.
+2. Client certificate renewal is not implemented; certificates expire after 30
+   days.
+3. Revocation does not force-close existing gateway connections and has no
+   CRL/OCSP layer.
+4. Authentication rate limits are per IP only.
+5. The main API has no native TLS and requires a correctly configured proxy for
+   non-local use.
+6. The Compose runtime image has no explicit non-root user.
+7. Backups have no application-provided encryption, PITR, automation, or
+   restore-test scheduler.
+8. Migrations have no automatic downgrade, and the two-version target is not
+   yet a tested compatibility guarantee.
+9. Release signing-key compromise and publication approval remain operational
+   responsibilities.
+10. Maintenance expected-failure and dependency confirmations can be misused;
+    audit records make misuse visible but do not prevent it.
+
+Resolved or materially improved through M10: signed artifact verification and
+agent binary rollback (M7), dependency-path alert suppression records (M8),
+maintenance conflict/lifecycle/overrun handling (M9), PostgreSQL-backed
+sessions and periodic cleanup, per-IP setup/login/enrollment limits, and the
+CSRF custom-header mechanism. None of these resolutions removes the gaps
+listed above.
