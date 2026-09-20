@@ -168,6 +168,11 @@ function OverviewDashboard() {
       to: "/monitoring" as const,
     })),
   ];
+  const retryDashboard = () => {
+    void Promise.all(
+      [...dashboardQueries, ...resultQueries].map((query) => query.refetch()),
+    );
+  };
 
   return (
     <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-5">
@@ -191,17 +196,7 @@ function OverviewDashboard() {
               ? dashboardError.message
               : "Refresh to try loading the missing data again."}
           </AlertDescription>
-          <Button
-            onClick={() => {
-              void Promise.all(
-                [...dashboardQueries, ...resultQueries].map((query) =>
-                  query.refetch(),
-                ),
-              );
-            }}
-            size="sm"
-            variant="outline"
-          >
+          <Button onClick={retryDashboard} size="sm" variant="outline">
             Retry
           </Button>
         </Alert>
@@ -260,7 +255,12 @@ function OverviewDashboard() {
             />
           </div>
         </div>
-        <NeedsAttentionCard items={attentionItems} loading={loading} />
+        <NeedsAttentionCard
+          error={dashboardError}
+          items={attentionItems}
+          loading={loading}
+          onRetry={retryDashboard}
+        />
       </section>
       <RecentChangesCard changes={changes} loading={changesQuery.isLoading} />
     </div>
@@ -516,11 +516,15 @@ function TopologyCard({
 }
 
 function NeedsAttentionCard({
+  error,
   items,
   loading,
+  onRetry,
 }: {
+  error: unknown;
   items: AttentionItem[];
   loading: boolean;
+  onRetry: () => void;
 }) {
   return (
     <Card className="gap-4">
@@ -539,7 +543,20 @@ function NeedsAttentionCard({
         </CardAction>
       </CardHeader>
       <CardContent>
-        {loading ? (
+        {error ? (
+          <div
+            aria-live="polite"
+            className="flex items-center justify-between gap-3 rounded-md border border-dashed p-3"
+            role="status"
+          >
+            <p className="text-sm text-muted-foreground">
+              Needs-attention data unavailable.
+            </p>
+            <Button onClick={onRetry} size="sm" variant="outline">
+              Retry
+            </Button>
+          </div>
+        ) : loading ? (
           <LoadingRows count={5} />
         ) : items.length ? (
           <div className="divide-y">

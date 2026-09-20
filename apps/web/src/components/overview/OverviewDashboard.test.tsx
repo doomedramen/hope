@@ -33,6 +33,25 @@ afterEach(() => {
 });
 
 describe("OverviewDashboard", () => {
+  it("shows an unavailable state for needs-attention data when a dashboard query fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input) === "/api/v1/monitors?limit=100") {
+          return Promise.reject(new Error("monitor store unavailable"));
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
+    );
+
+    renderDashboard();
+
+    expect(
+      await screen.findByText("Needs-attention data unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(2);
+  });
+
   it("renders live inventory, monitor, review, and change data in the overview", async () => {
     const now = Date.now();
     const recent = (minutesAgo: number) =>
