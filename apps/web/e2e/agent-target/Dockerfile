@@ -2,6 +2,8 @@ FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+EXPOSE 22
+
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         openssh-server \

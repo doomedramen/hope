@@ -117,11 +117,24 @@ async function runDocker(
 }
 
 async function publishedPort(containerName: string): Promise<number> {
-  const result = await runDocker(["port", containerName, "22/tcp"]);
-  const match = result.stdout.match(/:(\d+)\s*$/m);
-  if (!match)
-    throw new Error(`Could not determine SSH port for ${containerName}`);
-  return Number(match[1]);
+  const deadline = Date.now() + 30_000;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      const result = await runDocker(["port", containerName, "22/tcp"]);
+      const match = result.stdout.match(/:(\d+)\s*$/m);
+      if (match) return Number(match[1]);
+      lastError = new Error("Docker returned no published SSH port");
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(
+    `Timed out waiting for Docker to publish SSH port for ${containerName}: ${String(lastError)}`,
+  );
 }
 
 async function waitForPort(host: string, port: number, timeoutMs: number) {
