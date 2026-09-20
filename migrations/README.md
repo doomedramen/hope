@@ -55,6 +55,17 @@ channels, severity/event routes, and idempotent incident deliveries. The
 delivery job sends webhook or ntfy notifications outside the monitor
 transaction and retries provider failures through the normal job queue.
 
+M8 dependency topology lands in 0027_dependency_graph.sql. It adds explicit
+confirmation state and bounded graph safeguards for manual, deterministic,
+and suggested edges. M8 reconciliation projects containment and service
+ownership into deterministic inferred edges and runs through the worker job
+queue.
+
+M8 notification suppression lands in 0028_alert_suppressions.sql. It records
+the root incident, dependency edge, path, target, event, and technical reason
+when a downstream incident notification is suppressed. Child incidents and
+monitor results are not removed.
+
 M5 agent persistence lands in 0020_agent_inventory.sql. It extends enrolled
 agent metadata, keeps one current inventory snapshot plus bounded replay
 history, projects agent observations into the canonical inventory tables, and
