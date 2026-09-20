@@ -44,7 +44,7 @@ export const Route = createFileRoute("/changes")({
 const SEVERITIES = ["all", "info", "notice", "warning", "critical"] as const;
 const EMPTY_CHANGES: ChangeEvent[] = [];
 
-function ChangesPage() {
+export function ChangesPage() {
   const [severity, setSeverity] = useState<(typeof SEVERITIES)[number]>("all");
   const [category, setCategory] = useState("all");
   const changesQuery = useQuery({
@@ -134,7 +134,9 @@ function ChangesPage() {
                 className="w-full md:w-48"
                 id="change-category"
               >
-                <SelectValue />
+                <SelectValue>
+                  {category === "all" ? "All categories" : labelize(category)}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>

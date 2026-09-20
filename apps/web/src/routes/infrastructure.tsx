@@ -1216,7 +1216,7 @@ export function EditDeviceDialog({
   );
 }
 
-function MergeDialog({
+export function MergeDialog({
   open,
   onOpenChange,
   source,
@@ -1236,6 +1236,7 @@ function MergeDialog({
   const targets = devices.filter((device) => device.id !== source.id);
   const [target, setTarget] = useState(targets[0]?.id ?? "");
   const [reason, setReason] = useState("Operator confirmed duplicate");
+  const selectedTarget = targets.find((device) => device.id === target);
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent>
@@ -1273,7 +1274,11 @@ function MergeDialog({
                   value={target}
                 >
                   <SelectTrigger id="merge-target">
-                    <SelectValue />
+                    <SelectValue>
+                      {selectedTarget
+                        ? `${selectedTarget.name || "Unnamed device"} · ${shortId(selectedTarget.id)}`
+                        : "Select survivor"}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectGroup>

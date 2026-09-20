@@ -7,6 +7,7 @@ import {
   CreateDeviceDialog,
   EditDeviceDialog,
   InfrastructurePage,
+  MergeDialog,
 } from "./infrastructure";
 import type { Device, DeviceDetail } from "@/lib/api";
 
@@ -240,5 +241,31 @@ describe("create dialogs", () => {
       screen.getByText("VLAN must be between 1 and 4094."),
     ).toBeInTheDocument();
     expect(submit).not.toHaveBeenCalled();
+  });
+});
+
+describe("MergeDialog", () => {
+  it("shows the selected survivor label in the collapsed control", () => {
+    const source = detail("device-source", "Source device");
+    const survivor = detail("device-survivor", "QA test device");
+
+    render(
+      <MergeDialog
+        devices={[source, survivor]}
+        error={null}
+        onOpenChange={vi.fn()}
+        open
+        pending={false}
+        source={source}
+        submit={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("combobox", { name: "Into survivor" }),
+    ).toHaveTextContent("QA test device");
+    expect(
+      screen.getByRole("combobox", { name: "Into survivor" }),
+    ).toHaveTextContent("device-s");
   });
 });
