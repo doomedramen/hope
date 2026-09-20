@@ -60,6 +60,75 @@ jobs:
       - run: pnpm -C apps/web test -- --run
       - run: pnpm -C apps/web build
 
+  web-e2e:
+    name: browser smoke
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: hope
+          POSTGRES_PASSWORD: hope
+          POSTGRES_DB: hope
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hope"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      HOPE_DATABASE_URL: postgres://hope:hope@localhost:5432/hope
+      E2E_BASE_URL: http://127.0.0.1:8080
+      E2E_PKI_DIR: ${{ runner.temp }}/hope-e2e-pki
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile
+      - run: cargo build -p server
+      - run: pnpm -C apps/web build
+      - name: Initialize server PKI
+        run: |
+          mkdir -p "$E2E_PKI_DIR"
+          HOPE_CA_CERT_PATH="$E2E_PKI_DIR/ca-cert.pem" \
+          HOPE_CA_KEY_PATH="$E2E_PKI_DIR/ca-key.pem" \
+          HOPE_SERVER_CERT_PATH="$E2E_PKI_DIR/server-cert.pem" \
+          HOPE_SERVER_KEY_PATH="$E2E_PKI_DIR/server-key.pem" \
+          ./target/debug/server ca init
+      - name: Start server
+        run: |
+          HOPE_WEB_DIST_DIR=apps/web/dist \
+          HOPE_BIND_ADDR=127.0.0.1:8080 \
+          HOPE_GATEWAY_BIND_ADDR=127.0.0.1:18443 \
+          HOPE_ENROLL_BIND_ADDR=127.0.0.1:18444 \
+          HOPE_COOKIE_SECURE=false \
+          HOPE_CA_CERT_PATH="$E2E_PKI_DIR/ca-cert.pem" \
+          HOPE_CA_KEY_PATH="$E2E_PKI_DIR/ca-key.pem" \
+          HOPE_SERVER_CERT_PATH="$E2E_PKI_DIR/server-cert.pem" \
+          HOPE_SERVER_KEY_PATH="$E2E_PKI_DIR/server-key.pem" \
+          ./target/debug/server serve >"$RUNNER_TEMP/hope-e2e-server.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/hope-e2e-server.pid"
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:8080/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/hope-e2e-server.log"
+          exit 1
+      - run: pnpm -C apps/web exec playwright install --with-deps chromium
+      - run: pnpm -C apps/web test:e2e
+      - name: Show server log
+        if: always()
+        run: cat "$RUNNER_TEMP/hope-e2e-server.log"
+
   agent-cross-compile:
     name: agent cross-compile, sign, and release bundle (amd64 musl)
     runs-on: ubuntu-latest

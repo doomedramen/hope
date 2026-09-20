@@ -6,6 +6,8 @@ Cargo.lock.bak
 node_modules/
 apps/web/dist/
 apps/web/.vite/
+apps/web/test-results/
+apps/web/playwright-report/
 apps/web/src/routeTree.gen.ts
 pnpm-lock.yaml.bak
 

@@ -25,6 +25,16 @@ just web
 `DATABASE_URL`; tests that need Docker are explicitly ignored. Run those gates
 when changing the related subsystem.
 
+The browser smoke test needs a running server with a disposable database. Set
+`E2E_BASE_URL` when the server is not at the default address:
+
+```sh
+E2E_BASE_URL=http://127.0.0.1:8080 pnpm -C apps/web test:e2e
+```
+
+CI provisions PostgreSQL, the server PKI, the server, and Chromium before
+running this test.
+
 ## Change rules
 
 - Keep changes focused. Preserve concurrent work and do not rewrite unrelated

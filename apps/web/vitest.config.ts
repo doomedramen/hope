@@ -12,6 +12,14 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/.idea/**",
+      "**/.git/**",
+      "**/coverage/**",
+      "e2e/**",
+    ],
     globals: true,
     passWithNoTests: true,
   },
