@@ -7,6 +7,7 @@ import {
   draftDiscoveryScope,
   fetchAgent,
   fetchAgents,
+  fetchDiscoveryState,
   fetchScanRun,
   fetchHealthReady,
   fetchMonitors,
@@ -174,6 +175,47 @@ describe("fetchHealthReady", () => {
     );
     const headers = new Headers(fetchMock.mock.calls[1][1]?.headers);
     expect(headers.get("x-requested-with")).toBe("hope");
+  });
+
+  it("loads persisted discovery scope and latest scan state", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          scope: {
+            network_id: "network-1",
+            excluded_cidrs: ["192.168.1.10/32"],
+            scan_profile: "low_impact",
+            target_count: 252,
+            confirmed_target_count: 252,
+            confirmed_at: "2026-09-19T10:00:00Z",
+            enabled: true,
+            version: 2,
+          },
+          scan_run: {
+            id: "run-1",
+            network_id: "network-1",
+            status: "running",
+            targets_planned: 252,
+            targets_completed: 12,
+            ports_planned: 16_515_420,
+            ports_completed: 786_420,
+            complete: false,
+            authoritative: false,
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchDiscoveryState("network-1");
+
+    expect(result.scope?.confirmed_target_count).toBe(252);
+    expect(result.scan_run?.status).toBe("running");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/networks/network-1/discovery-state",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
   });
 
   it("creates a network with the discovery boundary fields", async () => {

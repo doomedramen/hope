@@ -9,11 +9,12 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelScanRun,
   confirmDiscoveryScope,
   draftDiscoveryScope,
+  fetchDiscoveryState,
   fetchScanRun,
   launchNetworkScan,
   type DiscoveryScope,
@@ -104,6 +105,7 @@ export function DiscoveryScopeSetup({
   const [scopeStates, setScopeStates] = useState<
     Record<string, ScopeDraftState>
   >({});
+  const hydratedNetworkIds = useRef(new Set<string>());
   const selectedNetwork =
     networks.find((network) => network.id === selectedNetworkId) ??
     networks[0] ??
@@ -111,6 +113,38 @@ export function DiscoveryScopeSetup({
   const selectedState = selectedNetwork
     ? (scopeStates[selectedNetwork.id] ?? DEFAULT_SCOPE_STATE)
     : DEFAULT_SCOPE_STATE;
+  const discoveryStateQuery = useQuery({
+    queryKey: ["discovery-state", selectedNetwork?.id],
+    queryFn: () => fetchDiscoveryState(selectedNetwork!.id),
+    enabled: Boolean(selectedNetwork),
+  });
+
+  useEffect(() => {
+    if (!selectedNetwork || !discoveryStateQuery.data) return;
+    const networkId = selectedNetwork.id;
+    if (hydratedNetworkIds.current.has(networkId)) return;
+    hydratedNetworkIds.current.add(networkId);
+    const persistedScope = discoveryStateQuery.data.scope;
+    const persistedProfile: ScanProfile =
+      persistedScope?.scan_profile === "low_impact" ? "low_impact" : "normal";
+    setScopeStates((current) => {
+      if (current[networkId]) return current;
+      return {
+        ...current,
+        [networkId]: persistedScope
+          ? {
+              excludedCidrs: persistedScope.excluded_cidrs.join("\n"),
+              scanProfile: persistedProfile,
+              scope: persistedScope,
+              appliedExcludedCidrs: persistedScope.excluded_cidrs,
+              appliedScanProfile: persistedProfile,
+              acknowledged: false,
+              scanRun: discoveryStateQuery.data.scan_run,
+            }
+          : DEFAULT_SCOPE_STATE,
+      };
+    });
+  }, [discoveryStateQuery.data, selectedNetwork]);
 
   const draftMutation = useMutation({
     mutationFn: ({
@@ -359,7 +393,11 @@ export function DiscoveryScopeSetup({
                 canConfirm={canConfirm}
                 confirmPending={confirmMutation.isPending}
                 draftPending={draftMutation.isPending}
-                error={draftMutation.error ?? confirmMutation.error}
+                error={
+                  discoveryStateQuery.error ??
+                  draftMutation.error ??
+                  confirmMutation.error
+                }
                 excludedCidrs={selectedState.excludedCidrs}
                 invalidExcludedCidr={invalidExcludedCidr ?? null}
                 isDirty={scopeIsDirty}
@@ -374,6 +412,7 @@ export function DiscoveryScopeSetup({
                   scanMutation.variables?.networkId === selectedNetwork.id
                 }
                 scanRun={selectedState.scanRun}
+                stateLoading={discoveryStateQuery.isLoading}
                 onAcknowledge={(acknowledged) =>
                   setSelectedState((current) => ({
                     ...current,
@@ -451,6 +490,7 @@ function ScopeForm({
   scanError,
   scanPending,
   scanRun,
+  stateLoading,
   onExcludedCidrsChange,
   onProfileChange,
   onAcknowledge,
@@ -472,6 +512,7 @@ function ScopeForm({
   scanError: unknown;
   scanPending: boolean;
   scanRun: ScanRun | null;
+  stateLoading: boolean;
   onExcludedCidrsChange: (value: string) => void;
   onProfileChange: (value: ScanProfile) => void;
   onAcknowledge: (value: boolean) => void;
@@ -515,6 +556,7 @@ function ScopeForm({
           </FieldLabel>
           <Textarea
             aria-invalid={Boolean(invalidExcludedCidr)}
+            disabled={stateLoading}
             id={`scope-exclusions-${network.id}`}
             onChange={(event) => onExcludedCidrsChange(event.target.value)}
             placeholder="One CIDR per line, for example 192.168.1.10/32"
@@ -535,6 +577,7 @@ function ScopeForm({
             Scan profile
           </FieldLabel>
           <Select
+            disabled={stateLoading}
             onValueChange={(value) => {
               if (value === "normal" || value === "low_impact") {
                 onProfileChange(value);
@@ -560,7 +603,9 @@ function ScopeForm({
 
       <div className="flex flex-wrap items-center gap-2">
         <Button
-          disabled={draftPending || Boolean(invalidExcludedCidr)}
+          disabled={
+            stateLoading || draftPending || Boolean(invalidExcludedCidr)
+          }
           type="submit"
           variant="outline"
         >
@@ -586,6 +631,12 @@ function ScopeForm({
         </Alert>
       ) : null}
 
+      {stateLoading ? (
+        <p aria-live="polite" className="text-sm text-muted-foreground">
+          Loading saved discovery state…
+        </p>
+      ) : null}
+
       {scope && !confirmed ? (
         <Field orientation="horizontal">
           <Checkbox
@@ -607,7 +658,11 @@ function ScopeForm({
       <ScopeError error={error} />
 
       {scope && !confirmed ? (
-        <Button disabled={!canConfirm} onClick={onConfirm} type="button">
+        <Button
+          disabled={stateLoading || !canConfirm}
+          onClick={onConfirm}
+          type="button"
+        >
           {confirmPending ? (
             <Spinner data-icon="inline-start" />
           ) : (
@@ -684,7 +739,11 @@ export function ScanLaunch({
             port sweep for the confirmed scope.
           </p>
         </div>
-        <Button disabled={pending} onClick={onLaunch} type="button">
+        <Button
+          disabled={pending || Boolean(canCancel)}
+          onClick={onLaunch}
+          type="button"
+        >
           {pending ? (
             <Spinner data-icon="inline-start" />
           ) : (

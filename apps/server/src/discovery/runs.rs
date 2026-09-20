@@ -19,7 +19,7 @@ fn err(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Valu
     (status, Json(json!({ "error": message.into() })))
 }
 
-fn run_view(mut run: Value) -> Value {
+pub(crate) fn run_view(mut run: Value) -> Value {
     let complete = run
         .get("complete")
         .and_then(Value::as_bool)

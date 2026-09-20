@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DiscoveryScopeSetup, ScanLaunch } from "./DiscoveryScopeSetup";
 import type { Network, ScanRun, ScanRunStatus } from "@/lib/api";
 
@@ -79,6 +79,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+beforeEach(() => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue(jsonResponse({ scope: null, scan_run: null })),
+  );
+});
+
 describe("ScanLaunch", () => {
   it("polls an active run until server reports completion", async () => {
     const running = makeRun("running", {
@@ -154,6 +161,62 @@ describe("ScanLaunch", () => {
 });
 
 describe("DiscoveryScopeSetup", () => {
+  it("restores a confirmed scope and active scan from the server", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false },
+        queries: { retry: false },
+      },
+    });
+    const persistedScope = {
+      network_id: network.id,
+      excluded_cidrs: ["192.168.1.10/32"],
+      scan_profile: "low_impact",
+      target_count: 252,
+      confirmed_target_count: 252,
+      confirmed_at: "2026-09-19T10:00:00Z",
+      enabled: true,
+      version: 2,
+    };
+    const persistedRun = makeRun("running", {
+      targets_planned: 252,
+      targets_completed: 12,
+      ports_planned: 16_515_420,
+      ports_completed: 786_420,
+      complete: false,
+      authoritative: false,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ scope: persistedScope, scan_run: persistedRun }),
+        ),
+    );
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DiscoveryScopeSetup
+          error={null}
+          loading={false}
+          networks={[network]}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(
+      await screen.findByText("Initial discovery running"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Excluded addresses or ranges")).toHaveValue(
+      "192.168.1.10/32",
+    );
+    expect(screen.getByRole("combobox")).toHaveTextContent("low_impact");
+    expect(
+      screen.queryByRole("button", { name: "Launch initial discovery" }),
+    ).toBeDisabled();
+  });
+
   it("exposes edit and delete actions for configured networks", () => {
     const queryClient = new QueryClient({
       defaultOptions: {

@@ -39,6 +39,11 @@ export interface DiscoveryScope {
   updated_at: string;
 }
 
+export interface DiscoveryState {
+  scope: DiscoveryScope | null;
+  scan_run: ScanRun | null;
+}
+
 export type ScanRunKind = "initial_discovery" | "change_scan" | "full_tcp";
 
 export type ScanRunStatus =
@@ -821,6 +826,14 @@ export async function confirmDiscoveryScope(
       method: "POST",
       body: JSON.stringify({ target_count: targetCount }),
     },
+  );
+}
+
+export async function fetchDiscoveryState(
+  networkId: string,
+): Promise<DiscoveryState> {
+  return request<DiscoveryState>(
+    `/api/v1/networks/${networkId}/discovery-state`,
   );
 }
 
