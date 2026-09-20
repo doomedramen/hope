@@ -137,15 +137,29 @@ atomically, signs the CSR, and returns a client cert + the CA cert.
 
 ## 5. Update supply chain
 
-Centralized signed update distribution is not implemented yet; it is the
-Milestone 7 scope. The current release verification primitives require
-operators to provide verified artifact paths to the M6 installer.
+Milestone 7 adds a filesystem-backed central release repository and a durable
+update worker. The server and worker verify the detached manifest signature,
+per-artifact Ed25519 signatures, platform/architecture, protocol floor, size,
+and SHA-256 before an artifact can be selected. Signed channel metadata keeps
+automatic stable/canary selection from being changed by an untrusted operator
+or file edit. The worker sends the verified bytes over the M6 trusted SSH
+path, atomically swaps the service binary, waits for a fresh target-version
+gateway hello, and restores the previous binary on failure.
 
 - **Tampering**: a compromised build step or artifact host could serve a
   malicious agent binary as if it were official.
-  *Mitigation*: the agent and xtask contain Ed25519 release verification
-  primitives, but M7 still needs the repository/cache, rollout policy, and
-  enforcement in the update/repair workflow.
+  *Mitigation*: unsigned, tampered, incompatible, missing, symlinked, and
+  oversized artifacts are rejected before upload. Trusted public keys are
+  bounded and support a documented rotation window. The repository is local
+  to the control plane, so monitored hosts do not contact GitHub or another
+  internet release service.
+- **Rollback failure**: a deliberately broken release can leave an agent
+  offline if restart or check-in fails.
+  *Mitigation*: the previous binary is retained until a fresh target-version
+  check-in meets the deadline. The worker restores it and can invoke the
+  existing bounded SSH repair path when rollback itself fails.
+  *Gap*: signing-key compromise still requires key rotation and fleet
+  recovery; it cannot be solved by the update worker alone.
 
 ## 6. Web authentication
 
