@@ -452,7 +452,8 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
         .route("/health/ready", get(routes::health::ready))
         .route(
             "/api/v1/setup",
-            post(routes::auth::setup)
+            get(routes::auth::setup_status)
+                .post(routes::auth::setup)
                 .layer(from_fn(csrf::require_custom_header))
                 .layer(from_fn_with_state(setup_limiter, ratelimit::enforce)),
         )

@@ -15,6 +15,23 @@ pub struct SetupRequest {
     pub password: String,
 }
 
+/// GET /api/v1/setup — report whether the first operator account is needed.
+pub async fn setup_status(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    match sqlx::query_scalar::<_, bool>("select not exists (select 1 from users)")
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(setup_required) => (
+            StatusCode::OK,
+            Json(json!({ "setup_required": setup_required })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
 /// POST /api/v1/setup — bootstrap the single admin account (spec §13.2
 /// first-run flow, step 1). Only succeeds when no user exists yet.
 pub async fn setup(

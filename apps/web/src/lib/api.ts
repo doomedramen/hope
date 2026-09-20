@@ -635,6 +635,10 @@ export interface SetupResponse {
   email: string;
 }
 
+export interface SetupStatusResponse {
+  setup_required: boolean;
+}
+
 export class ApiError extends Error {
   readonly status: number;
 
@@ -1105,6 +1109,10 @@ export async function setupAdmin(input: {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function fetchSetupStatus(): Promise<SetupStatusResponse> {
+  return request<SetupStatusResponse>("/api/v1/setup");
 }
 
 export async function login(input: {

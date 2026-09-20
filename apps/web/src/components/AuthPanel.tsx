@@ -21,10 +21,14 @@ import { Spinner } from "@/components/ui/spinner";
 
 export function AuthPanel({
   onAuthenticated,
+  setupRequired,
 }: {
   onAuthenticated: () => void;
+  setupRequired: boolean;
 }) {
-  const [mode, setMode] = useState<"login" | "setup">("login");
+  const [mode, setMode] = useState<"login" | "setup">(
+    setupRequired ? "setup" : "login",
+  );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -48,9 +52,9 @@ export function AuthPanel({
   }
 
   return (
-    <main className="grid min-h-screen bg-background lg:grid-cols-2">
-      <section className="flex items-center justify-center px-6 py-12 sm:px-10">
-        <Card className="w-full max-w-md shadow-sm">
+    <main className="grid min-h-screen place-items-center bg-background px-6 py-12 sm:px-10">
+      <section className="w-full max-w-md">
+        <Card className="w-full shadow-sm">
           <CardHeader>
             <div className="mb-4 flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
               <KeyRoundIcon />
@@ -137,22 +141,6 @@ export function AuthPanel({
           </CardContent>
         </Card>
       </section>
-      <aside className="hidden bg-primary p-12 text-primary-foreground lg:flex lg:flex-col lg:justify-between">
-        <div className="flex items-center gap-3 text-lg font-medium">
-          <span className="grid size-8 place-items-center rounded-lg bg-primary-foreground text-primary">
-            <ShieldCheckIcon />
-          </span>
-          Hope
-        </div>
-        <div className="max-w-md">
-          <h2 className="mt-3 text-4xl font-semibold tracking-tight">
-            Infrastructure inventory
-          </h2>
-          <p className="mt-4 text-lg leading-8 text-primary-foreground/75">
-            Devices, interfaces, addresses, and identity evidence.
-          </p>
-        </div>
-      </aside>
     </main>
   );
 }

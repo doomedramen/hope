@@ -14,7 +14,7 @@ import {
 import { useState } from "react";
 import { AuthPanel } from "@/components/AuthPanel";
 import { HealthIndicator } from "@/components/HealthIndicator";
-import { ApiError, fetchDevices } from "@/lib/api";
+import { ApiError, fetchDevices, fetchSetupStatus } from "@/lib/api";
 
 const NAV_ITEMS = [
   { to: "/", label: "Overview", icon: LayoutDashboardIcon },
@@ -39,10 +39,19 @@ function RootLayout() {
     retry: false,
     staleTime: 60_000,
   });
+  const setupQuery = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: fetchSetupStatus,
+    retry: false,
+    staleTime: 60_000,
+  });
   const requiresLogin =
     sessionQuery.error instanceof ApiError && sessionQuery.error.status === 401;
 
-  if (sessionQuery.isLoading && !authenticatedThisVisit) {
+  if (
+    (sessionQuery.isLoading || setupQuery.isLoading) &&
+    !authenticatedThisVisit
+  ) {
     return (
       <main
         aria-busy="true"
@@ -65,6 +74,7 @@ function RootLayout() {
   if (requiresLogin && !authenticatedThisVisit) {
     return (
       <AuthPanel
+        setupRequired={setupQuery.data?.setup_required === true}
         onAuthenticated={() => {
           setAuthenticatedThisVisit(true);
           void queryClient.invalidateQueries({ queryKey: ["session-probe"] });
