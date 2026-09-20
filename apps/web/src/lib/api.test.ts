@@ -10,6 +10,7 @@ import {
   fetchHealthReady,
   fetchMonitors,
   launchNetworkScan,
+  ApiError,
 } from "./api";
 
 describe("fetchHealthReady", () => {
@@ -210,6 +211,25 @@ describe("fetchHealthReady", () => {
     );
     const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
     expect(headers.get("x-requested-with")).toBe("hope");
+  });
+
+  it("preserves field-level network validation errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: "Please correct the highlighted network fields.",
+            field_errors: { cidr: "CIDR must be a valid network range." },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    await expect(createNetwork({ cidr: "not-a-cidr" })).rejects.toMatchObject({
+      fieldErrors: { cidr: "CIDR must be a valid network range." },
+    } satisfies Partial<ApiError>);
   });
 
   it("launches an initial discovery scan with an idempotency key", async () => {

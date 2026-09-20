@@ -14,9 +14,12 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use ipnet::IpNet;
 use serde_json::{Value, json};
 use sqlx::postgres::Postgres;
 use sqlx::{QueryBuilder, Transaction};
+use std::collections::BTreeMap;
+use std::net::IpAddr;
 use uuid::Uuid;
 
 use crate::auth_mw::CurrentUser;
@@ -166,6 +169,128 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
     (status, Json(json!({ "error": msg.into() })))
 }
 
+fn network_field_errors(
+    map: &serde_json::Map<String, Value>,
+    require_cidr: bool,
+) -> BTreeMap<&'static str, String> {
+    let mut errors = BTreeMap::new();
+
+    match map.get("cidr") {
+        None | Some(Value::Null) if require_cidr => {
+            errors.insert("cidr", "CIDR is required.".to_string());
+        }
+        Some(Value::String(value)) if !value.trim().is_empty() => {
+            if value.trim().parse::<IpNet>().is_err() {
+                errors.insert("cidr", "CIDR must be a valid network range.".to_string());
+            }
+        }
+        Some(Value::String(_)) if require_cidr => {
+            errors.insert("cidr", "CIDR is required.".to_string());
+        }
+        Some(_) if require_cidr => {
+            errors.insert("cidr", "CIDR must be a valid network range.".to_string());
+        }
+        _ => {}
+    }
+
+    if let Some(value) = map.get("gateway").filter(|value| !value.is_null()) {
+        match value {
+            Value::String(value) if value.trim().is_empty() => {}
+            Value::String(value) if value.trim().parse::<IpAddr>().is_ok() => {}
+            _ => {
+                errors.insert("gateway", "Gateway must be a valid IP address.".to_string());
+            }
+        }
+    }
+
+    if let Some(value) = map.get("vlan").filter(|value| !value.is_null()) {
+        let valid = value_to_text(value)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .is_some_and(|value| (1..=4094).contains(&value));
+        if !valid {
+            errors.insert("vlan", "VLAN must be between 1 and 4094.".to_string());
+        }
+    }
+
+    errors
+}
+
+fn network_error(
+    status: StatusCode,
+    message: impl Into<String>,
+    field_errors: BTreeMap<&'static str, String>,
+) -> (StatusCode, Json<Value>) {
+    (
+        status,
+        Json(json!({
+            "error": message.into(),
+            "field_errors": field_errors,
+        })),
+    )
+}
+
+async fn validate_network(
+    state: &AppState,
+    map: &serde_json::Map<String, Value>,
+    require_cidr: bool,
+    exclude_id: Option<Uuid>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let field_errors = network_field_errors(map, require_cidr);
+    if !field_errors.is_empty() {
+        return Err(network_error(
+            StatusCode::BAD_REQUEST,
+            "Please correct the highlighted network fields.",
+            field_errors,
+        ));
+    }
+
+    let Some(cidr) = map
+        .get("cidr")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let conflict: Result<Option<(String,)>, sqlx::Error> = match exclude_id {
+        Some(id) => {
+            sqlx::query_as(
+                "select cidr::text from networks where cidr && $1::cidr and id <> $2 limit 1",
+            )
+            .bind(cidr)
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+        }
+        None => {
+            sqlx::query_as("select cidr::text from networks where cidr && $1::cidr limit 1")
+                .bind(cidr)
+                .fetch_optional(&state.pool)
+                .await
+        }
+    };
+    match conflict {
+        Ok(Some(_)) => {
+            let mut field_errors = BTreeMap::new();
+            field_errors.insert(
+                "cidr",
+                "CIDR overlaps an existing network boundary.".to_string(),
+            );
+            Err(network_error(
+                StatusCode::CONFLICT,
+                "Network CIDR overlaps an existing boundary.",
+                field_errors,
+            ))
+        }
+        Ok(None) => Ok(()),
+        Err(_) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Network validation is temporarily unavailable.",
+        )),
+    }
+}
+
 pub async fn list_generic(
     resource: &Resource,
     state: &AppState,
@@ -235,6 +360,10 @@ pub async fn create_generic(
         return Err(err(StatusCode::BAD_REQUEST, "body must be a JSON object"));
     };
 
+    if resource.table == NETWORKS.table {
+        validate_network(state, map, true, None).await?;
+    }
+
     let cols: Vec<Column> = resource
         .insertable
         .iter()
@@ -286,6 +415,10 @@ pub async fn patch_generic(
     let Some(expected_version) = map.get("version").and_then(|v| v.as_i64()) else {
         return Err(err(StatusCode::BAD_REQUEST, "version is required"));
     };
+
+    if resource.table == NETWORKS.table {
+        validate_network(state, map, false, Some(id)).await?;
+    }
 
     let cols: Vec<Column> = resource
         .patchable
@@ -612,6 +745,76 @@ mod tests {
             .await
             .expect("run migrations");
         Some(pool)
+    }
+
+    #[test]
+    fn network_validation_reports_invalid_fields() {
+        let body = json!({
+            "cidr": "not-a-cidr",
+            "gateway": "not-an-ip",
+            "vlan": 4096,
+        });
+
+        let errors = network_field_errors(body.as_object().expect("object"), true);
+
+        assert_eq!(
+            errors.get("cidr").map(String::as_str),
+            Some("CIDR must be a valid network range.")
+        );
+        assert_eq!(
+            errors.get("gateway").map(String::as_str),
+            Some("Gateway must be a valid IP address.")
+        );
+        assert_eq!(
+            errors.get("vlan").map(String::as_str),
+            Some("VLAN must be between 1 and 4094.")
+        );
+    }
+
+    #[test]
+    fn network_validation_accepts_optional_fields_and_valid_values() {
+        let body = json!({
+            "cidr": "192.168.1.0/24",
+            "gateway": "192.168.1.1",
+            "vlan": 20,
+        });
+
+        assert!(network_field_errors(body.as_object().expect("object"), true).is_empty());
+    }
+
+    #[tokio::test]
+    async fn network_validation_rejects_overlapping_cidr() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let state = AppState { pool: pool.clone() };
+        let name = format!("generic-network-{}", Uuid::new_v4());
+        sqlx::query("insert into networks (cidr, name) values ($1::cidr, $2)")
+            .bind("198.51.100.0/24")
+            .bind(&name)
+            .execute(&pool)
+            .await
+            .expect("insert network fixture");
+
+        let result = create_generic(
+            &NETWORKS,
+            &state,
+            json!({"cidr": "198.51.100.128/25", "name": "overlap"}),
+        )
+        .await;
+
+        let (status, body) = result.expect_err("overlapping CIDR should be rejected");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body.0["field_errors"]["cidr"],
+            json!("CIDR overlaps an existing network boundary.")
+        );
+        sqlx::query("delete from networks where name = $1")
+            .bind(name)
+            .execute(&pool)
+            .await
+            .expect("delete network fixture");
     }
 
     #[tokio::test]

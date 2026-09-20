@@ -206,4 +206,39 @@ describe("create dialogs", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("");
     expect(screen.getByLabelText("CIDR")).toHaveValue("");
   });
+
+  it("validates CIDR, gateway, and VLAN before submitting", () => {
+    const submit = vi.fn();
+    render(
+      <AddNetworkDialog
+        error={null}
+        onOpenChange={vi.fn()}
+        open
+        pending={false}
+        submit={submit}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("CIDR"), {
+      target: { value: "not-a-cidr" },
+    });
+    fireEvent.change(screen.getByLabelText("Gateway"), {
+      target: { value: "not-an-ip" },
+    });
+    fireEvent.change(screen.getByLabelText("VLAN"), {
+      target: { value: "4096" },
+    });
+    fireEvent.submit(screen.getByLabelText("CIDR").closest("form")!);
+
+    expect(
+      screen.getByText("CIDR must be a valid network range."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Gateway must be a valid IP address."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("VLAN must be between 1 and 4094."),
+    ).toBeInTheDocument();
+    expect(submit).not.toHaveBeenCalled();
+  });
 });

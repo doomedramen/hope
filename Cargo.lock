@@ -3472,6 +3472,7 @@ dependencies = [
  "futures-util",
  "governor",
  "hex",
+ "ipnet",
  "jiff",
  "jobs",
  "protocol",

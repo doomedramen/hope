@@ -641,11 +641,17 @@ export interface SetupStatusResponse {
 
 export class ApiError extends Error {
   readonly status: number;
+  readonly fieldErrors: Record<string, string>;
 
-  constructor(status: number, message: string) {
+  constructor(
+    status: number,
+    message: string,
+    fieldErrors: Record<string, string> = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.fieldErrors = fieldErrors;
   }
 }
 
@@ -678,12 +684,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const contentType = res.headers.get("content-type") ?? "";
   const body = contentType.includes("json")
-    ? ((await res.json()) as T & { error?: string })
+    ? ((await res.json()) as T & {
+        error?: string;
+        field_errors?: Record<string, string>;
+      })
     : null;
   if (!res.ok) {
     throw new ApiError(
       res.status,
       body?.error ?? `Request failed (${res.status})`,
+      body?.field_errors,
     );
   }
   return body as T;

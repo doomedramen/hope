@@ -30,6 +30,7 @@ clap.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 jiff.workspace = true
+ipnet.workspace = true
 rrule = "0.14"
 argon2.workspace = true
 rand.workspace = true
