@@ -22,6 +22,7 @@ Decisions are recorded using the template in [`0000-template.md`](0000-template.
 | [0016](0016-ssh-agent-deployment.md) | Bounded, host-key-verified SSH install and repair jobs. |
 | [0017](0017-signed-agent-updates.md) | Signed release channels, staged agent updates, and rollback recovery. |
 | [0018](0018-dependency-aware-alerting.md) | Confirmed dependency topology with durable downstream notification suppression. |
+| [0019](0019-maintenance-planning.md) | Timezone-aware maintenance reservations, recurrence expansion, conflict detection, and expected-failure handling. |
 
 ## Supporting library defaults
 

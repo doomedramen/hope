@@ -82,3 +82,12 @@ M8 notification suppression lands in 0028_alert_suppressions.sql. It records
 the root incident, dependency edge, path, target, event, and technical reason
 when a downstream incident notification is suppressed. Child incidents and
 monitor results are not removed.
+
+M9 maintenance planning lands in `0029_maintenance.sql`. It stores timezone-
+aware events, normalized target/required/affected/exclusive resources, and
+stable occurrences expanded through the bounded future horizon. `0030` keeps
+the exact maintenance occurrence behind an expected incident suppression;
+`0031` stores idempotent overrun deliveries routed through configured
+webhook/ntfy channels. The scheduler and reconcile job own lifecycle state,
+conflict checks, and recurring expansion; no frontend calendar is required for
+the backend milestone.
