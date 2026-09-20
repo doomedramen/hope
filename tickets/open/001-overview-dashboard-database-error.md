@@ -18,7 +18,8 @@ Steps observed:
 
 1. Open `http://192.168.1.242:8183/` while authenticated.
 2. Observe the Overview dashboard.
+3. Open Monitoring and select the Monitors view.
 
-Actual result: the dashboard renders partial data, but the error banner is visible. The `Retry` button does not remove the error during the observed load.
+Actual result: the Overview dashboard renders partial data with the error banner, and the Monitoring > Monitors view shows the same database error. The `Retry` button does not remove the error during the observed load.
 
 Expected result: Overview loads its dashboard data without exposing a database syntax error to the user.
