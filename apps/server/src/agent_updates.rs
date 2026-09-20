@@ -588,6 +588,12 @@ pub async fn compliance(
         .as_ref()
         .and_then(|row| row.try_get::<i32, _>("rollout_percent").ok())
         .unwrap_or(100);
+    let channel_kind = channel.parse::<release::ReleaseChannel>().map_err(|_| {
+        error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stored update policy has an invalid release channel",
+        )
+    })?;
 
     let Some((platform, architecture)) = platform_arch(&os, &arch) else {
         return Ok(Json(json!({
@@ -621,7 +627,7 @@ pub async fn compliance(
         Some(version.to_string())
     } else {
         repository
-            .latest_compatible(platform, architecture, protocol_version)
+            .latest_compatible_for_channel(platform, architecture, protocol_version, channel_kind)
             .ok()
             .map(|(release, _)| release.manifest.version)
     };
@@ -1021,12 +1027,12 @@ pub async fn handle_update(
             };
             let rollback_reason = match result.state {
                 ssh_install::AgentUpdateState::Succeeded => None,
-                ssh_install::AgentUpdateState::RolledBack => Some(
-                    "target agent did not check in; previous binary was restored".to_string(),
-                ),
-                ssh_install::AgentUpdateState::Repaired => Some(
-                    "target and rollback check-ins failed; SSH repair completed".to_string(),
-                ),
+                ssh_install::AgentUpdateState::RolledBack => {
+                    Some("target agent did not check in; previous binary was restored".to_string())
+                }
+                ssh_install::AgentUpdateState::Repaired => {
+                    Some("target and rollback check-ins failed; SSH repair completed".to_string())
+                }
             };
             let progress = json!({
                 "phase": state,
@@ -1095,6 +1101,12 @@ pub async fn reconcile(
         };
         let protocol_version: u32 =
             u32::try_from(row.get::<i32, _>("protocol_version")).unwrap_or(0);
+        let Ok(channel) = row
+            .get::<String, _>("channel")
+            .parse::<release::ReleaseChannel>()
+        else {
+            continue;
+        };
         let target = if let Some(pinned) = row.get::<Option<String>, _>("pinned_version") {
             match repository.load(&pinned) {
                 Ok(release)
@@ -1107,9 +1119,12 @@ pub async fn reconcile(
                 _ => continue,
             }
         } else {
-            let Ok((release, _)) =
-                repository.latest_compatible(platform, architecture, protocol_version)
-            else {
+            let Ok((release, _)) = repository.latest_compatible_for_channel(
+                platform,
+                architecture,
+                protocol_version,
+                channel,
+            ) else {
                 continue;
             };
             release.manifest.version

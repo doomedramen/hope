@@ -84,7 +84,7 @@ pub struct ReleaseRepository {
 
 #[derive(Debug, Clone)]
 pub struct VerifiedRelease {
-    pub manifest: release::Manifest,
+    pub manifest: release::ManifestWithMetadata,
     pub manifest_sha256: String,
     pub manifest_signing_key_fingerprint: String,
     directory: PathBuf,
@@ -102,6 +102,8 @@ pub struct VerifiedArtifact {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseSummary {
     pub version: String,
+    pub channel: release::ReleaseChannel,
+    pub release_notes: Option<String>,
     pub manifest_sha256: String,
     pub signing_key_fingerprint: String,
     pub artifacts: Vec<ArtifactSummary>,
@@ -258,13 +260,17 @@ impl ReleaseRepository {
         Ok(release)
     }
 
-    pub fn latest_compatible(
+    pub fn latest_compatible_for_channel(
         &self,
         platform: &str,
         arch: &str,
         protocol_version: u32,
+        channel: release::ReleaseChannel,
     ) -> Result<(VerifiedRelease, VerifiedArtifact)> {
         for release in self.list()? {
+            if release.manifest.channel != channel {
+                continue;
+            }
             if let Some(artifact) = compatible_artifact(&release, platform, arch, protocol_version)
             {
                 return Ok((release, artifact));
@@ -335,7 +341,7 @@ impl ReleaseRepository {
                     .is_ok()
             })
             .ok_or(RepositoryError::InvalidManifestSignature)?;
-        let manifest: release::Manifest =
+        let manifest: release::ManifestWithMetadata =
             serde_json::from_slice(&manifest_bytes).map_err(RepositoryError::Json)?;
         validate_version(&manifest.version)?;
         if manifest.artifacts.is_empty() || manifest.artifacts.len() > MAX_ARTIFACTS {
@@ -412,6 +418,8 @@ impl VerifiedRelease {
     pub fn summary(&self) -> ReleaseSummary {
         ReleaseSummary {
             version: self.manifest.version.clone(),
+            channel: self.manifest.channel,
+            release_notes: self.manifest.release_notes.clone(),
             manifest_sha256: self.manifest_sha256.clone(),
             signing_key_fingerprint: self.manifest_signing_key_fingerprint.clone(),
             artifacts: self
@@ -541,6 +549,16 @@ mod tests {
     use tempfile::tempdir;
 
     fn write_bundle(root: &Path, key: &SigningKey, version: &str, binary: &[u8]) {
+        write_bundle_with_channel(root, key, version, binary, release::ReleaseChannel::Stable);
+    }
+
+    fn write_bundle_with_channel(
+        root: &Path,
+        key: &SigningKey,
+        version: &str,
+        binary: &[u8],
+        channel: release::ReleaseChannel,
+    ) {
         fs::create_dir_all(root).unwrap();
         let record = release::ArtifactRecord {
             version: version.to_string(),
@@ -557,7 +575,11 @@ mod tests {
         let manifest = release::Manifest {
             version: version.to_string(),
             artifacts: vec![signed],
-        };
+        }
+        .with_metadata(release::ManifestMetadata {
+            channel,
+            release_notes: None,
+        });
         let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
         fs::write(root.join("manifest.json"), &bytes).unwrap();
         fs::write(
@@ -642,5 +664,32 @@ mod tests {
             ReleaseRepository::new(temp.path(), keys),
             Err(RepositoryError::TooManyTrustedKeys { .. })
         ));
+    }
+
+    #[test]
+    fn latest_compatible_release_respects_channel() {
+        let temp = tempdir().unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        write_bundle_with_channel(
+            &temp.path().join("stable"),
+            &key,
+            "1.0.0",
+            b"stable",
+            release::ReleaseChannel::Stable,
+        );
+        write_bundle_with_channel(
+            &temp.path().join("canary"),
+            &key,
+            "2.0.0",
+            b"canary",
+            release::ReleaseChannel::Canary,
+        );
+        let repo = ReleaseRepository::new(temp.path(), vec![key.verifying_key()]).unwrap();
+        let (release, artifact) = repo
+            .latest_compatible_for_channel("linux", "amd64", 1, release::ReleaseChannel::Canary)
+            .unwrap();
+        assert_eq!(release.manifest.channel, release::ReleaseChannel::Canary);
+        assert_eq!(release.manifest.version, "2.0.0");
+        assert_eq!(repo.read_artifact(&release, &artifact).unwrap(), b"canary");
     }
 }
