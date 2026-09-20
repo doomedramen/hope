@@ -5,9 +5,11 @@ import {
   CircleAlertIcon,
   CircleHelpIcon,
   Clock3Icon,
+  CopyIcon,
   ContainerIcon,
   CpuIcon,
   DatabaseIcon,
+  DownloadIcon,
   FileTextIcon,
   HardDriveIcon,
   NetworkIcon,
@@ -51,6 +53,15 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Empty,
   EmptyDescription,
   EmptyHeader,
@@ -74,6 +85,7 @@ const EMPTY_AGENTS: Agent[] = [];
 
 export function AgentsPage() {
   const [requestedAgentId, setRequestedAgentId] = useState<string | null>(null);
+  const [enrollmentOpen, setEnrollmentOpen] = useState(false);
   const [search, setSearch] = useState("");
   const agentsQuery = useQuery({
     queryKey: ["agents"],
@@ -122,17 +134,23 @@ export function AgentsPage() {
         <div>
           <h1 className="text-3xl font-semibold tracking-tight">Agents</h1>
         </div>
-        <Button
-          onClick={() => {
-            void agentsQuery.refetch();
-            if (selectedAgentId) void detailQuery.refetch();
-          }}
-          size="sm"
-          variant="outline"
-        >
-          <RefreshCwIcon data-icon="inline-start" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={() => {
+              void agentsQuery.refetch();
+              if (selectedAgentId) void detailQuery.refetch();
+            }}
+            size="sm"
+            variant="outline"
+          >
+            <RefreshCwIcon data-icon="inline-start" />
+            Refresh
+          </Button>
+          <Button onClick={() => setEnrollmentOpen(true)} size="sm">
+            <DownloadIcon data-icon="inline-start" />
+            Enroll agent
+          </Button>
+        </div>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -209,6 +227,12 @@ export function AgentsPage() {
                       ? "Clear search to view all enrolled agents."
                       : "Enroll a Linux agent to collect host inventory."}
                   </EmptyDescription>
+                  {!search.trim() ? (
+                    <Button onClick={() => setEnrollmentOpen(true)}>
+                      <DownloadIcon data-icon="inline-start" />
+                      Enroll agent
+                    </Button>
+                  ) : null}
                 </EmptyHeader>
               </Empty>
             </CardContent>
@@ -229,6 +253,137 @@ export function AgentsPage() {
           selectedAgent={selectedAgent}
         />
       </div>
+      <EnrollmentDialog
+        onOpenChange={setEnrollmentOpen}
+        open={enrollmentOpen}
+      />
+    </div>
+  );
+}
+
+function EnrollmentDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const baseUrl =
+    typeof window === "undefined"
+      ? "https://hope.example"
+      : window.location.origin;
+  const scriptUrl = `${baseUrl}/install-agent.sh`;
+  const tokenCommand = "server enroll-token create --ttl-minutes 15";
+  const downloadCommand = `curl -fsSL ${scriptUrl} -o /tmp/hope-install-agent.sh && chmod 0700 /tmp/hope-install-agent.sh`;
+  const installCommand = `sudo /tmp/hope-install-agent.sh \\
+  --enroll-url https://<hope-host>:8444 \\
+  --gateway-url wss://<hope-host>:8443 \\
+  --release-base-url ${baseUrl}`;
+  const [copied, setCopied] = useState<string | null>(null);
+
+  async function copy(label: string, value: string) {
+    if (!navigator.clipboard) return;
+    await navigator.clipboard.writeText(value);
+    setCopied(label);
+    window.setTimeout(() => setCopied(null), 2_000);
+  }
+
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent className="max-h-[min(90vh,48rem)] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Enroll a Linux agent</DialogTitle>
+          <DialogDescription>
+            Create a short-lived code, then run the signed installer on the
+            Linux host. The code is single-use and never appears in this UI.
+          </DialogDescription>
+        </DialogHeader>
+        <ol className="flex list-decimal flex-col gap-5 pl-5">
+          <li className="grid gap-2 pl-1">
+            <span className="font-medium">Create an enrollment code</span>
+            <CommandBlock
+              copied={copied === "token"}
+              label="enrollment token command"
+              onCopy={() => copy("token", tokenCommand)}
+              value={tokenCommand}
+            />
+            <p className="text-xs text-muted-foreground">
+              Run this on the Hope server and transfer the printed
+              <code className="mx-1 rounded bg-muted px-1">code=</code> value to
+              the target host through a trusted channel.
+            </p>
+          </li>
+          <li className="grid gap-2 pl-1">
+            <span className="font-medium">Download the installer</span>
+            <CommandBlock
+              copied={copied === "download"}
+              label="installer download command"
+              onCopy={() => copy("download", downloadCommand)}
+              value={downloadCommand}
+            />
+            <Button
+              className="w-fit"
+              render={
+                <a href="/install-agent.sh" rel="noreferrer" target="_blank" />
+              }
+              size="sm"
+              variant="outline"
+            >
+              <DownloadIcon data-icon="inline-start" />
+              Download installer
+            </Button>
+          </li>
+          <li className="grid gap-2 pl-1">
+            <span className="font-medium">Install and enroll the host</span>
+            <CommandBlock
+              copied={copied === "install"}
+              label="agent install command"
+              onCopy={() => copy("install", installCommand)}
+              value={installCommand}
+            />
+            <p className="text-xs text-muted-foreground">
+              Replace{" "}
+              <code className="rounded bg-muted px-1">&lt;hope-host&gt;</code>
+              with the server hostname. The installer prompts for the code
+              without echoing it; add{" "}
+              <code className="rounded bg-muted px-1">--code-stdin --yes</code>
+              when piping the code from a secret manager.
+            </p>
+          </li>
+        </ol>
+        <DialogFooter>
+          <DialogClose render={<Button variant="outline" />}>Done</DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CommandBlock({
+  value,
+  label,
+  copied,
+  onCopy,
+}: {
+  value: string;
+  label: string;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  return (
+    <div className="flex items-start gap-2 rounded-lg border bg-muted/40 p-2">
+      <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap p-1 font-mono text-xs leading-relaxed">
+        {value}
+      </pre>
+      <Button
+        aria-label={`Copy ${label}`}
+        onClick={onCopy}
+        size="icon-sm"
+        type="button"
+        variant="ghost"
+      >
+        {copied ? <CheckIcon /> : <CopyIcon />}
+      </Button>
     </div>
   );
 }

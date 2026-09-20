@@ -154,6 +154,31 @@ describe("AgentsPage", () => {
     expect(await screen.findByText("No enrolled agents")).toBeInTheDocument();
   });
 
+  it("offers a guided enrollment flow from the empty state", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null })),
+    );
+
+    renderPage();
+
+    expect(await screen.findByText("No enrolled agents")).toBeInTheDocument();
+    const enrollButtons = screen.getAllByRole("button", {
+      name: "Enroll agent",
+    });
+    fireEvent.click(enrollButtons.at(-1)!);
+
+    expect(
+      await screen.findByRole("heading", { name: "Enroll a Linux agent" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("server enroll-token create --ttl-minutes 15"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Download installer" }),
+    ).toHaveAttribute("href", "/install-agent.sh");
+  });
+
   it("shows an actionable error state when the list cannot load", async () => {
     vi.stubGlobal(
       "fetch",
