@@ -36,6 +36,7 @@ const STALE_AFTER: Duration = DEFAULT_STALE_AFTER;
 #[derive(Debug, FromRow)]
 struct ClaimedMonitor {
     id: Uuid,
+    service_id: Option<Uuid>,
     monitor_type: String,
     config: Value,
     interval_seconds: i32,
@@ -142,7 +143,7 @@ async fn claim_due(pool: &PgPool, owner: &str) -> sqlx::Result<Option<ClaimedMon
              from candidate c where m.id = c.id \
              returning m.id \
          ) \
-         select m.id, m.monitor_type, m.config, m.interval_seconds, m.timeout_ms, \
+         select m.id, m.service_id, m.monitor_type, m.config, m.interval_seconds, m.timeout_ms, \
                 m.failure_threshold, m.recovery_threshold, m.state, m.underlying_state, \
                 m.consecutive_failures, m.consecutive_successes, m.last_result_at, \
                 m.last_success_at, m.last_failure_at, e.address::text as address, e.port, \
@@ -351,6 +352,18 @@ async fn persist_outcome(
         monitor.last_failure_at
     };
     let next_delay = next_delay_seconds(monitor.interval_seconds, monitor.id);
+    let suppression_reasons = if update
+        .events
+        .iter()
+        .any(|event| event.kind == HealthEventKind::IncidentOpened)
+    {
+        match monitor.service_id {
+            Some(service_id) => notifications::find_suppressions(pool, service_id).await?,
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
 
     let mut tx = pool.begin().await?;
     let result_id: Uuid = sqlx::query_scalar(
@@ -484,12 +497,19 @@ async fn persist_outcome(
         {
             notifications::enqueue_incident_notifications(
                 &mut tx,
-                incident_id,
-                monitor.id,
-                notification_event,
-                notification_severity,
-                result_id,
-                outcome.error.as_deref().unwrap_or("Monitor recovered"),
+                notifications::IncidentNotification {
+                    incident_id,
+                    monitor_id: monitor.id,
+                    event_type: notification_event,
+                    severity: notification_severity,
+                    result_id,
+                    summary: outcome.error.as_deref().unwrap_or("Monitor recovered"),
+                },
+                if notification_event == "incident.opened" {
+                    &suppression_reasons
+                } else {
+                    &[]
+                },
             )
             .await?;
         }
@@ -645,6 +665,16 @@ mod tests {
     }
 
     async fn create_monitor(pool: &PgPool, port: u16, failure_threshold: i32) -> Uuid {
+        create_monitor_topology(pool, port, failure_threshold)
+            .await
+            .0
+    }
+
+    async fn create_monitor_topology(
+        pool: &PgPool,
+        port: u16,
+        failure_threshold: i32,
+    ) -> (Uuid, Uuid, Uuid) {
         let device_id: Uuid =
             sqlx::query_scalar("insert into devices (device_type) values ('unknown') returning id")
                 .fetch_one(pool)
@@ -667,7 +697,7 @@ mod tests {
         .fetch_one(pool)
         .await
         .expect("create monitor endpoint");
-        sqlx::query_scalar(
+        let monitor_id = sqlx::query_scalar(
             "insert into monitors \
                 (service_id, endpoint_id, monitor_type, config, interval_seconds, timeout_ms, \
                  failure_threshold, recovery_threshold, next_run_at) \
@@ -684,7 +714,8 @@ mod tests {
         .bind(failure_threshold)
         .fetch_one(pool)
         .await
-        .expect("create monitor")
+        .expect("create monitor");
+        (monitor_id, service_id, device_id)
     }
 
     async fn isolate_due_monitors(pool: &PgPool) {
@@ -695,6 +726,28 @@ mod tests {
         .execute(pool)
         .await
         .expect("isolate due monitors");
+    }
+
+    async fn create_critical_webhook_route(pool: &PgPool, prefix: &str) -> Uuid {
+        let channel_id: Uuid = sqlx::query_scalar(
+            "insert into notification_channels (name, provider, config) \
+             values ($1, 'webhook', $2) returning id",
+        )
+        .bind(format!("{prefix}-{}", Uuid::new_v4()))
+        .bind(json!({"url": "http://127.0.0.1:9/hook"}))
+        .fetch_one(pool)
+        .await
+        .expect("create notification channel");
+        sqlx::query(
+            "insert into notification_routes \
+                 (channel_id, min_severity, event_types) \
+             values ($1, 'critical', '[\"incident.opened\"]'::jsonb)",
+        )
+        .bind(channel_id)
+        .execute(pool)
+        .await
+        .expect("create notification route");
+        channel_id
     }
 
     #[tokio::test]
@@ -852,6 +905,178 @@ mod tests {
         .unwrap();
         assert_eq!(row.1, 1);
         assert_eq!(row.2, 1);
+    }
+
+    #[tokio::test]
+    async fn parent_incident_suppresses_child_delivery_with_durable_reason() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        isolate_due_monitors(&pool).await;
+        let channel_id = create_critical_webhook_route(&pool, "scheduler-suppression").await;
+        let (parent_monitor, _parent_service, parent_device) =
+            create_monitor_topology(&pool, 1, 1).await;
+        let (child_monitor, child_service, _child_device) =
+            create_monitor_topology(&pool, 1, 1).await;
+        let edge_id: Uuid = sqlx::query_scalar(
+            "insert into dependency_edges \
+                (provider_kind, provider_id, consumer_kind, consumer_id, dependency_kind, \
+                 criticality, origin, health_propagation, confirmation_state) \
+             values ('devices', $1, 'services', $2, 'host', 'hard', 'manual', \
+                     'suppress_only', 'confirmed') returning id",
+        )
+        .bind(parent_device)
+        .bind(child_service)
+        .fetch_one(&pool)
+        .await
+        .expect("create parent dependency");
+
+        sqlx::query("update monitors set next_run_at = now() where id = $1")
+            .bind(parent_monitor)
+            .execute(&pool)
+            .await
+            .expect("make parent due");
+        sqlx::query("update monitors set next_run_at = now() + interval '1 hour' where id = $1")
+            .bind(child_monitor)
+            .execute(&pool)
+            .await
+            .expect("hold child monitor");
+        let parent = claim_due(&pool, "suppression-test")
+            .await
+            .unwrap()
+            .expect("parent monitor is due");
+        execute_one(&pool, "suppression-test", parent)
+            .await
+            .expect("persist parent failure");
+        let parent_incident: Uuid =
+            sqlx::query_scalar("select id from incidents where monitor_id = $1 and state = 'open'")
+                .bind(parent_monitor)
+                .fetch_one(&pool)
+                .await
+                .expect("parent incident");
+
+        sqlx::query("update monitors set next_run_at = now() where id = $1")
+            .bind(child_monitor)
+            .execute(&pool)
+            .await
+            .expect("make child due");
+        let child = claim_due(&pool, "suppression-test")
+            .await
+            .unwrap()
+            .expect("child monitor is due");
+        execute_one(&pool, "suppression-test", child)
+            .await
+            .expect("persist child failure");
+        let (child_incident,): (Uuid,) =
+            sqlx::query_as("select id from incidents where monitor_id = $1 and state = 'open'")
+                .bind(child_monitor)
+                .fetch_one(&pool)
+                .await
+                .expect("child incident");
+        let (root_incident, dependency_edge, reason, path): (Uuid, Uuid, String, Value) =
+            sqlx::query_as(
+                "select root_incident_id, dependency_edge_id, reason, dependency_path \
+                   from incident_notification_suppressions \
+                  where incident_id = $1",
+            )
+            .bind(child_incident)
+            .fetch_one(&pool)
+            .await
+            .expect("suppression reason");
+        assert_eq!(root_incident, parent_incident);
+        assert_eq!(dependency_edge, edge_id);
+        assert!(reason.contains(&parent_incident.to_string()));
+        let edge_id_text = edge_id.to_string();
+        assert_eq!(
+            path.as_array()
+                .and_then(|items| items.first())
+                .and_then(Value::as_str),
+            Some(edge_id_text.as_str())
+        );
+
+        let child_deliveries: i64 = sqlx::query_scalar(
+            "select count(*) from notification_deliveries \
+              where incident_id = $1 and channel_id = $2 and event_type = 'incident.opened'",
+        )
+        .bind(child_incident)
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .expect("child delivery count");
+        assert_eq!(child_deliveries, 0);
+        let parent_deliveries: i64 = sqlx::query_scalar(
+            "select count(*) from notification_deliveries \
+              where incident_id = $1 and channel_id = $2 and event_type = 'incident.opened'",
+        )
+        .bind(parent_incident)
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .expect("parent delivery count");
+        assert_eq!(parent_deliveries, 1);
+    }
+
+    #[tokio::test]
+    async fn child_failure_alerts_when_dependency_is_healthy() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        isolate_due_monitors(&pool).await;
+        let channel_id = create_critical_webhook_route(&pool, "scheduler-independent").await;
+        let healthy_parent: Uuid = sqlx::query_scalar(
+            "insert into devices (device_type) values ('physical_host') returning id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("create healthy parent");
+        let (child_monitor, child_service, _child_device) =
+            create_monitor_topology(&pool, 1, 1).await;
+        sqlx::query(
+            "insert into dependency_edges \
+                (provider_kind, provider_id, consumer_kind, consumer_id, dependency_kind, \
+                 criticality, origin, health_propagation, confirmation_state) \
+             values ('devices', $1, 'services', $2, 'host', 'hard', 'manual', \
+                     'suppress_only', 'confirmed')",
+        )
+        .bind(healthy_parent)
+        .bind(child_service)
+        .execute(&pool)
+        .await
+        .expect("create healthy dependency");
+
+        let child = claim_due(&pool, "independent-test")
+            .await
+            .unwrap()
+            .expect("child monitor is due");
+        execute_one(&pool, "independent-test", child)
+            .await
+            .expect("persist independent child failure");
+        let child_incident: Uuid =
+            sqlx::query_scalar("select id from incidents where monitor_id = $1 and state = 'open'")
+                .bind(child_monitor)
+                .fetch_one(&pool)
+                .await
+                .expect("child incident");
+        let deliveries: i64 = sqlx::query_scalar(
+            "select count(*) from notification_deliveries \
+              where incident_id = $1 and channel_id = $2 and event_type = 'incident.opened'",
+        )
+        .bind(child_incident)
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .expect("independent delivery count");
+        assert_eq!(deliveries, 1);
+        let suppressions: i64 = sqlx::query_scalar(
+            "select count(*) from incident_notification_suppressions where incident_id = $1",
+        )
+        .bind(child_incident)
+        .fetch_one(&pool)
+        .await
+        .expect("independent suppression count");
+        assert_eq!(suppressions, 0);
     }
 
     #[tokio::test]

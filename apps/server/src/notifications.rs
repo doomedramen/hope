@@ -12,11 +12,12 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{FromRow, Postgres, Transaction};
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::dependency_graph;
 use crate::state::AppState;
 
 const EVENT_OPENED: &str = "incident.opened";
@@ -71,6 +72,112 @@ pub struct RouteListQuery {
 
 fn default_min_severity() -> String {
     "warning".to_string()
+}
+
+/// The durable explanation attached to an incident when a dependency-aware
+/// policy suppresses its downstream notification.
+#[derive(Debug, Clone, Serialize)]
+pub struct SuppressionReason {
+    pub root_incident_id: Uuid,
+    pub dependency_edge_id: Uuid,
+    pub dependency_path: Vec<Uuid>,
+    pub provider_kind: String,
+    pub provider_id: Uuid,
+    pub reason: String,
+}
+
+pub struct IncidentNotification<'a> {
+    pub incident_id: Uuid,
+    pub monitor_id: Uuid,
+    pub event_type: &'a str,
+    pub severity: &'a str,
+    pub result_id: Uuid,
+    pub summary: &'a str,
+}
+
+/// Find open incidents on upstream dependencies of a service. The graph
+/// helper bounds traversal; this function adds the operational question of
+/// whether each upstream entity currently has an open monitored incident.
+pub async fn find_suppressions(pool: &PgPool, service_id: Uuid) -> Result<Vec<SuppressionReason>> {
+    const MAX_SUPPRESSIONS: usize = 32;
+    let paths = dependency_graph::upstream_dependency_paths(pool, "services", service_id).await?;
+    let mut suppressions = Vec::new();
+
+    for path in paths {
+        if path.edge_ids.is_empty() || suppressions.len() >= MAX_SUPPRESSIONS {
+            continue;
+        }
+        let suppressible: Option<bool> = sqlx::query_scalar(
+            "select bool_and(criticality = 'hard' or health_propagation in ('propagate', 'suppress_only')) \
+               from dependency_edges \
+              where id = any($1::uuid[]) and confirmation_state = 'confirmed'",
+        )
+        .bind(&path.edge_ids)
+        .fetch_one(pool)
+        .await?;
+        if !suppressible.unwrap_or(false) {
+            continue;
+        }
+        let root_incident: Option<(Uuid,)> = sqlx::query_as(
+            r#"
+            select i.id
+              from incidents i
+              join monitors m on m.id = i.monitor_id
+              left join services s on s.id = m.service_id
+             where i.state = 'open'
+               and (
+                   ($1 in ('service', 'services') and s.id = $2)
+                   or ($1 in ('workload', 'workloads')
+                       and s.owner_kind = 'workload' and s.owner_id = $2)
+                   or ($1 in ('device', 'devices') and (
+                       (s.owner_kind = 'device' and s.owner_id = $2)
+                       or (s.owner_kind = 'workload' and exists (
+                           select 1 from workloads w
+                            where w.id = s.owner_id and w.host_device_id = $2
+                       ))
+                       or exists (
+                           select 1
+                             from containment_edges ce
+                            where ce.parent_kind in ('device', 'devices')
+                              and ce.parent_id = $2
+                              and ce.child_kind in ('service', 'services')
+                              and ce.child_id = s.id
+                       )
+                   ))
+               )
+             order by i.opened_at asc, i.id asc
+             limit 1
+            "#,
+        )
+        .bind(&path.provider_kind)
+        .bind(path.provider_id)
+        .fetch_optional(pool)
+        .await?;
+        let Some((root_incident_id,)) = root_incident else {
+            continue;
+        };
+
+        let dependency_edge_id = path.edge_ids[0];
+        if suppressions.iter().any(|existing: &SuppressionReason| {
+            existing.root_incident_id == root_incident_id
+                && existing.dependency_edge_id == dependency_edge_id
+        }) {
+            continue;
+        }
+        suppressions.push(SuppressionReason {
+            root_incident_id,
+            dependency_edge_id,
+            dependency_path: path.edge_ids,
+            provider_kind: path.provider_kind.clone(),
+            provider_id: path.provider_id,
+            reason: format!(
+                "suppressed by open incident {root_incident_id} on dependency {}/{}",
+                path.provider_kind, path.provider_id
+            ),
+        });
+    }
+
+    Ok(suppressions)
 }
 
 pub async fn list_channels(
@@ -235,23 +342,44 @@ pub async fn create_route(
 /// incident transition. Replaying the transition cannot duplicate a delivery.
 pub async fn enqueue_incident_notifications(
     tx: &mut Transaction<'_, Postgres>,
-    incident_id: Uuid,
-    monitor_id: Uuid,
-    event_type: &str,
-    severity: &str,
-    result_id: Uuid,
-    summary: &str,
+    notification: IncidentNotification<'_>,
+    suppressions: &[SuppressionReason],
 ) -> Result<()> {
-    if !matches!(event_type, EVENT_OPENED | EVENT_RECOVERED) || !severity_is_valid(severity) {
+    if !matches!(notification.event_type, EVENT_OPENED | EVENT_RECOVERED)
+        || !severity_is_valid(notification.severity)
+    {
         return Err(anyhow!("invalid notification event"));
     }
+    if notification.event_type == EVENT_OPENED && !suppressions.is_empty() {
+        for suppression in suppressions {
+            sqlx::query(
+                "insert into incident_notification_suppressions \
+                    (incident_id, root_incident_id, dependency_edge_id, dependency_path, \
+                     provider_kind, provider_id, event_type, reason) \
+                 values ($1, $2, $3, $4, $5, $6, $7, $8) \
+                 on conflict (incident_id, root_incident_id, dependency_edge_id, event_type) \
+                 do nothing",
+            )
+            .bind(notification.incident_id)
+            .bind(suppression.root_incident_id)
+            .bind(suppression.dependency_edge_id)
+            .bind(serde_json::to_value(&suppression.dependency_path)?)
+            .bind(&suppression.provider_kind)
+            .bind(suppression.provider_id)
+            .bind(notification.event_type)
+            .bind(&suppression.reason)
+            .execute(&mut **tx)
+            .await?;
+        }
+        return Ok(());
+    }
     let payload = json!({
-        "event": event_type,
-        "incident_id": incident_id,
-        "monitor_id": monitor_id,
-        "result_id": result_id,
-        "severity": severity,
-        "summary": summary,
+        "event": notification.event_type,
+        "incident_id": notification.incident_id,
+        "monitor_id": notification.monitor_id,
+        "result_id": notification.result_id,
+        "severity": notification.severity,
+        "summary": notification.summary,
     });
     let routes: Vec<(Uuid, i32, String)> = sqlx::query_as(
         "select r.channel_id, r.delay_seconds, r.min_severity \
@@ -259,11 +387,11 @@ pub async fn enqueue_incident_notifications(
            join notification_channels c on c.id = r.channel_id \
           where r.enabled and c.enabled and r.event_types ? $1",
     )
-    .bind(event_type)
+    .bind(notification.event_type)
     .fetch_all(&mut **tx)
     .await?;
     for (channel_id, delay_seconds, min_severity) in routes {
-        if severity_rank(severity) < severity_rank(&min_severity) {
+        if severity_rank(notification.severity) < severity_rank(&min_severity) {
             continue;
         }
         let delivery: Option<(Uuid,)> = sqlx::query_as(
@@ -273,10 +401,10 @@ pub async fn enqueue_incident_notifications(
              on conflict (incident_id, channel_id, event_type) do nothing \
              returning id",
         )
-        .bind(incident_id)
+        .bind(notification.incident_id)
         .bind(channel_id)
-        .bind(event_type)
-        .bind(severity)
+        .bind(notification.event_type)
+        .bind(notification.severity)
         .bind(&payload)
         .fetch_optional(&mut **tx)
         .await?;

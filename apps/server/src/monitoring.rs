@@ -493,28 +493,37 @@ pub async fn incidents(
 ) -> (StatusCode, Json<Value>) {
     let limit = query.limit.unwrap_or(100).clamp(1, 100);
     let rows: Result<Vec<(Value,)>, sqlx::Error> = sqlx::query_as(
-        "select row_to_json(t) from (\
-           select i.*,\
-                  m.service_id,\
-                  m.endpoint_id,\
-                  m.monitor_type,\
-                  m.state as monitor_state,\
-                  e.address::text as endpoint_address,\
-                  e.port as endpoint_port,\
-                  e.url as endpoint_url,\
-                  e.dns_name as endpoint_dns_name,\
-                  s.name as service_name,\
-                  s.product as service_product,\
-                  m.agent_id, a.hostname as agent_hostname\
-             from incidents i\
-             join monitors m on m.id = i.monitor_id\
-             left join endpoints e on e.id = m.endpoint_id\
-             left join services s on s.id = m.service_id\
-             left join agents a on a.id = m.agent_id\
-            where ($1::text is null or i.state = $1)\
-            order by i.last_event_at desc, i.id desc\
-            limit $2\
-         ) t",
+        r#"
+        select row_to_json(t) from (
+           select i.*,
+                  m.service_id,
+                  m.endpoint_id,
+                  m.monitor_type,
+                  m.state as monitor_state,
+                  e.address::text as endpoint_address,
+                  e.port as endpoint_port,
+                  e.url as endpoint_url,
+                  e.dns_name as endpoint_dns_name,
+                  s.name as service_name,
+                  s.product as service_product,
+                  m.agent_id, a.hostname as agent_hostname,
+                  (select coalesce(jsonb_agg(row_to_json(suppression) order by suppression.created_at), '[]'::jsonb)
+                     from (select sns.id, sns.root_incident_id, sns.dependency_edge_id,
+                                  sns.dependency_path, sns.provider_kind, sns.provider_id,
+                                  sns.event_type, sns.reason, sns.created_at
+                             from incident_notification_suppressions sns
+                            where sns.incident_id = i.id) suppression)
+                    as notification_suppressions
+             from incidents i
+             join monitors m on m.id = i.monitor_id
+             left join endpoints e on e.id = m.endpoint_id
+             left join services s on s.id = m.service_id
+             left join agents a on a.id = m.agent_id
+            where ($1::text is null or i.state = $1)
+            order by i.last_event_at desc, i.id desc
+            limit $2
+         ) t
+        "#,
     )
     .bind(query.state)
     .bind(limit)
@@ -534,26 +543,35 @@ pub async fn incident(
     Path(id): Path<Uuid>,
 ) -> (StatusCode, Json<Value>) {
     let row: Result<Option<(Value,)>, sqlx::Error> = sqlx::query_as(
-        "select row_to_json(t) from (\
-           select i.*,\
-                  m.service_id,\
-                  m.endpoint_id,\
-                  m.monitor_type,\
-                  m.state as monitor_state,\
-                  e.address::text as endpoint_address,\
-                  e.port as endpoint_port,\
-                  e.url as endpoint_url,\
-                  e.dns_name as endpoint_dns_name,\
-                  s.name as service_name,\
-                  s.product as service_product,\
-                  m.agent_id, a.hostname as agent_hostname\
-             from incidents i\
-             join monitors m on m.id = i.monitor_id\
-             left join endpoints e on e.id = m.endpoint_id\
-             left join services s on s.id = m.service_id\
-             left join agents a on a.id = m.agent_id\
-            where i.id = $1\
-         ) t",
+        r#"
+        select row_to_json(t) from (
+           select i.*,
+                  m.service_id,
+                  m.endpoint_id,
+                  m.monitor_type,
+                  m.state as monitor_state,
+                  e.address::text as endpoint_address,
+                  e.port as endpoint_port,
+                  e.url as endpoint_url,
+                  e.dns_name as endpoint_dns_name,
+                  s.name as service_name,
+                  s.product as service_product,
+                  m.agent_id, a.hostname as agent_hostname,
+                  (select coalesce(jsonb_agg(row_to_json(suppression) order by suppression.created_at), '[]'::jsonb)
+                     from (select sns.id, sns.root_incident_id, sns.dependency_edge_id,
+                                  sns.dependency_path, sns.provider_kind, sns.provider_id,
+                                  sns.event_type, sns.reason, sns.created_at
+                             from incident_notification_suppressions sns
+                            where sns.incident_id = i.id) suppression)
+                    as notification_suppressions
+             from incidents i
+             join monitors m on m.id = i.monitor_id
+             left join endpoints e on e.id = m.endpoint_id
+             left join services s on s.id = m.service_id
+             left join agents a on a.id = m.agent_id
+            where i.id = $1
+         ) t
+        "#,
     )
     .bind(id)
     .fetch_optional(&state.pool)
@@ -592,6 +610,112 @@ mod tests {
         )
         .expect_err("zero threshold must be rejected");
         assert!(error.to_string().contains("failure_threshold"));
+    }
+
+    #[tokio::test]
+    async fn incident_responses_include_suppression_reasons() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+
+        let device_id: Uuid =
+            sqlx::query_scalar("insert into devices (device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let service_id: Uuid = sqlx::query_scalar(
+            "insert into services (protocol, owner_kind, owner_id) \
+             values ('http', 'device', $1) returning id",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let endpoint_id: Uuid = sqlx::query_scalar(
+            "insert into endpoints (service_id, endpoint_type, address, port) \
+             values ($1, 'socket', '127.0.0.1'::inet, 1) returning id",
+        )
+        .bind(service_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let monitor_id: Uuid = sqlx::query_scalar(
+            "insert into monitors (service_id, endpoint_id, monitor_type) \
+             values ($1, $2, 'http') returning id",
+        )
+        .bind(service_id)
+        .bind(endpoint_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let result_id: Uuid = sqlx::query_scalar(
+            "insert into monitor_results (monitor_id, status, error) \
+             values ($1, 'failure', 'test') returning id",
+        )
+        .bind(monitor_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let incident_id: Uuid = sqlx::query_scalar(
+            "insert into incidents (monitor_id, state, severity, last_result_id, summary) \
+             values ($1, 'open', 'critical', $2, 'test incident') returning id",
+        )
+        .bind(monitor_id)
+        .bind(result_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let edge_id: Uuid = sqlx::query_scalar(
+            "insert into dependency_edges \
+                (provider_kind, provider_id, consumer_kind, consumer_id, dependency_kind, \
+                 criticality, origin, health_propagation, confirmation_state) \
+             values ('devices', $1, 'services', $2, 'host', 'hard', 'manual', \
+                     'suppress_only', 'confirmed') returning id",
+        )
+        .bind(device_id)
+        .bind(service_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into incident_notification_suppressions \
+                (incident_id, root_incident_id, dependency_edge_id, dependency_path, \
+                 provider_kind, provider_id, event_type, reason) \
+             values ($1, $1, $2, $3, 'devices', $4, 'incident.opened', $5)",
+        )
+        .bind(incident_id)
+        .bind(edge_id)
+        .bind(json!([edge_id]))
+        .bind(device_id)
+        .bind("suppressed by test dependency")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (status, Json(body)) = incidents(
+            State(AppState { pool: pool.clone() }),
+            Query(IncidentListQuery {
+                state: Some("open".to_string()),
+                limit: Some(100),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let item = body["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == json!(incident_id)))
+            .expect("incident is listed");
+        let suppressions = item["notification_suppressions"]
+            .as_array()
+            .expect("suppression array");
+        assert_eq!(suppressions.len(), 1);
+        assert_eq!(suppressions[0]["dependency_edge_id"], json!(edge_id));
+        assert_eq!(suppressions[0]["reason"], "suppressed by test dependency");
     }
 
     #[test]
