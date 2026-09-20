@@ -44,7 +44,10 @@ function update_script() {
     exit 1
   fi
 
-  msg_info "Updating ${APP}"
+  # The updater intentionally prints its own progress and Docker Compose output.
+  # Use a static status line here so the Helper Script spinner cannot overwrite
+  # those messages while the nested updater is running.
+  msg_custom "ℹ️" "${YW}" "Updating ${APP}"
   bash -c "$updater"
   msg_ok "Updated ${APP}"
   exit 0
