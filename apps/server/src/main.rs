@@ -1,4 +1,5 @@
 mod agent_inventory;
+mod agent_updates;
 mod agents;
 mod auth_mw;
 mod config;
@@ -15,6 +16,7 @@ mod monitoring;
 mod notifications;
 mod pki;
 mod ratelimit;
+mod release_repository;
 mod routes;
 mod scheduler;
 mod seed;
@@ -145,6 +147,27 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
     let inventory_router = Router::new()
         .route("/api/v1/agents", get(agent_inventory::list_agents))
         .route("/api/v1/agents/{id}", get(agent_inventory::get_agent))
+        .route(
+            "/api/v1/agents/{id}/update",
+            post(agent_updates::start_update),
+        )
+        .route(
+            "/api/v1/agents/{id}/updates",
+            get(agent_updates::list_updates),
+        )
+        .route(
+            "/api/v1/agents/{id}/compliance",
+            get(agent_updates::compliance),
+        )
+        .route(
+            "/api/v1/agents/{id}/update-policy",
+            get(agent_updates::get_policy).put(agent_updates::put_policy),
+        )
+        .route("/api/v1/agent-releases", get(agent_updates::list_releases))
+        .route(
+            "/api/v1/agent-releases/{version}",
+            get(agent_updates::get_release),
+        )
         .route(
             "/api/v1/agents/{id}/inventory",
             get(agent_inventory::get_agent_inventory),

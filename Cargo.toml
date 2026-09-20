@@ -53,6 +53,7 @@ x509-parser = "0.16"
 ipnet = "2.12.2"
 ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
+semver = "1"
 chacha20poly1305 = "0.10"
 zeroize = { version = "1", features = ["serde"] }
 russh = { version = "0.63", default-features = false, features = ["async-trait", "ring", "rsa"] }

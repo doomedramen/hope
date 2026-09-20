@@ -77,6 +77,18 @@ pub(crate) async fn enqueue_periodic_jobs(
         tracing::warn!(error = %err, "failed to enqueue agent_health.sweep");
     }
 
+    let agent_update_key = five_minute_period_key("five-minute-agent-updates");
+    if let Err(err) = jobs::enqueue(
+        pool,
+        crate::agent_updates::RECONCILE_JOB_TYPE,
+        &agent_update_key,
+        serde_json::json!({}),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "failed to enqueue agent_updates.reconcile");
+    }
+
     let retention_key = daily_period_key("daily");
     if let Err(err) = jobs::enqueue(
         pool,

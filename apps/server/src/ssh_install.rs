@@ -24,6 +24,8 @@ use crate::ssh_trust::{self, HostKeyDecision};
 const MAX_COMMAND_OUTPUT: usize = 64 * 1024;
 const MAX_AGENT_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MAX_UPDATE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_UPDATE_DEADLINE: Duration = Duration::from_secs(120);
 const DEFAULT_STATE_DIR: &str = "/var/lib/hope";
 const DEFAULT_SERVICE_USER: &str = "hope-agent";
 const AGENT_PATH: &str = "/usr/local/libexec/hope-agent";
@@ -84,6 +86,37 @@ pub struct DeploymentResult {
     pub architecture: String,
     pub enrolled: bool,
     pub repaired: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentUpdateRequest {
+    pub device_id: Uuid,
+    pub agent_id: Uuid,
+    pub host: String,
+    pub port: i32,
+    pub credential_id: Uuid,
+    pub actor_user_id: Option<Uuid>,
+    pub target_version: String,
+    pub previous_version: Option<String>,
+    pub expected_platform: String,
+    pub expected_architecture: String,
+    pub binary: Vec<u8>,
+    pub check_in_deadline: Duration,
+    pub repair_on_failure: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentUpdateState {
+    Succeeded,
+    RolledBack,
+    Repaired,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentUpdateResult {
+    pub state: AgentUpdateState,
+    pub platform: String,
+    pub architecture: String,
 }
 
 #[derive(Debug, Clone)]
@@ -310,6 +343,258 @@ pub async fn install_or_repair(
         enrolled,
         repaired: request.repair,
     })
+}
+
+/// Push one already-verified release over the trusted SSH connection. The
+/// remote replacement is an atomic same-filesystem rename. The old binary is
+/// retained until the agent has checked in with the target version; if that
+/// deadline expires, the worker restores it and restarts the service.
+pub async fn update_or_rollback(
+    pool: &PgPool,
+    store: &CredentialStore,
+    request: AgentUpdateRequest,
+) -> Result<AgentUpdateResult> {
+    validate_update_version(&request.target_version)?;
+    if request.binary.is_empty() || request.binary.len() as u64 > MAX_AGENT_BINARY_BYTES {
+        return Err(InstallError::BinaryUnavailable);
+    }
+    if request.expected_platform != "linux"
+        || !matches!(request.expected_architecture.as_str(), "amd64" | "arm64")
+    {
+        return Err(InstallError::UnsupportedHost);
+    }
+
+    let config = DeploymentConfig::from_environment()?;
+    let host = ssh_trust::normalize_host(&request.host)?;
+    ssh_trust::validate_port(request.port)?;
+    let secret = store
+        .decrypt_for_agent_use(
+            request.credential_id,
+            request.device_id,
+            request.actor_user_id,
+        )
+        .await?;
+    let (mut session, decision) = connect_authenticated(
+        pool,
+        Some(request.device_id),
+        &host,
+        request.port,
+        request.actor_user_id,
+        &secret,
+        config.timeout,
+    )
+    .await?;
+    if !decision
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(HostKeyDecision::permits_connection)
+    {
+        return Err(InstallError::HostKeyUntrusted);
+    }
+
+    let platform_output = run_command(&mut session, "uname -s", config.timeout).await?;
+    let platform = single_line(&platform_output.stdout).ok_or(InstallError::UnsupportedHost)?;
+    let architecture_output = run_command(&mut session, "uname -m", config.timeout).await?;
+    let remote_arch =
+        single_line(&architecture_output.stdout).ok_or(InstallError::UnsupportedHost)?;
+    let architecture = match remote_arch {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => return Err(InstallError::UnsupportedHost),
+    };
+    if platform != "Linux"
+        || request.expected_platform != "linux"
+        || request.expected_architecture != architecture
+    {
+        return Err(InstallError::UnsupportedHost);
+    }
+
+    let sudo = privilege_prefix(&mut session, config.timeout).await?;
+    let operation_id = Uuid::new_v4().simple().to_string();
+    let remote_upload = format!("/tmp/hope-agent-update-{operation_id}");
+    let staged_path = format!("{AGENT_PATH}.staged-{operation_id}");
+    let rollback_path = format!("{AGENT_PATH}.rollback-{operation_id}");
+    upload_binary(
+        &mut session,
+        &sudo,
+        &remote_upload,
+        &request.binary,
+        config.timeout,
+    )
+    .await?;
+
+    let install_and_restart = format!(
+        "{sudo}install -o root -g root -m 0755 {remote_upload} {staged_path} && \
+         {sudo}cp -p {AGENT_PATH} {rollback_path} && \
+         {sudo}mv -f {staged_path} {AGENT_PATH} && \
+         {sudo}rm -f {remote_upload} && \
+         {sudo}systemctl daemon-reload && {sudo}systemctl restart hope-agent",
+    );
+    let started_at = time::OffsetDateTime::now_utc();
+    let restart_result = run_command(&mut session, &install_and_restart, config.timeout).await;
+    if restart_result.is_err()
+        || !wait_for_agent_check_in(
+            pool,
+            request.agent_id,
+            &request.target_version,
+            started_at,
+            bounded_deadline(request.check_in_deadline),
+        )
+        .await?
+    {
+        let rollback_result = rollback_remote(
+            &mut session,
+            &sudo,
+            &remote_upload,
+            &staged_path,
+            &rollback_path,
+            config.timeout,
+        )
+        .await;
+        if rollback_result.is_ok()
+            && wait_for_previous_agent(
+                pool,
+                request.agent_id,
+                request.previous_version.as_deref(),
+                time::OffsetDateTime::now_utc(),
+                bounded_deadline(request.check_in_deadline.min(Duration::from_secs(60))),
+            )
+            .await?
+        {
+            let _ = session
+                .disconnect(russh::Disconnect::ByApplication, "rolled back", "")
+                .await;
+            drop(secret);
+            return Ok(AgentUpdateResult {
+                state: AgentUpdateState::RolledBack,
+                platform: platform.to_string(),
+                architecture: architecture.to_string(),
+            });
+        }
+
+        let _ = session
+            .disconnect(russh::Disconnect::ByApplication, "update failed", "")
+            .await;
+        drop(secret);
+        if request.repair_on_failure {
+            install_or_repair(
+                pool,
+                store,
+                DeploymentRequest {
+                    device_id: request.device_id,
+                    host,
+                    port: request.port,
+                    credential_id: request.credential_id,
+                    actor_user_id: request.actor_user_id,
+                    repair: true,
+                    disassociate_after_enrollment: false,
+                },
+            )
+            .await?;
+            return Ok(AgentUpdateResult {
+                state: AgentUpdateState::Repaired,
+                platform: platform.to_string(),
+                architecture: architecture.to_string(),
+            });
+        }
+        return Err(InstallError::ServiceUnavailable);
+    }
+
+    let _ = run_command(
+        &mut session,
+        &format!("{sudo}rm -f {rollback_path} {staged_path} {remote_upload}"),
+        config.timeout,
+    )
+    .await;
+    let _ = session
+        .disconnect(russh::Disconnect::ByApplication, "updated", "")
+        .await;
+    drop(secret);
+    Ok(AgentUpdateResult {
+        state: AgentUpdateState::Succeeded,
+        platform: platform.to_string(),
+        architecture: architecture.to_string(),
+    })
+}
+
+async fn rollback_remote(
+    session: &mut client::Handle<HostKeyHandler>,
+    sudo: &str,
+    remote_upload: &str,
+    staged_path: &str,
+    rollback_path: &str,
+    timeout: Duration,
+) -> Result<CommandOutput> {
+    let command = format!(
+        "{sudo}sh -c {}",
+        sh_quote(&format!(
+            "test -f {rollback_path} && mv -f {rollback_path} {AGENT_PATH} && rm -f {remote_upload} {staged_path} && systemctl daemon-reload && systemctl restart hope-agent"
+        )),
+    );
+    run_command(session, &command, timeout).await
+}
+
+async fn wait_for_agent_check_in(
+    pool: &PgPool,
+    agent_id: Uuid,
+    version: &str,
+    started_at: time::OffsetDateTime,
+    deadline: Duration,
+) -> Result<bool> {
+    let deadline_at = tokio::time::Instant::now() + deadline;
+    loop {
+        let ready: bool = sqlx::query_scalar(
+            "select exists(\
+                 select 1 from agents where id = $1 and revoked_at is null\
+                   and agent_version = $2 and last_seen >= $3)",
+        )
+        .bind(agent_id)
+        .bind(version)
+        .bind(started_at)
+        .fetch_one(pool)
+        .await?;
+        if ready {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline_at {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn wait_for_previous_agent(
+    pool: &PgPool,
+    agent_id: Uuid,
+    version: Option<&str>,
+    started_at: time::OffsetDateTime,
+    deadline: Duration,
+) -> Result<bool> {
+    let Some(version) = version else {
+        return Ok(true);
+    };
+    wait_for_agent_check_in(pool, agent_id, version, started_at, deadline).await
+}
+
+fn bounded_deadline(deadline: Duration) -> Duration {
+    if deadline.is_zero() {
+        DEFAULT_UPDATE_DEADLINE
+    } else {
+        deadline.clamp(Duration::from_secs(10), MAX_UPDATE_TIMEOUT)
+    }
+}
+
+fn validate_update_version(version: &str) -> Result<()> {
+    if version.is_empty()
+        || version.len() > 128
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(InstallError::Configuration);
+    }
+    Ok(())
 }
 
 async fn connect_authenticated(

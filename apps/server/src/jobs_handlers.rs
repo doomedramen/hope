@@ -14,6 +14,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::agent_updates;
 use crate::agents;
 use crate::discovery::service_collectors::{self, CollectorConfig, CollectorProtocol};
 use crate::discovery::worker;
@@ -370,6 +371,36 @@ impl JobHandler for AgentDeployment {
     }
 }
 
+struct AgentUpdate;
+
+#[async_trait]
+impl JobHandler for AgentUpdate {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        job_id: Uuid,
+        worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        agent_updates::handle_update(pool, job_id, worker_id, payload).await
+    }
+}
+
+struct AgentUpdateReconcile;
+
+#[async_trait]
+impl JobHandler for AgentUpdateReconcile {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        job_id: Uuid,
+        worker_id: &str,
+        _payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        agent_updates::reconcile(pool, job_id, worker_id).await
+    }
+}
+
 async fn validate_collector_scope(
     pool: &PgPool,
     network_id: Uuid,
@@ -412,6 +443,8 @@ impl Registry {
         handlers.insert("session.cleanup", Box::new(SessionCleanup));
         handlers.insert("enrollment_token.purge", Box::new(EnrollmentTokenPurge));
         handlers.insert("agent_health.sweep", Box::new(AgentHealthSweep));
+        handlers.insert("agent.update", Box::new(AgentUpdate));
+        handlers.insert("agent_updates.reconcile", Box::new(AgentUpdateReconcile));
         handlers.insert("diagnostic.echo", Box::new(DiagnosticEcho));
         handlers.insert("change_events.retention", Box::new(ChangeEventRetention));
         handlers.insert(

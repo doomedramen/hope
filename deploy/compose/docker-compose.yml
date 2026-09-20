@@ -29,6 +29,8 @@ services:
       HOPE_CREDENTIAL_MASTER_KEY_FILE: /run/secrets/hope_credential_master_key
       HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:?set HOPE_AGENT_ENROLL_URL in .env}
       HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:?set HOPE_AGENT_GATEWAY_URL in .env}
+      HOPE_AGENT_RELEASE_DIR: /app/agent-releases
+      HOPE_RELEASE_PUBLIC_KEY_FILE: ${HOPE_RELEASE_PUBLIC_KEY_FILE:-/app/agent-releases/public-key.hex}
       HOPE_AGENT_BINARY_X86_64: /app/agent-releases/agent-linux-amd64
       HOPE_AGENT_BINARY_AARCH64: /app/agent-releases/agent-linux-arm64
     secrets:
@@ -55,6 +57,8 @@ services:
       HOPE_CREDENTIAL_MASTER_KEY_FILE: /run/secrets/hope_credential_master_key
       HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:?set HOPE_AGENT_ENROLL_URL in .env}
       HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:?set HOPE_AGENT_GATEWAY_URL in .env}
+      HOPE_AGENT_RELEASE_DIR: /app/agent-releases
+      HOPE_RELEASE_PUBLIC_KEY_FILE: ${HOPE_RELEASE_PUBLIC_KEY_FILE:-/app/agent-releases/public-key.hex}
       HOPE_AGENT_BINARY_X86_64: /app/agent-releases/agent-linux-amd64
       HOPE_AGENT_BINARY_AARCH64: /app/agent-releases/agent-linux-arm64
     secrets:
