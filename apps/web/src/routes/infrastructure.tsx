@@ -849,7 +849,7 @@ function ReviewQueue({
   );
 }
 
-function CreateDeviceDialog({
+export function CreateDeviceDialog({
   open,
   onOpenChange,
   submit,
@@ -864,6 +864,13 @@ function CreateDeviceDialog({
 }) {
   const [name, setName] = useState("");
   const [deviceType, setDeviceType] = useState("physical_host");
+  useEffect(() => {
+    if (open) {
+      setName("");
+      setDeviceType("physical_host");
+    }
+  }, [open]);
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent>
@@ -877,7 +884,8 @@ function CreateDeviceDialog({
           className="flex flex-col gap-5"
           onSubmit={(event) => {
             event.preventDefault();
-            submit(deviceType, name);
+            const trimmedName = name.trim();
+            if (trimmedName) submit(deviceType, trimmedName);
           }}
         >
           <FieldGroup>
@@ -887,6 +895,7 @@ function CreateDeviceDialog({
                 id="device-name"
                 onChange={(event) => setName(event.target.value)}
                 placeholder="e.g. kitchen-host"
+                required
                 value={name}
               />
             </Field>
@@ -894,7 +903,7 @@ function CreateDeviceDialog({
           </FieldGroup>
           <MutationError error={error} />
           <DialogFooter>
-            <Button type="submit" disabled={pending}>
+            <Button disabled={pending || !name.trim()} type="submit">
               {pending ? (
                 <Spinner data-icon="inline-start" />
               ) : (
@@ -909,7 +918,7 @@ function CreateDeviceDialog({
   );
 }
 
-function AddNetworkDialog({
+export function AddNetworkDialog({
   open,
   onOpenChange,
   submit,
@@ -931,6 +940,14 @@ function AddNetworkDialog({
   const [cidr, setCidr] = useState("");
   const [gateway, setGateway] = useState("");
   const [vlan, setVlan] = useState("");
+  useEffect(() => {
+    if (open) {
+      setName("");
+      setCidr("");
+      setGateway("");
+      setVlan("");
+    }
+  }, [open]);
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>

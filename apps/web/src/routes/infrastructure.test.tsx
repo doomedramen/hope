@@ -2,7 +2,12 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EditDeviceDialog, InfrastructurePage } from "./infrastructure";
+import {
+  AddNetworkDialog,
+  CreateDeviceDialog,
+  EditDeviceDialog,
+  InfrastructurePage,
+} from "./infrastructure";
 import type { Device, DeviceDetail } from "@/lib/api";
 
 function detail(id: string, name: string): DeviceDetail {
@@ -119,5 +124,86 @@ describe("InfrastructurePage", () => {
         screen.getByRole("heading", { name: "QA test device" }),
       ).toBeInTheDocument(),
     );
+  });
+});
+
+describe("create dialogs", () => {
+  it("resets device fields and blocks unnamed creation", () => {
+    const { rerender } = render(
+      <CreateDeviceDialog
+        error={null}
+        onOpenChange={vi.fn()}
+        open
+        pending={false}
+        submit={vi.fn()}
+      />,
+    );
+    const name = screen.getByLabelText("Device name");
+    fireEvent.change(name, { target: { value: "stale device" } });
+    expect(name).toHaveValue("stale device");
+
+    rerender(
+      <CreateDeviceDialog
+        error={null}
+        onOpenChange={vi.fn()}
+        open={false}
+        pending={false}
+        submit={vi.fn()}
+      />,
+    );
+    rerender(
+      <CreateDeviceDialog
+        error={null}
+        onOpenChange={vi.fn()}
+        open
+        pending={false}
+        submit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Device name")).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "Create device" }),
+    ).toBeDisabled();
+  });
+
+  it("resets network fields after reopening", () => {
+    const { rerender } = render(
+      <AddNetworkDialog
+        error={null}
+        onOpenChange={vi.fn()}
+        open
+        pending={false}
+        submit={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "stale network" },
+    });
+    fireEvent.change(screen.getByLabelText("CIDR"), {
+      target: { value: "192.168.1.0/24" },
+    });
+
+    rerender(
+      <AddNetworkDialog
+        error={null}
+        onOpenChange={vi.fn()}
+        open={false}
+        pending={false}
+        submit={vi.fn()}
+      />,
+    );
+    rerender(
+      <AddNetworkDialog
+        error={null}
+        onOpenChange={vi.fn()}
+        open
+        pending={false}
+        submit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("Name")).toHaveValue("");
+    expect(screen.getByLabelText("CIDR")).toHaveValue("");
   });
 });
