@@ -4,7 +4,7 @@ title: "Simplify Linux agent installation to one command"
 status: open
 priority: high
 created: "2026-09-20T22:18:11Z"
-updated: "2026-09-20T22:18:11Z"
+updated: "2026-09-20T22:18:51Z"
 tags: ["agents", "installation", "enrollment", "ux", "cli"]
 ---
 
@@ -17,6 +17,10 @@ release arguments. This should be automated away so installation is a single
 command run on the host where the agent should be installed.
 
 ## Current instructions
+
+These instructions describe the current experience for context only; the
+requested work is to replace this multi-step flow with the single-command
+flow below.
 
 ```text
 Enroll a Linux agent
