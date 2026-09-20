@@ -14,7 +14,7 @@ import {
   Undo2Icon,
   XIcon,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { DiscoveryScopeSetup } from "@/components/DiscoveryScopeSetup";
 import {
   createDevice,
@@ -1013,7 +1013,7 @@ function AddNetworkDialog({
   );
 }
 
-function EditDeviceDialog({
+export function EditDeviceDialog({
   open,
   onOpenChange,
   detail,
@@ -1030,6 +1030,11 @@ function EditDeviceDialog({
 }) {
   const [name, setName] = useState(detail.name ?? "");
   const [status, setStatus] = useState(detail.status);
+  useEffect(() => {
+    setName(detail.name ?? "");
+    setStatus(detail.status);
+  }, [detail.id, detail.name, detail.status]);
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent>
