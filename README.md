@@ -21,6 +21,11 @@ TLS reverse proxy for any non-local deployment. See
 [`docs/operations/upgrade-recovery.md`](docs/operations/upgrade-recovery.md)
 before using the stack for persistent data.
 
+The canonical Compose file uses the published server/worker image from GHCR.
+Set `HOPE_IMAGE` in `.env` to select another image. For production, use an
+immutable digest. Contributors can use the local-build override documented
+below.
+
 ### 1. Configure local state
 
 ```sh
@@ -47,10 +52,13 @@ passthrough; the 8444 enrollment listener should also preserve the server
 certificate and CA fingerprint. See
 [`docs/manual-agent-install.md`](docs/manual-agent-install.md).
 
-### 2. Build and initialise server PKI
+### 2. Select an image and initialise server PKI
+
+The default `.env.example` value uses the published `main` image. Pull it
+before the first start:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml --env-file .env build
+docker compose -f deploy/compose/docker-compose.yml --env-file .env pull server worker
 docker compose -f deploy/compose/docker-compose.yml --env-file .env \
   run --rm --no-deps server ca init
 ```
@@ -58,6 +66,31 @@ docker compose -f deploy/compose/docker-compose.yml --env-file .env \
 `ca init` writes the internal CA key and certificate plus the server leaf
 certificate into the `server-pki` volume. It refuses to overwrite existing PKI
 files. Back up this volume before changing deployments.
+
+To build the server/worker image from the current checkout, add the explicit
+local-build override to every Compose command:
+
+```sh
+docker compose \
+  -f deploy/compose/docker-compose.yml \
+  -f deploy/compose/docker-compose.local-build.yml \
+  --env-file .env build server worker
+docker compose \
+  -f deploy/compose/docker-compose.yml \
+  -f deploy/compose/docker-compose.local-build.yml \
+  --env-file .env run --rm --no-deps server ca init
+docker compose \
+  -f deploy/compose/docker-compose.yml \
+  -f deploy/compose/docker-compose.local-build.yml \
+  --env-file .env up -d
+```
+
+Use the same two `-f` options with later `ps`, `logs`, and `down` commands.
+
+GHCR packages can be public or private. Public packages need no registry
+login. For a private package, run `docker login ghcr.io -u YOUR_GITHUB_USERNAME`
+and enter a GitHub token with `read:packages` when prompted. GitHub Actions uses
+the built-in `GITHUB_TOKEN` with package write permission.
 
 ### 3. Start and check the stack
 
@@ -76,6 +109,30 @@ the agent gateway and enrollment listeners. `worker` applies the same
 migrations, consumes the PostgreSQL job queue, and runs monitor checks and
 background handlers. The worker may start independently after PostgreSQL is
 healthy; Compose does not treat server startup as a worker dependency.
+
+### Use another image or an immutable digest
+
+Set `HOPE_IMAGE` in `.env`, then pull and start the selected image:
+
+```sh
+# Fork or rebuilt image.
+export HOPE_IMAGE=ghcr.io/YOUR_GITHUB_USERNAME/hope:main
+
+# Or use a production pin. Replace DIGEST with the published sha256 digest.
+# export HOPE_IMAGE=ghcr.io/doomedramen/hope@sha256:DIGEST
+
+docker compose -f deploy/compose/docker-compose.yml --env-file .env pull server worker
+docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d
+```
+
+The export overrides `HOPE_IMAGE` from `.env` for this shell. To persist the
+choice, put only one of these values in `.env` instead. A one-command shell
+override can also be supplied:
+
+```sh
+HOPE_IMAGE=ghcr.io/YOUR_GITHUB_USERNAME/hope:main \
+  docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d
+```
 
 Create the first operator account:
 

@@ -54,8 +54,9 @@ It makes migration failure visible before server and worker restart.
 ```sh
 docker compose -f deploy/compose/docker-compose.yml --env-file .env stop worker server
 
-# Build or pull the exact same release image for both services.
-docker compose -f deploy/compose/docker-compose.yml --env-file .env build server worker
+# Pull the exact same release image for both services. Set HOPE_IMAGE to the
+# approved release tag or immutable digest before running this procedure.
+docker compose -f deploy/compose/docker-compose.yml --env-file .env pull server worker
 
 docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d postgres
 docker compose -f deploy/compose/docker-compose.yml --env-file .env ps postgres
@@ -145,3 +146,8 @@ For each release, record:
 
 Until this record and compatibility tests exist for a pair, operate it as a
 lockstep upgrade with a tested backup and a forward-recovery plan.
+
+For a source checkout build, add
+`-f deploy/compose/docker-compose.local-build.yml` to every Compose command and
+run `build server worker` before the migration. This is a contributor path; the
+production procedure uses a published image.

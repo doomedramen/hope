@@ -16,9 +16,7 @@ services:
       start_period: 10s
 
   server:
-    build:
-      context: ../..
-      dockerfile: deploy/compose/Dockerfile
+    image: ${HOPE_IMAGE:-ghcr.io/doomedramen/hope:main}
     restart: unless-stopped
     stop_grace_period: 30s
     depends_on:
@@ -72,9 +70,7 @@ services:
     command: ["serve"]
 
   worker:
-    build:
-      context: ../..
-      dockerfile: deploy/compose/Dockerfile
+    image: ${HOPE_IMAGE:-ghcr.io/doomedramen/hope:main}
     restart: unless-stopped
     stop_grace_period: 90s
     depends_on:

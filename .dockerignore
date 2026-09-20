@@ -1,0 +1,12 @@
+.git
+.github
+.agent-notes
+target
+node_modules
+**/node_modules
+dist
+**/dist
+data
+deploy/compose/secrets
+deploy/compose/agent-releases
+*.env

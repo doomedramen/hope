@@ -1,0 +1,12 @@
+services:
+  server:
+    image: hope-server:local
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+
+  worker:
+    image: hope-server:local
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile

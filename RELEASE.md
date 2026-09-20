@@ -1,9 +1,10 @@
 # Release process
 
-This repository currently builds and tests server, web, and agent artifacts in
-GitHub Actions. It does not publish a production server image or agent release
-automatically. A release operator must verify artifacts and place the approved
-agent bundle in the server-side release repository.
+This repository builds and tests server, web, and agent artifacts in GitHub
+Actions. GitHub Actions publishes the server/worker image to
+`ghcr.io/doomedramen/hope` on `main` and version tags, but does not publish
+agent releases automatically. A release operator must verify artifacts and
+place the approved agent bundle in the server-side release repository.
 
 ## Prepare
 
@@ -15,8 +16,14 @@ agent bundle in the server-side release repository.
 4. Confirm the backup and restore procedure was exercised for the deployment
    class being upgraded.
 5. Build server and web artifacts from the same source commit. For production,
-   publish or pin the resulting image by immutable digest; the example Compose
-   file builds locally.
+   set `HOPE_IMAGE` to the approved published image and pin it by immutable
+   digest. Use `deploy/compose/docker-compose.local-build.yml` only when a
+   contributor needs to build the image from a checkout.
+
+The image workflow builds on pull requests without pushing. It publishes
+`ghcr.io/doomedramen/hope` on `main` and `vX.Y.Z` tags with branch, version, and
+full-commit SHA tags for `linux/amd64` and `linux/arm64`. Use the immutable
+digest for a deployment record and rollback target.
 
 ## Sign agent releases
 
