@@ -18,6 +18,7 @@ import {
   type Network,
   type ScanRun,
 } from "@/lib/api";
+import { isValidCidr } from "@/lib/network-validation";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,6 +42,7 @@ import {
   Field,
   FieldContent,
   FieldDescription,
+  FieldError,
   FieldGroup,
   FieldLabel,
 } from "@/components/ui/field";
@@ -190,6 +192,9 @@ export function DiscoveryScopeSetup({
     () => parseExcludedCidrs(selectedState.excludedCidrs),
     [selectedState.excludedCidrs],
   );
+  const invalidExcludedCidr = excludedCidrs.find(
+    (excludedCidr) => !isValidCidr(excludedCidr),
+  );
   const scopeIsDirty =
     selectedState.scope !== null &&
     (selectedState.appliedExcludedCidrs?.join("\n") !==
@@ -317,6 +322,7 @@ export function DiscoveryScopeSetup({
                 draftPending={draftMutation.isPending}
                 error={draftMutation.error ?? confirmMutation.error}
                 excludedCidrs={selectedState.excludedCidrs}
+                invalidExcludedCidr={invalidExcludedCidr ?? null}
                 isDirty={scopeIsDirty}
                 network={selectedNetwork}
                 scanError={
@@ -362,6 +368,7 @@ export function DiscoveryScopeSetup({
                 }}
                 onDraft={() => {
                   scanMutation.reset();
+                  if (invalidExcludedCidr) return;
                   draftMutation.mutate({
                     networkId: selectedNetwork.id,
                     excludedCidrs,
@@ -394,6 +401,7 @@ function ScopeForm({
   network,
   scope,
   excludedCidrs,
+  invalidExcludedCidr,
   profile,
   acknowledged,
   isDirty,
@@ -414,6 +422,7 @@ function ScopeForm({
   network: Network;
   scope: DiscoveryScope | null;
   excludedCidrs: string;
+  invalidExcludedCidr: string | null;
   profile: ScanProfile;
   acknowledged: boolean;
   isDirty: boolean;
@@ -466,12 +475,18 @@ function ScopeForm({
             Excluded addresses or ranges
           </FieldLabel>
           <Textarea
+            aria-invalid={Boolean(invalidExcludedCidr)}
             id={`scope-exclusions-${network.id}`}
             onChange={(event) => onExcludedCidrsChange(event.target.value)}
             placeholder="One CIDR per line, for example 192.168.1.10/32"
             rows={3}
             value={excludedCidrs}
           />
+          <FieldError>
+            {invalidExcludedCidr
+              ? "CIDR must be a valid network range."
+              : undefined}
+          </FieldError>
           <FieldDescription>
             Leave blank to include every scannable address in this network.
           </FieldDescription>
@@ -505,7 +520,11 @@ function ScopeForm({
       </FieldGroup>
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={draftPending} type="submit" variant="outline">
+        <Button
+          disabled={draftPending || Boolean(invalidExcludedCidr)}
+          type="submit"
+          variant="outline"
+        >
           {draftPending ? <Spinner data-icon="inline-start" /> : null}
           Calculate targets
         </Button>

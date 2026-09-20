@@ -154,6 +154,35 @@ describe("ScanLaunch", () => {
 });
 
 describe("DiscoveryScopeSetup", () => {
+  it("identifies invalid exclusion CIDRs before calculating targets", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false },
+        queries: { retry: false },
+      },
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DiscoveryScopeSetup
+          error={null}
+          loading={false}
+          networks={[network]}
+        />
+      </QueryClientProvider>,
+    );
+
+    const exclusions = screen.getByLabelText("Excluded addresses or ranges");
+    fireEvent.change(exclusions, { target: { value: "not-a-cidr" } });
+
+    expect(
+      screen.getByText("CIDR must be a valid network range."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Calculate targets" }),
+    ).toBeDisabled();
+  });
+
   it("gives an empty inventory a path to add its first network", () => {
     const queryClient = new QueryClient({
       defaultOptions: {

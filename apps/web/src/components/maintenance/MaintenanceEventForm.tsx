@@ -232,6 +232,55 @@ function toInput(form: FormState): MaintenanceEventInput {
   };
 }
 
+function isSupportedTimezone(value: string) {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function recurrenceValidationError(value: string) {
+  const rule = value.trim().replace(/^RRULE:/i, "");
+  if (!rule) return null;
+  const fields = rule.split(";");
+  const frequency = fields.find((field) => /^FREQ=/i.test(field));
+  const supportedFrequencies = new Set([
+    "SECONDLY",
+    "MINUTELY",
+    "HOURLY",
+    "DAILY",
+    "WEEKLY",
+    "MONTHLY",
+    "YEARLY",
+  ]);
+  if (
+    !frequency ||
+    !supportedFrequencies.has(frequency.slice(5).toUpperCase())
+  ) {
+    return "Recurrence rule must include a supported FREQ value.";
+  }
+  if (
+    /[\r\n]/.test(rule) ||
+    fields.some((field) => {
+      const [key, fieldValue, ...rest] = field.split("=");
+      return (
+        !key ||
+        !fieldValue ||
+        rest.length > 0 ||
+        !/^[A-Z][A-Z0-9-]*$/i.test(key)
+      );
+    })
+  ) {
+    return "Recurrence rule must use KEY=VALUE pairs separated by semicolons.";
+  }
+  if (fields.some((field) => /^(DTSTART|RDATE|EXDATE)=/i.test(field))) {
+    return "Recurrence rule must contain only RRULE properties.";
+  }
+  return null;
+}
+
 export function MaintenanceEventForm({
   open,
   event,
@@ -270,6 +319,15 @@ export function MaintenanceEventForm({
     }
     if (!form.timezone.trim()) {
       setValidationError("Timezone is required.");
+      return;
+    }
+    if (!isSupportedTimezone(form.timezone.trim())) {
+      setValidationError("Timezone must be a supported IANA timezone.");
+      return;
+    }
+    const recurrenceError = recurrenceValidationError(form.recurrence_rule);
+    if (recurrenceError) {
+      setValidationError(recurrenceError);
       return;
     }
     if (
