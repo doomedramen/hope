@@ -262,7 +262,7 @@ function ChangeRow({ change }: { change: ChangeEvent }) {
           {change.entity_kind === "devices" ? (
             <Link
               className="inline-flex items-center gap-1 rounded-sm text-foreground outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
-              to="/infrastructure"
+              to={`/infrastructure?device=${encodeURIComponent(change.entity_id)}`}
             >
               Open inventory <ExternalLinkIcon className="size-3" />
             </Link>

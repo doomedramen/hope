@@ -111,7 +111,10 @@ const EMPTY_ADDRESSES: Address[] = [];
 export function InfrastructurePage() {
   const queryClient = useQueryClient();
   const [requestedDeviceId, setRequestedDeviceId] = useState<string | null>(
-    null,
+    () =>
+      typeof window === "undefined"
+        ? null
+        : new URLSearchParams(window.location.search).get("device"),
   );
   const [search, setSearch] = useState("");
   const [dialog, setDialog] = useState<

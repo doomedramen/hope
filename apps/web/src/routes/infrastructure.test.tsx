@@ -82,6 +82,34 @@ describe("EditDeviceDialog", () => {
 });
 
 describe("InfrastructurePage", () => {
+  it("selects the device supplied by an inventory link", async () => {
+    window.history.replaceState({}, "", "/infrastructure?device=device-2");
+    const first: Device = detail("device-1", "QA VM device");
+    const second: Device = detail("device-2", "QA test device");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/devices?limit=100") {
+          return Promise.resolve(
+            jsonResponse({ items: [first, second], next_cursor: null }),
+          );
+        }
+        if (path === "/api/v1/devices/device-2") {
+          return Promise.resolve(jsonResponse(second));
+        }
+        return Promise.resolve(jsonResponse({ items: [], next_cursor: null }));
+      }),
+    );
+
+    renderInfrastructurePage();
+
+    expect(
+      await screen.findByRole("heading", { name: "QA test device" }),
+    ).toBeInTheDocument();
+    window.history.replaceState({}, "", "/");
+  });
+
   it("selects a visible device when search hides the current selection", async () => {
     const first: Device = detail("device-1", "QA VM device");
     const second: Device = detail("device-2", "QA test device");

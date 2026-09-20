@@ -6,8 +6,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChangesPage } from "./changes";
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, ...props }: AnchorHTMLAttributes<HTMLAnchorElement>) => (
-    <a {...props}>{children}</a>
+  Link: ({
+    children,
+    to,
+    ...props
+  }: AnchorHTMLAttributes<HTMLAnchorElement> & { to?: string }) => (
+    <a href={to} {...props}>
+      {children}
+    </a>
   ),
   createFileRoute: () => () => ({}),
 }));
@@ -34,7 +40,7 @@ describe("ChangesPage", () => {
               items: [
                 {
                   id: "change-1",
-                  entity_kind: "monitor",
+                  entity_kind: "devices",
                   entity_id: "monitor-1",
                   category: "monitor.created",
                   severity: "notice",
@@ -72,5 +78,8 @@ describe("ChangesPage", () => {
     fireEvent.click(option, { detail: 1 });
 
     await waitFor(() => expect(trigger).toHaveTextContent("Monitor.Created"));
+    expect(
+      await screen.findByRole("link", { name: /Open inventory/ }),
+    ).toHaveAttribute("href", "/infrastructure?device=monitor-1");
   });
 });
