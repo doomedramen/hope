@@ -6,8 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use ed25519_dalek::{Signer, SigningKey};
-use release::{ArtifactRecord, Manifest, SignedArtifact};
+use ed25519_dalek::SigningKey;
+use release::{ArtifactRecord, Manifest, ManifestMetadata, ReleaseChannel, SignedArtifact};
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "hope release tooling")]
@@ -34,6 +34,12 @@ enum Command {
         /// Release version, e.g. 0.1.0.
         #[arg(long)]
         version: String,
+        /// Release channel. Older manifests default to stable.
+        #[arg(long, default_value = "stable", value_parser = parse_release_channel)]
+        channel: ReleaseChannel,
+        /// Optional release notes, bounded to the shared manifest limit.
+        #[arg(long, alias = "notes")]
+        release_notes: Option<String>,
         #[arg(long, default_value_t = 1)]
         min_protocol_version: u32,
         /// Path to the signing-key.hex private key file (from `keygen`).
@@ -55,11 +61,21 @@ fn main() -> anyhow::Result<()> {
         Command::Keygen { out } => keygen(&out),
         Command::Sign {
             version,
+            channel,
+            release_notes,
             min_protocol_version,
             key,
             out,
             artifacts,
-        } => sign(&version, min_protocol_version, &key, &out, &artifacts),
+        } => sign(
+            &version,
+            channel,
+            release_notes,
+            min_protocol_version,
+            &key,
+            &out,
+            &artifacts,
+        ),
     }
 }
 
@@ -105,11 +121,19 @@ fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
 
 fn sign(
     version: &str,
+    channel: ReleaseChannel,
+    release_notes: Option<String>,
     min_protocol_version: u32,
     key_path: &Path,
     out: &Path,
     artifact_specs: &[String],
 ) -> anyhow::Result<()> {
+    let metadata = ManifestMetadata {
+        channel,
+        release_notes,
+    };
+    metadata.validate()?;
+
     let key_hex = fs::read_to_string(key_path)?;
     let key_bytes: [u8; 32] = hex::decode(key_hex.trim())?
         .try_into()
@@ -162,17 +186,22 @@ fn sign(
     let manifest = Manifest {
         version: version.to_string(),
         artifacts,
-    };
+    }
+    .with_metadata(metadata);
+    manifest.validate()?;
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
 
     let manifest_path = out.join("manifest.json");
-    fs::write(&manifest_path, &manifest_json)?;
+    let manifest_signature = release::sign_manifest(&manifest_json, &signing_key);
+    release::verify_manifest_with_metadata(
+        &manifest_json,
+        &manifest_signature,
+        std::slice::from_ref(&verifying_key),
+    )
+    .map_err(|error| anyhow::anyhow!("self-verification of manifest failed: {error}"))?;
 
-    let manifest_signature = signing_key.sign(&manifest_json);
-    fs::write(
-        out.join("manifest.json.sig"),
-        hex::encode(manifest_signature.to_bytes()),
-    )?;
+    fs::write(&manifest_path, &manifest_json)?;
+    fs::write(out.join("manifest.json.sig"), manifest_signature)?;
 
     fs::write(out.join("SHA256SUMS"), sha256sums)?;
 
@@ -185,13 +214,28 @@ fn sign(
     Ok(())
 }
 
+fn parse_release_channel(value: &str) -> Result<ReleaseChannel, String> {
+    value
+        .parse()
+        .map_err(|error: &'static str| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::parse_release_channel;
+    use release::ReleaseChannel;
 
     #[test]
     fn artifact_spec_parses_path_platform_arch() {
         let spec = "target/release/agent=linux=amd64";
         let parts: Vec<&str> = spec.splitn(3, '=').collect();
         assert_eq!(parts, vec!["target/release/agent", "linux", "amd64"]);
+    }
+
+    #[test]
+    fn release_channel_parser_accepts_only_stable_or_canary() {
+        assert_eq!(parse_release_channel("stable"), Ok(ReleaseChannel::Stable));
+        assert_eq!(parse_release_channel("canary"), Ok(ReleaseChannel::Canary));
+        assert!(parse_release_channel("beta").is_err());
     }
 }

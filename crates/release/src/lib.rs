@@ -8,7 +8,7 @@
 //! or [`verify_manifest_and_binary`], then never consume an artifact record
 //! that was not returned by that verification.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use sha2::{Digest, Sha256};
@@ -21,6 +21,8 @@ pub const MAX_MANIFEST_ARTIFACTS: usize = 16;
 pub const MAX_TRUSTED_KEYS: usize = 8;
 /// Maximum byte length for manifest string fields such as version/platform.
 pub const MAX_MANIFEST_STRING_BYTES: usize = 128;
+/// Maximum UTF-8 byte length for optional release notes.
+pub const MAX_RELEASE_NOTES_BYTES: usize = 4096;
 /// Maximum binary size accepted by artifact verification.
 pub const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 /// SHA-256 encoded as lowercase hexadecimal.
@@ -145,18 +147,173 @@ pub struct SignedArtifact {
     pub signature: String,
 }
 
+/// Release channel encoded in signed manifest metadata.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseChannel {
+    #[default]
+    Stable,
+    Canary,
+}
+
+impl fmt::Display for ReleaseChannel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stable => formatter.write_str("stable"),
+            Self::Canary => formatter.write_str("canary"),
+        }
+    }
+}
+
+impl FromStr for ReleaseChannel {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "stable" => Ok(Self::Stable),
+            "canary" => Ok(Self::Canary),
+            _ => Err("expected stable or canary"),
+        }
+    }
+}
+
+/// Metadata that applies to one complete release bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManifestMetadata {
+    #[serde(default)]
+    pub channel: ReleaseChannel,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_notes: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestMetadataFields {
+    #[serde(default)]
+    channel: ReleaseChannel,
+    #[serde(default)]
+    release_notes: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ManifestMetadata {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = ManifestMetadataFields::deserialize(deserializer)?;
+        let metadata = Self {
+            channel: fields.channel,
+            release_notes: fields.release_notes,
+        };
+        metadata.validate().map_err(D::Error::custom)?;
+        Ok(metadata)
+    }
+}
+
+impl Default for ManifestMetadata {
+    fn default() -> Self {
+        Self {
+            channel: ReleaseChannel::Stable,
+            release_notes: None,
+        }
+    }
+}
+
+impl ManifestMetadata {
+    /// Validate metadata bounds before it is serialized or consumed.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(release_notes) = &self.release_notes
+            && release_notes.len() > MAX_RELEASE_NOTES_BYTES
+        {
+            return Err(ReleaseError::InvalidField {
+                field: "manifest.release_notes",
+                reason: "exceeds the release notes size limit",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// The full manifest written alongside a release: one entry per
 /// platform/arch, plus the overall release version they belong to.
+///
+/// This legacy view stays source-compatible with callers that construct a
+/// manifest directly. Use [`ManifestWithMetadata`] for newly signed bundles.
 #[derive(Debug, Clone, Serialize)]
 pub struct Manifest {
     pub version: String,
     pub artifacts: Vec<SignedArtifact>,
 }
 
+impl Manifest {
+    /// Add signed release metadata without changing the legacy manifest
+    /// construction API used by older agent code.
+    pub fn with_metadata(self, metadata: ManifestMetadata) -> ManifestWithMetadata {
+        ManifestWithMetadata {
+            version: self.version,
+            channel: metadata.channel,
+            release_notes: metadata.release_notes,
+            artifacts: self.artifacts,
+        }
+    }
+}
+
+/// Complete manifest wire format, including channel and optional release
+/// notes. Missing metadata in older JSON manifests means stable with no notes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManifestWithMetadata {
+    pub version: String,
+    pub channel: ReleaseChannel,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_notes: Option<String>,
+    pub artifacts: Vec<SignedArtifact>,
+}
+
+impl ManifestWithMetadata {
+    /// Return metadata as a standalone value for callers that do not need
+    /// artifact records.
+    pub fn metadata(&self) -> ManifestMetadata {
+        ManifestMetadata {
+            channel: self.channel,
+            release_notes: self.release_notes.clone(),
+        }
+    }
+
+    /// Validate metadata and all legacy manifest invariants.
+    pub fn validate(&self) -> Result<()> {
+        self.metadata().validate()?;
+        Manifest {
+            version: self.version.clone(),
+            artifacts: self.artifacts.clone(),
+        }
+        .validate()
+    }
+
+    /// Return the source-compatible manifest view, dropping metadata only
+    /// from the returned Rust value. Metadata remains covered by its
+    /// detached signature on the wire.
+    pub fn into_manifest(self) -> Manifest {
+        Manifest {
+            version: self.version,
+            artifacts: self.artifacts,
+        }
+    }
+}
+
+impl From<Manifest> for ManifestWithMetadata {
+    fn from(manifest: Manifest) -> Self {
+        manifest.with_metadata(ManifestMetadata::default())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManifestFields {
     version: String,
+    #[serde(default)]
+    channel: ReleaseChannel,
+    #[serde(default)]
+    release_notes: Option<String>,
     artifacts: Vec<SignedArtifact>,
 }
 
@@ -168,6 +325,29 @@ impl<'de> Deserialize<'de> for Manifest {
         let fields = ManifestFields::deserialize(deserializer)?;
         let manifest = Self {
             version: fields.version,
+            artifacts: fields.artifacts,
+        };
+        ManifestMetadata {
+            channel: fields.channel,
+            release_notes: fields.release_notes,
+        }
+        .validate()
+        .map_err(D::Error::custom)?;
+        manifest.validate().map_err(D::Error::custom)?;
+        Ok(manifest)
+    }
+}
+
+impl<'de> Deserialize<'de> for ManifestWithMetadata {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = ManifestFields::deserialize(deserializer)?;
+        let manifest = Self {
+            version: fields.version,
+            channel: fields.channel,
+            release_notes: fields.release_notes,
             artifacts: fields.artifacts,
         };
         manifest.validate().map_err(D::Error::custom)?;
@@ -360,17 +540,19 @@ pub fn verify_manifest_signature(
 }
 
 /// Verify a detached manifest signature, parse the manifest, and validate all
-/// manifest-wide consistency and resource constraints.
-pub fn verify_manifest(
+/// manifest-wide consistency, metadata, and resource constraints.
+pub fn verify_manifest_with_metadata(
     manifest_bytes: &[u8],
     manifest_signature_hex: &str,
     trusted_keys: &[ed25519_dalek::VerifyingKey],
-) -> Result<Manifest> {
+) -> Result<ManifestWithMetadata> {
     verify_manifest_signature(manifest_bytes, manifest_signature_hex, trusted_keys)?;
     let fields: ManifestFields = serde_json::from_slice(manifest_bytes)
         .map_err(|err| ReleaseError::Decode(err.to_string()))?;
-    let manifest = Manifest {
+    let manifest = ManifestWithMetadata {
         version: fields.version,
+        channel: fields.channel,
+        release_notes: fields.release_notes,
         artifacts: fields.artifacts,
     };
     manifest.validate()?;
@@ -378,6 +560,20 @@ pub fn verify_manifest(
         verify_record_signature_with_keys(&artifact.record, &artifact.signature, trusted_keys)?;
     }
     Ok(manifest)
+}
+
+/// Verify a detached manifest signature, parse the manifest, and validate all
+/// manifest-wide consistency and resource constraints. Older callers receive
+/// the source-compatible view without the new metadata fields.
+pub fn verify_manifest(
+    manifest_bytes: &[u8],
+    manifest_signature_hex: &str,
+    trusted_keys: &[ed25519_dalek::VerifyingKey],
+) -> Result<Manifest> {
+    Ok(
+        verify_manifest_with_metadata(manifest_bytes, manifest_signature_hex, trusted_keys)?
+            .into_manifest(),
+    )
 }
 
 /// Verify a downloaded artifact with the legacy single-key API. This keeps
@@ -518,30 +714,59 @@ pub fn verify_manifest_and_binary(
     expected_arch: &str,
     current_protocol_version: u32,
 ) -> Result<SignedArtifact> {
-    let manifest = verify_manifest(manifest_bytes, manifest_signature_hex, trusted_keys)?;
-    let artifact = manifest
-        .artifacts
-        .iter()
-        .find(|artifact| {
-            artifact.record.platform == expected_platform && artifact.record.arch == expected_arch
-        })
-        .ok_or_else(|| {
-            ReleaseError::InvalidManifest(format!(
-                "no artifact for {expected_platform}/{expected_arch}"
-            ))
-        })?;
-
-    verify_binary_with_keys(
-        &artifact.record,
-        &artifact.signature,
+    Ok(verify_manifest_and_binary_with_metadata(
+        manifest_bytes,
+        manifest_signature_hex,
         trusted_keys,
         binary_bytes,
         expected_platform,
         expected_arch,
         current_protocol_version,
-    )?;
+    )?
+    .1)
+}
 
-    Ok(artifact.clone())
+/// Verify a complete manifest, including metadata, and the artifact matching
+/// the expected target. Returns both verified values so callers can apply
+/// channel or release-note policy without reparsing signed bytes.
+pub fn verify_manifest_and_binary_with_metadata(
+    manifest_bytes: &[u8],
+    manifest_signature_hex: &str,
+    trusted_keys: &[ed25519_dalek::VerifyingKey],
+    binary_bytes: &[u8],
+    expected_platform: &str,
+    expected_arch: &str,
+    current_protocol_version: u32,
+) -> Result<(ManifestWithMetadata, SignedArtifact)> {
+    let manifest =
+        verify_manifest_with_metadata(manifest_bytes, manifest_signature_hex, trusted_keys)?;
+    let artifact = {
+        let artifact = manifest
+            .artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.record.platform == expected_platform
+                    && artifact.record.arch == expected_arch
+            })
+            .ok_or_else(|| {
+                ReleaseError::InvalidManifest(format!(
+                    "no artifact for {expected_platform}/{expected_arch}"
+                ))
+            })?;
+
+        verify_binary_with_keys(
+            &artifact.record,
+            &artifact.signature,
+            trusted_keys,
+            binary_bytes,
+            expected_platform,
+            expected_arch,
+            current_protocol_version,
+        )?;
+        artifact.clone()
+    };
+
+    Ok((manifest, artifact))
 }
 
 #[cfg(test)]
@@ -576,6 +801,25 @@ mod tests {
             artifacts: vec![SignedArtifact { record, signature }],
         })
         .expect("sample manifest should serialize")
+    }
+
+    fn manifest_with_metadata_json(
+        record: ArtifactRecord,
+        signature: String,
+        channel: ReleaseChannel,
+        release_notes: Option<String>,
+    ) -> Vec<u8> {
+        serde_json::to_vec_pretty(
+            &Manifest {
+                version: record.version.clone(),
+                artifacts: vec![SignedArtifact { record, signature }],
+            }
+            .with_metadata(ManifestMetadata {
+                channel,
+                release_notes,
+            }),
+        )
+        .expect("sample manifest with metadata should serialize")
     }
 
     fn sign_manifest_bytes(manifest_bytes: &[u8], key: &SigningKey) -> String {
@@ -893,6 +1137,91 @@ mod tests {
         let decoded: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.artifacts.len(), 1);
         assert_eq!(decoded.artifacts[0].record.version, "0.1.0");
+    }
+
+    #[test]
+    fn legacy_manifest_defaults_to_stable_without_release_notes() {
+        let key = keypair();
+        let record = sample_record();
+        let artifact_signature = sign(&record, &key);
+        let manifest = manifest_json(record, artifact_signature);
+        let manifest_signature = sign_manifest_bytes(&manifest, &key);
+
+        let decoded =
+            verify_manifest_with_metadata(&manifest, &manifest_signature, &[key.verifying_key()])
+                .expect("legacy manifest should remain valid");
+        assert_eq!(decoded.channel, ReleaseChannel::Stable);
+        assert_eq!(decoded.release_notes, None);
+    }
+
+    #[test]
+    fn signed_channel_and_release_notes_roundtrip() {
+        let key = keypair();
+        let record = sample_record();
+        let artifact_signature = sign(&record, &key);
+        let manifest = manifest_with_metadata_json(
+            record,
+            artifact_signature,
+            ReleaseChannel::Canary,
+            Some("Test canary before stable rollout.".to_string()),
+        );
+        let manifest_signature = sign_manifest_bytes(&manifest, &key);
+
+        let decoded =
+            verify_manifest_with_metadata(&manifest, &manifest_signature, &[key.verifying_key()])
+                .expect("signed metadata should verify");
+        assert_eq!(decoded.channel, ReleaseChannel::Canary);
+        assert_eq!(
+            decoded.release_notes.as_deref(),
+            Some("Test canary before stable rollout.")
+        );
+
+        let mut tampered: serde_json::Value =
+            serde_json::from_slice(&manifest).expect("manifest should parse");
+        tampered["channel"] = serde_json::Value::String("stable".to_string());
+        let tampered =
+            serde_json::to_vec_pretty(&tampered).expect("tampered manifest should encode");
+        let err =
+            verify_manifest_with_metadata(&tampered, &manifest_signature, &[key.verifying_key()])
+                .expect_err("metadata tampering must fail detached signature");
+        assert!(matches!(err, ReleaseError::InvalidSignature));
+    }
+
+    #[test]
+    fn release_notes_are_bounded() {
+        let record = sample_record();
+        let manifest = Manifest {
+            version: record.version.clone(),
+            artifacts: vec![SignedArtifact {
+                record,
+                signature: "0".repeat(SIGNATURE_HEX_BYTES),
+            }],
+        }
+        .with_metadata(ManifestMetadata {
+            channel: ReleaseChannel::Stable,
+            release_notes: Some("x".repeat(MAX_RELEASE_NOTES_BYTES + 1)),
+        });
+
+        assert!(matches!(
+            manifest.validate(),
+            Err(ReleaseError::InvalidField {
+                field: "manifest.release_notes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn release_channel_parser_rejects_unknown_values() {
+        assert_eq!(
+            "stable".parse::<ReleaseChannel>(),
+            Ok(ReleaseChannel::Stable)
+        );
+        assert_eq!(
+            "canary".parse::<ReleaseChannel>(),
+            Ok(ReleaseChannel::Canary)
+        );
+        assert!("beta".parse::<ReleaseChannel>().is_err());
     }
 
     #[test]
