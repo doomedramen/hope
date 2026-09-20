@@ -2349,6 +2349,18 @@ mod tests {
     }
 
     #[test]
+    fn reversed_event_times_are_rejected() {
+        let start = parse_schedule_time("2026-09-20T20:49:00", "UTC").expect("start");
+        let end = parse_schedule_time("2026-09-20T19:49:00", "UTC").expect("end");
+
+        let error = timestamp_span_seconds(start, end).expect_err("reversed times");
+        assert_eq!(
+            error,
+            "event duration must be a positive whole number of seconds"
+        );
+    }
+
+    #[test]
     fn conflict_explanation_contains_overlap_and_later_move() {
         let first = snapshot(
             Uuid::from_u128(1),
