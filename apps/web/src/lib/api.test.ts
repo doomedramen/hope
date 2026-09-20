@@ -13,6 +13,9 @@ import {
   fetchMonitors,
   launchNetworkScan,
   patchNetwork,
+  patchNotificationChannel,
+  testNotificationChannel,
+  deleteNotificationChannel,
   ApiError,
 } from "./api";
 
@@ -255,6 +258,61 @@ describe("fetchHealthReady", () => {
     );
     const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
     expect(headers.get("x-requested-with")).toBe("hope");
+  });
+
+  it("updates, tests, and removes a notification channel", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "channel-1",
+            name: "Ops webhook",
+            provider: "webhook",
+            enabled: false,
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: "sent" }), {
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await patchNotificationChannel("channel-1", {
+      name: "Ops webhook",
+      enabled: false,
+      config: { url: "https://hooks.example.test/hope" },
+    });
+    const testResult = await testNotificationChannel("channel-1");
+    await deleteNotificationChannel("channel-1");
+
+    expect(testResult.status).toBe("sent");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/notification-channels/channel-1",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          name: "Ops webhook",
+          enabled: false,
+          config: { url: "https://hooks.example.test/hope" },
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/notification-channels/channel-1/test",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "/api/v1/notification-channels/channel-1",
+      expect.objectContaining({ method: "DELETE" }),
+    );
   });
 
   it("edits and deletes a network through its lifecycle endpoints", async () => {

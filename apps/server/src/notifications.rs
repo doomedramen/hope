@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,14 @@ pub struct CreateChannelRequest {
     pub config: Value,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchChannelRequest {
+    pub name: Option<String>,
+    pub provider: Option<String>,
+    pub config: Option<Value>,
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,6 +260,123 @@ pub async fn create_channel(
             }
         }
         Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+pub async fn patch_channel(
+    State(state): State<AppState>,
+    Path(channel_id): Path<Uuid>,
+    Json(input): Json<PatchChannelRequest>,
+) -> (StatusCode, Json<Value>) {
+    let existing: Option<(String, String, Value, bool)> = match sqlx::query_as(
+        "select name, provider, config, enabled from notification_channels where id = $1",
+    )
+    .bind(channel_id)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(channel) => channel,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let Some((existing_name, existing_provider, existing_config, existing_enabled)) = existing
+    else {
+        return err(StatusCode::NOT_FOUND, "notification channel not found");
+    };
+
+    let name = input.name.as_deref().unwrap_or(&existing_name).trim();
+    if name.is_empty() || name.len() > 128 {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "channel name must be 1-128 characters",
+        );
+    }
+    let provider = input.provider.as_deref().unwrap_or(&existing_provider);
+    let config = match input.config {
+        Some(config) => match merge_channel_config(&existing_config, &config) {
+            Ok(config) => config,
+            Err(error) => return err(StatusCode::BAD_REQUEST, error.to_string()),
+        },
+        None => existing_config,
+    };
+    if let Err(error) = validate_channel(provider, &config) {
+        return err(StatusCode::BAD_REQUEST, error.to_string());
+    }
+    let enabled = input.enabled.unwrap_or(existing_enabled);
+    let row: Result<(Value,), sqlx::Error> = sqlx::query_as(
+        "update notification_channels set name = $2, provider = $3, config = $4, \
+                enabled = $5, updated_at = now() where id = $1 \
+         returning row_to_json(notification_channels.*)",
+    )
+    .bind(channel_id)
+    .bind(name)
+    .bind(provider)
+    .bind(config)
+    .bind(enabled)
+    .fetch_one(&state.pool)
+    .await;
+    match row {
+        Ok((row,)) => (StatusCode::OK, Json(redact_channel(row))),
+        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+pub async fn delete_channel(
+    State(state): State<AppState>,
+    Path(channel_id): Path<Uuid>,
+) -> (StatusCode, Json<Value>) {
+    let result = sqlx::query("delete from notification_channels where id = $1")
+        .bind(channel_id)
+        .execute(&state.pool)
+        .await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => (StatusCode::NO_CONTENT, Json(Value::Null)),
+        Ok(_) => err(StatusCode::NOT_FOUND, "notification channel not found"),
+        Err(error) => {
+            let foreign_key = error
+                .as_database_error()
+                .and_then(|database_error| database_error.code())
+                .is_some_and(|code| code == "23503");
+            if foreign_key {
+                err(
+                    StatusCode::CONFLICT,
+                    "cannot remove a channel with notification routes or deliveries",
+                )
+            } else {
+                err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+            }
+        }
+    }
+}
+
+pub async fn test_channel(
+    State(state): State<AppState>,
+    Path(channel_id): Path<Uuid>,
+) -> (StatusCode, Json<Value>) {
+    let channel: Option<(String, Value)> =
+        match sqlx::query_as("select provider, config from notification_channels where id = $1")
+            .bind(channel_id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(channel) => channel,
+            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
+    let Some((provider, config)) = channel else {
+        return err(StatusCode::NOT_FOUND, "notification channel not found");
+    };
+    let delivery = Delivery {
+        id: channel_id,
+        provider,
+        config,
+        payload: channel_test_payload(),
+        status: "pending".to_string(),
+    };
+    match send_delivery(&delivery).await {
+        Ok(()) => (StatusCode::OK, Json(json!({"status": "sent"}))),
+        Err(error) => err(
+            StatusCode::BAD_GATEWAY,
+            format!("channel test failed: {error}"),
+        ),
     }
 }
 
@@ -755,6 +880,37 @@ fn severity_is_valid(value: &str) -> bool {
     matches!(value, "info" | "notice" | "warning" | "critical")
 }
 
+fn merge_channel_config(existing: &Value, patch: &Value) -> Result<Value> {
+    let mut merged = existing
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("channel config must be an object"))?;
+    let patch = patch
+        .as_object()
+        .ok_or_else(|| anyhow!("channel config must be an object"))?;
+    for (key, value) in patch {
+        if matches!(key.as_str(), "token" | "authorization" | "secret")
+            && value.as_str() == Some("[redacted]")
+        {
+            continue;
+        }
+        if value.is_null() {
+            merged.remove(key);
+        } else {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Object(merged))
+}
+
+fn channel_test_payload() -> Value {
+    json!({
+        "event": "notification.test",
+        "severity": "info",
+        "summary": "Hope notification channel test",
+    })
+}
+
 fn severity_rank(value: &str) -> i32 {
     match value {
         "critical" => 3,
@@ -801,6 +957,32 @@ mod tests {
             &json!({"url": "https://hooks.example.test/hope"}),
         )
         .expect("webhook URL is valid");
+    }
+
+    #[test]
+    fn channel_patch_preserves_redacted_secrets_and_allows_removal() {
+        let existing = json!({
+            "url": "https://hooks.example.test/hope",
+            "token": "secret-token",
+        });
+        let merged = merge_channel_config(
+            &existing,
+            &json!({"url": "https://hooks.example.test/new", "token": "[redacted]"}),
+        )
+        .unwrap();
+        assert_eq!(merged["url"], "https://hooks.example.test/new");
+        assert_eq!(merged["token"], "secret-token");
+
+        let removed = merge_channel_config(&merged, &json!({"token": null})).unwrap();
+        assert!(removed.get("token").is_none());
+    }
+
+    #[test]
+    fn channel_test_payload_is_non_incident_and_safe_to_repeat() {
+        let payload = channel_test_payload();
+        assert_eq!(payload["event"], "notification.test");
+        assert_eq!(payload["severity"], "info");
+        assert!(payload["summary"].as_str().is_some());
     }
 
     #[tokio::test]

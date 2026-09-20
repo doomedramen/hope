@@ -1056,6 +1056,36 @@ export async function createNotificationChannel(input: {
   });
 }
 
+export async function patchNotificationChannel(
+  id: string,
+  input: {
+    name?: string;
+    provider?: NotificationProvider;
+    config?: Record<string, string | null>;
+    enabled?: boolean;
+  },
+): Promise<NotificationChannel> {
+  return request<NotificationChannel>(`/api/v1/notification-channels/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteNotificationChannel(id: string): Promise<void> {
+  await request<unknown>(`/api/v1/notification-channels/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export async function testNotificationChannel(
+  id: string,
+): Promise<{ status: "sent" }> {
+  return request<{ status: "sent" }>(
+    `/api/v1/notification-channels/${id}/test`,
+    { method: "POST" },
+  );
+}
+
 export async function fetchNotificationRoutes(): Promise<{
   items: NotificationRoute[];
 }> {

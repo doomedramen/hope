@@ -36,7 +36,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use clap::{Parser, Subcommand};
 use sqlx::postgres::PgPoolOptions;
 use tokio::signal::unix::{SignalKind, signal};
@@ -372,6 +372,14 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
         .route(
             "/api/v1/notification-channels",
             get(notifications::list_channels).post(notifications::create_channel),
+        )
+        .route(
+            "/api/v1/notification-channels/{id}",
+            patch(notifications::patch_channel).delete(notifications::delete_channel),
+        )
+        .route(
+            "/api/v1/notification-channels/{id}/test",
+            post(notifications::test_channel),
         )
         .route(
             "/api/v1/notification-routes",
