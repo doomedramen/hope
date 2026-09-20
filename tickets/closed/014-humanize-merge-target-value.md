@@ -1,10 +1,10 @@
 ---
 id: "014"
 title: "Humanize selected merge target"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T17:28:31Z"
-updated: "2026-09-20T17:28:31Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["infrastructure", "devices", "merge", "usability"]
 ---
 

@@ -1,10 +1,10 @@
 ---
 id: "005"
 title: "Widen maintenance event dialog to prevent overflow clipping"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T17:11:27Z"
-updated: "2026-09-20T17:11:27Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["maintenance", "dialog", "layout", "ux"]
 ---
 

@@ -1,10 +1,10 @@
 ---
 id: "017"
 title: "Reset create dialogs after use"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T17:37:57Z"
-updated: "2026-09-20T17:37:57Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["infrastructure", "devices", "networks", "dialogs", "usability"]
 ---
 

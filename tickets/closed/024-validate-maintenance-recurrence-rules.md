@@ -1,10 +1,10 @@
 ---
 id: "024"
 title: "Validate maintenance recurrence rules before submit"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T17:53:26Z"
-updated: "2026-09-20T17:53:26Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["maintenance", "recurrence", "validation", "usability"]
 ---
 

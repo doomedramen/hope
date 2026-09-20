@@ -1,10 +1,10 @@
 ---
 id: "023"
 title: "Reject maintenance events with reversed times"
-status: open
+status: closed
 priority: high
 created: "2026-09-20T17:53:26Z"
-updated: "2026-09-20T17:53:26Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["maintenance", "validation", "data-integrity"]
 ---
 

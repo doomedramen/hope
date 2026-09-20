@@ -1,10 +1,10 @@
 ---
 id: "028"
 title: "Improve maintenance recurrence UI"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T18:01:00Z"
-updated: "2026-09-20T18:01:00Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["maintenance", "recurrence", "usability", "feature-request"]
 ---
 

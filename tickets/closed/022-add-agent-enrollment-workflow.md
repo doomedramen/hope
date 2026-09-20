@@ -1,10 +1,10 @@
 ---
 id: "022"
 title: "Provide an agent enrollment workflow"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T17:53:26Z"
-updated: "2026-09-20T17:53:26Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["agents", "onboarding", "feature-request"]
 ---
 

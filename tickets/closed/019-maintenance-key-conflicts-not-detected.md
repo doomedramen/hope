@@ -1,10 +1,10 @@
 ---
 id: "019"
 title: "Detect maintenance conflicts for resource keys"
-status: open
+status: closed
 priority: high
 created: "2026-09-20T17:42:48Z"
-updated: "2026-09-20T17:42:48Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["maintenance", "conflicts", "resources", "data-integrity"]
 ---
 

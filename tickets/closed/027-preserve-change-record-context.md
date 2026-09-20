@@ -1,10 +1,10 @@
 ---
 id: "027"
 title: "Preserve record context from Changes inventory links"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T17:56:25Z"
-updated: "2026-09-20T17:56:25Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["changes", "infrastructure", "navigation", "usability"]
 ---
 

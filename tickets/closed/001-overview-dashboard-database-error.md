@@ -1,10 +1,10 @@
 ---
 id: "001"
 title: "Fix overview dashboard database error"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T17:11:27Z"
-updated: "2026-09-20T17:11:27Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["overview", "dashboard", "database"]
 ---
 

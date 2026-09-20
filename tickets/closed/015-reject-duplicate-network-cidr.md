@@ -1,10 +1,10 @@
 ---
 id: "015"
 title: "Reject duplicate network CIDRs"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T17:36:00Z"
-updated: "2026-09-20T17:36:00Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["infrastructure", "networks", "validation", "data-integrity"]
 ---
 

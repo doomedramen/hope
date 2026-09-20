@@ -1,10 +1,10 @@
 ---
 id: "013"
 title: "Fix maintenance date picker page crash"
-status: open
+status: closed
 priority: high
 created: "2026-09-20T17:25:30Z"
-updated: "2026-09-20T17:25:30Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["maintenance", "date-picker", "crash"]
 ---
 

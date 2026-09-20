@@ -1,10 +1,10 @@
 ---
 id: "012"
 title: "Persist discovery scope and scan state across navigation"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T17:11:27Z"
-updated: "2026-09-20T17:11:27Z"
+updated: "2026-09-20T19:53:40Z"
 tags: ["infrastructure", "discovery", "scanning", "state"]
 ---
 
