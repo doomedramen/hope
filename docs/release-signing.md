@@ -103,9 +103,10 @@ agent verify-release --manifest dist/release/manifest.json --binary dist/release
 
 ## CI
 
-`.github/workflows/ci.yml`'s `agent-cross-compile` job builds, signs, and
-uploads a release bundle for `linux/amd64` and `linux/arm64` on every
-push/PR:
+`.github/workflows/ci.yml`'s `agent-cross-compile` job currently builds, signs,
+and uploads a release bundle for `linux/amd64` on every push/PR. Arm64 remains
+supported by the release format and local build instructions, but is excluded
+from active CI until the project is stable on the amd64 path:
 
 - If the repository secrets `HOPE_RELEASE_SIGNING_KEY_HEX` /
   `HOPE_RELEASE_PUBLIC_KEY_HEX` are configured, CI signs with the real
