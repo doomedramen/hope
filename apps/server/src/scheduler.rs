@@ -89,6 +89,18 @@ pub(crate) async fn enqueue_periodic_jobs(
         tracing::warn!(error = %err, "failed to enqueue agent_updates.reconcile");
     }
 
+    let dependency_graph_key = five_minute_period_key("five-minute-dependency-graph");
+    if let Err(err) = jobs::enqueue(
+        pool,
+        "dependency_graph.reconcile",
+        &dependency_graph_key,
+        serde_json::json!({}),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "failed to enqueue dependency_graph.reconcile");
+    }
+
     let retention_key = daily_period_key("daily");
     if let Err(err) = jobs::enqueue(
         pool,

@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::agent_updates;
 use crate::agents;
+use crate::dependency_graph;
 use crate::discovery::service_collectors::{self, CollectorConfig, CollectorProtocol};
 use crate::discovery::worker;
 use crate::inventory::retention;
@@ -401,6 +402,22 @@ impl JobHandler for AgentUpdateReconcile {
     }
 }
 
+struct DependencyGraphReconcile;
+
+#[async_trait]
+impl JobHandler for DependencyGraphReconcile {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        _payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        dependency_graph::reconcile_deterministic_edges(pool).await?;
+        Ok(JobOutcome::Completed)
+    }
+}
+
 async fn validate_collector_scope(
     pool: &PgPool,
     network_id: Uuid,
@@ -445,6 +462,10 @@ impl Registry {
         handlers.insert("agent_health.sweep", Box::new(AgentHealthSweep));
         handlers.insert("agent.update", Box::new(AgentUpdate));
         handlers.insert("agent_updates.reconcile", Box::new(AgentUpdateReconcile));
+        handlers.insert(
+            "dependency_graph.reconcile",
+            Box::new(DependencyGraphReconcile),
+        );
         handlers.insert("diagnostic.echo", Box::new(DiagnosticEcho));
         handlers.insert("change_events.retention", Box::new(ChangeEventRetention));
         handlers.insert(

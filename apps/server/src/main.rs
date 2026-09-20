@@ -5,6 +5,7 @@ mod auth_mw;
 mod config;
 mod credentials;
 mod csrf;
+pub mod dependency_graph;
 mod discovery;
 mod enroll;
 mod gateway;
@@ -141,6 +142,15 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
     let setup_limiter = RateLimitState::new(10, config.trust_proxy_headers);
     let login_limiter = RateLimitState::new(10, config.trust_proxy_headers);
 
+    // The generic dependency resource stays compiled for shared inventory
+    // code, while M8 routes use the validated graph handlers below.
+    let _ = (
+        inventory::generic::dependency_edges::list,
+        inventory::generic::dependency_edges::get,
+        inventory::generic::dependency_edges::create,
+        inventory::generic::dependency_edges::patch,
+    );
+
     // M1 inventory: every route is session-authenticated (§12.3) and
     // subject to the same CSRF custom-header check as every other
     // mutating `/api/v1` route (see csrf.rs doc comment).
@@ -273,13 +283,23 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
         )
         .route(
             "/api/v1/dependencies",
-            get(inventory::generic::dependency_edges::list)
-                .post(inventory::generic::dependency_edges::create),
+            get(dependency_graph::list).post(dependency_graph::create),
         )
         .route(
             "/api/v1/dependencies/{id}",
-            get(inventory::generic::dependency_edges::get)
-                .patch(inventory::generic::dependency_edges::patch),
+            get(dependency_graph::get).patch(dependency_graph::patch),
+        )
+        .route(
+            "/api/v1/dependencies/{id}/blast-radius",
+            get(dependency_graph::blast_radius),
+        )
+        .route(
+            "/api/v1/dependencies/{id}/confirm",
+            post(dependency_graph::confirm),
+        )
+        .route(
+            "/api/v1/dependencies/{id}/reject",
+            post(dependency_graph::reject),
         )
         .route(
             "/api/v1/identity-suggestions",
