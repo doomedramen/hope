@@ -9,9 +9,16 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({
     children,
     to,
+    search,
     ...props
-  }: AnchorHTMLAttributes<HTMLAnchorElement> & { to?: string }) => (
-    <a href={to} {...props}>
+  }: AnchorHTMLAttributes<HTMLAnchorElement> & {
+    search?: { device?: string };
+    to?: string;
+  }) => (
+    <a
+      href={`${to ?? ""}${search?.device ? `?device=${encodeURIComponent(search.device)}` : ""}`}
+      {...props}
+    >
       {children}
     </a>
   ),

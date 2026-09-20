@@ -101,6 +101,10 @@ import {
 } from "@/components/ui/table";
 
 export const Route = createFileRoute("/infrastructure")({
+  validateSearch: (search: Record<string, unknown>): { device?: string } => {
+    const device = typeof search.device === "string" ? search.device : null;
+    return device ? { device } : {};
+  },
   component: InfrastructurePage,
 });
 
