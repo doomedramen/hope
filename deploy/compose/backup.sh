@@ -25,6 +25,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
 backup_root="${1:-${HOPE_BACKUP_DIR:-$repo_root/backups}}"
 backup_root="$(mkdir -p -- "$backup_root" && cd -- "$backup_root" && pwd)"
+env_path="${HOPE_DEPLOYMENT_ENV_FILE:-$repo_root/.env}"
 
 case "${HOPE_BACKUP_INCLUDE_SECRETS:-}" in
   1|true|TRUE|yes|YES) ;;
@@ -39,18 +40,24 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-compose=(docker compose --project-directory "$repo_root" -f "$script_dir/docker-compose.yml")
+compose=(docker compose --project-directory "$repo_root" --env-file "$env_path" -f "$script_dir/docker-compose.yml")
 created_at="$(date -u +%Y%m%dT%H%M%SZ)"
 destination="$backup_root/hope-$created_at"
 key_path="${HOPE_CREDENTIAL_MASTER_KEY_FILE_HOST:-$script_dir/secrets/credential-master-key}"
+release_dir="${HOPE_AGENT_RELEASE_DIR_HOST:-$script_dir/agent-releases}"
+
+if [[ ! -f "$env_path" ]]; then
+  printf 'Deployment env file not found: %s\n' "$env_path" >&2
+  exit 1
+fi
 
 if [[ ! -f "$key_path" ]]; then
   printf 'Credential master key not found: %s\n' "$key_path" >&2
   exit 1
 fi
 
-if [[ ! -d "$script_dir/agent-releases" ]]; then
-  printf 'Agent release repository not found: %s\n' "$script_dir/agent-releases" >&2
+if [[ ! -d "$release_dir" ]]; then
+  printf 'Agent release repository not found: %s\n' "$release_dir" >&2
   exit 1
 fi
 
@@ -87,8 +94,9 @@ fi
 "${compose[@]}" exec -T postgres pg_restore --list <"$destination/postgres.dump" >/dev/null
 
 docker cp "$server_container:/app/data/pki" "$destination/"
-cp -a -- "$script_dir/agent-releases" "$destination/agent-releases"
+cp -a -- "$release_dir" "$destination/agent-releases"
 install -m 600 -- "$key_path" "$destination/credential-master-key"
+install -m 600 -- "$env_path" "$destination/deployment.env"
 
 git_revision="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || printf '%s' unknown)"
 cat >"$destination/manifest.txt" <<EOF
@@ -100,6 +108,7 @@ postgres_globals=postgres-globals.sql
 server_pki=pki
 agent_releases=agent-releases
 credential_master_key=credential-master-key
+deployment_env=deployment.env
 EOF
 
 (

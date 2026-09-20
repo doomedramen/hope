@@ -42,7 +42,7 @@ if [[ "$force" != 1 ]]; then
   exit 2
 fi
 
-for required in manifest.txt SHA256SUMS postgres.dump postgres-globals.sql pki agent-releases; do
+for required in manifest.txt SHA256SUMS postgres.dump postgres-globals.sql pki agent-releases deployment.env; do
   if [[ ! -e "$backup_dir/$required" ]]; then
     printf 'Backup is missing %s\n' "$required" >&2
     exit 1
@@ -73,8 +73,9 @@ fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
-compose=(docker compose --project-directory "$repo_root" -f "$script_dir/docker-compose.yml")
+compose=(docker compose --project-directory "$repo_root" --env-file "$backup_dir/deployment.env" -f "$script_dir/docker-compose.yml")
 key_path="${HOPE_CREDENTIAL_MASTER_KEY_FILE_HOST:-$script_dir/secrets/credential-master-key}"
+release_dir="${HOPE_AGENT_RELEASE_DIR_HOST:-$script_dir/agent-releases}"
 helper_id=""
 
 cleanup() {
@@ -109,10 +110,11 @@ fi
 "${compose[@]}" exec -T postgres sh -c 'dropdb --if-exists --username="$POSTGRES_USER" "$POSTGRES_DB" && createdb --username="$POSTGRES_USER" "$POSTGRES_DB"'
 "${compose[@]}" exec -T postgres sh -c 'pg_restore --exit-on-error --no-owner --no-acl --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' <"$backup_dir/postgres.dump"
 
-if [[ -e "$script_dir/agent-releases" ]]; then
-  rm -rf -- "$script_dir/agent-releases"
+if [[ -e "$release_dir" ]]; then
+  rm -rf -- "$release_dir"
 fi
-cp -a -- "$backup_dir/agent-releases" "$script_dir/agent-releases"
+mkdir -p -- "$(dirname -- "$release_dir")"
+cp -a -- "$backup_dir/agent-releases" "$release_dir"
 
 helper_id="$("${compose[@]}" run -d --no-deps --entrypoint sh server -c 'sleep 300')"
 docker exec "$helper_id" rm -rf /app/data/pki
