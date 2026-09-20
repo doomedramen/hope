@@ -242,7 +242,7 @@ async fn load_active_edges(pool: &PgPool) -> sqlx::Result<Vec<GraphEdge>> {
     let rows: Vec<(String, Uuid, String, Uuid, Uuid)> = sqlx::query_as(
         "select provider_kind, provider_id, consumer_kind, consumer_id, id \
          from dependency_edges \
-         where coalesce(confirmation_state, 'confirmed') <> 'rejected' \
+         where coalesce(confirmation_state, 'confirmed') = 'confirmed' \
          order by provider_kind, provider_id, consumer_kind, consumer_id, dependency_kind, id \
          limit $1",
     )
@@ -961,6 +961,30 @@ pub async fn reconcile_deterministic_edges(pool: &PgPool) -> sqlx::Result<()> {
         .execute(&mut *tx)
         .await?;
     }
+
+    sqlx::query(
+        "update dependency_edges d \
+            set confirmation_state = 'rejected', confirmed_by = null, confirmed_at = null, \
+                updated_at = now() \
+          where d.origin = 'inferred' \
+            and exists ( \
+                select 1 from incident_notification_suppressions s \
+                where s.dependency_edge_id = d.id) \
+            and ((d.dependency_kind like 'containment:%' and d.inference_rule = d.dependency_kind \
+                  and not exists ( \
+                      select 1 from containment_edges c \
+                      where c.parent_kind = d.provider_kind and c.parent_id = d.provider_id \
+                        and c.child_kind = d.consumer_kind and c.child_id = d.consumer_id \
+                        and ('containment:' || c.relation) = d.dependency_kind)) \
+              or (d.dependency_kind = 'ownership' and d.inference_rule = 'ownership' \
+                  and not exists ( \
+                      select 1 from services s \
+                      where s.id = d.consumer_id and s.owner_id = d.provider_id \
+                        and ((s.owner_kind = 'device' and d.provider_kind = 'devices') \
+                             or (s.owner_kind = 'workload' and d.provider_kind = 'workloads')))))",
+    )
+    .execute(&mut *tx)
+    .await?;
 
     sqlx::query(
         "delete from dependency_edges d \
