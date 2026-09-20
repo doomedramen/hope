@@ -124,6 +124,20 @@ docker compose -f deploy/compose/docker-compose.yml down
 `down -v` removes the PostgreSQL and server-PKI volumes. Use it only when
 intentionally discarding the deployment.
 
+## Proxmox VE Helper Script
+
+Install Hope into a dedicated Debian 13 LXC from a Proxmox VE host:
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct/hope.sh)"
+```
+
+The helper creates an unprivileged, Docker-enabled LXC, installs the published
+Hope image and PostgreSQL stack, and writes its deployment to `/opt/hope`.
+It currently supports `amd64` Proxmox hosts. See
+[Proxmox VE installation and updates](docs/operations/proxmox-ve.md) for
+resource defaults, backups, configuration, and the safe update command.
+
 ## M9 maintenance API
 
 All maintenance routes require an authenticated operator session and the CSRF
@@ -187,6 +201,7 @@ configuration, image pulls, scan failures, or record mismatches.
 
 - [Backup and clean restore](docs/operations/backup-restore.md)
 - [Upgrade and recovery](docs/operations/upgrade-recovery.md)
+- [Proxmox VE installation and updates](docs/operations/proxmox-ve.md)
 - [Signed agent releases](docs/release-signing.md)
 - [Manual agent installation](docs/manual-agent-install.md)
 - [Threat model](docs/threat-model.md)

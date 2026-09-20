@@ -14,6 +14,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  proxmox-helper:
+    name: Proxmox helper scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/test-proxmox-helper.sh
+
   rust-checks:
     name: fmt, clippy, test
     runs-on: ubuntu-latest
