@@ -49,6 +49,28 @@ export type ScanRunKind = "initial_discovery" | "change_scan" | "full_tcp";
 export type ScanRunStatus =
   "pending" | "running" | "succeeded" | "failed" | "cancelled";
 
+export interface ScanJobSnapshot {
+  id: string;
+  job_type: string;
+  status: string;
+  progress: Record<string, unknown>;
+  attempts: number;
+  max_attempts: number;
+  run_at: string;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScanLogEntry {
+  id: string;
+  actor_kind: string;
+  action: string;
+  result: string;
+  detail: Record<string, unknown> | null;
+  occurred_at: string;
+}
+
 export interface ScanRun {
   id: string;
   network_id: string;
@@ -70,6 +92,13 @@ export interface ScanRun {
   finished_at: string | null;
   created_at: string;
   updated_at: string;
+  job?: ScanJobSnapshot | null;
+  logs?: ScanLogEntry[];
+}
+
+export interface NetworkScansResponse {
+  items: ScanRun[];
+  active_scan: ScanRun | null;
 }
 
 export interface Device {
@@ -282,6 +311,58 @@ export interface AgentDetail extends Agent {
   containers: AgentContainerInventory[];
   evidence: AgentEvidenceItem[];
   reconciliation: AgentReconciliation;
+}
+
+export type CredentialKind = "ssh_private_key" | "ssh_password" | string;
+
+export interface Credential {
+  id: string;
+  name: string;
+  kind: CredentialKind;
+  scope: { kind: string; device_id?: string; [key: string]: unknown };
+  version: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  deleted_at: string | null;
+}
+
+export type JobStatus =
+  "pending" | "running" | "succeeded" | "failed" | "cancelled" | string;
+
+export interface DeploymentJob {
+  id: string;
+  job_type: string;
+  status: JobStatus;
+  progress: Record<string, unknown>;
+  attempts: number;
+  max_attempts: number;
+  run_at: string | null;
+  last_error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export type SshHostKeyState =
+  "pending" | "trusted" | "changed" | "revoked" | string;
+
+export interface SshHostKey {
+  id: string;
+  device_id: string | null;
+  host: string;
+  port: number;
+  key_type: string;
+  fingerprint_sha256: string;
+  previous_fingerprint_sha256: string | null;
+  state: SshHostKeyState;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  trusted_at: string | null;
+  changed_at: string | null;
+  revoked_at: string | null;
+  version: number;
 }
 
 export interface MatchedIdentifier {
@@ -848,6 +929,12 @@ export async function launchNetworkScan(
   });
 }
 
+export async function fetchNetworkScans(
+  networkId: string,
+): Promise<NetworkScansResponse> {
+  return request<NetworkScansResponse>(`/api/v1/networks/${networkId}/scans`);
+}
+
 export async function fetchScanRun(id: string): Promise<ScanRun> {
   return request<ScanRun>(`/api/v1/scans/${id}`);
 }
@@ -868,6 +955,102 @@ export async function fetchAgents(): Promise<ApiPage<Agent>> {
 
 export async function fetchAgent(id: string): Promise<AgentDetail> {
   return request<AgentDetail>(`/api/v1/agents/${id}`);
+}
+
+export async function fetchCredentials(): Promise<ApiPage<Credential>> {
+  return request<ApiPage<Credential>>("/api/v1/credentials?limit=100");
+}
+
+export async function createCredential(input: {
+  name: string;
+  scope: { kind: "device"; device_id: string };
+  secret:
+    | {
+        type: "ssh_password";
+        username: string;
+        password: string;
+      }
+    | {
+        type: "ssh_private_key";
+        username: string;
+        private_key_pem: string;
+        passphrase?: string | null;
+      };
+}): Promise<Credential> {
+  return request<Credential>("/api/v1/credentials", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function installAgent(
+  deviceId: string,
+  input: {
+    host: string;
+    port: number;
+    credential_id: string;
+    disassociate_after_enrollment?: boolean;
+    idempotencyKey: string;
+  },
+): Promise<{ job_id: string; status: JobStatus }> {
+  return request<{ job_id: string; status: JobStatus }>(
+    `/api/v1/devices/${deviceId}/agent-install`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": input.idempotencyKey },
+      body: JSON.stringify({
+        host: input.host,
+        port: input.port,
+        credential_id: input.credential_id,
+        disassociate_after_enrollment:
+          input.disassociate_after_enrollment ?? false,
+      }),
+    },
+  );
+}
+
+export async function repairAgent(
+  deviceId: string,
+  input: {
+    host: string;
+    port: number;
+    credential_id: string;
+    disassociate_after_enrollment?: boolean;
+    idempotencyKey: string;
+  },
+): Promise<{ job_id: string; status: JobStatus }> {
+  return request<{ job_id: string; status: JobStatus }>(
+    `/api/v1/devices/${deviceId}/agent-repair`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": input.idempotencyKey },
+      body: JSON.stringify({
+        host: input.host,
+        port: input.port,
+        credential_id: input.credential_id,
+        disassociate_after_enrollment:
+          input.disassociate_after_enrollment ?? false,
+      }),
+    },
+  );
+}
+
+export async function fetchJob(id: string): Promise<DeploymentJob> {
+  return request<DeploymentJob>(`/api/v1/jobs/${id}`);
+}
+
+export async function fetchSshHostKeys(
+  deviceId?: string,
+): Promise<ApiPage<SshHostKey>> {
+  return request<ApiPage<SshHostKey>>(
+    `/api/v1/ssh-host-keys${deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : ""}`,
+  );
+}
+
+export async function trustSshHostKey(id: string): Promise<SshHostKey> {
+  return request<SshHostKey>(`/api/v1/ssh-host-keys/${id}/trust`, {
+    method: "POST",
+  });
 }
 
 export async function fetchAddresses(): Promise<ApiPage<Address>> {

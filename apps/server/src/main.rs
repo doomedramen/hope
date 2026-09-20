@@ -218,7 +218,10 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             "/api/v1/networks/{id}/discovery-scope/confirm",
             post(inventory::discovery_scopes::confirm),
         )
-        .route("/api/v1/networks/{id}/scans", post(discovery::runs::create))
+        .route(
+            "/api/v1/networks/{id}/scans",
+            get(discovery::runs::list).post(discovery::runs::create),
+        )
         .route(
             "/api/v1/networks/{id}/service-collectors",
             post(discovery::collectors::create),

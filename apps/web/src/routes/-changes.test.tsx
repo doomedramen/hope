@@ -87,6 +87,6 @@ describe("ChangesPage", () => {
     await waitFor(() => expect(trigger).toHaveTextContent("Monitor.Created"));
     expect(
       await screen.findByRole("link", { name: /Open inventory/ }),
-    ).toHaveAttribute("href", "/infrastructure?device=monitor-1");
+    ).toHaveAttribute("href", "/devices?device=monitor-1");
   });
 });

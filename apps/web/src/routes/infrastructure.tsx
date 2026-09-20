@@ -15,22 +15,18 @@ import {
   XIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { DiscoveryScopeSetup } from "@/components/DiscoveryScopeSetup";
+import { AgentDeploymentDialog } from "@/components/AgentDeploymentDialog";
 import {
   createDevice,
   fetchAddresses,
   fetchDevice,
   fetchDevices,
   fetchIdentitySuggestions,
-  fetchNetworks,
-  deleteNetwork,
   mergeDevice,
-  patchNetwork,
   patchDevice,
   resolveIdentitySuggestion,
   splitDevice,
   undoMerge,
-  createNetwork,
   ApiError,
   type Address,
   type Device,
@@ -141,15 +137,8 @@ export function InfrastructurePage() {
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).get("focus") === "search";
   const [dialog, setDialog] = useState<
-    | "create"
-    | "network-create"
-    | "network-edit"
-    | "edit"
-    | "merge"
-    | "split"
-    | null
+    "create" | "edit" | "merge" | "split" | "agent-install" | null
   >(null);
-  const [networkTarget, setNetworkTarget] = useState<Network | null>(null);
   const devicesQuery = useQuery({
     queryKey: ["devices"],
     queryFn: fetchDevices,
@@ -157,10 +146,6 @@ export function InfrastructurePage() {
   const suggestionsQuery = useQuery({
     queryKey: ["identity-suggestions"],
     queryFn: fetchIdentitySuggestions,
-  });
-  const networksQuery = useQuery({
-    queryKey: ["networks"],
-    queryFn: fetchNetworks,
   });
   const devices = devicesQuery.data?.items ?? EMPTY_DEVICES;
   const visibleDevices = useMemo(() => {
@@ -208,35 +193,6 @@ export function InfrastructurePage() {
       await invalidateInventory();
       setRequestedDeviceId(device.id);
       setDialog(null);
-    },
-  });
-  const networkCreateMutation = useMutation({
-    mutationFn: createNetwork,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["networks"] });
-      setNetworkTarget(null);
-      setDialog(null);
-    },
-  });
-  const networkPatchMutation = useMutation({
-    mutationFn: ({
-      id,
-      input,
-    }: {
-      id: string;
-      input: Parameters<typeof patchNetwork>[1];
-    }) => patchNetwork(id, input),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["networks"] });
-      setNetworkTarget(null);
-      setDialog(null);
-    },
-  });
-  const networkDeleteMutation = useMutation({
-    mutationFn: deleteNetwork,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["networks"] });
-      setNetworkTarget(null);
     },
   });
   const editMutation = useMutation({
@@ -321,41 +277,26 @@ export function InfrastructurePage() {
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
       <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight">
-            Devices and network records
-          </h1>
+          <h1 className="text-3xl font-semibold tracking-tight">Devices</h1>
+          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+            Browse device identity, interfaces, address history, and review work
+            in one focused inventory view.
+          </p>
         </div>
-        <Button onClick={() => setDialog("create")}>
-          <PlusIcon data-icon="inline-start" />
-          Add device
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <a
+            className="inline-flex min-h-9 items-center justify-center rounded-md border px-3 text-sm font-medium hover:bg-muted"
+            href="/networks"
+          >
+            <NetworkIcon className="mr-2 size-4" />
+            Manage networks
+          </a>
+          <Button onClick={() => setDialog("create")}>
+            <PlusIcon data-icon="inline-start" />
+            Add device
+          </Button>
+        </div>
       </div>
-
-      <DiscoveryScopeSetup
-        actionError={networkDeleteMutation.error}
-        error={networksQuery.error}
-        loading={networksQuery.isLoading}
-        networks={networksQuery.data?.items ?? []}
-        onAddNetwork={() => {
-          networkCreateMutation.reset();
-          setNetworkTarget(null);
-          setDialog("network-create");
-        }}
-        onDeleteNetwork={(network) => {
-          if (
-            window.confirm(
-              `Delete ${network.name || network.cidr}? Dependent discovery data must be removed first.`,
-            )
-          ) {
-            networkDeleteMutation.mutate(network.id);
-          }
-        }}
-        onEditNetwork={(network) => {
-          networkPatchMutation.reset();
-          setNetworkTarget(network);
-          setDialog("network-edit");
-        }}
-      />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
@@ -480,6 +421,7 @@ export function InfrastructurePage() {
           error={detailQuery.error}
           loading={detailQuery.isLoading}
           onEdit={() => setDialog("edit")}
+          onInstall={() => setDialog("agent-install")}
           onMerge={() => setDialog("merge")}
           onSplit={() => setDialog("split")}
           onUndo={(id) => undoMutation.mutate(id)}
@@ -514,40 +456,6 @@ export function InfrastructurePage() {
             name: name || undefined,
           })
         }
-      />
-      <AddNetworkDialog
-        error={
-          dialog === "network-edit"
-            ? networkPatchMutation.error
-            : networkCreateMutation.error
-        }
-        network={dialog === "network-edit" ? networkTarget : null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setNetworkTarget(null);
-            setDialog(null);
-          }
-        }}
-        open={dialog === "network-create" || dialog === "network-edit"}
-        pending={
-          networkCreateMutation.isPending || networkPatchMutation.isPending
-        }
-        submit={(input) => {
-          if (dialog === "network-edit" && networkTarget) {
-            networkPatchMutation.mutate({
-              id: networkTarget.id,
-              input: {
-                version: networkTarget.version,
-                cidr: input.cidr,
-                gateway: input.gateway ?? null,
-                name: input.name ?? null,
-                vlan: input.vlan ?? null,
-              },
-            });
-          } else {
-            networkCreateMutation.mutate(input);
-          }
-        }}
       />
       {detailQuery.data ? (
         <EditDeviceDialog
@@ -596,6 +504,11 @@ export function InfrastructurePage() {
           }
         />
       ) : null}
+      <AgentDeploymentDialog
+        device={detailQuery.data}
+        onOpenChange={(open) => !open && setDialog(null)}
+        open={dialog === "agent-install"}
+      />
     </div>
   );
 }
@@ -644,6 +557,7 @@ function DeviceDetail({
   loading,
   error,
   onEdit,
+  onInstall,
   onMerge,
   onSplit,
   onUndo,
@@ -655,6 +569,7 @@ function DeviceDetail({
   loading: boolean;
   error: unknown;
   onEdit: () => void;
+  onInstall: () => void;
   onMerge: () => void;
   onSplit: () => void;
   onUndo: (id: string) => void;
@@ -716,6 +631,10 @@ function DeviceDetail({
           <Button onClick={onEdit} size="sm" variant="outline">
             <PencilIcon data-icon="inline-start" />
             Edit
+          </Button>
+          <Button onClick={onInstall} size="sm" variant="outline">
+            <ShieldCheckIcon data-icon="inline-start" />
+            Install agent
           </Button>
           <Button onClick={onMerge} size="sm" variant="outline">
             <GitMergeIcon data-icon="inline-start" />

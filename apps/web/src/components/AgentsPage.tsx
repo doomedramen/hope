@@ -28,6 +28,7 @@ import {
   type AgentDetail,
   type AgentFilesystemInventory,
   type AgentHostInventory,
+  type AgentInventorySummary,
   type AgentNetworkInventory,
   type AgentProcessInventory,
   type AgentReachabilityState,
@@ -82,6 +83,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "cn";
 
 const EMPTY_AGENTS: Agent[] = [];
+const EMPTY_INVENTORY_SUMMARY: AgentInventorySummary = {
+  interfaces: 0,
+  filesystems: 0,
+  processes: 0,
+  sockets: 0,
+  containers: 0,
+};
 
 export function AgentsPage() {
   const [requestedAgentId, setRequestedAgentId] = useState<string | null>(null);
@@ -487,7 +495,10 @@ function AgentTable({
               {formatRelative(agent.last_seen)}
             </TableCell>
             <TableCell>
-              <InventorySummary summary={agent.inventory_summary} compact />
+              <InventorySummary
+                summary={agent.inventory_summary ?? EMPTY_INVENTORY_SUMMARY}
+                compact
+              />
             </TableCell>
           </TableRow>
         ))}
@@ -635,7 +646,9 @@ function AgentDetailPanel({
           <TabsContent className="flex flex-col gap-5 pt-4" value="overview">
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-medium">Inventory summary</h2>
-              <InventorySummary summary={detail.inventory_summary} />
+              <InventorySummary
+                summary={detail.inventory_summary ?? EMPTY_INVENTORY_SUMMARY}
+              />
             </section>
             <ReconciliationSummary detail={detail} />
             <section className="flex flex-col gap-2">

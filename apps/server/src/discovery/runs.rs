@@ -7,6 +7,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth_mw::CurrentUser;
@@ -34,6 +35,53 @@ pub(crate) fn run_view(mut run: Value) -> Value {
 
 fn can_request_cancellation(status: &str, complete: bool) -> bool {
     !complete && matches!(status, "pending" | "running")
+}
+
+async fn enrich_run(pool: &PgPool, mut run: Value) -> Result<Value, sqlx::Error> {
+    let Some(job_id) = run
+        .get("job_id")
+        .and_then(Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+    else {
+        run["job"] = Value::Null;
+        run["logs"] = json!([]);
+        return Ok(run);
+    };
+
+    let job: Option<(Value,)> = sqlx::query_as(
+        "select row_to_json(t) from (select id, job_type, status, progress, attempts, \
+                max_attempts, run_at, last_error, created_at, updated_at \
+         from jobs where id = $1) t",
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await?;
+    let logs: Vec<(Value,)> = sqlx::query_as(
+        "select row_to_json(t) from (select id, actor_kind, action, result, detail, occurred_at \
+         from audit_events where target_kind = 'scan_runs' and target_id = $1 \
+         order by occurred_at asc, id asc limit 100) t",
+    )
+    .bind(
+        run.get("id")
+            .and_then(Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok()),
+    )
+    .fetch_all(pool)
+    .await?;
+
+    run["job"] = job.map(|(job,)| job).unwrap_or(Value::Null);
+    run["logs"] = Value::Array(logs.into_iter().map(|(log,)| log).collect());
+    Ok(run)
+}
+
+fn active_scan_conflict(run_id: Option<Uuid>) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "a scan is already pending or running for this network",
+            "active_scan_id": run_id,
+        })),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,11 +142,31 @@ pub async fn create(
             "network needs an enabled, confirmed discovery scope",
         );
     };
+    let job_type = "discovery.full_tcp";
+    let active_scan: Option<(Uuid,)> = match sqlx::query_as(
+        "select sr.id from scan_runs sr \
+         join jobs active_job on active_job.id = sr.job_id \
+         where sr.network_id = $1 \
+           and sr.status in ('pending', 'running') and not sr.complete \
+           and not (active_job.job_type = $2 and active_job.idempotency_key = $3) \
+         order by sr.created_at desc, sr.id desc limit 1 for update of sr",
+    )
+    .bind(network_id)
+    .bind(job_type)
+    .bind(idempotency_key)
+    .fetch_optional(&mut *transaction)
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    if let Some((run_id,)) = active_scan {
+        return active_scan_conflict(Some(run_id));
+    }
     let ports_planned = match target_count.checked_mul(PORTS_PER_TARGET) {
         Some(count) => count,
         None => return err(StatusCode::BAD_REQUEST, "scope is too large to scan"),
     };
-    let job_type = "discovery.full_tcp";
     let job_id = match jobs::enqueue_in(
         &mut transaction,
         job_type,
@@ -128,7 +196,17 @@ pub async fn create(
     .await
     {
         Ok(run) => run,
-        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        Err(error) => {
+            if error
+                .as_database_error()
+                .and_then(|database_error| database_error.code())
+                .as_deref()
+                == Some("23505")
+            {
+                return active_scan_conflict(None);
+            }
+            return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+        }
     };
     let (run, created) = match run {
         Some((run,)) => (run, true),
@@ -173,6 +251,10 @@ pub async fn create(
     if let Err(error) = transaction.commit().await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
+    let run = match enrich_run(&state.pool, run).await {
+        Ok(run) => run,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
     (
         if created {
             StatusCode::ACCEPTED
@@ -203,7 +285,69 @@ pub async fn get(
     let Some((run,)) = run else {
         return err(StatusCode::NOT_FOUND, "scan run not found");
     };
-    (StatusCode::OK, Json(run_view(run)))
+    let run = match enrich_run(&state.pool, run_view(run)).await {
+        Ok(run) => run,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    (StatusCode::OK, Json(run))
+}
+
+/// List recent scan runs for a network, including the current job snapshot and
+/// audit activity associated with each run. The response also identifies the
+/// active run so callers can disable duplicate launch controls without local
+/// state guesses.
+pub async fn list(
+    State(state): State<AppState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(network_id): Path<Uuid>,
+) -> (StatusCode, Json<Value>) {
+    let network_exists: Option<(Uuid,)> =
+        match sqlx::query_as("select id from networks where id = $1")
+            .bind(network_id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(network) => network,
+            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
+    if network_exists.is_none() {
+        return err(StatusCode::NOT_FOUND, "network not found");
+    }
+    let runs: Vec<(Value,)> = match sqlx::query_as(
+        "select row_to_json(scan_runs.*) from scan_runs \
+         where network_id = $1 order by created_at desc, id desc limit 50",
+    )
+    .bind(network_id)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(runs) => runs,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let mut items = Vec::with_capacity(runs.len());
+    for (run,) in runs {
+        let run = match enrich_run(&state.pool, run_view(run)).await {
+            Ok(run) => run,
+            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
+        items.push(run);
+    }
+    let active_scan = items.iter().find(|run| {
+        run.get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "pending" | "running"))
+            && !run
+                .get("complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+    });
+    (
+        StatusCode::OK,
+        Json(json!({
+            "items": items,
+            "active_scan": active_scan,
+        })),
+    )
 }
 
 /// Request cooperative cancellation for one pending or running scan.
@@ -241,7 +385,11 @@ pub async fn cancel(
         if let Err(error) = transaction.commit().await {
             return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
         }
-        return (StatusCode::OK, Json(run_view(run)));
+        let run = match enrich_run(&state.pool, run_view(run)).await {
+            Ok(run) => run,
+            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
+        return (StatusCode::OK, Json(run));
     }
     if !can_request_cancellation(&status, complete) {
         return err(
@@ -306,13 +454,17 @@ pub async fn cancel(
     if let Err(error) = transaction.commit().await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
+    let run = match enrich_run(&state.pool, run_view(run)).await {
+        Ok(run) => run,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
     (
         if cancellation_requested {
             StatusCode::OK
         } else {
             StatusCode::ACCEPTED
         },
-        Json(run_view(run)),
+        Json(run),
     )
 }
 

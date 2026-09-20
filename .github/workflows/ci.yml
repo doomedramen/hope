@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
   pull_request:
 
 permissions:
@@ -99,11 +99,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: pnpm install --frozen-lockfile
       - run: cargo build -p server
+      - name: Build agent for the disposable target
+        run: cargo build -p agent --release
       - run: pnpm -C apps/web build
       - name: Initialize server PKI
         run: |
           e2e_pki_dir="$RUNNER_TEMP/hope-e2e-pki"
           mkdir -p "$e2e_pki_dir"
+          openssl rand -hex 32 >"$RUNNER_TEMP/hope-e2e-master-key"
           HOPE_CA_CERT_PATH="$e2e_pki_dir/ca-cert.pem" \
           HOPE_CA_KEY_PATH="$e2e_pki_dir/ca-key.pem" \
           HOPE_SERVER_CERT_PATH="$e2e_pki_dir/server-cert.pem" \
@@ -111,17 +114,24 @@ jobs:
           ./target/debug/server ca init
       - name: Start server
         run: |
-          HOPE_WEB_DIST_DIR=apps/web/dist \
-          HOPE_BIND_ADDR=127.0.0.1:8080 \
-          HOPE_GATEWAY_BIND_ADDR=127.0.0.1:18443 \
-          HOPE_ENROLL_BIND_ADDR=127.0.0.1:18444 \
-          HOPE_COOKIE_SECURE=false \
-          HOPE_CA_CERT_PATH="$RUNNER_TEMP/hope-e2e-pki/ca-cert.pem" \
-          HOPE_CA_KEY_PATH="$RUNNER_TEMP/hope-e2e-pki/ca-key.pem" \
-          HOPE_SERVER_CERT_PATH="$RUNNER_TEMP/hope-e2e-pki/server-cert.pem" \
-          HOPE_SERVER_KEY_PATH="$RUNNER_TEMP/hope-e2e-pki/server-key.pem" \
+          export HOPE_WEB_DIST_DIR=apps/web/dist
+          export HOPE_BIND_ADDR=0.0.0.0:8080
+          export HOPE_GATEWAY_BIND_ADDR=0.0.0.0:18443
+          export HOPE_ENROLL_BIND_ADDR=0.0.0.0:18444
+          export HOPE_COOKIE_SECURE=false
+          export HOPE_CREDENTIAL_MASTER_KEY_FILE="$RUNNER_TEMP/hope-e2e-master-key"
+          export HOPE_AGENT_ENROLL_URL=https://host.docker.internal:18444
+          export HOPE_AGENT_GATEWAY_URL=wss://host.docker.internal:18443
+          export HOPE_AGENT_BINARY_X86_64="$GITHUB_WORKSPACE/target/release/agent"
+          export HOPE_AGENT_BINARY_AARCH64="$GITHUB_WORKSPACE/target/release/agent"
+          export HOPE_CA_CERT_PATH="$RUNNER_TEMP/hope-e2e-pki/ca-cert.pem"
+          export HOPE_CA_KEY_PATH="$RUNNER_TEMP/hope-e2e-pki/ca-key.pem"
+          export HOPE_SERVER_CERT_PATH="$RUNNER_TEMP/hope-e2e-pki/server-cert.pem"
+          export HOPE_SERVER_KEY_PATH="$RUNNER_TEMP/hope-e2e-pki/server-key.pem"
           ./target/debug/server serve >"$RUNNER_TEMP/hope-e2e-server.log" 2>&1 &
           echo $! >"$RUNNER_TEMP/hope-e2e-server.pid"
+          ./target/debug/server worker >"$RUNNER_TEMP/hope-e2e-worker.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/hope-e2e-worker.pid"
           for attempt in {1..60}; do
             if curl --fail --silent http://127.0.0.1:8080/health/ready >/dev/null; then
               exit 0
@@ -132,9 +142,20 @@ jobs:
           exit 1
       - run: pnpm -C apps/web exec playwright install --with-deps chromium
       - run: pnpm -C apps/web test:e2e
+      - name: Stop E2E services
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/hope-e2e-worker.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/hope-e2e-worker.pid")" || true
+          fi
+          if [ -f "$RUNNER_TEMP/hope-e2e-server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/hope-e2e-server.pid")" || true
+          fi
       - name: Show server log
         if: always()
-        run: cat "$RUNNER_TEMP/hope-e2e-server.log"
+        run: |
+          cat "$RUNNER_TEMP/hope-e2e-server.log"
+          cat "$RUNNER_TEMP/hope-e2e-worker.log"
 
   agent-cross-compile:
     name: agent cross-compile, sign, and release bundle (amd64 musl)

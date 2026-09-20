@@ -656,7 +656,7 @@ export function MaintenanceEventForm({
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-h-[min(90vh,60rem)] max-w-5xl overflow-y-auto">
+      <DialogContent className="max-h-[min(90vh,60rem)] overflow-y-auto sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle>
             {event ? "Edit maintenance event" : "Create maintenance event"}

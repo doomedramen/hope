@@ -15,6 +15,7 @@ import {
   confirmDiscoveryScope,
   draftDiscoveryScope,
   fetchDiscoveryState,
+  fetchNetworkScans,
   fetchScanRun,
   launchNetworkScan,
   type DiscoveryScope,
@@ -34,6 +35,14 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Empty,
   EmptyDescription,
@@ -61,6 +70,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 
 type ScanProfile = "normal" | "low_impact";
+const SCAN_RUN_POLL_INTERVAL_MS = 2_500;
 
 interface ScopeDraftState {
   excludedCidrs: string;
@@ -118,6 +128,17 @@ export function DiscoveryScopeSetup({
     queryKey: ["discovery-state", selectedNetwork?.id],
     queryFn: () => fetchDiscoveryState(selectedNetwork!.id),
     enabled: Boolean(selectedNetwork),
+  });
+  const scansQuery = useQuery({
+    queryKey: ["network-scans", selectedNetwork?.id],
+    queryFn: () => fetchNetworkScans(selectedNetwork!.id),
+    enabled: Boolean(selectedNetwork),
+    refetchInterval: (query) => {
+      const active = query.state.data?.active_scan;
+      return active && isActiveScanRun(active.status)
+        ? SCAN_RUN_POLL_INTERVAL_MS
+        : false;
+    },
   });
 
   useEffect(() => {
@@ -191,13 +212,15 @@ export function DiscoveryScopeSetup({
       }),
     onSuccess: (scanRun, variables) => {
       launchKeysByNetwork.current.delete(variables.networkId);
-      setScopeStates((current) => ({
-        ...current,
-        [variables.networkId]: {
-          ...(current[variables.networkId] ?? DEFAULT_SCOPE_STATE),
-          scanRun,
-        },
-      }));
+      setScopeStates((current) => {
+        return {
+          ...current,
+          [variables.networkId]: {
+            ...(current[variables.networkId] ?? DEFAULT_SCOPE_STATE),
+            scanRun,
+          },
+        };
+      });
     },
   });
   const confirmMutation = useMutation({
@@ -262,6 +285,12 @@ export function DiscoveryScopeSetup({
     selectedState.acknowledged &&
     !confirmMutation.isPending &&
     !scanMutation.isPending;
+  const scanHistory = scansQuery.data?.items ?? [];
+  const activeScan =
+    scansQuery.data?.active_scan ??
+    scanHistory.find((run) => isActiveScanRun(run.status)) ??
+    null;
+  const selectedScanRun = activeScan ?? scanHistory[0] ?? selectedState.scanRun;
 
   if (loading) {
     return (
@@ -426,7 +455,8 @@ export function DiscoveryScopeSetup({
                   scanMutation.isPending &&
                   scanMutation.variables?.networkId === selectedNetwork.id
                 }
-                scanRun={selectedState.scanRun}
+                scanHistory={scanHistory}
+                scanRun={selectedScanRun}
                 stateLoading={discoveryStateQuery.isLoading}
                 onAcknowledge={(acknowledged) =>
                   setSelectedState((current) => ({
@@ -521,6 +551,7 @@ function ScopeForm({
   error,
   scanError,
   scanPending,
+  scanHistory,
   scanRun,
   stateLoading,
   onExcludedCidrsChange,
@@ -544,6 +575,7 @@ function ScopeForm({
   error: unknown;
   scanError: unknown;
   scanPending: boolean;
+  scanHistory: ScanRun[];
   scanRun: ScanRun | null;
   stateLoading: boolean;
   onExcludedCidrsChange: (value: string) => void;
@@ -556,6 +588,7 @@ function ScopeForm({
 }) {
   const confirmed = isScopeConfirmed(scope, isDirty);
   const targetCount = scope ? formatCount(scope.target_count) : null;
+  const [launchReviewOpen, setLaunchReviewOpen] = useState(false);
   const status = confirmed
     ? "Confirmed"
     : isDirty
@@ -698,7 +731,7 @@ function ScopeForm({
         <div className="flex flex-wrap gap-2">
           <Button
             disabled={stateLoading || !canConfirm}
-            onClick={onConfirmAndLaunch}
+            onClick={() => setLaunchReviewOpen(true)}
             type="button"
           >
             {confirmPending || scanPending ? (
@@ -723,6 +756,17 @@ function ScopeForm({
           </Button>
         </div>
       ) : null}
+      <ScanLaunchReviewDialog
+        acknowledgmentLabel="I understand this will scan the confirmed target set."
+        description="Review the scope and probe budget before queuing initial discovery."
+        network={network}
+        onOpenChange={setLaunchReviewOpen}
+        onSubmit={onConfirmAndLaunch}
+        open={launchReviewOpen}
+        targetCount={targetCount}
+        title="Review initial discovery"
+        submitLabel="Launch initial discovery"
+      />
       {confirmed ? (
         <>
           <p className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -735,6 +779,7 @@ function ScopeForm({
             onLaunch={onLaunch}
             pending={scanPending}
             run={scanRun}
+            history={scanHistory}
             targetCount={targetCount}
           />
         </>
@@ -743,11 +788,10 @@ function ScopeForm({
   );
 }
 
-const SCAN_RUN_POLL_INTERVAL_MS = 2_500;
-
 export function ScanLaunch({
   network,
   run,
+  history = [],
   targetCount,
   pending,
   error,
@@ -755,12 +799,14 @@ export function ScanLaunch({
 }: {
   network: Network;
   run: ScanRun | null;
+  history?: ScanRun[];
   targetCount: string | null;
   pending: boolean;
   error: unknown;
   onLaunch: () => void;
 }) {
   const queryClient = useQueryClient();
+  const [launchReviewOpen, setLaunchReviewOpen] = useState(false);
   const runQuery = useQuery({
     queryKey: ["scan-run", run?.id],
     queryFn: () => fetchScanRun(run!.id),
@@ -793,7 +839,7 @@ export function ScanLaunch({
         </div>
         <Button
           disabled={pending || Boolean(canCancel)}
-          onClick={onLaunch}
+          onClick={() => setLaunchReviewOpen(true)}
           type="button"
         >
           {pending ? (
@@ -812,9 +858,22 @@ export function ScanLaunch({
         </p>
       ) : null}
       {error ? <ScanLaunchError error={error} /> : null}
+      {canCancel ? (
+        <Alert aria-live="polite">
+          <NetworkIcon />
+          <AlertTitle>Scan job already running</AlertTitle>
+          <AlertDescription>
+            This network already has a pending or running scan. Launching a
+            second job is disabled until the current job finishes or is
+            cancelled.
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {currentRun ? (
         <ScanRunStatus run={currentRun} targetCount={targetCount} />
       ) : null}
+      {currentRun?.job ? <ScanJobDetails run={currentRun} /> : null}
+      {history.length > 1 ? <ScanHistory history={history} /> : null}
       {canCancel ? (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-muted-foreground">
@@ -865,6 +924,211 @@ export function ScanLaunch({
           </AlertDescription>
         </Alert>
       ) : null}
+      <ScanLaunchReviewDialog
+        acknowledgmentLabel="I understand this scan may take time and will inspect every TCP port on each confirmed target."
+        description="Review the confirmed scope before queueing another initial discovery scan."
+        network={network}
+        onOpenChange={setLaunchReviewOpen}
+        onSubmit={onLaunch}
+        open={launchReviewOpen}
+        targetCount={targetCount}
+        title="Launch initial discovery"
+        submitLabel="Launch scan"
+      />
+    </div>
+  );
+}
+
+function ScanLaunchReviewDialog({
+  acknowledgmentLabel,
+  description,
+  network,
+  onOpenChange,
+  onSubmit,
+  open,
+  targetCount,
+  title,
+  submitLabel,
+}: {
+  acknowledgmentLabel: string;
+  description: string;
+  network: Network;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: () => void;
+  open: boolean;
+  targetCount: string | null;
+  title: string;
+  submitLabel: string;
+}) {
+  const [acknowledged, setAcknowledged] = useState(false);
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (nextOpen) setAcknowledged(false);
+    onOpenChange(nextOpen);
+  };
+
+  return (
+    <Dialog onOpenChange={handleOpenChange} open={open}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-3 text-sm">
+          <div className="rounded-lg border bg-muted/30 p-3">
+            <dl className="grid gap-2 sm:grid-cols-2">
+              <div>
+                <dt className="text-xs text-muted-foreground">Network</dt>
+                <dd className="font-mono font-medium">{network.cidr}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted-foreground">
+                  Confirmed targets
+                </dt>
+                <dd className="font-medium">
+                  {targetCount ?? "Not available"}
+                </dd>
+              </div>
+            </dl>
+          </div>
+          <p className="text-muted-foreground">
+            Discovery checks 65,535 TCP ports per target. A full sweep can take
+            time and may generate significant network traffic.
+          </p>
+          <label className="flex items-start gap-3 rounded-lg border p-3">
+            <Checkbox
+              checked={acknowledged}
+              onCheckedChange={(checked) => setAcknowledged(checked === true)}
+            />
+            <span className="text-sm leading-5">{acknowledgmentLabel}</span>
+          </label>
+        </div>
+        <DialogFooter>
+          <Button
+            onClick={() => onOpenChange(false)}
+            type="button"
+            variant="outline"
+          >
+            Cancel
+          </Button>
+          <Button
+            disabled={!acknowledged}
+            onClick={() => {
+              onSubmit();
+              onOpenChange(false);
+            }}
+            type="button"
+          >
+            <PlayIcon data-icon="inline-start" />
+            {submitLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ScanJobDetails({ run }: { run: ScanRun }) {
+  const job = run.job;
+  if (!job) return null;
+  const progress = job.progress;
+  const progressTargets = progress.targets_completed;
+  const progressPorts = progress.ports_completed;
+  return (
+    <div aria-label="Scan job details" className="rounded-lg border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-medium">Job activity</p>
+          <p className="font-mono text-xs text-muted-foreground">{job.id}</p>
+        </div>
+        <Badge variant={job.status === "failed" ? "destructive" : "outline"}>
+          {job.status}
+        </Badge>
+      </div>
+      <dl className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+        <div>
+          <dt>Attempts</dt>
+          <dd className="font-medium text-foreground">
+            {job.attempts} of {job.max_attempts}
+          </dd>
+        </div>
+        <div>
+          <dt>Worker progress</dt>
+          <dd className="font-medium text-foreground">
+            {typeof progressTargets === "number"
+              ? `${formatCount(progressTargets)} targets`
+              : typeof progressPorts === "number"
+                ? `${formatCount(progressPorts)} ports`
+                : "No progress reported"}
+          </dd>
+        </div>
+        <div>
+          <dt>Last updated</dt>
+          <dd className="font-medium text-foreground">
+            {formatScanTime(job.updated_at)}
+          </dd>
+        </div>
+      </dl>
+      {job.last_error ? (
+        <p className="mt-3 text-xs text-destructive">{job.last_error}</p>
+      ) : null}
+      {run.logs?.length ? (
+        <details className="mt-3 border-t pt-3">
+          <summary className="cursor-pointer text-sm font-medium">
+            Activity log ({run.logs.length})
+          </summary>
+          <ol className="mt-2 flex flex-col gap-2 text-xs text-muted-foreground">
+            {run.logs.map((log) => (
+              <li className="flex flex-wrap gap-x-2 gap-y-1" key={log.id}>
+                <time dateTime={log.occurred_at}>
+                  {formatScanTime(log.occurred_at)}
+                </time>
+                <span className="font-medium text-foreground">
+                  {log.action}
+                </span>
+                <span>{log.result}</span>
+              </li>
+            ))}
+          </ol>
+        </details>
+      ) : (
+        <p className="mt-3 border-t pt-3 text-xs text-muted-foreground">
+          No activity events have been recorded for this job yet.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ScanHistory({ history }: { history: ScanRun[] }) {
+  return (
+    <div aria-label="Recent scan jobs" className="rounded-lg border p-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-medium">Recent scan jobs</p>
+        <Badge variant="outline">{history.length}</Badge>
+      </div>
+      <div className="mt-3 divide-y text-sm">
+        {history.map((run) => (
+          <div
+            className="flex flex-wrap items-center justify-between gap-2 py-2 first:pt-0 last:pb-0"
+            key={run.id}
+          >
+            <div>
+              <p className="font-medium">{scanKindLabel(run.kind)}</p>
+              <p className="text-xs text-muted-foreground">
+                {formatScanTime(run.created_at)} ·{" "}
+                {formatCount(run.targets_completed)} of{" "}
+                {formatCount(run.targets_planned)} targets
+              </p>
+            </div>
+            <Badge
+              variant={run.status === "failed" ? "destructive" : "outline"}
+            >
+              {run.status}
+            </Badge>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -958,6 +1222,23 @@ function ScanLaunchError({ error }: { error: unknown }) {
       </AlertDescription>
     </Alert>
   );
+}
+
+function formatScanTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf())
+    ? value
+    : date.toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      });
+}
+
+function scanKindLabel(kind: ScanRun["kind"]): string {
+  return kind
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function ScopeError({ error }: { error: unknown }) {

@@ -1,6 +1,12 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DiscoveryScopeSetup, ScanLaunch } from "./DiscoveryScopeSetup";
 import type { Network, ScanRun, ScanRunStatus } from "@/lib/api";
@@ -53,7 +59,7 @@ function jsonResponse(value: unknown): Response {
   });
 }
 
-function renderScanLaunch(run: ScanRun) {
+function renderScanLaunch(run: ScanRun, onLaunch = () => undefined) {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -65,7 +71,7 @@ function renderScanLaunch(run: ScanRun) {
       <ScanLaunch
         error={null}
         network={network}
-        onLaunch={() => undefined}
+        onLaunch={onLaunch}
         pending={false}
         run={run}
         targetCount="2"
@@ -157,6 +163,35 @@ describe("ScanLaunch", () => {
       "/api/v1/scans/run-1/cancel",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+
+  it("requires review before launching a new scan", () => {
+    const onLaunch = vi.fn();
+    renderScanLaunch(makeRun("succeeded"), onLaunch);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Launch initial discovery" }),
+    );
+
+    const dialog = screen.getByRole("dialog", {
+      name: "Launch initial discovery",
+    });
+    const launchButton = within(dialog).getByRole("button", {
+      name: "Launch scan",
+    });
+    expect(launchButton).toBeDisabled();
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: /understand this scan may take time/i,
+      }),
+    );
+    expect(launchButton).toBeEnabled();
+    fireEvent.click(launchButton);
+
+    expect(onLaunch).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole("dialog", { name: "Launch initial discovery" }),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -344,6 +379,19 @@ describe("DiscoveryScopeSetup", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name: "Confirm and launch initial discovery",
+      }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Review initial discovery",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: /understand this will scan the confirmed target set/i,
+      }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "Launch initial discovery",
       }),
     );
 

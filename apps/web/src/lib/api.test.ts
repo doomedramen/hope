@@ -7,7 +7,14 @@ import {
   draftDiscoveryScope,
   fetchAgent,
   fetchAgents,
+  fetchCredentials,
+  createCredential,
+  installAgent,
+  fetchJob,
+  fetchSshHostKeys,
+  trustSshHostKey,
   fetchDiscoveryState,
+  fetchNetworkScans,
   fetchScanRun,
   fetchHealthReady,
   fetchMonitors,
@@ -99,6 +106,124 @@ describe("fetchHealthReady", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/agents/agent-1",
       expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("drives credential creation, agent deployment, and host-key trust", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: "credential-1",
+                name: "Target SSH",
+                kind: "ssh_password",
+                scope: { kind: "device", device_id: "device-1" },
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "credential-1",
+            name: "Target SSH",
+            kind: "ssh_password",
+            scope: { kind: "device", device_id: "device-1" },
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ job_id: "job-1", status: "pending" }), {
+          status: 202,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ id: "job-1", status: "succeeded", attempts: 1 }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: "host-key-1",
+                host: "198.51.100.10",
+                port: 22,
+                state: "pending",
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "host-key-1",
+            host: "198.51.100.10",
+            port: 22,
+            state: "trusted",
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const credentials = await fetchCredentials();
+    await createCredential({
+      name: "Target SSH",
+      scope: { kind: "device", device_id: "device-1" },
+      secret: { type: "ssh_password", username: "root", password: "secret" },
+    });
+    const deployment = await installAgent("device-1", {
+      host: "198.51.100.10",
+      port: 22,
+      credential_id: "credential-1",
+      idempotencyKey: "deploy-device-1",
+    });
+    const job = await fetchJob(deployment.job_id);
+    const hostKeys = await fetchSshHostKeys("device-1");
+    const trusted = await trustSshHostKey(hostKeys.items[0]!.id);
+
+    expect(credentials.items[0]?.scope.device_id).toBe("device-1");
+    expect(job.status).toBe("succeeded");
+    expect(trusted.state).toBe("trusted");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/credentials",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          name: "Target SSH",
+          scope: { kind: "device", device_id: "device-1" },
+          secret: {
+            type: "ssh_password",
+            username: "root",
+            password: "secret",
+          },
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "/api/v1/devices/device-1/agent-install",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const deploymentHeaders = new Headers(fetchMock.mock.calls[2][1]?.headers);
+    expect(deploymentHeaders.get("idempotency-key")).toBe("deploy-device-1");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      6,
+      "/api/v1/ssh-host-keys/host-key-1/trust",
+      expect.objectContaining({ method: "POST" }),
     );
   });
 
@@ -465,6 +590,43 @@ describe("fetchHealthReady", () => {
     );
     const headers = new Headers(fetchMock.mock.calls[1][1]?.headers);
     expect(headers.get("x-requested-with")).toBe("hope");
+  });
+
+  it("fetches scan history with the active job snapshot", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: "run-1",
+              network_id: "network-1",
+              status: "running",
+              job: { id: "job-1", status: "running", progress: {} },
+              logs: [
+                {
+                  id: "log-1",
+                  action: "scan_run.create",
+                  result: "success",
+                },
+              ],
+            },
+          ],
+          active_scan: { id: "run-1", status: "running" },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchNetworkScans("network-1");
+
+    expect(result.active_scan?.id).toBe("run-1");
+    expect(result.items[0]?.job?.status).toBe("running");
+    expect(result.items[0]?.logs?.[0]?.action).toBe("scan_run.create");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/networks/network-1/scans",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
   });
 
   it("fetches monitor rows with the bounded list size", async () => {

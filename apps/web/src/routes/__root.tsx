@@ -5,6 +5,7 @@ import {
   CalendarDaysIcon,
   GitCompareArrowsIcon,
   LayoutDashboardIcon,
+  NetworkIcon,
   SearchIcon,
   RadioTowerIcon,
   ServerIcon,
@@ -18,7 +19,8 @@ import { ApiError, fetchDevices, fetchSetupStatus } from "@/lib/api";
 
 const NAV_ITEMS = [
   { to: "/", label: "Overview", icon: LayoutDashboardIcon },
-  { to: "/infrastructure", label: "Infrastructure", icon: ServerIcon },
+  { to: "/devices", label: "Devices", icon: ServerIcon },
+  { to: "/networks", label: "Networks", icon: NetworkIcon },
   { to: "/monitoring", label: "Monitoring", icon: ActivityIcon },
   { to: "/maintenance", label: "Maintenance", icon: CalendarDaysIcon },
   { to: "/changes", label: "Changes", icon: GitCompareArrowsIcon },
@@ -125,7 +127,7 @@ function RootLayout() {
               aria-label="Search devices"
               className="flex h-8 w-full max-w-sm items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
               search={{ focus: "search" }}
-              to="/infrastructure"
+              to="/devices"
             >
               <SearchIcon aria-hidden="true" className="size-4" />
               Search devices

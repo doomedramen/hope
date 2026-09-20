@@ -1483,6 +1483,7 @@ pub async fn list_agents(
         "select row_to_json(t) from ( \
             select a.id, a.hostname, a.agent_version, a.os, a.arch, a.capabilities, \
                    a.last_seen, a.last_heartbeat_at, a.protocol_version, a.revoked_at, \
+                   (select c.inventory from agent_inventory_current c where c.agent_id = a.id) as inventory, \
                    case when a.revoked_at is not null then 'revoked' \
                         when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
                              now() - make_interval(secs => a.heartbeat_timeout_seconds::double precision) \
@@ -1509,7 +1510,16 @@ pub async fn list_agents(
             rows.unwrap_err().to_string(),
         );
     };
-    let items: Vec<Value> = rows.into_iter().map(|(value,)| value).collect();
+    let mut items: Vec<Value> = rows.into_iter().map(|(value,)| value).collect();
+    for item in &mut items {
+        if let Value::Object(map) = item {
+            let inventory = map.remove("inventory").unwrap_or_else(|| json!({}));
+            map.insert(
+                "inventory_summary".to_string(),
+                inventory_summary(&inventory),
+            );
+        }
+    }
     let next_cursor = items.last().and_then(|item| {
         let created_at = item.get("created_at")?.as_str()?;
         let id = Uuid::parse_str(item.get("id")?.as_str()?).ok()?;
@@ -1706,6 +1716,7 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
         })
         .unwrap_or_else(|| json!([]));
     let sockets = decorated_sockets(&inventory_value);
+    let summary = inventory_summary(&inventory_value);
     let evidence: Vec<(Value,)> = sqlx::query_as(
         "select row_to_json(t) from (select * from evidence where subject_table = 'devices' \
             and subject_id = $1 order by last_seen desc limit 500) t",
@@ -1720,18 +1731,41 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
     .bind(agent_id)
     .fetch_optional(pool)
     .await?;
-    let reconciliation: Value = json!({
+    let identity_rules: Vec<Value> = sqlx::query_as::<_, (String, String, bool)>(
+        "select rule_type, value, pinned from identity_rules where device_id = $1 order by rule_type, value",
+    )
+    .bind(device_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(rule_type, value, pinned)| {
+        json!({"rule_type": rule_type, "value": value, "pinned": pinned})
+    })
+    .collect();
+    let matched_identifiers = identity_rules
+        .iter()
+        .filter_map(|rule| {
+            Some(format!(
+                "{}:{}",
+                rule.get("rule_type")?.as_str()?,
+                rule.get("value")?.as_str()?
+            ))
+        })
+        .collect::<Vec<_>>();
+    let reconciliation = json!({
+        "status": if device_id.is_some() { "matched" } else { "unmatched" },
         "device_id": device_id,
+        "confidence": if device_id.is_some() { Some(1.0) } else { None },
+        "matched_identifiers": matched_identifiers,
+        "conflicts": [],
+        "last_reconciled_at": detail.get("updated_at").cloned().unwrap_or(Value::Null),
+        "explanation": if device_id.is_some() {
+            "Agent identity is linked to this device."
+        } else {
+            "Agent identity has not been linked to a device."
+        },
         "agent_id": agent_id,
-        "identity_rules": sqlx::query_as::<_, (String, String, bool)>(
-            "select rule_type, value, pinned from identity_rules where device_id = $1 order by rule_type, value",
-        )
-        .bind(device_id)
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(|(rule_type, value, pinned)| json!({"rule_type": rule_type, "value": value, "pinned": pinned}))
-        .collect::<Vec<_>>(),
+        "identity_rules": identity_rules,
     });
 
     if let Value::Object(map) = &mut detail {
@@ -1742,6 +1776,7 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
         map.insert("processes".to_string(), processes);
         map.insert("sockets".to_string(), sockets);
         map.insert("containers".to_string(), containers);
+        map.insert("inventory_summary".to_string(), summary);
         map.insert(
             "evidence".to_string(),
             Value::Array(evidence.into_iter().map(|(value,)| value).collect()),
@@ -1802,6 +1837,34 @@ fn decorated_sockets(inventory: &Value) -> Value {
             })
             .collect(),
     )
+}
+
+fn inventory_summary(inventory: &Value) -> Value {
+    let interfaces = first_array(inventory, &["interfaces", "network.interfaces"])
+        .map(Vec::len)
+        .unwrap_or_default();
+    let filesystems = first_array(inventory, &["filesystems"])
+        .map(Vec::len)
+        .unwrap_or_default();
+    let processes = first_array(inventory, &["processes"])
+        .map(Vec::len)
+        .unwrap_or_default();
+    let sockets = first_array(
+        inventory,
+        &["sockets", "listening_sockets", "listening.services"],
+    )
+    .map(Vec::len)
+    .unwrap_or_default();
+    let containers = first_array(inventory, &["containers", "docker.containers"])
+        .map(Vec::len)
+        .unwrap_or_default();
+    json!({
+        "interfaces": interfaces,
+        "filesystems": filesystems,
+        "processes": processes,
+        "sockets": sockets,
+        "containers": containers,
+    })
 }
 
 #[cfg(test)]

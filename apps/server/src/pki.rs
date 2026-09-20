@@ -58,13 +58,23 @@ pub fn init(config: &Config) -> anyhow::Result<()> {
     let ca_key = KeyPair::generate()?;
     let ca_cert = ca_params()?.self_signed(&ca_key)?;
 
-    let mut server_params = CertificateParams::new(vec!["localhost".to_string()])?;
+    let mut server_params = CertificateParams::new(vec![
+        "localhost".to_string(),
+        // Docker-backed agent acceptance tests and local Compose deployments
+        // reach the host through these conventional bridge aliases. Keeping
+        // them on the development certificate makes the mTLS gateway usable
+        // from the disposable target without weakening certificate checks.
+        "host.docker.internal".to_string(),
+        "host.containers.internal".to_string(),
+    ])?;
     let mut server_dn = DistinguishedName::new();
     server_dn.push(DnType::CommonName, "hope server");
     server_params.distinguished_name = server_dn;
     server_params.serial_number = Some(random_serial());
     server_params.subject_alt_names = vec![
         SanType::DnsName("localhost".try_into()?),
+        SanType::DnsName("host.docker.internal".try_into()?),
+        SanType::DnsName("host.containers.internal".try_into()?),
         SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
     ];
     server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];

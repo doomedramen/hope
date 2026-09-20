@@ -263,7 +263,7 @@ function ChangeRow({ change }: { change: ChangeEvent }) {
             <Link
               className="inline-flex items-center gap-1 rounded-sm text-foreground outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
               search={{ device: change.entity_id }}
-              to="/infrastructure"
+              to="/devices"
             >
               Open inventory <ExternalLinkIcon className="size-3" />
             </Link>

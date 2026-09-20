@@ -16,7 +16,7 @@ describe("MaintenanceEventForm", () => {
       />,
     );
 
-    expect(screen.getByRole("dialog")).toHaveClass("max-w-5xl");
+    expect(screen.getByRole("dialog")).toHaveClass("sm:max-w-5xl");
   });
 
   it("uses an app-owned date picker instead of the native datetime picker", () => {

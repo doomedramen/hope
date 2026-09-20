@@ -75,7 +75,7 @@ type AttentionItem = {
   id: string;
   label: string;
   tone: StatusTone;
-  to: "/infrastructure" | "/monitoring";
+  to: "/devices" | "/monitoring";
 };
 
 function OverviewDashboard() {
@@ -151,7 +151,7 @@ function OverviewDashboard() {
       label: `Candidate ${item.candidate_device_id}`,
       description: `${Math.round(item.score * 100)}% match confidence`,
       tone: "critical" as const,
-      to: "/infrastructure" as const,
+      to: "/devices" as const,
     })),
     ...serviceReviews.map((item) => ({
       id: item.id,
@@ -206,7 +206,7 @@ function OverviewDashboard() {
           detail={`${networks.length} networks`}
           icon={ServerIcon}
           label="Devices"
-          to="/infrastructure"
+          to="/devices"
           value={devices.length}
         />
         <MetricCard
@@ -277,7 +277,7 @@ function MetricCard({
   detail: string;
   icon: typeof ServerIcon;
   label: string;
-  to: "/infrastructure" | "/monitoring" | "/changes";
+  to: "/devices" | "/monitoring" | "/changes";
   value: number | string;
 }) {
   return (
@@ -498,7 +498,7 @@ function TopologyCard({
         <CardAction>
           <Link
             className="rounded-sm text-sm font-medium text-primary outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
-            to="/infrastructure"
+            to="/devices"
           >
             View map
           </Link>

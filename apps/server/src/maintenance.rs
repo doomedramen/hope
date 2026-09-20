@@ -1519,7 +1519,13 @@ async fn event_json(pool: &PgPool, event_id: Uuid) -> sqlx::Result<Option<Value>
     sqlx::query_as::<_, (Value,)>(
         "select row_to_json(t) from ( \
              select e.*, \
-                    coalesce((select jsonb_agg(to_jsonb(r) - 'event_id' order by r.id) \
+                    coalesce((select jsonb_agg(jsonb_build_object( \
+                                  'role', r.role, \
+                                  'kind', r.resource_kind, \
+                                  'id', r.resource_id, \
+                                  'key', r.resource_key, \
+                                  'expected_failure', r.expected_failure \
+                                ) order by r.id) \
                               from maintenance_resources r where r.event_id = e.id), '[]'::jsonb) as resources, \
                     coalesce((select jsonb_agg(to_jsonb(o) - 'event_id' order by o.occurrence_index, o.id) \
                               from maintenance_occurrences o where o.event_id = e.id), '[]'::jsonb) as occurrences \
@@ -1740,7 +1746,13 @@ pub async fn list(
     let rows = sqlx::query_as::<_, (Value,)>(
         "select row_to_json(t) from ( \
              select e.*, \
-                    coalesce((select jsonb_agg(to_jsonb(r) - 'event_id' order by r.id) \
+                    coalesce((select jsonb_agg(jsonb_build_object( \
+                                  'role', r.role, \
+                                  'kind', r.resource_kind, \
+                                  'id', r.resource_id, \
+                                  'key', r.resource_key, \
+                                  'expected_failure', r.expected_failure \
+                                ) order by r.id) \
                               from maintenance_resources r where r.event_id = e.id), '[]'::jsonb) as resources, \
                     coalesce((select jsonb_agg(to_jsonb(o) - 'event_id' order by o.occurrence_index, o.id) \
                               from maintenance_occurrences o where o.event_id = e.id), '[]'::jsonb) as occurrences \
