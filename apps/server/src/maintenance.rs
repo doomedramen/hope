@@ -2423,7 +2423,9 @@ mod tests {
         };
         let user_id = test_user(&pool).await;
         let key = format!("maintenance-db-{}", Uuid::new_v4());
-        let start = whole_now().checked_add(Span::new().days(7)).expect("start");
+        let start = whole_now()
+            .checked_add(Span::new().hours(24 * 7))
+            .expect("start");
         let end = start.checked_add(Span::new().minutes(20)).expect("end");
 
         let first = create_event_record(
@@ -2619,8 +2621,8 @@ mod tests {
         .expect("notification route");
 
         let now = whole_now();
-        let start = now.checked_sub(Span::new().hours(2)).expect("start");
-        let end = now.checked_sub(Span::new().hours(1)).expect("end");
+        let start = now.checked_sub(Span::new().minutes(5)).expect("start");
+        let end = now.checked_add(Span::new().minutes(5)).expect("end");
         let event = create_event_record(
             &pool,
             db_request(
@@ -2640,6 +2642,13 @@ mod tests {
         .await
         .expect("overrun event");
         let event_id = value_uuid(&event, "id");
+        let occurrence_id: Uuid = sqlx::query_scalar(
+            "select id from maintenance_occurrences where event_id = $1 order by occurrence_index limit 1",
+        )
+        .bind(event_id)
+        .fetch_one(&pool)
+        .await
+        .expect("overrun occurrence");
 
         reconcile(&pool).await.expect("active reconcile");
         let state: String =
@@ -2660,6 +2669,18 @@ mod tests {
                 .is_empty()
         );
 
+        sqlx::query(
+            "update maintenance_occurrences \
+                set start_at = now() - interval '2 hours', \
+                    end_at = now() - interval '1 hour', \
+                    reservation_start = now() - interval '2 hours', \
+                    reservation_end = now() - interval '1 hour' \
+              where id = $1",
+        )
+        .bind(occurrence_id)
+        .execute(&pool)
+        .await
+        .expect("age occurrence past planned end");
         reconcile(&pool).await.expect("overrun reconcile");
         let state: String =
             sqlx::query_scalar("select state from maintenance_events where id = $1")
