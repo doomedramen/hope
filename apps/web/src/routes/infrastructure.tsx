@@ -14,7 +14,7 @@ import {
   Undo2Icon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DiscoveryScopeSetup } from "@/components/DiscoveryScopeSetup";
 import {
   createDevice,
@@ -101,9 +101,17 @@ import {
 } from "@/components/ui/table";
 
 export const Route = createFileRoute("/infrastructure")({
-  validateSearch: (search: Record<string, unknown>): { device?: string } => {
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { device?: string; focus?: "search"; q?: string } => {
     const device = typeof search.device === "string" ? search.device : null;
-    return device ? { device } : {};
+    const focus = search.focus === "search" ? "search" : undefined;
+    const q = typeof search.q === "string" ? search.q : null;
+    return {
+      ...(device ? { device } : {}),
+      ...(focus ? { focus } : {}),
+      ...(q ? { q } : {}),
+    };
   },
   component: InfrastructurePage,
 });
@@ -120,7 +128,15 @@ export function InfrastructurePage() {
         ? null
         : new URLSearchParams(window.location.search).get("device"),
   );
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(() =>
+    typeof window === "undefined"
+      ? ""
+      : (new URLSearchParams(window.location.search).get("q") ?? ""),
+  );
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const shouldFocusSearch =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("focus") === "search";
   const [dialog, setDialog] = useState<
     "create" | "network-create" | "edit" | "merge" | "split" | null
   >(null);
@@ -146,6 +162,10 @@ export function InfrastructurePage() {
       ),
     );
   }, [devices, search]);
+
+  useEffect(() => {
+    if (shouldFocusSearch) searchInputRef.current?.focus();
+  }, [shouldFocusSearch]);
 
   const selectedId = visibleDevices.some(
     (device) => device.id === requestedDeviceId,
@@ -326,6 +346,7 @@ export function InfrastructurePage() {
                   className="w-full pl-8 sm:w-56"
                   onChange={(event) => setSearch(event.target.value)}
                   placeholder="Search inventory"
+                  ref={searchInputRef}
                   value={search}
                 />
               </div>

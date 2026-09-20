@@ -47,6 +47,7 @@ function renderInfrastructurePage() {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  window.history.replaceState({}, "", "/");
 });
 
 describe("EditDeviceDialog", () => {
@@ -82,6 +83,30 @@ describe("EditDeviceDialog", () => {
 });
 
 describe("InfrastructurePage", () => {
+  it("restores and focuses search when entered from the header search", async () => {
+    window.history.replaceState({}, "", "/infrastructure?focus=search&q=QA");
+    const first: Device = detail("device-1", "QA VM device");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input) === "/api/v1/devices?limit=100") {
+          return Promise.resolve(
+            jsonResponse({ items: [first], next_cursor: null }),
+          );
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
+    );
+
+    renderInfrastructurePage();
+
+    const search = await screen.findByRole("textbox", {
+      name: "Search devices",
+    });
+    expect(search).toHaveValue("QA");
+    expect(search).toHaveFocus();
+  });
+
   it("selects the device supplied by an inventory link", async () => {
     window.history.replaceState({}, "", "/infrastructure?device=device-2");
     const first: Device = detail("device-1", "QA VM device");

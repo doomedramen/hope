@@ -122,12 +122,13 @@ function RootLayout() {
           {renderPrimaryNavigation({ mobile: true })}
           <header className="hidden h-14 items-center justify-end border-b bg-card/70 px-8 md:flex">
             <Link
-              aria-label="Search devices, services, or networks"
+              aria-label="Search devices"
               className="flex h-8 w-full max-w-sm items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+              search={{ focus: "search" }}
               to="/infrastructure"
             >
               <SearchIcon aria-hidden="true" className="size-4" />
-              Search devices, services, or networks
+              Search devices
             </Link>
           </header>
           <main
