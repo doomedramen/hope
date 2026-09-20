@@ -1040,6 +1040,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_expected_maintenance_suppresses_only_affected_service_delivery() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        isolate_due_monitors(&pool).await;
+        let channel_id = create_critical_webhook_route(&pool, "scheduler-maintenance").await;
+        let (maintained_monitor, maintained_service, _maintained_device) =
+            create_monitor_topology(&pool, 1, 1).await;
+        let (unrelated_monitor, _unrelated_service, _unrelated_device) =
+            create_monitor_topology(&pool, 1, 1).await;
+
+        let event_id: Uuid = sqlx::query_scalar(
+            "insert into maintenance_events \
+                (name, timezone, start_at, end_at, state, notification_policy) \
+             values ($1, 'UTC', now() - interval '5 minutes', \
+                     now() + interval '5 minutes', 'active', '{}'::jsonb) \
+             returning id",
+        )
+        .bind(format!("maintenance-suppression-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("create active maintenance event");
+        let occurrence_id = Uuid::new_v4();
+        sqlx::query(
+            "insert into maintenance_occurrences \
+                (id, event_id, occurrence_key, occurrence_index, start_at, end_at, \
+                 reservation_start, reservation_end, timezone) \
+             values ($1, $2, 'maintenance-test-occurrence', 0, \
+                     now() - interval '5 minutes', now() + interval '5 minutes', \
+                     now() - interval '5 minutes', now() + interval '5 minutes', 'UTC')",
+        )
+        .bind(occurrence_id)
+        .bind(event_id)
+        .execute(&pool)
+        .await
+        .expect("create active maintenance occurrence");
+        sqlx::query(
+            "insert into maintenance_resources \
+                (event_id, role, resource_kind, resource_id, expected_failure) \
+             values ($1, 'affected', 'services', $2, true)",
+        )
+        .bind(event_id)
+        .bind(maintained_service)
+        .execute(&pool)
+        .await
+        .expect("create expected maintenance resource");
+
+        for monitor_id in [maintained_monitor, unrelated_monitor] {
+            sqlx::query("update monitors set next_run_at = now() where id = $1")
+                .bind(monitor_id)
+                .execute(&pool)
+                .await
+                .expect("make monitor due");
+        }
+        let maintained = claim_due(&pool, "maintenance-suppression-test")
+            .await
+            .unwrap()
+            .expect("maintained monitor is due");
+        execute_one(&pool, "maintenance-suppression-test", maintained)
+            .await
+            .expect("persist maintained failure");
+        let maintained_incident: Uuid =
+            sqlx::query_scalar("select id from incidents where monitor_id = $1 and state = 'open'")
+                .bind(maintained_monitor)
+                .fetch_one(&pool)
+                .await
+                .expect("maintained incident");
+
+        let suppressed_delivery_count: i64 = sqlx::query_scalar(
+            "select count(*) from notification_deliveries \
+              where incident_id = $1 and channel_id = $2 and event_type = 'incident.opened'",
+        )
+        .bind(maintained_incident)
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .expect("maintained delivery count");
+        assert_eq!(suppressed_delivery_count, 0);
+        let suppression: (Uuid, Uuid, String) = sqlx::query_as(
+            "select maintenance_event_id, maintenance_occurrence_id, reason \
+               from maintenance_notification_suppressions where incident_id = $1",
+        )
+        .bind(maintained_incident)
+        .fetch_one(&pool)
+        .await
+        .expect("maintenance suppression reason");
+        assert_eq!(suppression.0, event_id);
+        assert_eq!(suppression.1, occurrence_id);
+        assert!(suppression.2.contains("maintenance event"));
+
+        let unrelated = claim_due(&pool, "maintenance-suppression-test")
+            .await
+            .unwrap()
+            .expect("unrelated monitor is due");
+        execute_one(&pool, "maintenance-suppression-test", unrelated)
+            .await
+            .expect("persist unrelated failure");
+        let unrelated_incident: Uuid =
+            sqlx::query_scalar("select id from incidents where monitor_id = $1 and state = 'open'")
+                .bind(unrelated_monitor)
+                .fetch_one(&pool)
+                .await
+                .expect("unrelated incident");
+        let unrelated_delivery_count: i64 = sqlx::query_scalar(
+            "select count(*) from notification_deliveries \
+              where incident_id = $1 and channel_id = $2 and event_type = 'incident.opened'",
+        )
+        .bind(unrelated_incident)
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .expect("unrelated delivery count");
+        assert_eq!(unrelated_delivery_count, 1);
+        let unrelated_suppressions: i64 = sqlx::query_scalar(
+            "select count(*) from maintenance_notification_suppressions where incident_id = $1",
+        )
+        .bind(unrelated_incident)
+        .fetch_one(&pool)
+        .await
+        .expect("unrelated suppression count");
+        assert_eq!(unrelated_suppressions, 0);
+    }
+
+    #[tokio::test]
     async fn child_failure_alerts_when_dependency_is_healthy() {
         let Some(pool) = pool_or_skip().await else {
             eprintln!("skipping: DATABASE_URL not set");
