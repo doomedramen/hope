@@ -5,12 +5,11 @@ umask 077
 
 usage() {
   cat >&2 <<'EOF'
-Usage: restore.sh BACKUP-DIRECTORY --force [--with-secrets]
+Usage: restore.sh BACKUP-DIRECTORY --force --with-secrets
 
 Restores a backup produced by backup.sh into the Compose deployment. This
-replaces the database and server PKI. --force is required. Use --with-secrets
-to replace the local credential master key with the key from the backup; the
-database credentials cannot be decrypted with a different key.
+replaces the database and server PKI. --force and --with-secrets are required;
+the database credentials cannot be decrypted with a different key.
 EOF
 }
 
@@ -42,6 +41,11 @@ if [[ "$force" != 1 ]]; then
   exit 2
 fi
 
+if [[ "$with_secrets" != 1 ]]; then
+  printf '%s\n' "Refusing restore without --with-secrets: the credential master key is part of server-pki." >&2
+  exit 2
+fi
+
 for required in manifest.txt SHA256SUMS postgres.dump postgres-globals.sql pki agent-releases deployment.env; do
   if [[ ! -e "$backup_dir/$required" ]]; then
     printf 'Backup is missing %s\n' "$required" >&2
@@ -49,8 +53,8 @@ for required in manifest.txt SHA256SUMS postgres.dump postgres-globals.sql pki a
   fi
 done
 
-if [[ "$with_secrets" == 1 && ! -f "$backup_dir/credential-master-key" ]]; then
-  printf '%s\n' "--with-secrets was supplied but credential-master-key is missing." >&2
+if [[ ! -f "$backup_dir/credential-master-key" ]]; then
+  printf '%s\n' "Backup is missing credential-master-key." >&2
   exit 1
 fi
 
@@ -113,11 +117,9 @@ cp -a "$backup_dir/agent-releases" "$release_dir"
 helper_id="$("${compose[@]}" run -d --no-deps --entrypoint sh server -c 'sleep 300')"
 docker exec "$helper_id" sh -c 'find /app/data/pki -mindepth 1 -maxdepth 1 -exec rm -rf {} +'
 docker cp "$backup_dir/pki" "$helper_id:/app/data/"
-if [[ "$with_secrets" == 1 ]]; then
-  docker cp "$backup_dir/credential-master-key" \
-    "$helper_id:/app/data/pki/credential-master-key"
-  docker exec "$helper_id" chmod 0400 /app/data/pki/credential-master-key
-fi
+docker cp "$backup_dir/credential-master-key" \
+  "$helper_id:/app/data/pki/credential-master-key"
+docker exec "$helper_id" chmod 0400 /app/data/pki/credential-master-key
 docker exec "$helper_id" chmod -R go-rwx /app/data/pki
 docker rm -f "$helper_id" >/dev/null
 helper_id=""
