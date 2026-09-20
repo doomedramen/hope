@@ -1,175 +1,132 @@
 # Manual agent installation
 
-Use this procedure before automated SSH installation. It installs one Linux
-agent, enrolls it with a single-use token, and starts its outbound gateway
-connection.
+The installer supports Linux `amd64` and `arm64`. It downloads the selected
+agent from the Hope server, verifies the signed release bundle, enrolls the
+host with a single-use code, and creates a hardened systemd service.
 
-Current supported binaries:
+The server must already be running with its CA and agent listeners available.
+The normal endpoints are:
 
-- Linux `amd64` for `x86_64` hosts: `agent-linux-amd64`
-- Linux `arm64` for `aarch64` hosts: `agent-linux-arm64`
+- enrollment: `https://<hope-host>:8444`
+- gateway: `wss://<hope-host>:8443`
+- HTTP/API origin: `https://<hope-host>`
 
-The server must already have its internal CA and agent listeners configured.
-The enrollment listener defaults to `https://<server>:8444`; the mTLS gateway
-defaults to `wss://<server>:8443`.
+## Install
 
-## 1. Create enrollment material
-
-Run this on the server:
+Create a short-lived enrollment code on the Hope server:
 
 ```sh
 server enroll-token create --ttl-minutes 15
 ```
 
-When running from this repository, use `cargo run -p server --` before the
-subcommand.
+When running from a checkout, use `cargo run -p server --` before the
+subcommand. Transfer the printed `code=<token>.<ca-fingerprint>` value to the
+target host through a trusted channel. It is single-use and must be treated as
+a password. Do not put it in shell history, a unit file, or logs.
 
-The command prints:
-
-```text
-token=<single-use secret>
-ca_fingerprint_sha256=<CA SHA-256 fingerprint>
-code=<token>.<fingerprint>
-```
-
-Transfer `code` to the target host through a trusted channel. The token is
-single-use, expires after its TTL, and must be treated like a password. The CA
-fingerprint is not secret, but it pins the enrollment TLS connection and must
-also come from a trusted channel. Do not put either value in shell history or
-logs.
-
-## 2. Select and verify the binary
-
-Select the binary from the signed release bundle. Verify its checksum and
-signature before copying it to the host:
+On the target Linux host, download the installer from the same Hope origin:
 
 ```sh
-sha256sum -c SHA256SUMS
-agent verify-release \
-  --manifest manifest.json \
-  --binary agent-linux-amd64
+curl -fsSL https://hope.example/install-agent.sh -o /tmp/hope-install-agent.sh
+chmod 0700 /tmp/hope-install-agent.sh
+sudo /tmp/hope-install-agent.sh \
+  --enroll-url https://hope.example:8444 \
+  --gateway-url wss://hope.example:8443 \
+  --release-base-url https://hope.example
 ```
 
-Use `agent-linux-arm64` and `aarch64` when the target architecture is ARM64.
-Do not run an artifact for a different architecture. Release signing details
-are in [Signed agent releases](release-signing.md).
-
-Install the selected binary as a root-owned executable. Replace the source
-filename when using ARM64:
+The installer detects `x86_64`/`aarch64`, selects the matching Linux artifact,
+and prompts for the enrollment code without echoing it. `latest` is the default
+release selection. To supply the code through a pipe without exposing it in
+the process list, use `--code-stdin --yes`:
 
 ```sh
-sudo install -o root -g root -m 0755 agent-linux-amd64 /usr/local/libexec/hope-agent
+printf '%s\n' '<token>.<ca-fingerprint>' | \
+  sudo /tmp/hope-install-agent.sh \
+    --enroll-url https://hope.example:8444 \
+    --gateway-url wss://hope.example:8443 \
+    --release-base-url https://hope.example \
+    --code-stdin --yes
 ```
 
-## 3. Enroll the host
+The UI should generate these values from the configured public URL. The
+installer URL is always the current Hope origin with `/install-agent.sh`
+appended; `hope.example` above is only an example.
 
-Create a dedicated service account and private state directory. The state
-directory contains the agent private key, client certificate, and CA
-certificate.
+For a pinned release, add `--version 0.1.0`. For an explicit release
+repository root, use `--release-url https://hope.example/agent-download` with
+an exact `--version`; `--release-base-url` is required when using `latest`.
+
+The installer:
+
+1. downloads `manifest.json`, its detached signature, and the architecture-
+   specific binary from the server's verified release repository;
+2. runs the downloaded binary's `verify-release` command before replacing an
+   installed binary;
+3. installs `/usr/local/libexec/hope-agent` as a root-owned executable;
+4. creates the non-login `hope-agent` service account and `/var/lib/hope` with
+   mode `0700`;
+5. enrolls the host using the code and writes the private identity only in
+   that state directory; and
+6. enables and starts `hope-agent.service` with systemd hardening.
+
+Re-running the installer is safe. Existing enrollment state is kept and the
+binary/unit are replaced only after release verification succeeds.
+
+Check the service:
 
 ```sh
-sudo useradd --system --home-dir /var/lib/hope --shell /usr/sbin/nologin hope-agent
-sudo install -d -o hope-agent -g hope-agent -m 0700 /var/lib/hope
-
-sudo -u hope-agent /usr/local/libexec/hope-agent enroll \
-  --server https://hope.example:8444 \
-  --code '<token>.<ca-fingerprint>' \
-  --state-dir /var/lib/hope
-```
-
-Enrollment generates the key locally. The SSH credential used to copy the
-binary never reaches the agent.
-
-## 4. Start the outbound connection
-
-Run the gateway process as the dedicated account:
-
-```sh
-sudo -u hope-agent /usr/local/libexec/hope-agent run \
-  --gateway wss://hope.example:8443 \
-  --state-dir /var/lib/hope
-```
-
-For a persistent host, run the same command under the host's service manager.
-Example systemd unit:
-
-```ini
-[Unit]
-Description=Hope agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=hope-agent
-Group=hope-agent
-ExecStart=/usr/local/libexec/hope-agent run --gateway wss://hope.example:8443 --state-dir /var/lib/hope
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=/var/lib/hope
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable it only after manual enrollment succeeds:
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now hope-agent
+sudo systemctl status hope-agent
 sudo journalctl -u hope-agent -f
 ```
 
-## Least privilege
+## Uninstall
 
-- Run the agent as a dedicated non-login user. Keep `/var/lib/hope` mode `0700`.
-- Keep the binary root-owned and non-writable by the service account.
-- Grant read access only to collectors that need it. Do not grant `sudo` or
-  arbitrary command execution.
-- Docker socket access is root-equivalent. Do not add the service account to
-  the Docker group unless container inventory is required and that trust is
-  accepted.
-- If a collector needs root for socket ownership, SMART, package, or system
-  data, use the smallest host-specific exception. Review it when collector
-  capabilities change.
-- Keep enrollment code out of unit files, environment files, process arguments,
-  and logs after enrollment. Remove it from shell history.
+Remove the unit and binary but preserve the enrolled identity for recovery:
 
-## Reconnect and recovery
+```sh
+sudo /tmp/hope-install-agent.sh --uninstall --yes
+```
 
-`agent run` keeps its enrolled identity on disk and reconnects after a dropped
-gateway connection. Retry delay uses full jitter over exponential backoff:
-1, 2, 4, 8, 16, 32, then at most 60 seconds. A successful session resets the
-backoff.
+To also remove the service account and enrolled identity:
 
-The agent must be enrolled before `run`. If the state files are missing or
-unreadable, fix ownership and permissions; do not copy a private key from
-another host. A revoked certificate is rejected on its next gateway
-connection. The current implementation issues a 30-day client certificate
-without renewal, so plan a new enrollment before expiry.
+```sh
+sudo /tmp/hope-install-agent.sh --uninstall --purge --yes
+```
 
-If the enrollment token is expired or already used, create a new token. If the
-CA fingerprint is wrong, stop and obtain the fingerprint again through a
-trusted channel; do not disable TLS verification.
+`--purge` is intentionally separate and requires `--yes`.
+
+## Security and recovery
+
+- Use the HTTPS enrollment URL and the exact CA fingerprint printed with the
+  enrollment code. The agent refuses enrollment when the fingerprint does not
+  match the Hope CA.
+- The enrollment code never appears in the systemd unit, command-line
+  arguments, or installer logs when using the interactive prompt or
+  `--code-stdin`.
+- The service account has no login shell and cannot write the installed binary.
+- Docker socket access is root-equivalent. Do not add `hope-agent` to the
+  Docker group unless that trust is intended.
+- If enrollment expires or has already been used, create a new code. Do not
+  disable TLS or reuse an old code.
+- The current agent certificate lifetime is 30 days. Re-enroll before expiry
+  until certificate renewal is implemented.
+
+Automatic self-update is not exposed by this installer yet. The update and
+rollback path must be complete before an unattended update switch is offered.
+
+Automated SSH installation and repair are documented in the API section below
+and use the same verified release repository.
 
 ## Automated SSH install and repair
-
-The Compose deployment creates the credential-vault key on first server start
-in the read-write `server-pki` volume at
-`/app/data/pki/credential-master-key`. Back up this exact key with the
-database. A database backup without it cannot decrypt SSH credentials. Never
-put the key in `.env`.
 
 The API exposes `POST /api/v1/devices/<device-id>/agent-install` and
 `POST /api/v1/devices/<device-id>/agent-repair`. Both require an
 `Idempotency-Key` header and a JSON body containing `host`, `port`, and the
 selected `credential_id`. Set `disassociate_after_enrollment` to `true` when
-the SSH credential should be detached after a successful new enrollment.
+the SSH credential should be detached after successful enrollment.
 
-The server/worker deployment must provide:
+The server and worker deployment must provide:
 
 ```text
 HOPE_CREDENTIAL_MASTER_KEY_FILE=/app/data/pki/credential-master-key
@@ -179,10 +136,10 @@ HOPE_AGENT_BINARY_X86_64=/app/agent-releases/agent-linux-amd64
 HOPE_AGENT_BINARY_AARCH64=/app/agent-releases/agent-linux-arm64
 ```
 
-The binary paths must point to verified, signed release artifacts. The worker
-detects Linux architecture over SSH, verifies the saved SSH host key, uploads
-the matching binary, creates the dedicated service account, and enrolls the
-agent. First use and host-key changes deliberately fail with a pending/changed
-trust record; review the fingerprint through `GET /api/v1/ssh-host-keys` and
-explicitly call its `/trust` action before retrying. The worker executes only
-the fixed install/repair sequence; it is not a general-purpose shell runner.
+The worker detects Linux architecture over SSH, verifies the saved SSH host
+key, uploads the matching verified artifact, creates the dedicated service
+account, and enrolls the agent. First use and host-key changes deliberately
+fail with a pending/changed trust record; review the fingerprint through
+`GET /api/v1/ssh-host-keys` and explicitly call its `/trust` action before
+retrying. The worker executes only the fixed install/repair sequence; it is not
+a general-purpose shell runner.

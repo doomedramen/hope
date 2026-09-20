@@ -316,6 +316,43 @@ impl ReleaseRepository {
         Ok(binary)
     }
 
+    /// Read the exact manifest bytes and detached signature that were
+    /// verified when this release was loaded. Re-verify the files on read so
+    /// a repository change between discovery and download cannot turn into a
+    /// mismatched bundle response.
+    pub fn read_manifest_bundle(&self, release: &VerifiedRelease) -> Result<(Vec<u8>, Vec<u8>)> {
+        let manifest_path = release.directory.join("manifest.json");
+        let signature_path = release.directory.join("manifest.json.sig");
+        let manifest_bytes = read_bounded(&manifest_path, MAX_MANIFEST_BYTES).map_err(|error| {
+            if matches!(&error, RepositoryError::ArtifactTooLarge) {
+                RepositoryError::ManifestTooLarge
+            } else {
+                error
+            }
+        })?;
+        if sha256(&manifest_bytes) != release.manifest_sha256 {
+            return Err(RepositoryError::InvalidManifestSignature);
+        }
+        let signature_bytes =
+            read_bounded(&signature_path, MAX_SIGNATURE_BYTES).map_err(|error| {
+                if matches!(&error, RepositoryError::ArtifactTooLarge) {
+                    RepositoryError::SignatureTooLarge
+                } else {
+                    error
+                }
+            })?;
+        let signature = decode_signature(&signature_bytes)?;
+        let key = self
+            .trusted_keys
+            .iter()
+            .find(|trusted| trusted.fingerprint == release.manifest_signing_key_fingerprint)
+            .ok_or(RepositoryError::InvalidManifestSignature)?;
+        key.key
+            .verify(&manifest_bytes, &signature)
+            .map_err(|_| RepositoryError::InvalidManifestSignature)?;
+        Ok((manifest_bytes, signature_bytes))
+    }
+
     fn load_directory(&self, directory: &Path) -> Result<VerifiedRelease> {
         let manifest_path = directory.join("manifest.json");
         let manifest_bytes =
@@ -599,6 +636,21 @@ mod tests {
         let release = repo.load("1.2.3").unwrap();
         let artifact = repo.artifact_for(&release, "linux", "amd64", 1).unwrap();
         assert_eq!(repo.read_artifact(&release, &artifact).unwrap(), b"agent");
+        let (manifest, signature) = repo.read_manifest_bundle(&release).unwrap();
+        assert_eq!(
+            manifest,
+            fs::read(temp.path().join("manifest.json")).unwrap()
+        );
+        assert_eq!(
+            signature,
+            fs::read(temp.path().join("manifest.json.sig")).unwrap()
+        );
+
+        fs::write(temp.path().join("manifest.json"), b"tampered").unwrap();
+        assert!(matches!(
+            repo.read_manifest_bundle(&release),
+            Err(RepositoryError::InvalidManifestSignature)
+        ));
     }
 
     #[test]

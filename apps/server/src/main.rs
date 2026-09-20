@@ -1,3 +1,4 @@
+mod agent_install;
 mod agent_inventory;
 mod agent_updates;
 mod agents;
@@ -450,6 +451,15 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
     let api = Router::new()
         .route("/health/live", get(routes::health::live))
         .route("/health/ready", get(routes::health::ready))
+        .route("/install-agent.sh", get(agent_install::script))
+        .route(
+            "/agent-download/latest/{platform}/{arch}",
+            get(agent_install::latest_version),
+        )
+        .route(
+            "/agent-download/{version}/{platform}/{arch}/{file}",
+            get(agent_install::file),
+        )
         .route(
             "/api/v1/setup",
             get(routes::auth::setup_status)

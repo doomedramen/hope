@@ -20,6 +20,7 @@ COPY apps apps
 COPY crates crates
 COPY xtask xtask
 COPY migrations migrations
+COPY deploy/agent deploy/agent
 RUN cargo build --release -p server
 
 # --- Stage 3: runtime --------------------------------------------------
