@@ -386,25 +386,29 @@ pub async fn list(
 ) -> (StatusCode, Json<Value>) {
     let limit = query.limit.unwrap_or(100).clamp(1, 100);
     let rows: Result<Vec<(Value,)>, sqlx::Error> = sqlx::query_as(
-        "select row_to_json(t) from (\
-           select m.*,\
-                  e.address::text as endpoint_address,\
-                  e.port as endpoint_port,\
-                  e.url as endpoint_url,\
-                  e.dns_name as endpoint_dns_name,\
-                  s.name as service_name,\
-                  s.product as service_product,\
-                  s.product_version as service_product_version,\
-                  m.agent_id, a.hostname as agent_hostname\
-             from monitors m\
-             left join endpoints e on e.id = m.endpoint_id\
-             left join services s on s.id = m.service_id\
-             left join agents a on a.id = m.agent_id\
-            where ($1::text is null or m.state = $1)\
-              and ($2::uuid is null or m.agent_id = $2)\
-            order by m.created_at desc, m.id desc\
-            limit $3\
-         ) t",
+        r#"
+            select row_to_json(t)
+            from (
+                select m.*,
+                       e.address::text as endpoint_address,
+                       e.port as endpoint_port,
+                       e.url as endpoint_url,
+                       e.dns_name as endpoint_dns_name,
+                       s.name as service_name,
+                       s.product as service_product,
+                       s.product_version as service_product_version,
+                       m.agent_id,
+                       a.hostname as agent_hostname
+                  from monitors m
+                  left join endpoints e on e.id = m.endpoint_id
+                  left join services s on s.id = m.service_id
+                  left join agents a on a.id = m.agent_id
+                 where ($1::text is null or m.state = $1)
+                   and ($2::uuid is null or m.agent_id = $2)
+                 order by m.created_at desc, m.id desc
+                 limit $3
+            ) t
+        "#,
     )
     .bind(query.state)
     .bind(query.agent_id)
@@ -422,22 +426,26 @@ pub async fn list(
 
 pub async fn get(State(state): State<AppState>, Path(id): Path<Uuid>) -> (StatusCode, Json<Value>) {
     let row: Result<Option<(Value,)>, sqlx::Error> = sqlx::query_as(
-        "select row_to_json(t) from (\
-               select m.*,\
-                      e.address::text as endpoint_address,\
-                      e.port as endpoint_port,\
-                      e.url as endpoint_url,\
-                      e.dns_name as endpoint_dns_name,\
-                      s.name as service_name,\
-                      s.product as service_product,\
-                      s.product_version as service_product_version,\
-                      m.agent_id, a.hostname as agent_hostname\
-                 from monitors m\
-                 left join endpoints e on e.id = m.endpoint_id\
-                 left join services s on s.id = m.service_id\
-                 left join agents a on a.id = m.agent_id\
-                where m.id = $1\
-             ) t",
+        r#"
+            select row_to_json(t)
+            from (
+                select m.*,
+                       e.address::text as endpoint_address,
+                       e.port as endpoint_port,
+                       e.url as endpoint_url,
+                       e.dns_name as endpoint_dns_name,
+                       s.name as service_name,
+                       s.product as service_product,
+                       s.product_version as service_product_version,
+                       m.agent_id,
+                       a.hostname as agent_hostname
+                  from monitors m
+                  left join endpoints e on e.id = m.endpoint_id
+                  left join services s on s.id = m.service_id
+                  left join agents a on a.id = m.agent_id
+                 where m.id = $1
+            ) t
+        "#,
     )
     .bind(id)
     .fetch_optional(&state.pool)
@@ -790,6 +798,68 @@ mod tests {
         assert_eq!(suppressions.len(), 1);
         assert_eq!(suppressions[0]["dependency_edge_id"], json!(edge_id));
         assert_eq!(suppressions[0]["reason"], "suppressed by test dependency");
+    }
+
+    #[tokio::test]
+    async fn monitor_list_returns_joined_monitor_fields() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+
+        let device_id: Uuid =
+            sqlx::query_scalar("insert into devices (device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let service_id: Uuid = sqlx::query_scalar(
+            "insert into services (name, protocol, owner_kind, owner_id) \
+             values ('Monitor list test service', 'http', 'device', $1) returning id",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let endpoint_id: Uuid = sqlx::query_scalar(
+            "insert into endpoints (service_id, endpoint_type, address, port) \
+             values ($1, 'socket', '198.18.0.10'::inet, 8080) returning id",
+        )
+        .bind(service_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let monitor_id: Uuid = sqlx::query_scalar(
+            "insert into monitors (service_id, endpoint_id, monitor_type) \
+             values ($1, $2, 'http') returning id",
+        )
+        .bind(service_id)
+        .bind(endpoint_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let (status, Json(body)) = list(
+            State(AppState { pool }),
+            Query(MonitorListQuery {
+                state: None,
+                agent_id: None,
+                limit: Some(100),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "monitor list response: {body}");
+        let item = body["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == json!(monitor_id)))
+            .expect("created monitor is listed");
+        assert_eq!(item["endpoint_address"], "198.18.0.10/32");
+        assert_eq!(item["endpoint_port"], 8080);
+        assert_eq!(item["service_name"], "Monitor list test service");
     }
 
     #[test]
