@@ -40,7 +40,7 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-compose=(docker compose --project-directory "$repo_root" --env-file "$env_path" -f "$script_dir/docker-compose.yml")
+compose=(docker compose --env-file "$env_path" -f "$script_dir/docker-compose.yml")
 created_at="$(date -u +%Y%m%dT%H%M%SZ)"
 destination="$backup_root/hope-$created_at"
 key_path="${HOPE_CREDENTIAL_MASTER_KEY_FILE_HOST:-$script_dir/secrets/credential-master-key}"

@@ -73,7 +73,7 @@ fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/../.." && pwd)"
-compose=(docker compose --project-directory "$repo_root" --env-file "$backup_dir/deployment.env" -f "$script_dir/docker-compose.yml")
+compose=(docker compose --env-file "$backup_dir/deployment.env" -f "$script_dir/docker-compose.yml")
 key_path="${HOPE_CREDENTIAL_MASTER_KEY_FILE_HOST:-$script_dir/secrets/credential-master-key}"
 release_dir="${HOPE_AGENT_RELEASE_DIR_HOST:-$script_dir/agent-releases}"
 helper_id=""
