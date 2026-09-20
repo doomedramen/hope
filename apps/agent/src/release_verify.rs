@@ -8,6 +8,7 @@ use ed25519_dalek::VerifyingKey;
 
 /// The embedded trusted public key, or `None` in a dev build that had no
 /// `HOPE_RELEASE_PUBLIC_KEY(_FILE)` set at compile time.
+#[allow(dead_code)]
 pub fn trusted_public_key() -> Option<VerifyingKey> {
     #[cfg(hope_dev_no_release_key)]
     {
@@ -37,7 +38,26 @@ pub fn trusted_public_key() -> Option<VerifyingKey> {
 /// old and new keys to the explicit `*_with_trusted_keys` helpers while this
 /// compatibility function preserves current embedded-key behavior.
 pub fn trusted_public_keys() -> Option<Vec<VerifyingKey>> {
-    trusted_public_key().map(|key| vec![key])
+    #[cfg(hope_dev_no_release_key)]
+    {
+        trusted_public_key();
+        None
+    }
+
+    #[cfg(not(hope_dev_no_release_key))]
+    {
+        let keys = env!("HOPE_RELEASE_PUBLIC_KEYS")
+            .split(',')
+            .map(|hex| {
+                let bytes: [u8; 32] = hex::decode(hex)
+                    .expect("HOPE_RELEASE_PUBLIC_KEYS was validated as hex at build time")
+                    .try_into()
+                    .expect("embedded release key must be 32 bytes");
+                VerifyingKey::from_bytes(&bytes).expect("embedded key must be valid")
+            })
+            .collect::<Vec<_>>();
+        Some(keys)
+    }
 }
 
 /// This build's platform/arch, in the same vocabulary `xtask sign` and
@@ -62,6 +82,7 @@ pub fn current_platform_arch() -> (&'static str, &'static str) {
 /// platform/arch. Returns an error (rather than panicking) if this is a
 /// dev build with no embedded key — callers must not silently proceed as
 /// if verification passed.
+#[allow(dead_code)]
 pub fn verify_release(
     record: &release::ArtifactRecord,
     signature_hex: &str,
@@ -77,6 +98,7 @@ pub fn verify_release(
 }
 
 /// Verify one artifact against an explicit bounded trusted-key rotation set.
+#[allow(dead_code)]
 pub fn verify_release_with_trusted_keys(
     record: &release::ArtifactRecord,
     signature_hex: &str,

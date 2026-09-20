@@ -109,7 +109,7 @@ impl ArtifactRecord {
 
     /// Validate fields before using them as release metadata.
     pub fn validate(&self) -> Result<()> {
-        validate_string("artifact.version", &self.version)?;
+        validate_version("artifact.version", &self.version)?;
         validate_string("artifact.platform", &self.platform)?;
         validate_string("artifact.arch", &self.arch)?;
 
@@ -191,6 +191,32 @@ fn validate_string(field: &'static str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_version(field: &'static str, value: &str) -> Result<()> {
+    validate_string(field, value)?;
+    let (core, prerelease) = value.split_once('-').unwrap_or((value, ""));
+    let components: Vec<_> = core.split('.').collect();
+    if components.len() != 3
+        || components.iter().any(|component| {
+            component.is_empty()
+                || (component.len() > 1 && component.starts_with('0'))
+                || !component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        || (!prerelease.is_empty()
+            && prerelease.split('.').any(|component| {
+                component.is_empty()
+                    || !component
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            }))
+    {
+        return Err(ReleaseError::InvalidField {
+            field,
+            reason: "expected semantic version MAJOR.MINOR.PATCH[-PRERELEASE]",
+        });
+    }
+    Ok(())
+}
+
 impl SignedArtifact {
     fn validate(&self) -> Result<()> {
         self.record.validate()?;
@@ -202,7 +228,7 @@ impl SignedArtifact {
 impl Manifest {
     /// Validate manifest-wide bounds and invariants independent of signatures.
     pub fn validate(&self) -> Result<()> {
-        validate_string("manifest.version", &self.version)?;
+        validate_version("manifest.version", &self.version)?;
         if self.artifacts.is_empty() {
             return Err(ReleaseError::InvalidManifest(
                 "manifest must contain at least one artifact".to_string(),
@@ -867,5 +893,18 @@ mod tests {
         let decoded: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.artifacts.len(), 1);
         assert_eq!(decoded.artifacts[0].record.version, "0.1.0");
+    }
+
+    #[test]
+    fn semantic_versions_are_required() {
+        let mut record = sample_record();
+        record.version = "release-latest".to_string();
+        assert!(matches!(
+            record.validate(),
+            Err(ReleaseError::InvalidField {
+                field: "artifact.version",
+                ..
+            })
+        ));
     }
 }

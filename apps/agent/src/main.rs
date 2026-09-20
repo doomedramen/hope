@@ -117,20 +117,19 @@ async fn main() -> anyhow::Result<()> {
             manifest: manifest_path,
             binary: binary_path,
         }) => {
-            let manifest_json = std::fs::read_to_string(&manifest_path)?;
-            let manifest: release::Manifest = serde_json::from_str(&manifest_json)?;
+            let manifest_bytes = std::fs::read(&manifest_path)?;
+            let manifest_signature_path =
+                std::path::Path::new(&manifest_path).with_file_name("manifest.json.sig");
+            let manifest_signature = std::fs::read_to_string(&manifest_signature_path)?;
             let binary_bytes = std::fs::read(&binary_path)?;
             let (platform, arch) = release_verify::current_platform_arch();
 
-            let artifact = manifest
-                .artifacts
-                .iter()
-                .find(|a| a.record.platform == platform && a.record.arch == arch)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("no {platform}/{arch} artifact in {manifest_path}")
-                })?;
-
-            release_verify::verify_release(&artifact.record, &artifact.signature, &binary_bytes)?;
+            let artifact = release_verify::verify_release_manifest(
+                &manifest_bytes,
+                manifest_signature.trim(),
+                &binary_bytes,
+            )
+            .map_err(|error| anyhow::anyhow!("no {platform}/{arch} verified release: {error}"))?;
             println!(
                 "OK: {} {}/{} verified",
                 artifact.record.version, platform, arch
