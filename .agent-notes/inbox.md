@@ -304,3 +304,12 @@ our ntfy server is [https://ntfy.lab](https://ntfy.lab).rtin.page
 - Status: captured
 
 The ntfy server URL is `https://ntfy.lab.rtin.page/`
+## Review deferred UI work
+
+- Created: 2026-09-20
+- Type: question
+- Area: ui
+- Context: Continuing the milestone implementation
+- Status: captured
+
+it might be worth making note of any other ui stuff that has been left behind that should be brought forward
