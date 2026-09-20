@@ -11,10 +11,9 @@ const BATCH_SIZE: i64 = 1000;
 
 pub(crate) fn validate_retention_days(days: i64, field: &str) -> sqlx::Result<i64> {
     if !(MIN_RETENTION_DAYS..=MAX_RETENTION_DAYS).contains(&days) {
-        return Err(sqlx::Error::Protocol(
-            format!("{field} must be between {MIN_RETENTION_DAYS} and {MAX_RETENTION_DAYS} days")
-                .into(),
-        ));
+        return Err(sqlx::Error::Protocol(format!(
+            "{field} must be between {MIN_RETENTION_DAYS} and {MAX_RETENTION_DAYS} days"
+        )));
     }
     Ok(days)
 }
