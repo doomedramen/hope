@@ -8,7 +8,7 @@ test.describe("agent deployment", () => {
     const deviceName = `E2E agent target ${Date.now()}`;
 
     await page.goto("/devices");
-    await page.getByRole("button", { name: "Add device" }).click();
+    await page.getByRole("button", { name: "Add device" }).first().click();
     const createDialog = page.getByRole("dialog");
     await createDialog.getByLabel("Device name").fill(deviceName);
     await createDialog.getByRole("button", { name: "Create device" }).click();
