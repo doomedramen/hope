@@ -21,10 +21,10 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$script_dir/../.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 backup_root="${1:-${HOPE_BACKUP_DIR:-$repo_root/backups}}"
-backup_root="$(mkdir -p -- "$backup_root" && cd -- "$backup_root" && pwd)"
+backup_root="$(mkdir -p "$backup_root" && cd "$backup_root" && pwd)"
 env_path="${HOPE_DEPLOYMENT_ENV_FILE:-$repo_root/.env}"
 
 case "${HOPE_BACKUP_INCLUDE_SECRETS:-}" in
@@ -40,31 +40,23 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-compose=(docker compose --env-file "$env_path" -f "$script_dir/docker-compose.yml")
+compose=(docker compose -f "$script_dir/docker-compose.yml")
+if [[ -f "$env_path" ]]; then
+  compose+=(--env-file "$env_path")
+fi
 created_at="$(date -u +%Y%m%dT%H%M%SZ)"
 destination="$backup_root/hope-$created_at"
-key_path="${HOPE_CREDENTIAL_MASTER_KEY_FILE_HOST:-$script_dir/secrets/credential-master-key}"
 release_dir="${HOPE_AGENT_RELEASE_DIR_HOST:-$script_dir/agent-releases}"
-
-if [[ ! -f "$env_path" ]]; then
-  printf 'Deployment env file not found: %s\n' "$env_path" >&2
-  exit 1
-fi
-
-if [[ ! -f "$key_path" ]]; then
-  printf 'Credential master key not found: %s\n' "$key_path" >&2
-  exit 1
-fi
 
 if [[ ! -d "$release_dir" ]]; then
   printf 'Agent release repository not found: %s\n' "$release_dir" >&2
   exit 1
 fi
 
-mkdir -p -- "$destination"
+mkdir -p "$destination"
 cleanup() {
   if [[ "${backup_succeeded:-0}" != 1 ]]; then
-    rm -rf -- "$destination"
+    rm -rf "$destination"
   fi
 }
 trap cleanup EXIT
@@ -93,10 +85,19 @@ fi
 
 "${compose[@]}" exec -T postgres pg_restore --list <"$destination/postgres.dump" >/dev/null
 
-docker cp "$server_container:/app/data/pki" "$destination/"
-cp -a -- "$release_dir" "$destination/agent-releases"
-install -m 600 -- "$key_path" "$destination/credential-master-key"
-install -m 600 -- "$env_path" "$destination/deployment.env"
+mkdir -p "$destination/pki"
+for pki_file in ca-cert.pem ca-key.pem server-cert.pem server-key.pem; do
+  docker cp "$server_container:/app/data/pki/$pki_file" "$destination/pki/$pki_file"
+done
+docker cp "$server_container:/app/data/pki/credential-master-key" \
+  "$destination/credential-master-key"
+chmod 600 "$destination/credential-master-key"
+cp -a "$release_dir" "$destination/agent-releases"
+if [[ -f "$env_path" ]]; then
+  install -m 600 "$env_path" "$destination/deployment.env"
+else
+  install -m 600 /dev/null "$destination/deployment.env"
+fi
 
 git_revision="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || printf '%s' unknown)"
 cat >"$destination/manifest.txt" <<EOF
@@ -112,7 +113,7 @@ deployment_env=deployment.env
 EOF
 
 (
-  cd -- "$destination"
+  cd "$destination"
   if command -v sha256sum >/dev/null 2>&1; then
     find . -type f ! -name manifest.txt ! -name SHA256SUMS -print0 |
       while IFS= read -r -d '' file; do sha256sum "$file"; done >SHA256SUMS
@@ -125,6 +126,6 @@ EOF
   fi
 )
 
-chmod -R go-rwx -- "$destination"
+chmod -R go-rwx "$destination"
 backup_succeeded=1
 printf 'Backup complete: %s\n' "$destination"

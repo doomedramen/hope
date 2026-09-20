@@ -34,10 +34,10 @@ M6 stores credential ciphertext in PostgreSQL using ChaCha20-Poly1305 and a
 operation decrypts a selected credential for the fixed SSH install, repair, or
 update path; secret-bearing logs and job payloads are redacted or excluded.
 
-The Compose example mounts the key as a read-only container secret at
-`/run/secrets/hope_credential_master_key`. The key is not in `.env`, the image,
-or PostgreSQL. A database backup without the exact key cannot restore
-credential use.
+The Compose example creates the key on first server start in the read-write
+`server-pki` volume at `/app/data/pki/credential-master-key`. The key is not in
+`.env`, the image, or PostgreSQL. A database backup without the exact key
+cannot restore credential use.
 
 *Gap*: in-place master-key rotation and re-encryption are not implemented.
 Keep the old key available until a future controlled migration exists.

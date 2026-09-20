@@ -9,164 +9,120 @@ and calendar/timeline/list UI are available.
 See [`docs/adr/`](docs/adr/) for architecture decisions and
 [`docs/threat-model.md`](docs/threat-model.md) for current controls and gaps.
 
-## Quickstart with Docker Compose
+## Docker Compose
 
-Prerequisites: Docker Engine with Compose v2, `openssl`, and `curl`.
+The web UI is bundled into the server image, so there is no frontend container.
+The worker uses the same image with a different command. The stack needs only
+Docker Engine with Compose v2.
 
-The example exposes the API as plain HTTP on `127.0.0.1:8080` for local use.
-It also exposes the server-terminated agent TLS listeners on ports 8443 and
-8444. Do not expose the HTTP listener directly to an untrusted network; use a
-TLS reverse proxy for any non-local deployment. See
-[`docs/operations/backup-restore.md`](docs/operations/backup-restore.md) and
-[`docs/operations/upgrade-recovery.md`](docs/operations/upgrade-recovery.md)
-before using the stack for persistent data.
+Save this as `docker-compose.yml`, or use the identical file at
+`deploy/compose/docker-compose.yml`:
 
-The canonical Compose file uses the published server/worker image from GHCR.
-Set `HOPE_IMAGE` in `.env` to select another image. For production, use an
-immutable digest. Contributors can use the local-build override documented
-below.
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hope}
+      POSTGRES_USER: ${POSTGRES_USER:-hope}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hope}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
-### 1. Configure local state
+  server:
+    image: ${HOPE_IMAGE:-ghcr.io/doomedramen/hope:main}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    environment:
+      HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:-postgres://${POSTGRES_USER:-hope}:${POSTGRES_PASSWORD:-hope}@postgres:5432/${POSTGRES_DB:-hope}}
+      HOPE_COOKIE_SECURE: ${HOPE_COOKIE_SECURE:-false}
+      HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:-https://localhost:8444}
+      HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:-wss://localhost:8443}
+    ports:
+      - "${HOPE_HTTP_BIND:-0.0.0.0}:${HOPE_HTTP_PORT:-8080}:8080"
+      - "${HOPE_GATEWAY_BIND:-0.0.0.0}:${HOPE_GATEWAY_PORT:-8443}:8443"
+      - "${HOPE_ENROLL_BIND:-0.0.0.0}:${HOPE_ENROLL_PORT:-8444}:8444"
+    volumes:
+      - server-pki:/app/data/pki
+      - ${HOPE_AGENT_RELEASE_DIR_HOST:-./agent-releases}:/app/agent-releases:ro
+    command: ["serve"]
 
-```sh
-git clone https://github.com/doomedramen/hope.git
-cd hope
-cp .env.example .env
+  worker:
+    image: ${HOPE_IMAGE:-ghcr.io/doomedramen/hope:main}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    environment:
+      HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:-postgres://${POSTGRES_USER:-hope}:${POSTGRES_PASSWORD:-hope}@postgres:5432/${POSTGRES_DB:-hope}}
+    volumes:
+      - server-pki:/app/data/pki:ro
+      - ${HOPE_AGENT_RELEASE_DIR_HOST:-./agent-releases}:/app/agent-releases:ro
+    command: ["worker"]
 
-# Set one real password in both POSTGRES_PASSWORD and HOPE_DATABASE_URL.
-mkdir -p deploy/compose/secrets deploy/compose/agent-releases
-umask 077
-test -e deploy/compose/secrets/credential-master-key || \
-  openssl rand -hex 32 > deploy/compose/secrets/credential-master-key
-
-# Local quickstart has no agent release yet. Add a real public key before
-# enabling signed agent install or update operations.
-test -e deploy/compose/agent-releases/public-key.hex || \
-  : > deploy/compose/agent-releases/public-key.hex
+volumes:
+  postgres-data:
+  server-pki:
 ```
 
-For local HTTP, keep `HOPE_COOKIE_SECURE=false`. For production, set it to
-`true`, change both agent URLs to the public service names, and put a TLS
-reverse proxy in front of port 8080. The 8443 mTLS gateway must use TCP
-passthrough; the 8444 enrollment listener should also preserve the server
-certificate and CA fingerprint. See
-[`docs/manual-agent-install.md`](docs/manual-agent-install.md).
-
-### 2. Select an image and initialise server PKI
-
-The default `.env.example` value uses the published `main` image. Pull it
-before the first start:
+Start it:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml --env-file .env pull server worker
-docker compose -f deploy/compose/docker-compose.yml --env-file .env \
-  run --rm --no-deps server ca init
+docker compose -f deploy/compose/docker-compose.yml up -d
 ```
 
-`ca init` writes the internal CA key and certificate plus the server leaf
-certificate into the `server-pki` volume. It refuses to overwrite existing PKI
-files. Back up this volume before changing deployments.
+Open <http://localhost:8080>. On an empty database, the web UI presents the
+first-run form for creating the operator account. No account, key, certificate,
+or manual migration command is required. The server image creates the
+credential key and agent CA on first start and keeps them in the `server-pki`
+volume. PostgreSQL migrations run when the server and worker start.
 
-To build the server/worker image from the current checkout, add the explicit
-local-build override to every Compose command:
+For a source build, use the checked-in override:
 
 ```sh
 docker compose \
   -f deploy/compose/docker-compose.yml \
   -f deploy/compose/docker-compose.local-build.yml \
-  --env-file .env build server worker
-docker compose \
-  -f deploy/compose/docker-compose.yml \
-  -f deploy/compose/docker-compose.local-build.yml \
-  --env-file .env run --rm --no-deps server ca init
-docker compose \
-  -f deploy/compose/docker-compose.yml \
-  -f deploy/compose/docker-compose.local-build.yml \
-  --env-file .env up -d
+  up -d --build
 ```
 
-Use the same two `-f` options with later `ps`, `logs`, and `down` commands.
+The HTTP port is published on all interfaces by default for homelab use. Set
+`HOPE_HTTP_BIND=127.0.0.1` for a local-only listener. Put a TLS reverse proxy
+in front of HTTP for an internet-facing deployment, set
+`HOPE_COOKIE_SECURE=true`, use a strong PostgreSQL password, and pin `HOPE_IMAGE`
+to an immutable GHCR digest. Set the agent URLs to the hostname reachable by
+agents. The 8443 gateway needs TCP passthrough and 8444 must preserve the
+server certificate and CA fingerprint.
 
-GHCR packages can be public or private. Public packages need no registry
-login. For a private package, run `docker login ghcr.io -u YOUR_GITHUB_USERNAME`
-and enter a GitHub token with `read:packages` when prompted. GitHub Actions uses
-the built-in `GITHUB_TOKEN` with package write permission.
+Copy `.env.example` to `.env` only when changing those defaults. Public images
+need no registry login. For a private GHCR package, log in with a GitHub token
+that has `read:packages`.
 
-### 3. Start and check the stack
+To stop the stack while preserving data:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d
-docker compose -f deploy/compose/docker-compose.yml --env-file .env ps
-
-curl -fsS http://127.0.0.1:8080/health/live
-# {"status":"live"}
-curl -fsS http://127.0.0.1:8080/health/ready
-# {"status":"ready"}
+docker compose -f deploy/compose/docker-compose.yml down
 ```
 
-`server` serves the API and web SPA, applies embedded SQL migrations, and runs
-the agent gateway and enrollment listeners. `worker` applies the same
-migrations, consumes the PostgreSQL job queue, and runs monitor checks and
-background handlers. The worker may start independently after PostgreSQL is
-healthy; Compose does not treat server startup as a worker dependency.
-
-### Use another image or an immutable digest
-
-Set `HOPE_IMAGE` in `.env`, then pull and start the selected image:
-
-```sh
-# Fork or rebuilt image.
-export HOPE_IMAGE=ghcr.io/YOUR_GITHUB_USERNAME/hope:main
-
-# Or use a production pin. Replace DIGEST with the published sha256 digest.
-# export HOPE_IMAGE=ghcr.io/doomedramen/hope@sha256:DIGEST
-
-docker compose -f deploy/compose/docker-compose.yml --env-file .env pull server worker
-docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d
-```
-
-The export overrides `HOPE_IMAGE` from `.env` for this shell. To persist the
-choice, put only one of these values in `.env` instead. A one-command shell
-override can also be supplied:
-
-```sh
-HOPE_IMAGE=ghcr.io/YOUR_GITHUB_USERNAME/hope:main \
-  docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d
-```
-
-Create the first operator account:
-
-```sh
-curl -fsS -X POST http://127.0.0.1:8080/api/v1/setup \
-  -H 'content-type: application/json' \
-  -H 'x-requested-with: hope' \
-  -d '{"email":"admin@example.com","password":"correcthorsebatterystaple"}'
-
-curl -fsS -X POST http://127.0.0.1:8080/api/v1/login \
-  -H 'content-type: application/json' \
-  -H 'x-requested-with: hope' \
-  -c cookies.txt \
-  -d '{"email":"admin@example.com","password":"correcthorsebatterystaple"}'
-```
-
-Unsafe `/api/v1` requests require the `X-Requested-With: hope` header. The
-session cookie is stored server-side in PostgreSQL.
-
-### 4. Inspect worker activity
-
-```sh
-docker compose -f deploy/compose/docker-compose.yml --env-file .env logs -f worker
-```
-
-The server scheduler enqueues idempotent work immediately and every five
-minutes. Current periodic work includes agent health, automatic update
-reconciliation, dependency-graph reconciliation, maintenance reconciliation,
-and due discovery change scans. Session cleanup and enrollment-token purge run
-hourly. Monitor-result and change-event retention run daily. The worker also
-handles monitor checks, notifications, discovery, agent install/repair, signed
-agent updates, and maintenance-overrun delivery. Failed retryable jobs use
-queue backoff; unknown job kinds fail permanently because an older worker
-cannot safely process a newer job contract.
+`down -v` removes the PostgreSQL and server-PKI volumes. Use it only when
+intentionally discarding the deployment.
 
 ## M9 maintenance API
 
@@ -237,13 +193,3 @@ configuration, image pulls, scan failures, or record mismatches.
 - [Contributing](CONTRIBUTING.md)
 - [Security reporting](SECURITY.md)
 - [Release process](RELEASE.md)
-
-To stop local containers while preserving database and PKI volumes:
-
-```sh
-docker compose -f deploy/compose/docker-compose.yml --env-file .env down
-```
-
-`down -v` removes the PostgreSQL and server-PKI volumes. Use it only when
-intentionally discarding local state or following a verified clean-restore
-procedure.

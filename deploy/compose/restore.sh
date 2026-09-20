@@ -23,7 +23,7 @@ if [[ ! -d "$1" ]]; then
   printf 'Backup directory not found: %s\n' "$1" >&2
   exit 1
 fi
-backup_dir="$(cd -- "$1" && pwd)"
+backup_dir="$(cd "$1" && pwd)"
 shift
 force=0
 with_secrets=0
@@ -55,7 +55,7 @@ if [[ "$with_secrets" == 1 && ! -f "$backup_dir/credential-master-key" ]]; then
 fi
 
 (
-  cd -- "$backup_dir"
+  cd "$backup_dir"
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum -c SHA256SUMS
   elif command -v shasum >/dev/null 2>&1; then
@@ -71,10 +71,9 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "$script_dir/../.." && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 compose=(docker compose --env-file "$backup_dir/deployment.env" -f "$script_dir/docker-compose.yml")
-key_path="${HOPE_CREDENTIAL_MASTER_KEY_FILE_HOST:-$script_dir/secrets/credential-master-key}"
 release_dir="${HOPE_AGENT_RELEASE_DIR_HOST:-$script_dir/agent-releases}"
 helper_id=""
 
@@ -84,11 +83,6 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-
-if [[ "$with_secrets" == 1 ]]; then
-  mkdir -p -- "$(dirname -- "$key_path")"
-  install -m 600 -- "$backup_dir/credential-master-key" "$key_path"
-fi
 
 printf '%s\n' "Stopping application services. The database and PKI will be replaced."
 "${compose[@]}" stop server worker >/dev/null
@@ -111,15 +105,19 @@ fi
 "${compose[@]}" exec -T postgres sh -c 'pg_restore --exit-on-error --no-owner --no-acl --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' <"$backup_dir/postgres.dump"
 
 if [[ -e "$release_dir" ]]; then
-  rm -rf -- "$release_dir"
+  rm -rf "$release_dir"
 fi
-mkdir -p -- "$(dirname -- "$release_dir")"
-cp -a -- "$backup_dir/agent-releases" "$release_dir"
+mkdir -p "$(dirname "$release_dir")"
+cp -a "$backup_dir/agent-releases" "$release_dir"
 
 helper_id="$("${compose[@]}" run -d --no-deps --entrypoint sh server -c 'sleep 300')"
-docker exec "$helper_id" rm -rf /app/data/pki
-docker exec "$helper_id" mkdir -p /app/data
+docker exec "$helper_id" sh -c 'find /app/data/pki -mindepth 1 -maxdepth 1 -exec rm -rf {} +'
 docker cp "$backup_dir/pki" "$helper_id:/app/data/"
+if [[ "$with_secrets" == 1 ]]; then
+  docker cp "$backup_dir/credential-master-key" \
+    "$helper_id:/app/data/pki/credential-master-key"
+  docker exec "$helper_id" chmod 0400 /app/data/pki/credential-master-key
+fi
 docker exec "$helper_id" chmod -R go-rwx /app/data/pki
 docker rm -f "$helper_id" >/dev/null
 helper_id=""

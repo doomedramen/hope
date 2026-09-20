@@ -3,13 +3,13 @@ services:
     image: postgres:17
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-hope}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-hope}
+      POSTGRES_USER: ${POSTGRES_USER:-hope}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hope}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hope} -d ${POSTGRES_DB:-hope}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -18,101 +18,44 @@ services:
   server:
     image: ${HOPE_IMAGE:-ghcr.io/doomedramen/hope:main}
     restart: unless-stopped
-    stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     environment:
-      HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:?set HOPE_DATABASE_URL in .env}
-      HOPE_BIND_ADDR: ${HOPE_BIND_ADDR:-0.0.0.0:8080}
-      HOPE_COOKIE_SECURE: ${HOPE_COOKIE_SECURE:-true}
-      HOPE_TRUST_PROXY_HEADERS: ${HOPE_TRUST_PROXY_HEADERS:-false}
-      HOPE_CREDENTIAL_MASTER_KEY_FILE: /run/secrets/hope_credential_master_key
-      HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:?set HOPE_AGENT_ENROLL_URL in .env}
-      HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:?set HOPE_AGENT_GATEWAY_URL in .env}
-      HOPE_AGENT_RELEASE_DIR: /app/agent-releases
-      HOPE_RELEASE_PUBLIC_KEY_FILE: ${HOPE_RELEASE_PUBLIC_KEY_FILE:-/app/agent-releases/public-key.hex}
-      HOPE_RELEASE_PUBLIC_KEYS: ${HOPE_RELEASE_PUBLIC_KEYS:-}
-      HOPE_AGENT_BINARY_X86_64: /app/agent-releases/agent-linux-amd64
-      HOPE_AGENT_BINARY_AARCH64: /app/agent-releases/agent-linux-arm64
-      HOPE_CHANGE_EVENT_RETENTION_DAYS: ${HOPE_CHANGE_EVENT_RETENTION_DAYS:-365}
-      HOPE_MONITOR_RESULT_RETENTION_DAYS: ${HOPE_MONITOR_RESULT_RETENTION_DAYS:-90}
-      HOPE_MONITOR_RESULT_ROLLUP_AFTER_DAYS: ${HOPE_MONITOR_RESULT_ROLLUP_AFTER_DAYS:-7}
-      HOPE_MONITOR_RESULT_ROLLUP_RETENTION_DAYS: ${HOPE_MONITOR_RESULT_ROLLUP_RETENTION_DAYS:-365}
-      HOPE_AUDIT_EVENT_RETENTION_DAYS: ${HOPE_AUDIT_EVENT_RETENTION_DAYS:-365}
-      HOPE_JOB_RETENTION_DAYS: ${HOPE_JOB_RETENTION_DAYS:-30}
-      HOPE_MAINTENANCE_HORIZON_DAYS: ${HOPE_MAINTENANCE_HORIZON_DAYS:-90}
-      HOPE_MAINTENANCE_GLOBAL_DISRUPTIVE_LOCK: ${HOPE_MAINTENANCE_GLOBAL_DISRUPTIVE_LOCK:-true}
-    secrets:
-      - source: hope_credential_master_key
-        target: hope_credential_master_key
-        mode: 0400
-    volumes:
-      # Contains ca-key.pem and server-key.pem. Back up and protect this volume.
-      - server-pki:/app/data/pki:rw
-      # Contains only verified release bundles and public trust configuration.
-      - ${HOPE_AGENT_RELEASE_DIR_HOST:-./agent-releases}:/app/agent-releases:ro
+      HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:-postgres://${POSTGRES_USER:-hope}:${POSTGRES_PASSWORD:-hope}@postgres:5432/${POSTGRES_DB:-hope}}
+      HOPE_COOKIE_SECURE: ${HOPE_COOKIE_SECURE:-false}
+      HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:-https://localhost:8444}
+      HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:-wss://localhost:8443}
     ports:
-      # Keep plain HTTP on localhost for local use. Put a TLS reverse proxy in
-      # front for production; do not publish this port to an untrusted network.
-      - "${HOPE_HTTP_BIND:-127.0.0.1}:${HOPE_HTTP_PORT:-8080}:8080"
-      # These listeners terminate server PKI. Use a firewall or L4 passthrough.
+      - "${HOPE_HTTP_BIND:-0.0.0.0}:${HOPE_HTTP_PORT:-8080}:8080"
       - "${HOPE_GATEWAY_BIND:-0.0.0.0}:${HOPE_GATEWAY_PORT:-8443}:8443"
       - "${HOPE_ENROLL_BIND:-0.0.0.0}:${HOPE_ENROLL_PORT:-8444}:8444"
-    healthcheck:
-      # Container liveness only. Use /health/ready from the proxy or operator
-      # for dependency readiness; the runtime image has no HTTP probe binary.
-      test: ["CMD-SHELL", "kill -0 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 15s
+    volumes:
+      - server-pki:/app/data/pki
+      - ${HOPE_AGENT_RELEASE_DIR_HOST:-./agent-releases}:/app/agent-releases:ro
     command: ["serve"]
 
   worker:
     image: ${HOPE_IMAGE:-ghcr.io/doomedramen/hope:main}
     restart: unless-stopped
-    stop_grace_period: 90s
     depends_on:
       postgres:
         condition: service_healthy
+      server:
+        condition: service_healthy
     environment:
-      HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:?set HOPE_DATABASE_URL in .env}
-      HOPE_CREDENTIAL_MASTER_KEY_FILE: /run/secrets/hope_credential_master_key
-      HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:?set HOPE_AGENT_ENROLL_URL in .env}
-      HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:?set HOPE_AGENT_GATEWAY_URL in .env}
-      HOPE_AGENT_RELEASE_DIR: /app/agent-releases
-      HOPE_RELEASE_PUBLIC_KEY_FILE: ${HOPE_RELEASE_PUBLIC_KEY_FILE:-/app/agent-releases/public-key.hex}
-      HOPE_RELEASE_PUBLIC_KEYS: ${HOPE_RELEASE_PUBLIC_KEYS:-}
-      HOPE_AGENT_BINARY_X86_64: /app/agent-releases/agent-linux-amd64
-      HOPE_AGENT_BINARY_AARCH64: /app/agent-releases/agent-linux-arm64
-      HOPE_CHANGE_EVENT_RETENTION_DAYS: ${HOPE_CHANGE_EVENT_RETENTION_DAYS:-365}
-      HOPE_MONITOR_RESULT_RETENTION_DAYS: ${HOPE_MONITOR_RESULT_RETENTION_DAYS:-90}
-      HOPE_MONITOR_RESULT_ROLLUP_AFTER_DAYS: ${HOPE_MONITOR_RESULT_ROLLUP_AFTER_DAYS:-7}
-      HOPE_MONITOR_RESULT_ROLLUP_RETENTION_DAYS: ${HOPE_MONITOR_RESULT_ROLLUP_RETENTION_DAYS:-365}
-      HOPE_AUDIT_EVENT_RETENTION_DAYS: ${HOPE_AUDIT_EVENT_RETENTION_DAYS:-365}
-      HOPE_JOB_RETENTION_DAYS: ${HOPE_JOB_RETENTION_DAYS:-30}
-      HOPE_MAINTENANCE_HORIZON_DAYS: ${HOPE_MAINTENANCE_HORIZON_DAYS:-90}
-      HOPE_MAINTENANCE_GLOBAL_DISRUPTIVE_LOCK: ${HOPE_MAINTENANCE_GLOBAL_DISRUPTIVE_LOCK:-true}
-    secrets:
-      - source: hope_credential_master_key
-        target: hope_credential_master_key
-        mode: 0400
+      HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:-postgres://${POSTGRES_USER:-hope}:${POSTGRES_PASSWORD:-hope}@postgres:5432/${POSTGRES_DB:-hope}}
     volumes:
       - server-pki:/app/data/pki:ro
       - ${HOPE_AGENT_RELEASE_DIR_HOST:-./agent-releases}:/app/agent-releases:ro
-    healthcheck:
-      test: ["CMD-SHELL", "kill -0 1"]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 15s
     command: ["worker"]
 
 volumes:
   postgres-data:
   server-pki:
-
-secrets:
-  hope_credential_master_key:
-    file: ${HOPE_CREDENTIAL_MASTER_KEY_HOST:-./secrets/credential-master-key}
