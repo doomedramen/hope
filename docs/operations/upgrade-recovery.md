@@ -65,8 +65,8 @@ docker compose -f deploy/compose/docker-compose.yml --env-file .env \
   run --rm --no-deps server migrate
 
 docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d server
-curl -fsS http://127.0.0.1:8080/health/live
-curl -fsS http://127.0.0.1:8080/health/ready
+curl -fsS http://127.0.0.1:80/health/live
+curl -fsS http://127.0.0.1:80/health/ready
 
 docker compose -f deploy/compose/docker-compose.yml --env-file .env up -d worker
 docker compose -f deploy/compose/docker-compose.yml --env-file .env ps

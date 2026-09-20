@@ -17,8 +17,9 @@ Run this in a Proxmox VE host shell:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct/hope.sh)"
 ```
 
-Open `http://<container-ip>:8080` after installation. The first-run page
-creates the operator account.
+Open `http://<container-ip>` after installation. HTTP is published on port 80
+because the LXC has its own IP address. The first-run page creates the operator
+account.
 
 The installer writes these managed files:
 

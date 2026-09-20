@@ -54,7 +54,7 @@ services:
       HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:-https://localhost:8444}
       HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:-wss://localhost:8443}
     ports:
-      - "${HOPE_HTTP_BIND:-0.0.0.0}:${HOPE_HTTP_PORT:-8080}:8080"
+      - "${HOPE_HTTP_BIND:-0.0.0.0}:${HOPE_HTTP_PORT:-80}:8080"
       - "${HOPE_GATEWAY_BIND:-0.0.0.0}:${HOPE_GATEWAY_PORT:-8443}:8443"
       - "${HOPE_ENROLL_BIND:-0.0.0.0}:${HOPE_ENROLL_PORT:-8444}:8444"
     volumes:
@@ -88,9 +88,10 @@ Start it:
 docker compose -f deploy/compose/docker-compose.yml up -d
 ```
 
-Open <http://localhost:8080>. On an empty database, the web UI presents the
-first-run form for creating the operator account. No account, key, certificate,
-or manual migration command is required. The server image creates the
+Open <http://localhost>. On an empty database, the web UI presents the first-run
+form for creating the operator account. Set `HOPE_HTTP_PORT=8080` in `.env` if
+port 80 is already in use. No account, key, certificate, or manual migration
+command is required. The server image creates the
 credential key and agent CA on first start and keeps them in the `server-pki`
 volume. PostgreSQL migrations run when the server and worker start.
 

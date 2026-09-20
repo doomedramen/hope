@@ -33,7 +33,7 @@ services:
       HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:-https://localhost:8444}
       HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:-wss://localhost:8443}
     ports:
-      - "${HOPE_HTTP_BIND:-0.0.0.0}:${HOPE_HTTP_PORT:-8080}:8080"
+      - "${HOPE_HTTP_BIND:-0.0.0.0}:${HOPE_HTTP_PORT:-80}:8080"
       - "${HOPE_GATEWAY_BIND:-0.0.0.0}:${HOPE_GATEWAY_PORT:-8443}:8443"
       - "${HOPE_ENROLL_BIND:-0.0.0.0}:${HOPE_ENROLL_PORT:-8444}:8444"
     volumes:

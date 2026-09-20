@@ -51,6 +51,7 @@ POSTGRES_USER=hope
 POSTGRES_PASSWORD=0123456789abcdef0123456789abcdef0123456789abcdef
 POSTGRES_DB=hope
 HOPE_IMAGE=ghcr.io/doomedramen/hope:main
+HOPE_HTTP_PORT=80
 HOPE_COOKIE_SECURE=false
 HOPE_AGENT_ENROLL_URL=https://localhost:8444
 HOPE_AGENT_GATEWAY_URL=wss://localhost:8443
@@ -184,6 +185,8 @@ install_password="$(sed -n 's/^POSTGRES_PASSWORD=//p' "$install_root/.env")"
   fail "installer did not generate a safe PostgreSQL password"
 grep -Fqx 'COMPOSE_PROJECT_NAME=hope' "$install_root/.env" ||
   fail "installer did not pin its Compose project name"
+grep -Fqx 'HOPE_HTTP_PORT=80' "$install_root/.env" ||
+  fail "installer did not publish HTTP on port 80"
 grep -Fqx 'HOPE_AGENT_ENROLL_URL=https://localhost:8444' "$install_root/.env" ||
   fail "installer did not use safe initial agent endpoint"
 [[ -f "$install_root/deploy/compose/docker-compose.yml" ]] ||

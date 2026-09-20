@@ -67,6 +67,7 @@ write_deployment_env() {
 # Change settings here. Keep this file private.
 COMPOSE_PROJECT_NAME=hope
 HOPE_IMAGE=ghcr.io/doomedramen/hope:main
+HOPE_HTTP_PORT=80
 
 POSTGRES_USER=hope
 POSTGRES_PASSWORD=${password}
