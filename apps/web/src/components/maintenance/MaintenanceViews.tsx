@@ -146,7 +146,7 @@ function EventBadges({ event }: { event: MaintenanceEvent }) {
       {event.disruptive ? <Badge variant="outline">Disruptive</Badge> : null}
       {event.recurrence_rule ? (
         <Badge variant="outline">
-          <Repeat2Icon />
+          <Repeat2Icon data-icon="inline-start" />
           Recurring
         </Badge>
       ) : null}

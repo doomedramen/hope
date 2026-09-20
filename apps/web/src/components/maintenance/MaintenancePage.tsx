@@ -220,7 +220,7 @@ export function MaintenancePage() {
           </p>
         </div>
         <Button onClick={openCreate}>
-          <PlusIcon />
+          <PlusIcon data-icon="inline-start" />
           New event
         </Button>
       </div>
@@ -305,7 +305,7 @@ export function MaintenancePage() {
                 </EmptyDescription>
               </EmptyHeader>
               <Button onClick={openCreate}>
-                <PlusIcon />
+                <PlusIcon data-icon="inline-start" />
                 Create event
               </Button>
             </Empty>
@@ -448,7 +448,7 @@ function MaintenanceDetail({
         <CardAction className="flex flex-wrap justify-end gap-2">
           {canEdit ? (
             <Button onClick={onEdit} size="sm" variant="outline">
-              <PencilIcon />
+              <PencilIcon data-icon="inline-start" />
               Edit
             </Button>
           ) : null}

@@ -666,7 +666,7 @@ export function MaintenanceEventForm({
                         type="button"
                         variant="ghost"
                       >
-                        <Trash2Icon />
+                        <Trash2Icon data-icon="inline-start" />
                       </Button>
                     </div>
                     <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
@@ -711,7 +711,7 @@ export function MaintenanceEventForm({
               type="button"
               variant="outline"
             >
-              <PlusIcon />
+              <PlusIcon data-icon="inline-start" />
               Add resource
             </Button>
           </section>
