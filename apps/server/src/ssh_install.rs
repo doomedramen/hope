@@ -199,8 +199,27 @@ impl Handler for HostKeyHandler {
             &fingerprint,
             self.actor_user_id,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                host = %self.host,
+                port = self.port,
+                key_type = %key_type,
+                error = %error,
+                "could not persist SSH host-key observation"
+            );
+            anyhow::Error::from(error)
+        })?;
         let permits = decision.permits_connection();
+        tracing::info!(
+            host = %self.host,
+            port = self.port,
+            key_type = %key_type,
+            fingerprint = %fingerprint,
+            decision = ?decision,
+            permits,
+            "observed SSH host key"
+        );
         *self.decision.lock().await = Some(decision);
         Ok(permits)
     }
@@ -626,13 +645,20 @@ async fn connect_authenticated(
     let mut session =
         match tokio::time::timeout(timeout, client::connect(config, address, handler)).await {
             Err(_) => return Err(InstallError::Timeout),
-            Ok(Err(_)) => {
-                if !decision
-                    .lock()
-                    .await
+            Ok(Err(error)) => {
+                let decision_value = decision.lock().await.clone();
+                let permits = decision_value
                     .as_ref()
-                    .is_some_and(HostKeyDecision::permits_connection)
-                {
+                    .is_some_and(HostKeyDecision::permits_connection);
+                tracing::warn!(
+                    host = %host,
+                    port,
+                    permits,
+                    decision = ?decision_value,
+                    error = %error,
+                    "SSH connection failed before authentication"
+                );
+                if !permits {
                     return Err(InstallError::HostKeyUntrusted);
                 }
                 return Err(InstallError::Connection);
