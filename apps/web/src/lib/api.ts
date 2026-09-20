@@ -502,6 +502,131 @@ export interface ChangeEvent {
   acknowledged: boolean;
 }
 
+export type MaintenanceState =
+  | "draft"
+  | "scheduled"
+  | "upcoming"
+  | "active"
+  | "overrunning"
+  | "completed"
+  | "cancelled"
+  | string;
+
+export type MaintenanceResourceRole =
+  "target" | "required" | "affected" | "exclusive" | string;
+
+export interface MaintenanceResource {
+  role: MaintenanceResourceRole;
+  kind: string | null;
+  id: string | null;
+  key: string | null;
+  expected_failure: boolean;
+}
+
+export interface MaintenanceResourceInput {
+  role: "target" | "required" | "affected" | "exclusive";
+  kind?: string;
+  id?: string;
+  key?: string;
+  expected_failure?: boolean;
+}
+
+export interface MaintenanceOccurrence {
+  id: string;
+  occurrence_key: string;
+  occurrence_index: number;
+  start_at: string;
+  end_at: string;
+  reservation_start: string;
+  reservation_end: string;
+  timezone: string;
+}
+
+export interface MaintenanceEvent {
+  id: string;
+  name: string;
+  description: string | null;
+  timezone: string;
+  start_at: string;
+  end_at: string;
+  recurrence_rule: string | null;
+  lead_in_seconds: number;
+  cooldown_seconds: number;
+  disruptive: boolean;
+  notification_policy: Record<string, unknown>;
+  owner: string | null;
+  source: string | null;
+  notes: string | null;
+  links: string[];
+  state: MaintenanceState;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  resources: MaintenanceResource[];
+  occurrences: MaintenanceOccurrence[];
+}
+
+export interface MaintenanceEventInput {
+  name: string;
+  description?: string | null;
+  timezone: string;
+  start: string;
+  end?: string;
+  duration_seconds?: number;
+  recurrence_rule?: string | null;
+  lead_in_seconds?: number;
+  cooldown_seconds?: number;
+  disruptive?: boolean;
+  notification_policy?: Record<string, unknown>;
+  owner?: string | null;
+  source?: string | null;
+  notes?: string | null;
+  links?: string[];
+  resources: MaintenanceResourceInput[];
+  state?: "draft" | "scheduled" | "upcoming";
+}
+
+export interface MaintenanceEventPatchInput extends Omit<
+  Partial<MaintenanceEventInput>,
+  "state"
+> {
+  version: number;
+  state?: MaintenanceState;
+}
+
+export interface MaintenanceSuggestedMove {
+  event_id: string;
+  occurrence_id: string;
+  start_after: string;
+}
+
+export interface MaintenanceConflict {
+  event_id: string;
+  occurrence_id: string;
+  conflicting_event_id: string;
+  conflicting_occurrence_id: string;
+  resource_role: MaintenanceResourceRole;
+  resource_kind: string | null;
+  resource_id: string | null;
+  resource_key: string | null;
+  related_resource_role: MaintenanceResourceRole | null;
+  related_resource_kind: string | null;
+  related_resource_id: string | null;
+  related_resource_key: string | null;
+  relationship: string;
+  overlap_start: string;
+  overlap_end: string;
+  reason: string;
+  suggestion: string;
+  suggested_move: MaintenanceSuggestedMove;
+}
+
+interface MaintenanceErrorBody {
+  error?: string;
+  conflicts?: MaintenanceConflict[];
+  current_version?: number | null;
+}
+
 export interface LoginResponse {
   status: "ok";
 }
@@ -517,6 +642,18 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
     this.status = status;
+  }
+}
+
+export class MaintenanceApiError extends ApiError {
+  readonly conflicts: MaintenanceConflict[];
+  readonly currentVersion: number | null | undefined;
+
+  constructor(status: number, message: string, body: MaintenanceErrorBody) {
+    super(status, message);
+    this.name = "MaintenanceApiError";
+    this.conflicts = body.conflicts ?? [];
+    this.currentVersion = body.current_version;
   }
 }
 
@@ -543,6 +680,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(
       res.status,
       body?.error ?? `Request failed (${res.status})`,
+    );
+  }
+  return body as T;
+}
+
+async function maintenanceRequest<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body) {
+    headers.set("content-type", "application/json");
+  }
+  if (init?.method && init.method !== "GET") {
+    headers.set("x-requested-with", "hope");
+  }
+
+  const res = await fetch(path, {
+    credentials: "same-origin",
+    ...init,
+    headers,
+  });
+  const contentType = res.headers.get("content-type") ?? "";
+  const body = contentType.includes("json")
+    ? ((await res.json()) as T & MaintenanceErrorBody)
+    : null;
+  if (!res.ok) {
+    throw new MaintenanceApiError(
+      res.status,
+      body?.error ?? `Request failed (${res.status})`,
+      body ?? {},
     );
   }
   return body as T;
@@ -677,6 +845,97 @@ export async function fetchChanges(filters?: {
 }): Promise<ApiPage<ChangeEvent>> {
   return request<ApiPage<ChangeEvent>>(
     `/api/v1/changes${queryString({ ...filters, limit: 100 })}`,
+  );
+}
+
+export async function fetchMaintenanceEvents(filters?: {
+  cursor?: string;
+  limit?: number;
+  state?: MaintenanceState;
+}): Promise<ApiPage<MaintenanceEvent>> {
+  return maintenanceRequest<ApiPage<MaintenanceEvent>>(
+    `/api/v1/maintenance-events${queryString({
+      cursor: filters?.cursor,
+      limit: filters?.limit ?? 200,
+      state: filters?.state,
+    })}`,
+  );
+}
+
+export async function fetchMaintenanceEvent(
+  id: string,
+): Promise<MaintenanceEvent> {
+  return maintenanceRequest<MaintenanceEvent>(
+    `/api/v1/maintenance-events/${id}`,
+  );
+}
+
+export async function fetchMaintenanceConflicts(
+  id: string,
+): Promise<ApiPage<MaintenanceConflict>> {
+  return maintenanceRequest<ApiPage<MaintenanceConflict>>(
+    `/api/v1/maintenance-events/${id}/conflicts`,
+  );
+}
+
+export async function createMaintenanceEvent(
+  input: MaintenanceEventInput,
+): Promise<MaintenanceEvent> {
+  return maintenanceRequest<MaintenanceEvent>("/api/v1/maintenance-events", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function patchMaintenanceEvent(
+  id: string,
+  input: MaintenanceEventPatchInput,
+): Promise<MaintenanceEvent> {
+  return maintenanceRequest<MaintenanceEvent>(
+    `/api/v1/maintenance-events/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function startMaintenanceEvent(
+  id: string,
+  version: number,
+): Promise<MaintenanceEvent> {
+  return maintenanceRequest<MaintenanceEvent>(
+    `/api/v1/maintenance-events/${id}/start`,
+    {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    },
+  );
+}
+
+export async function completeMaintenanceEvent(
+  id: string,
+  version: number,
+): Promise<MaintenanceEvent> {
+  return maintenanceRequest<MaintenanceEvent>(
+    `/api/v1/maintenance-events/${id}/complete`,
+    {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    },
+  );
+}
+
+export async function cancelMaintenanceEvent(
+  id: string,
+  version: number,
+): Promise<MaintenanceEvent> {
+  return maintenanceRequest<MaintenanceEvent>(
+    `/api/v1/maintenance-events/${id}/cancel`,
+    {
+      method: "POST",
+      body: JSON.stringify({ version }),
+    },
   );
 }
 
