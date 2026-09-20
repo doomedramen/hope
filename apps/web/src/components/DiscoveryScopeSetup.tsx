@@ -3,6 +3,7 @@ import {
   CheckIcon,
   CircleAlertIcon,
   NetworkIcon,
+  PlusIcon,
   PlayIcon,
   XIcon,
 } from "lucide-react";
@@ -80,10 +81,12 @@ export function DiscoveryScopeSetup({
   networks,
   loading,
   error,
+  onAddNetwork,
 }: {
   networks: Network[];
   loading: boolean;
   error: unknown;
+  onAddNetwork?: () => void;
 }) {
   const [selectedNetworkId, setSelectedNetworkId] = useState<string | null>(
     null,
@@ -226,7 +229,15 @@ export function DiscoveryScopeSetup({
           Choose the private addresses that discovery can scan.
         </CardDescription>
         <CardAction>
-          <Badge variant="outline">{networks.length} configured</Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant="outline">{networks.length} configured</Badge>
+            {onAddNetwork ? (
+              <Button onClick={onAddNetwork} size="sm" variant="outline">
+                <PlusIcon data-icon="inline-start" />
+                Add network
+              </Button>
+            ) : null}
+          </div>
         </CardAction>
       </CardHeader>
       <CardContent className="grid gap-6 pt-5 lg:grid-cols-[minmax(13rem,0.8fr)_minmax(0,1.2fr)]">
@@ -241,6 +252,12 @@ export function DiscoveryScopeSetup({
                 <EmptyDescription>
                   Add a network before setting up discovery scope.
                 </EmptyDescription>
+                {onAddNetwork ? (
+                  <Button onClick={onAddNetwork} variant="outline">
+                    <PlusIcon data-icon="inline-start" />
+                    Add network
+                  </Button>
+                ) : null}
               </EmptyHeader>
             </Empty>
           </div>

@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ScanLaunch } from "./DiscoveryScopeSetup";
+import { DiscoveryScopeSetup, ScanLaunch } from "./DiscoveryScopeSetup";
 import type { Network, ScanRun, ScanRunStatus } from "@/lib/api";
 
 const network: Network = {
@@ -150,5 +150,34 @@ describe("ScanLaunch", () => {
       "/api/v1/scans/run-1/cancel",
       expect.objectContaining({ method: "POST" }),
     );
+  });
+});
+
+describe("DiscoveryScopeSetup", () => {
+  it("gives an empty inventory a path to add its first network", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false },
+        queries: { retry: false },
+      },
+    });
+    const onAddNetwork = vi.fn();
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DiscoveryScopeSetup
+          error={null}
+          loading={false}
+          networks={[]}
+          onAddNetwork={onAddNetwork}
+        />
+      </QueryClientProvider>,
+    );
+
+    const addButtons = screen.getAllByRole("button", { name: "Add network" });
+    expect(addButtons).toHaveLength(2);
+    fireEvent.click(addButtons[0]!);
+
+    expect(onAddNetwork).toHaveBeenCalledOnce();
   });
 });

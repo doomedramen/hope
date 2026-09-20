@@ -28,6 +28,7 @@ import {
   resolveIdentitySuggestion,
   splitDevice,
   undoMerge,
+  createNetwork,
   type Address,
   type Device,
   type DeviceDetail,
@@ -108,7 +109,7 @@ function InfrastructurePage() {
   );
   const [search, setSearch] = useState("");
   const [dialog, setDialog] = useState<
-    "create" | "edit" | "merge" | "split" | null
+    "create" | "network-create" | "edit" | "merge" | "split" | null
   >(null);
   const devicesQuery = useQuery({
     queryKey: ["devices"],
@@ -161,6 +162,13 @@ function InfrastructurePage() {
     onSuccess: async (device) => {
       await invalidateInventory();
       setRequestedDeviceId(device.id);
+      setDialog(null);
+    },
+  });
+  const networkCreateMutation = useMutation({
+    mutationFn: createNetwork,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["networks"] });
       setDialog(null);
     },
   });
@@ -260,6 +268,7 @@ function InfrastructurePage() {
         error={networksQuery.error}
         loading={networksQuery.isLoading}
         networks={networksQuery.data?.items ?? []}
+        onAddNetwork={() => setDialog("network-create")}
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -418,6 +427,13 @@ function InfrastructurePage() {
             name: name || undefined,
           })
         }
+      />
+      <AddNetworkDialog
+        error={networkCreateMutation.error}
+        onOpenChange={(open) => !open && setDialog(null)}
+        open={dialog === "network-create"}
+        pending={networkCreateMutation.isPending}
+        submit={(input) => networkCreateMutation.mutate(input)}
       />
       {detailQuery.data ? (
         <EditDeviceDialog
@@ -883,6 +899,112 @@ function CreateDeviceDialog({
                 <PlusIcon data-icon="inline-start" />
               )}
               Create device
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AddNetworkDialog({
+  open,
+  onOpenChange,
+  submit,
+  pending,
+  error,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  submit: (input: {
+    cidr: string;
+    name?: string;
+    gateway?: string;
+    vlan?: number;
+  }) => void;
+  pending: boolean;
+  error: unknown;
+}) {
+  const [name, setName] = useState("");
+  const [cidr, setCidr] = useState("");
+  const [gateway, setGateway] = useState("");
+  const [vlan, setVlan] = useState("");
+
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add network</DialogTitle>
+          <DialogDescription>
+            Define the CIDR boundary that discovery can scan.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="flex flex-col gap-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit({
+              cidr: cidr.trim(),
+              gateway: gateway.trim() || undefined,
+              name: name.trim() || undefined,
+              vlan: vlan ? Number(vlan) : undefined,
+            });
+          }}
+        >
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="network-name">Name</FieldLabel>
+              <Input
+                id="network-name"
+                onChange={(event) => setName(event.target.value)}
+                placeholder="e.g. Home LAN"
+                value={name}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="network-cidr">CIDR</FieldLabel>
+              <Input
+                id="network-cidr"
+                onChange={(event) => setCidr(event.target.value)}
+                placeholder="e.g. 192.168.1.0/24"
+                required
+                value={cidr}
+              />
+            </Field>
+            <div className="grid gap-5 sm:grid-cols-2">
+              <Field>
+                <FieldLabel htmlFor="network-gateway">Gateway</FieldLabel>
+                <Input
+                  id="network-gateway"
+                  onChange={(event) => setGateway(event.target.value)}
+                  placeholder="e.g. 192.168.1.1"
+                  value={gateway}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="network-vlan">VLAN</FieldLabel>
+                <Input
+                  id="network-vlan"
+                  inputMode="numeric"
+                  min="1"
+                  max="4094"
+                  onChange={(event) => setVlan(event.target.value)}
+                  placeholder="Optional"
+                  type="number"
+                  value={vlan}
+                />
+              </Field>
+            </div>
+          </FieldGroup>
+          <MutationError error={error} />
+          <DialogFooter>
+            <Button disabled={pending || !cidr.trim()} type="submit">
+              {pending ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <PlusIcon data-icon="inline-start" />
+              )}
+              Add network
             </Button>
           </DialogFooter>
         </form>

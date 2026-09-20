@@ -750,6 +750,18 @@ export async function fetchNetworks(): Promise<ApiPage<Network>> {
   return request<ApiPage<Network>>("/api/v1/networks?limit=100");
 }
 
+export async function createNetwork(input: {
+  cidr: string;
+  name?: string;
+  gateway?: string;
+  vlan?: number;
+}): Promise<Network> {
+  return request<Network>("/api/v1/networks", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function draftDiscoveryScope(
   networkId: string,
   input: {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cancelScanRun,
   confirmDiscoveryScope,
+  createNetwork,
   draftDiscoveryScope,
   fetchAgent,
   fetchAgents,
@@ -169,6 +170,45 @@ describe("fetchHealthReady", () => {
       }),
     );
     const headers = new Headers(fetchMock.mock.calls[1][1]?.headers);
+    expect(headers.get("x-requested-with")).toBe("hope");
+  });
+
+  it("creates a network with the discovery boundary fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "network-1",
+          cidr: "192.168.1.0/24",
+          gateway: "192.168.1.1",
+          name: "Lab network",
+          vlan: 10,
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createNetwork({
+      cidr: "192.168.1.0/24",
+      gateway: "192.168.1.1",
+      name: "Lab network",
+      vlan: 10,
+    });
+
+    expect(result.cidr).toBe("192.168.1.0/24");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/networks",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          cidr: "192.168.1.0/24",
+          gateway: "192.168.1.1",
+          name: "Lab network",
+          vlan: 10,
+        }),
+      }),
+    );
+    const headers = new Headers(fetchMock.mock.calls[0][1]?.headers);
     expect(headers.get("x-requested-with")).toBe("hope");
   });
 
