@@ -5,7 +5,12 @@ import {
   type FormEvent,
   type SetStateAction,
 } from "react";
-import { CircleAlertIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import {
+  CalendarDaysIcon,
+  CircleAlertIcon,
+  PlusIcon,
+  Trash2Icon,
+} from "lucide-react";
 import {
   MaintenanceApiError,
   type MaintenanceEvent,
@@ -16,6 +21,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Calendar } from "@/components/ui/calendar";
 import {
   Dialog,
   DialogContent,
@@ -41,6 +47,11 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { MaintenanceConflictList } from "./MaintenanceConflictList";
 
 type ResourceMode = "key" | "entity";
@@ -117,6 +128,153 @@ function localDateTime(value?: string | null) {
   const date = value ? new Date(value) : new Date(Date.now() + 60 * 60 * 1000);
   if (Number.isNaN(date.getTime())) return "";
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+interface LocalDateTimeParts {
+  date: string;
+  time: string;
+}
+
+function splitLocalDateTime(value: string): LocalDateTimeParts | null {
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/.exec(value);
+  if (!match) return null;
+  const [, date, time] = match;
+  const [year, month, day] = date.split("-").map(Number);
+  const [hour, minute] = time.split(":").map(Number);
+  const parsed = new Date(year, month - 1, day, hour, minute);
+  if (
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day ||
+    parsed.getHours() !== hour ||
+    parsed.getMinutes() !== minute
+  ) {
+    return null;
+  }
+  return { date, time };
+}
+
+function dateFromLocalDate(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  if (![year, month, day].every(Number.isFinite)) return undefined;
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day
+    ? date
+    : undefined;
+}
+
+function localDatePart(date: Date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function LocalDateTimePicker({
+  id,
+  label,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const parts = splitLocalDateTime(value);
+  const [dateDraft, setDateDraft] = useState(parts?.date ?? "");
+  const [timeDraft, setTimeDraft] = useState(parts?.time ?? "");
+
+  useEffect(() => {
+    const next = splitLocalDateTime(value);
+    if (next) {
+      setDateDraft(next.date);
+      setTimeDraft(next.time);
+    }
+  }, [value]);
+
+  function emit(nextDate: string, nextTime: string) {
+    onChange(`${nextDate}T${nextTime}`);
+  }
+
+  const selectedDate = dateFromLocalDate(dateDraft);
+
+  return (
+    <div className="grid gap-2">
+      <div className="flex gap-2">
+        <Input
+          aria-label={label}
+          id={id}
+          inputMode="numeric"
+          onChange={(eventObject) => {
+            const nextDate = eventObject.target.value;
+            setDateDraft(nextDate);
+            emit(nextDate, timeDraft);
+          }}
+          placeholder="YYYY-MM-DD"
+          required
+          type="text"
+          value={dateDraft}
+        />
+        <Input
+          aria-label={`${label} time`}
+          className="w-28"
+          inputMode="numeric"
+          onChange={(eventObject) => {
+            const nextTime = eventObject.target.value;
+            setTimeDraft(nextTime);
+            emit(dateDraft, nextTime);
+          }}
+          placeholder="HH:MM"
+          required
+          type="text"
+          value={timeDraft}
+        />
+        <Popover>
+          <PopoverTrigger
+            aria-label="Show local date and time picker"
+            render={<Button size="icon" type="button" variant="outline" />}
+          >
+            <CalendarDaysIcon />
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-auto p-0">
+            <Calendar
+              defaultMonth={selectedDate}
+              mode="single"
+              onSelect={(date) => {
+                if (!date) return;
+                const nextDate = localDatePart(date);
+                setDateDraft(nextDate);
+                emit(nextDate, timeDraft);
+              }}
+              selected={selectedDate}
+            />
+            <div className="border-t p-3">
+              <Label htmlFor={`${id}-picker-time`}>Time (24-hour)</Label>
+              <Input
+                className="mt-2"
+                id={`${id}-picker-time`}
+                inputMode="numeric"
+                onChange={(eventObject) => {
+                  const nextTime = eventObject.target.value;
+                  setTimeDraft(nextTime);
+                  emit(dateDraft, nextTime);
+                }}
+                placeholder="HH:MM"
+                type="text"
+                value={timeDraft}
+              />
+              <p className="mt-1 text-xs text-muted-foreground">
+                Enter local time as HH:MM.
+              </p>
+            </div>
+          </PopoverContent>
+        </Popover>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Use local time in YYYY-MM-DD and HH:MM format.
+      </p>
+    </div>
+  );
 }
 
 function zonedDateTime(value: string, timezone: string) {
@@ -469,12 +627,14 @@ export function MaintenanceEventForm({
       setValidationError(recurrenceError);
       return;
     }
-    if (
-      !form.start ||
-      !form.end ||
-      new Date(form.end) <= new Date(form.start)
-    ) {
-      setValidationError("End time must be later than start time.");
+    const start = splitLocalDateTime(form.start);
+    const end = splitLocalDateTime(form.end);
+    if (!start || !end || new Date(form.end) <= new Date(form.start)) {
+      setValidationError(
+        start && end
+          ? "End time must be later than start time."
+          : "Start and end must use YYYY-MM-DD and HH:MM format.",
+      );
       return;
     }
     const invalidResource = form.resources.find((resource) =>
@@ -598,25 +758,19 @@ export function MaintenanceEventForm({
             <div className="grid gap-4 sm:grid-cols-2">
               <Field>
                 <FieldLabel htmlFor="maintenance-start">Start</FieldLabel>
-                <Input
+                <LocalDateTimePicker
                   id="maintenance-start"
-                  onChange={(eventObject) =>
-                    update("start", eventObject.target.value)
-                  }
-                  required
-                  type="datetime-local"
+                  label="Start"
+                  onChange={(value) => update("start", value)}
                   value={form.start}
                 />
               </Field>
               <Field>
                 <FieldLabel htmlFor="maintenance-end">End</FieldLabel>
-                <Input
+                <LocalDateTimePicker
                   id="maintenance-end"
-                  onChange={(eventObject) =>
-                    update("end", eventObject.target.value)
-                  }
-                  required
-                  type="datetime-local"
+                  label="End"
+                  onChange={(value) => update("end", value)}
                   value={form.end}
                 />
               </Field>

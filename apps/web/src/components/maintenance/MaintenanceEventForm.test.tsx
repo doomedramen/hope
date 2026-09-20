@@ -19,6 +19,26 @@ describe("MaintenanceEventForm", () => {
     expect(screen.getByRole("dialog")).toHaveClass("max-w-5xl");
   });
 
+  it("uses an app-owned date picker instead of the native datetime picker", () => {
+    render(
+      <MaintenanceEventForm
+        error={null}
+        event={null}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+        open
+        pending={false}
+      />,
+    );
+
+    expect(screen.getByLabelText("Start")).toHaveAttribute("type", "text");
+    expect(
+      screen.getAllByRole("button", {
+        name: "Show local date and time picker",
+      }),
+    ).toHaveLength(2);
+  });
+
   it("rejects an unsupported timezone before submit", () => {
     const onSubmit = vi.fn();
     render(
