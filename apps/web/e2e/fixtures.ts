@@ -52,6 +52,9 @@ export const test = base.extend<WorkerFixtures>({
           `127.0.0.1:${port}:22/tcp`,
           image,
         ];
+        if (process.platform !== "darwin") {
+          dockerArgs.splice(5, 0, "--cgroupns=host");
+        }
         // Docker Desktop already provides a reachable IPv4
         // host.docker.internal entry. Adding host-gateway on macOS can add an
         // IPv6-only alias that the minimal target cannot route to. Linux CI
