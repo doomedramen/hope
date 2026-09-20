@@ -1,10 +1,10 @@
 ---
 id: "029"
 title: "Widen the Create maintenance event dialog"
-status: open
+status: closed
 priority: medium
 created: "2026-09-20T20:00:00Z"
-updated: "2026-09-20T20:00:00Z"
+updated: "2026-09-20T22:43:11Z"
 tags: ["maintenance", "dialog", "layout", "ux"]
 ---
 
