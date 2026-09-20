@@ -102,7 +102,7 @@ const EMPTY_DEVICES: Device[] = [];
 const EMPTY_SUGGESTIONS: IdentitySuggestion[] = [];
 const EMPTY_ADDRESSES: Address[] = [];
 
-function InfrastructurePage() {
+export function InfrastructurePage() {
   const queryClient = useQueryClient();
   const [requestedDeviceId, setRequestedDeviceId] = useState<string | null>(
     null,
@@ -124,9 +124,21 @@ function InfrastructurePage() {
     queryFn: fetchNetworks,
   });
   const devices = devicesQuery.data?.items ?? EMPTY_DEVICES;
-  const selectedId = devices.some((device) => device.id === requestedDeviceId)
+  const visibleDevices = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return devices;
+    return devices.filter((device) =>
+      [device.name, device.device_type, device.status, device.id].some(
+        (value) => value?.toLowerCase().includes(needle),
+      ),
+    );
+  }, [devices, search]);
+
+  const selectedId = visibleDevices.some(
+    (device) => device.id === requestedDeviceId,
+  )
     ? requestedDeviceId
-    : (devices[0]?.id ?? null);
+    : (visibleDevices[0]?.id ?? null);
 
   const selected = devices.find((device) => device.id === selectedId) ?? null;
   const detailQuery = useQuery({
@@ -139,16 +151,6 @@ function InfrastructurePage() {
     queryFn: fetchAddresses,
     enabled: Boolean(detailQuery.data),
   });
-
-  const visibleDevices = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    if (!needle) return devices;
-    return devices.filter((device) =>
-      [device.name, device.device_type, device.status, device.id].some(
-        (value) => value?.toLowerCase().includes(needle),
-      ),
-    );
-  }, [devices, search]);
 
   const invalidateInventory = () =>
     Promise.all([
