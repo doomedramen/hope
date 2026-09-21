@@ -23,6 +23,7 @@ Decisions are recorded using the template in [`0000-template.md`](0000-template.
 | [0017](0017-signed-agent-updates.md) | Signed release channels, staged agent updates, and rollback recovery. |
 | [0018](0018-dependency-aware-alerting.md) | Confirmed dependency topology with durable downstream notification suppression. |
 | [0019](0019-maintenance-planning.md) | Timezone-aware maintenance reservations, recurrence expansion, conflict detection, and expected-failure handling. |
+| [0020](0020-standard-port-discovery.md) | Standard-port discovery by default, with explicit full TCP scans. |
 
 ## Supporting library defaults
 

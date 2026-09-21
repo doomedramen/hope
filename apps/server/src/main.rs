@@ -241,6 +241,10 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             get(inventory::devices::get).patch(inventory::devices::patch),
         )
         .route(
+            "/api/v1/devices/{id}/full-scan",
+            get(discovery::runs::get_device_full).post(discovery::runs::create_device_full),
+        )
+        .route(
             "/api/v1/devices/{id}/merge",
             post(inventory::devices::merge),
         )

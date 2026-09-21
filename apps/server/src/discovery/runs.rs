@@ -1,10 +1,13 @@
 //! Scan-run creation. A run is queued only after an operator has confirmed
 //! the exact scope target count; workers resolve the run by `job_id`.
 
+use std::net::Ipv4Addr;
+
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
+use domain::discovery::ApprovedScope;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -14,7 +17,9 @@ use crate::auth_mw::CurrentUser;
 use crate::inventory::events::Recorder;
 use crate::state::AppState;
 
-const PORTS_PER_TARGET: i64 = 65_535;
+use super::ports::STANDARD_PORT_COUNT;
+
+const FULL_TCP_PORT_COUNT: i64 = 65_535;
 
 fn err(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
     (status, Json(json!({ "error": message.into() })))
@@ -86,8 +91,7 @@ fn active_scan_conflict(run_id: Option<Uuid>) -> (StatusCode, Json<Value>) {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRun {
-    /// A first discovery run and a periodic change scan both use a complete
-    /// TCP range in M2. Fingerprinting begins in M3.
+    /// Network runs use the standard plan. Full TCP uses the device route.
     pub kind: String,
 }
 
@@ -98,15 +102,110 @@ pub async fn create(
     headers: HeaderMap,
     Json(request): Json<CreateRun>,
 ) -> (StatusCode, Json<Value>) {
-    if !matches!(
-        request.kind.as_str(),
-        "initial_discovery" | "change_scan" | "full_tcp"
-    ) {
+    if !matches!(request.kind.as_str(), "initial_discovery" | "change_scan") {
         return err(
             StatusCode::BAD_REQUEST,
-            "kind must be initial_discovery, change_scan, or full_tcp",
+            "kind must be initial_discovery or change_scan",
         );
     }
+    create_in_scope(state, user, network_id, headers, request.kind, None, None).await
+}
+
+/// Queue an exhaustive scan of one current device address inside a confirmed scope.
+pub async fn create_device_full(
+    State(state): State<AppState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(device_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<Value>) {
+    let candidates: Vec<(Uuid, String, String, Value)> = match sqlx::query_as(
+        "select ds.network_id, host(a.ip), n.cidr::text, ds.excluded_cidrs \
+         from addresses a \
+         join interfaces i on i.id = a.interface_id \
+         join devices d on d.id = i.device_id \
+         join networks n on a.ip <<= n.cidr \
+         join discovery_scopes ds on ds.network_id = n.id \
+         where d.id = $1 and d.status != 'merged' and a.is_current \
+           and ds.enabled and ds.confirmed_at is not null \
+           and ds.confirmed_target_count = ds.target_count \
+         order by ds.network_id, a.ip",
+    )
+    .bind(device_id)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    for (network_id, address, cidr, excluded) in candidates {
+        if approved_device_address(&cidr, &excluded, &address) {
+            return create_in_scope(
+                state,
+                user,
+                network_id,
+                headers,
+                "full_tcp".to_owned(),
+                Some(address),
+                Some(device_id),
+            )
+            .await;
+        }
+    }
+    err(
+        StatusCode::CONFLICT,
+        "device has no current address in an enabled, confirmed discovery scope",
+    )
+}
+
+fn approved_device_address(cidr: &str, excluded: &Value, address: &str) -> bool {
+    let Ok(exclusions) = serde_json::from_value::<Vec<String>>(excluded.clone()) else {
+        return false;
+    };
+    let Ok(scope) = ApprovedScope::parse(cidr, &exclusions) else {
+        return false;
+    };
+    let Ok(address) = address.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    scope.cidr().hosts().any(|host| host == address)
+        && !scope.exclusions().iter().any(|net| net.contains(&address))
+}
+
+pub async fn get_device_full(
+    State(state): State<AppState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(device_id): Path<Uuid>,
+) -> (StatusCode, Json<Value>) {
+    let run: Option<(Value,)> = match sqlx::query_as(
+        "select row_to_json(sr.*) from scan_runs sr \
+         where sr.target_device_id = $1 and sr.kind = 'full_tcp' \
+         order by sr.created_at desc, sr.id desc limit 1",
+    )
+    .bind(device_id)
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let Some((run,)) = run else {
+        return (StatusCode::OK, Json(Value::Null));
+    };
+    match enrich_run(&state.pool, run_view(run)).await {
+        Ok(run) => (StatusCode::OK, Json(run)),
+        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn create_in_scope(
+    state: AppState,
+    user: CurrentUser,
+    network_id: Uuid,
+    headers: HeaderMap,
+    kind: String,
+    target_address: Option<String>,
+    target_device_id: Option<Uuid>,
+) -> (StatusCode, Json<Value>) {
     let Some(idempotency_key) = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
@@ -125,9 +224,11 @@ pub async fn create(
         Ok(transaction) => transaction,
         Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     };
-    let scope: Option<(i64, i32)> = match sqlx::query_as(
-        "select target_count, version from discovery_scopes \
-         where network_id = $1 and confirmed_at is not null and enabled",
+    let scope: Option<(i64, i32, String, Value)> = match sqlx::query_as(
+        "select ds.target_count, ds.version, n.cidr::text, ds.excluded_cidrs \
+         from discovery_scopes ds join networks n on n.id = ds.network_id \
+         where ds.network_id = $1 and ds.confirmed_at is not null and ds.enabled \
+           and ds.confirmed_target_count = ds.target_count",
     )
     .bind(network_id)
     .fetch_optional(&mut *transaction)
@@ -136,12 +237,38 @@ pub async fn create(
         Ok(scope) => scope,
         Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     };
-    let Some((target_count, scope_version)) = scope else {
+    let Some((target_count, scope_version, cidr, excluded)) = scope else {
         return err(
             StatusCode::CONFLICT,
             "network needs an enabled, confirmed discovery scope",
         );
     };
+    if let Some(address) = &target_address
+        && !approved_device_address(&cidr, &excluded, address)
+    {
+        return err(
+            StatusCode::CONFLICT,
+            "device address is outside approved scope",
+        );
+    }
+    if let (Some(address), Some(device_id)) = (&target_address, target_device_id) {
+        let current: (bool,) = match sqlx::query_as(
+            "select exists(select 1 from addresses a \
+             join interfaces i on i.id = a.interface_id \
+             where i.device_id = $1 and a.ip = $2::inet and a.is_current)",
+        )
+        .bind(device_id)
+        .bind(address)
+        .fetch_one(&mut *transaction)
+        .await
+        {
+            Ok(current) => current,
+            Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
+        if !current.0 {
+            return err(StatusCode::CONFLICT, "device address is no longer current");
+        }
+    }
     let job_type = "discovery.full_tcp";
     let active_scan: Option<(Uuid,)> = match sqlx::query_as(
         "select sr.id from scan_runs sr \
@@ -163,7 +290,17 @@ pub async fn create(
     if let Some((run_id,)) = active_scan {
         return active_scan_conflict(Some(run_id));
     }
-    let ports_planned = match target_count.checked_mul(PORTS_PER_TARGET) {
+    let ports_per_target = if kind == "full_tcp" {
+        FULL_TCP_PORT_COUNT
+    } else {
+        STANDARD_PORT_COUNT
+    };
+    let targets_planned = if target_address.is_some() {
+        1
+    } else {
+        target_count
+    };
+    let ports_planned = match targets_planned.checked_mul(ports_per_target) {
         Some(count) => count,
         None => return err(StatusCode::BAD_REQUEST, "scope is too large to scan"),
     };
@@ -171,7 +308,7 @@ pub async fn create(
         &mut transaction,
         job_type,
         idempotency_key,
-        json!({"network_id": network_id, "kind": request.kind}),
+        json!({"network_id": network_id, "kind": kind}),
     )
     .await
     {
@@ -180,18 +317,20 @@ pub async fn create(
     };
     let run: Option<(Value,)> = match sqlx::query_as(
         "insert into scan_runs \
-             (network_id, job_id, kind, scope_version, targets_planned, ports_planned, requested_by) \
-         values ($1, $2, $3, $4, $5, $6, $7) \
+             (network_id, job_id, kind, scope_version, targets_planned, ports_planned, requested_by, target_address, target_device_id) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9) \
          on conflict (job_id) do nothing \
          returning row_to_json(scan_runs.*)",
     )
     .bind(network_id)
     .bind(job_id)
-    .bind(&request.kind)
+    .bind(&kind)
     .bind(scope_version)
-    .bind(target_count)
+    .bind(targets_planned)
     .bind(ports_planned)
     .bind(user.0)
+    .bind(&target_address)
+    .bind(target_device_id)
     .fetch_optional(&mut *transaction)
     .await
     {
@@ -227,6 +366,17 @@ pub async fn create(
                     "scan run was not created",
                 );
             };
+            if run.get("network_id").and_then(Value::as_str)
+                != Some(network_id.to_string().as_str())
+                || run.get("kind").and_then(Value::as_str) != Some(kind.as_str())
+                || run.get("target_device_id").and_then(Value::as_str)
+                    != target_device_id.map(|id| id.to_string()).as_deref()
+            {
+                return err(
+                    StatusCode::CONFLICT,
+                    "idempotency key belongs to a different scan",
+                );
+            }
             (run, false)
         }
     };
@@ -242,7 +392,7 @@ pub async fn create(
                 .and_then(Value::as_str)
                 .and_then(|id| Uuid::parse_str(id).ok()),
             "success",
-            Some(json!({"network_id": network_id, "kind": request.kind, "job_id": job_id})),
+            Some(json!({"network_id": network_id, "kind": kind, "job_id": job_id, "target_address": target_address})),
         )
         .await
     {
@@ -471,6 +621,31 @@ pub async fn cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_scan_requires_approved_host_address() {
+        let exclusions = json!(["192.168.40.2/32"]);
+        assert!(approved_device_address(
+            "192.168.40.0/29",
+            &exclusions,
+            "192.168.40.1"
+        ));
+        assert!(!approved_device_address(
+            "192.168.40.0/29",
+            &exclusions,
+            "192.168.40.2"
+        ));
+        assert!(!approved_device_address(
+            "192.168.40.0/29",
+            &exclusions,
+            "192.168.40.0"
+        ));
+        assert!(!approved_device_address(
+            "192.168.40.0/29",
+            &exclusions,
+            "192.168.41.1"
+        ));
+    }
 
     #[test]
     fn partial_run_is_never_authoritative() {

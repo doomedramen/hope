@@ -78,6 +78,7 @@ export interface ScanLogEntry {
 
 export interface ScanRun {
   id: string;
+  target_address?: string | null;
   network_id: string;
   job_id: string;
   kind: ScanRunKind;
@@ -976,6 +977,22 @@ export async function launchNetworkScan(
     headers: { "Idempotency-Key": input.idempotencyKey },
     body: JSON.stringify({ kind: input.kind }),
   });
+}
+
+export async function launchDeviceFullScan(
+  deviceId: string,
+  idempotencyKey: string,
+): Promise<ScanRun> {
+  return request<ScanRun>(`/api/v1/devices/${deviceId}/full-scan`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+  });
+}
+
+export async function fetchDeviceFullScan(
+  deviceId: string,
+): Promise<ScanRun | null> {
+  return request<ScanRun | null>(`/api/v1/devices/${deviceId}/full-scan`);
 }
 
 export async function fetchNetworkScans(

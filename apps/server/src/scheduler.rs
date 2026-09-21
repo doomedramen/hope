@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DISCOVERY_JOB_TYPE: &str = "discovery.full_tcp";
-const PORTS_PER_TARGET: i64 = 65_535;
+use crate::discovery::ports::STANDARD_PORT_COUNT;
 
 /// Which hour-long period `now` falls in, as a stable string suitable for
 /// use as an idempotency key. Two calls within the same hour produce the
@@ -177,7 +177,7 @@ pub(crate) async fn enqueue_periodic_jobs(
     }
 }
 
-/// Enqueue one change scan for each scope whose full-TCP cadence is due.
+/// Enqueue one standard-port change scan for each scope whose cadence is due.
 ///
 /// The planner derives all state from PostgreSQL, so a server restart does not
 /// lose a due scan. Each scope transaction re-checks the safety gate while
@@ -240,7 +240,7 @@ async fn enqueue_change_scan_for_scope(pool: &PgPool, network_id: Uuid) -> anyho
         return Ok(false);
     };
     let ports_planned = target_count
-        .checked_mul(PORTS_PER_TARGET)
+        .checked_mul(STANDARD_PORT_COUNT)
         .ok_or_else(|| anyhow::anyhow!("discovery scope is too large to scan"))?;
     let idempotency_key = format!("discovery.change_scan:{network_id}:{cadence_window}");
     let job_id = jobs::enqueue_in(

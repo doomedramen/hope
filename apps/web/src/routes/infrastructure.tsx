@@ -18,11 +18,14 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AgentDeploymentDialog } from "@/components/AgentDeploymentDialog";
 import {
   createDevice,
+  cancelScanRun,
   fetchAddresses,
   fetchDevice,
+  fetchDeviceFullScan,
   fetchDevices,
   fetchIdentitySuggestions,
   getUserFacingError,
+  launchDeviceFullScan,
   mergeDevice,
   patchDevice,
   resolveIdentitySuggestion,
@@ -544,6 +547,102 @@ function StatusBadge({ value }: { value: string }) {
   return <Badge variant={variant}>{labelize(value)}</Badge>;
 }
 
+function DeviceFullScan({ device }: { device: DeviceDetail }) {
+  const [open, setOpen] = useState(false);
+  const queryClient = useQueryClient();
+  const scanQuery = useQuery({
+    queryKey: ["device-full-scan", device.id],
+    queryFn: () => fetchDeviceFullScan(device.id),
+    refetchInterval: (query) => {
+      const run = query.state.data;
+      return run?.status === "pending" || run?.status === "running"
+        ? 2_000
+        : false;
+    },
+  });
+  const launchKey = useRef<string | null>(null);
+  const launch = useMutation({
+    mutationFn: () => {
+      launchKey.current ??=
+        globalThis.crypto?.randomUUID?.() ??
+        `device-scan-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      return launchDeviceFullScan(device.id, launchKey.current);
+    },
+    onSuccess: (created) => {
+      launchKey.current = null;
+      queryClient.setQueryData(["device-full-scan", device.id], created);
+      setOpen(false);
+    },
+  });
+  const cancel = useMutation({
+    mutationFn: cancelScanRun,
+    onSuccess: (updated) =>
+      queryClient.setQueryData(["device-full-scan", device.id], updated),
+  });
+  const current = scanQuery.data;
+  const active = current?.status === "pending" || current?.status === "running";
+  return (
+    <>
+      <Button
+        disabled={launch.isPending || active}
+        onClick={() => setOpen(true)}
+        size="sm"
+        variant="outline"
+      >
+        Full port scan
+      </Button>
+      <Dialog onOpenChange={setOpen} open={open}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              Full port scan for {device.name || "device"}
+            </DialogTitle>
+            <DialogDescription>
+              Check all 65,535 TCP ports on one current device address in a
+              confirmed network scope. This can take a long time.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={() => setOpen(false)} variant="outline">
+              Cancel
+            </Button>
+            <Button disabled={launch.isPending} onClick={() => launch.mutate()}>
+              {launch.isPending ? "Queueing…" : "Start full scan"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {launch.error ? (
+        <p className="text-xs text-destructive">
+          {getUserFacingError(launch.error, "Full scan could not start.")}
+        </p>
+      ) : null}
+      {current ? (
+        <div
+          aria-live="polite"
+          className="w-full text-xs text-muted-foreground"
+        >
+          Full scan of {current.target_address || "device"}: {current.status}.{" "}
+          {current.ports_completed.toLocaleString()} of{" "}
+          {current.ports_planned.toLocaleString()} ports checked.
+          {active ? (
+            <Button
+              disabled={cancel.isPending || current.cancellation_requested}
+              onClick={() => cancel.mutate(current.id)}
+              size="sm"
+              variant="ghost"
+            >
+              {current.cancellation_requested
+                ? "Cancellation requested"
+                : "Cancel scan"}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 function DeviceDetail({
   addressError,
   addresses,
@@ -638,6 +737,7 @@ function DeviceDetail({
             <GitBranchIcon data-icon="inline-start" />
             Split
           </Button>
+          <DeviceFullScan key={detail.id} device={detail} />
         </div>
         <section>
           <h3 className="text-sm font-medium">Identity confidence</h3>

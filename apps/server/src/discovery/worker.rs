@@ -28,10 +28,10 @@ use super::policy::{
     NORMAL_CLASSIFICATION_CONCURRENCY, ResolvedScanPolicy, ScanPacer, probe_seed,
     resolve_scan_policy,
 };
+use super::ports::{STANDARD_PORT_COUNT, STANDARD_TCP_PORTS};
 use super::tcp::{ConnectScanner, ConnectScannerConfig, PortObservation, PortState, Scanner};
 use crate::inventory::{addresses, events::Recorder, evidence, fingerprinting};
 
-const TCP_PORT_COUNT: i64 = 65_535;
 const SCAN_BATCH_SIZE: usize = 256;
 const JOB_LEASE_SECS: i64 = 60;
 const JOB_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
@@ -92,7 +92,21 @@ async fn handle_inner(
         Err(error) => return async_fail_run(pool, run.id, error).await,
     };
     let targets = {
-        let targets = target_addresses(&scope);
+        let mut targets = target_addresses(&scope);
+        if let Some(target_address) = run.target_address.as_deref() {
+            let address: IpAddr = target_address
+                .parse()
+                .with_context(|| format!("invalid scan target address {target_address}"))?;
+            if !targets.contains(&address) {
+                return async_fail_run(
+                    pool,
+                    run.id,
+                    anyhow!("device address is outside approved scope"),
+                )
+                .await;
+            }
+            targets.retain(|candidate| *candidate == address);
+        }
         if targets.len() as i64 != run.targets_planned {
             let error = anyhow!(
                 "scope target count changed: expected {}, got {}",
@@ -103,6 +117,22 @@ async fn handle_inner(
         }
         targets
     };
+    if let (Some(device_id), Some(address)) = (run.target_device_id, run.target_address.as_deref())
+    {
+        let current: (bool,) = sqlx::query_as(
+            "select exists(select 1 from addresses a \
+             join interfaces i on i.id = a.interface_id \
+             where i.device_id = $1 and a.ip = $2::inet and a.is_current)",
+        )
+        .bind(device_id)
+        .bind(address)
+        .fetch_one(pool)
+        .await?;
+        if !current.0 {
+            return async_fail_run(pool, run.id, anyhow!("device address is no longer current"))
+                .await;
+        }
+    }
 
     let policy = match run_policy(&run) {
         Ok(policy) => policy,
@@ -135,10 +165,14 @@ async fn handle_inner(
         Err(error) => return async_fail_run(pool, run.id, error).await,
     };
     let mut device_ids = load_device_ids(pool).await?;
-    let expected_port_count = ports_override.map_or(TCP_PORT_COUNT, |ports| ports.len() as i64);
-    let ports: Vec<u16> = ports_override
-        .map(<[u16]>::to_vec)
-        .unwrap_or_else(|| (1..=u16::MAX).collect());
+    // Older queued routine runs planned the full range. Preserve that plan on
+    // retry so their progress offsets and absence evidence stay valid.
+    let ports: Vec<u16> = match ports_override {
+        Some(ports) => ports.to_vec(),
+        None if is_standard_run(&run) => STANDARD_TCP_PORTS.to_vec(),
+        None => (1..=u16::MAX).collect(),
+    };
+    let expected_port_count = ports.len() as i64;
     let expected_ports = run
         .targets_planned
         .checked_mul(expected_port_count)
@@ -173,6 +207,9 @@ struct ScanRun {
     id: Uuid,
     network_id: Uuid,
     status: String,
+    kind: String,
+    target_address: Option<String>,
+    target_device_id: Option<Uuid>,
     scope_version: i32,
     targets_planned: i64,
     targets_completed: i64,
@@ -196,7 +233,7 @@ struct ScanRun {
 
 async fn load_run(pool: &PgPool, job_id: Uuid) -> Result<ScanRun> {
     let row = sqlx::query(
-        "select sr.id, sr.network_id, sr.status, sr.scope_version, \
+        "select sr.id, sr.network_id, sr.status, sr.kind, host(sr.target_address) as target_address, sr.target_device_id, sr.scope_version, \
                 sr.targets_planned, sr.targets_completed, sr.ports_planned, \
                 sr.ports_completed, sr.complete, sr.cancellation_requested, \
                 n.cidr::text as cidr, ds.excluded_cidrs, \
@@ -221,6 +258,9 @@ async fn load_run(pool: &PgPool, job_id: Uuid) -> Result<ScanRun> {
         id: row.try_get("id")?,
         network_id: row.try_get("network_id")?,
         status: row.try_get("status")?,
+        kind: row.try_get("kind")?,
+        target_address: row.try_get("target_address")?,
+        target_device_id: row.try_get("target_device_id")?,
         scope_version: row.try_get("scope_version")?,
         targets_planned: row.try_get("targets_planned")?,
         targets_completed: row.try_get("targets_completed")?,
@@ -284,7 +324,8 @@ fn validate_run(run: &ScanRun) -> Result<()> {
         && (!run.scope_confirmed
             || run.scope_enabled != Some(true)
             || run.current_scope_version != Some(run.scope_version)
-            || run.confirmed_target_count != Some(run.targets_planned))
+            || (run.target_address.is_none()
+                && run.confirmed_target_count != Some(run.targets_planned)))
     {
         return Err(anyhow!(
             "scan run scope is no longer enabled, confirmed, or unchanged"
@@ -305,12 +346,23 @@ fn validated_scope_targets(run: &ScanRun) -> Result<ApprovedScope> {
     .context("discovery scope exclusions are not a string array")?;
     let scope = ApprovedScope::parse(&run.cidr, &excluded_cidrs)
         .map_err(|error| anyhow!("invalid persisted discovery scope: {error}"))?;
-    if scope.target_count() as i64 != run.targets_planned {
+    if run.target_address.is_none() && scope.target_count() as i64 != run.targets_planned {
         return Err(anyhow!(
             "scope has {} targets, run planned {}",
             scope.target_count(),
             run.targets_planned
         ));
+    }
+    if run.target_address.is_some()
+        && run.confirmed_target_count != Some(scope.target_count() as i64)
+    {
+        return Err(anyhow!("device scan scope target count changed"));
+    }
+    if run.target_device_id.is_some() != run.target_address.is_some() {
+        return Err(anyhow!("device scan target identity is incomplete"));
+    }
+    if run.target_address.is_some() && run.targets_planned != 1 {
+        return Err(anyhow!("device scan must plan one target"));
     }
     Ok(scope)
 }
@@ -356,6 +408,13 @@ fn scanner_config(run: &ScanRun, policy: ResolvedScanPolicy) -> Result<ConnectSc
     )
     .context("discovery scope connect timeout is invalid")?;
 
+    // Routine scans favor quick discovery. Full scans retain the configured
+    // timeout so a slower service can still be found explicitly.
+    let connect_timeout_ms = if is_standard_run(run) {
+        connect_timeout_ms.min(250)
+    } else {
+        connect_timeout_ms
+    };
     ConnectScannerConfig::new(
         Duration::from_millis(connect_timeout_ms),
         policy.tcp_global_concurrency(),
@@ -363,6 +422,14 @@ fn scanner_config(run: &ScanRun, policy: ResolvedScanPolicy) -> Result<ConnectSc
         policy.tcp_per_host_concurrency(),
     )
     .map_err(|error| anyhow!(error))
+}
+
+fn is_standard_run(run: &ScanRun) -> bool {
+    is_standard_plan(&run.kind, run.targets_planned, run.ports_planned)
+}
+
+fn is_standard_plan(kind: &str, targets_planned: i64, ports_planned: i64) -> bool {
+    kind != "full_tcp" && targets_planned.checked_mul(STANDARD_PORT_COUNT) == Some(ports_planned)
 }
 
 async fn load_device_ids(pool: &PgPool) -> Result<HashMap<IpAddr, Uuid>> {
@@ -1417,6 +1484,7 @@ async fn complete_run(
 ) -> Result<()> {
     let target_addresses: Vec<String> = targets.iter().map(ToString::to_string).collect();
     let target_address_set: HashSet<String> = target_addresses.iter().cloned().collect();
+    let scanned_ports: HashSet<i32> = ports.iter().map(|port| i32::from(*port)).collect();
     let mut tx = pool.begin().await?;
 
     let open_observations: Vec<(String, i32, String)> = sqlx::query_as(
@@ -1427,7 +1495,6 @@ async fn complete_run(
     .fetch_all(&mut *tx)
     .await?;
     let current_open: HashSet<(String, i32, String)> = open_observations.into_iter().collect();
-
     let scanned_device_rows: Vec<(String, Option<Uuid>)> = sqlx::query_as(
         "select distinct host(address), device_id from port_observations \
          where scan_run_id = $1 and transport = 'tcp' \
@@ -1436,6 +1503,7 @@ async fn complete_run(
     .bind(run_id)
     .fetch_all(&mut *tx)
     .await?;
+
     let mut scanned_device_ids = HashMap::new();
     let mut ambiguous_addresses = HashSet::new();
     for (address, device_id) in scanned_device_rows {
@@ -1463,6 +1531,20 @@ async fn complete_run(
     .fetch_all(&mut *tx)
     .await?;
 
+    let previous_ports: Vec<i32> = previous_open
+        .iter()
+        .filter_map(|(_, value, _)| value.get("port")?.as_i64()?.try_into().ok())
+        .collect();
+    let closed_observations: Vec<(String, i32, String)> = sqlx::query_as(
+        "select host(address), port, transport from port_observations \
+         where scan_run_id = $1 and state = 'closed' and port = any($2::integer[])",
+    )
+    .bind(run_id)
+    .bind(&previous_ports)
+    .fetch_all(&mut *tx)
+    .await?;
+    let current_closed: HashSet<(String, i32, String)> = closed_observations.into_iter().collect();
+
     let source_instance = run_id.to_string();
     let mut canonical_ids = HashMap::new();
     for (device_id, value, absent) in previous_open {
@@ -1482,9 +1564,7 @@ async fn complete_run(
         let Some(transport) = value.get("transport").and_then(Value::as_str) else {
             continue;
         };
-        if !target_address_set.contains(address)
-            || !ports.iter().any(|candidate| i32::from(*candidate) == port)
-        {
+        if !target_address_set.contains(address) || !scanned_ports.contains(&port) {
             continue;
         }
         if ambiguous_addresses.contains(address) {
@@ -1501,7 +1581,8 @@ async fn complete_run(
             continue;
         }
         let key = (address.to_string(), port, transport.to_string());
-        if current_open.contains(&key) {
+        // A timeout is inconclusive; only an explicit refusal closes a port.
+        if current_open.contains(&key) || !current_closed.contains(&key) {
             continue;
         }
 
@@ -1818,6 +1899,17 @@ impl Drop for CancellationMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routine_plan_preserves_old_full_runs() {
+        assert!(is_standard_plan(
+            "initial_discovery",
+            2,
+            2 * STANDARD_PORT_COUNT
+        ));
+        assert!(!is_standard_plan("initial_discovery", 2, 2 * 65_535));
+        assert!(!is_standard_plan("full_tcp", 1, STANDARD_PORT_COUNT));
+    }
     use async_trait::async_trait;
     use std::net::{Ipv4Addr, UdpSocket};
     use std::process::Command;

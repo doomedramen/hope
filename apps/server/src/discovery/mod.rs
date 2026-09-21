@@ -3,6 +3,7 @@
 pub mod classification;
 pub mod collectors;
 pub mod policy;
+pub mod ports;
 pub mod runs;
 pub mod service_collectors;
 pub mod tcp;

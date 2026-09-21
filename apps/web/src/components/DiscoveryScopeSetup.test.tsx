@@ -1,12 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DiscoveryScopeSetup, ScanLaunch } from "./DiscoveryScopeSetup";
 import type { Network, ScanRun, ScanRunStatus } from "@/lib/api";
@@ -74,7 +68,6 @@ function renderScanLaunch(run: ScanRun, onLaunch = () => undefined) {
         onLaunch={onLaunch}
         pending={false}
         run={run}
-        targetCount="2"
       />
     </QueryClientProvider>,
   );
@@ -116,14 +109,12 @@ describe("ScanLaunch", () => {
 
     renderScanLaunch(makeRun("pending"));
     await waitFor(() =>
-      expect(screen.getByText("Initial discovery running")).toBeInTheDocument(),
+      expect(screen.getByText("Full TCP scan running")).toBeInTheDocument(),
     );
 
     await waitFor(
       () =>
-        expect(
-          screen.getByText("Initial discovery completed"),
-        ).toBeInTheDocument(),
+        expect(screen.getByText("Full TCP scan completed")).toBeInTheDocument(),
       { timeout: 5_000 },
     );
     expect(statusRequests).toBe(2);
@@ -152,9 +143,7 @@ describe("ScanLaunch", () => {
     fireEvent.click(cancelButton);
 
     await waitFor(() =>
-      expect(
-        screen.getByText("Initial discovery cancelled"),
-      ).toBeInTheDocument(),
+      expect(screen.getByText("Full TCP scan cancelled")).toBeInTheDocument(),
     );
     expect(
       screen.queryByRole("button", { name: "Cancel scan" }),
@@ -165,32 +154,16 @@ describe("ScanLaunch", () => {
     );
   });
 
-  it("requires review before launching a new scan", () => {
+  it("launches standard scans directly", () => {
     const onLaunch = vi.fn();
     renderScanLaunch(makeRun("succeeded"), onLaunch);
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Launch initial discovery" }),
+      screen.getByRole("button", { name: "Scan standard ports" }),
     );
-
-    const dialog = screen.getByRole("dialog", {
-      name: "Launch initial discovery",
-    });
-    const launchButton = within(dialog).getByRole("button", {
-      name: "Launch scan",
-    });
-    expect(launchButton).toBeDisabled();
-    fireEvent.click(
-      within(dialog).getByRole("checkbox", {
-        name: /understand this scan may take time/i,
-      }),
-    );
-    expect(launchButton).toBeEnabled();
-    fireEvent.click(launchButton);
-
     expect(onLaunch).toHaveBeenCalledOnce();
     expect(
-      screen.queryByRole("dialog", { name: "Launch initial discovery" }),
+      screen.queryByRole("button", { name: /full TCP scan/i }),
     ).not.toBeInTheDocument();
   });
 });
@@ -216,7 +189,7 @@ describe("DiscoveryScopeSetup", () => {
     const persistedRun = makeRun("running", {
       targets_planned: 252,
       targets_completed: 12,
-      ports_planned: 16_515_420,
+      ports_planned: 16_514_820,
       ports_completed: 786_420,
       complete: false,
       authoritative: false,
@@ -241,14 +214,14 @@ describe("DiscoveryScopeSetup", () => {
     );
 
     expect(
-      await screen.findByText("Initial discovery running"),
+      await screen.findByText("Full TCP scan running"),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Excluded addresses or ranges")).toHaveValue(
       "192.168.1.10/32",
     );
     expect(screen.getByRole("combobox")).toHaveTextContent("low_impact");
     expect(
-      screen.queryByRole("button", { name: "Launch initial discovery" }),
+      screen.queryByRole("button", { name: "Scan standard ports" }),
     ).toBeDisabled();
   });
 
@@ -333,7 +306,7 @@ describe("DiscoveryScopeSetup", () => {
     };
     const pendingRun = makeRun("pending", {
       targets_planned: 252,
-      ports_planned: 16_514_820,
+      ports_planned: 9_828,
     });
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -373,7 +346,7 @@ describe("DiscoveryScopeSetup", () => {
     fireEvent.submit(calculateButton.closest("form")!);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     await waitFor(() =>
-      expect(document.body.textContent).toContain("16,514,820 TCP probes"),
+      expect(document.body.textContent).toContain("9,828 standard TCP probes"),
     );
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(
@@ -381,23 +354,7 @@ describe("DiscoveryScopeSetup", () => {
         name: "Confirm and launch initial discovery",
       }),
     );
-    const dialog = screen.getByRole("dialog", {
-      name: "Review initial discovery",
-    });
-    fireEvent.click(
-      within(dialog).getByRole("checkbox", {
-        name: /understand this will scan the confirmed target set/i,
-      }),
-    );
-    fireEvent.click(
-      within(dialog).getByRole("button", {
-        name: "Launch initial discovery",
-      }),
-    );
-
-    expect(
-      await screen.findByText("Initial discovery queued"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Standard scan queued")).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(
         ([path, init]) =>

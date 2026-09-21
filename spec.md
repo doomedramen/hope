@@ -81,7 +81,7 @@ The product should feel useful after its first scan but become increasingly accu
 ### 3.1 In scope for v1
 
 - IPv4 subnet discovery on explicitly approved CIDRs.
-- Full TCP port scans over ports `1–65535`.
+- Standard-port network discovery by default, with manual per-device full TCP scans over ports `1–65535`.
 - Targeted UDP discovery by default and optional full UDP scans.
 - Service fingerprinting using safe protocol probes.
 - Stable device identity independent of IP address.

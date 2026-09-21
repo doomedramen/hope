@@ -5,6 +5,10 @@ defines the safety and persistence rules for network discovery. M1 owns the
 canonical device/evidence model; M2 writes observations into it without
 changing confirmed operator facts.
 
+Port-plan details below describe the original M2 implementation. ADR-0020
+supersedes them: network discovery now uses 39 standard ports, while an operator
+can start a full TCP scan for one device from its detail page.
+
 ## 1. Scan scope is the hard gate
 
 `networks` remains the location model. A one-to-one `discovery_scopes` record

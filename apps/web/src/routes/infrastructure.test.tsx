@@ -83,6 +83,56 @@ describe("EditDeviceDialog", () => {
 });
 
 describe("InfrastructurePage", () => {
+  it("queues a full scan from one device", async () => {
+    const device = detail("device-1", "QA VM device");
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/v1/devices?limit=100") {
+        return Promise.resolve(
+          jsonResponse({ items: [device], next_cursor: null }),
+        );
+      }
+      if (path === "/api/v1/devices/device-1") {
+        return Promise.resolve(jsonResponse(device));
+      }
+      if (path === "/api/v1/devices/device-1/full-scan") {
+        return Promise.resolve(
+          jsonResponse(
+            init?.method === "POST"
+              ? {
+                  id: "scan-1",
+                  status: "pending",
+                  target_address: "192.168.1.10",
+                  ports_completed: 0,
+                  ports_planned: 65_535,
+                }
+              : null,
+          ),
+        );
+      }
+      return Promise.resolve(jsonResponse({ items: [], next_cursor: null }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderInfrastructurePage();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Full port scan" }),
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Full port scan for QA VM device" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start full scan" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/v1/devices/device-1/full-scan",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    expect(
+      await screen.findByText(/Full scan of 192\.168\.1\.10: pending/),
+    ).toBeInTheDocument();
+  });
+
   it("restores and focuses search when entered from the header search", async () => {
     window.history.replaceState({}, "", "/infrastructure?focus=search&q=QA");
     const first: Device = detail("device-1", "QA VM device");

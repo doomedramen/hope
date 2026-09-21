@@ -37,14 +37,6 @@ import {
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
   Empty,
   EmptyDescription,
   EmptyHeader,
@@ -72,6 +64,7 @@ import { Textarea } from "@/components/ui/textarea";
 
 type ScanProfile = "normal" | "low_impact";
 const SCAN_RUN_POLL_INTERVAL_MS = 2_500;
+const STANDARD_TCP_PORT_COUNT = 39;
 
 interface ScopeDraftState {
   excludedCidrs: string;
@@ -589,7 +582,6 @@ function ScopeForm({
 }) {
   const confirmed = isScopeConfirmed(scope, isDirty);
   const targetCount = scope ? formatCount(scope.target_count) : null;
-  const [launchReviewOpen, setLaunchReviewOpen] = useState(false);
   const status = confirmed
     ? "Confirmed"
     : isDirty
@@ -692,12 +684,13 @@ function ScopeForm({
           <NetworkIcon />
           <AlertTitle>
             {targetCount} scan targets ·{" "}
-            {formatCount(scope.target_count * 65_535)} TCP probes
+            {formatCount(scope.target_count * STANDARD_TCP_PORT_COUNT)} standard
+            TCP probes
           </AlertTitle>
           <AlertDescription>
             {isDirty
               ? "Scope settings changed. Calculate targets again before confirming."
-              : `Server calculated this scope from ${network.cidr} and your exclusions. A full TCP sweep checks every port on each target; duration depends on the network and ${profile === "low_impact" ? "low-impact" : "normal"} profile.`}
+              : `Routine discovery checks ${STANDARD_TCP_PORT_COUNT} common TCP ports on each approved address. Full scans can be started from a device. ${profile === "low_impact" ? "Low impact" : "Normal"} profile selected.`}
           </AlertDescription>
         </Alert>
       ) : null}
@@ -732,7 +725,7 @@ function ScopeForm({
         <div className="flex flex-wrap gap-2">
           <Button
             disabled={stateLoading || !canConfirm}
-            onClick={() => setLaunchReviewOpen(true)}
+            onClick={onConfirmAndLaunch}
             type="button"
           >
             {confirmPending || scanPending ? (
@@ -757,17 +750,6 @@ function ScopeForm({
           </Button>
         </div>
       ) : null}
-      <ScanLaunchReviewDialog
-        acknowledgmentLabel="I understand this will scan the confirmed target set."
-        description="Review the scope and probe budget before queuing initial discovery."
-        network={network}
-        onOpenChange={setLaunchReviewOpen}
-        onSubmit={onConfirmAndLaunch}
-        open={launchReviewOpen}
-        targetCount={targetCount}
-        title="Review initial discovery"
-        submitLabel="Launch initial discovery"
-      />
       {confirmed ? (
         <>
           <p className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -781,7 +763,6 @@ function ScopeForm({
             pending={scanPending}
             run={scanRun}
             history={scanHistory}
-            targetCount={targetCount}
           />
         </>
       ) : null}
@@ -793,7 +774,6 @@ export function ScanLaunch({
   network,
   run,
   history = [],
-  targetCount,
   pending,
   error,
   onLaunch,
@@ -801,13 +781,11 @@ export function ScanLaunch({
   network: Network;
   run: ScanRun | null;
   history?: ScanRun[];
-  targetCount: string | null;
   pending: boolean;
   error: unknown;
   onLaunch: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [launchReviewOpen, setLaunchReviewOpen] = useState(false);
   const runQuery = useQuery({
     queryKey: ["scan-run", run?.id],
     queryFn: () => fetchScanRun(run!.id),
@@ -832,15 +810,15 @@ export function ScanLaunch({
     <div className="flex flex-col gap-4 rounded-lg border bg-muted/20 p-4">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
-          <p className="font-medium">Initial discovery scan</p>
+          <p className="font-medium">Network scan</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Scan approved addresses in {network.cidr}. This launches a full TCP
-            port sweep for the confirmed scope.
+            Scan approved addresses in {network.cidr}. Standard discovery checks
+            {STANDARD_TCP_PORT_COUNT} common TCP ports per target.
           </p>
         </div>
         <Button
           disabled={pending || Boolean(canCancel)}
-          onClick={() => setLaunchReviewOpen(true)}
+          onClick={onLaunch}
           type="button"
         >
           {pending ? (
@@ -848,7 +826,7 @@ export function ScanLaunch({
           ) : (
             <PlayIcon data-icon="inline-start" />
           )}
-          {pending ? "Queueing initial discovery…" : "Launch initial discovery"}
+          {pending ? "Queueing scan…" : "Scan standard ports"}
         </Button>
       </div>
 
@@ -859,20 +837,7 @@ export function ScanLaunch({
         </p>
       ) : null}
       {error ? <ScanLaunchError error={error} /> : null}
-      {canCancel ? (
-        <Alert aria-live="polite">
-          <NetworkIcon />
-          <AlertTitle>Scan job already running</AlertTitle>
-          <AlertDescription>
-            This network already has a pending or running scan. Launching a
-            second job is disabled until the current job finishes or is
-            cancelled.
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      {currentRun ? (
-        <ScanRunStatus run={currentRun} targetCount={targetCount} />
-      ) : null}
+      {currentRun ? <ScanRunStatus run={currentRun} /> : null}
       {currentRun?.job ? <ScanJobDetails run={currentRun} /> : null}
       {history.length > 1 ? <ScanHistory history={history} /> : null}
       {canCancel ? (
@@ -927,107 +892,7 @@ export function ScanLaunch({
           </AlertDescription>
         </Alert>
       ) : null}
-      <ScanLaunchReviewDialog
-        acknowledgmentLabel="I understand this scan may take time and will inspect every TCP port on each confirmed target."
-        description="Review the confirmed scope before queueing another initial discovery scan."
-        network={network}
-        onOpenChange={setLaunchReviewOpen}
-        onSubmit={onLaunch}
-        open={launchReviewOpen}
-        targetCount={targetCount}
-        title="Launch initial discovery"
-        submitLabel="Launch scan"
-      />
     </div>
-  );
-}
-
-function ScanLaunchReviewDialog({
-  acknowledgmentLabel,
-  description,
-  network,
-  onOpenChange,
-  onSubmit,
-  open,
-  targetCount,
-  title,
-  submitLabel,
-}: {
-  acknowledgmentLabel: string;
-  description: string;
-  network: Network;
-  onOpenChange: (open: boolean) => void;
-  onSubmit: () => void;
-  open: boolean;
-  targetCount: string | null;
-  title: string;
-  submitLabel: string;
-}) {
-  const [acknowledged, setAcknowledged] = useState(false);
-
-  const handleOpenChange = (nextOpen: boolean) => {
-    if (nextOpen) setAcknowledged(false);
-    onOpenChange(nextOpen);
-  };
-
-  return (
-    <Dialog onOpenChange={handleOpenChange} open={open}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
-        <div className="grid gap-3 text-sm">
-          <div className="rounded-lg border bg-muted/30 p-3">
-            <dl className="grid gap-2 sm:grid-cols-2">
-              <div>
-                <dt className="text-xs text-muted-foreground">Network</dt>
-                <dd className="font-mono font-medium">{network.cidr}</dd>
-              </div>
-              <div>
-                <dt className="text-xs text-muted-foreground">
-                  Confirmed targets
-                </dt>
-                <dd className="font-medium">
-                  {targetCount ?? "Not available"}
-                </dd>
-              </div>
-            </dl>
-          </div>
-          <p className="text-muted-foreground">
-            Discovery checks 65,535 TCP ports per target. A full sweep can take
-            time and may generate significant network traffic.
-          </p>
-          <label className="flex items-start gap-3 rounded-lg border p-3">
-            <Checkbox
-              checked={acknowledged}
-              onCheckedChange={(checked) => setAcknowledged(checked === true)}
-            />
-            <span className="text-sm leading-5">{acknowledgmentLabel}</span>
-          </label>
-        </div>
-        <DialogFooter>
-          <Button
-            onClick={() => onOpenChange(false)}
-            type="button"
-            variant="outline"
-          >
-            Cancel
-          </Button>
-          <Button
-            disabled={!acknowledged}
-            onClick={() => {
-              onSubmit();
-              onOpenChange(false);
-            }}
-            type="button"
-          >
-            <PlayIcon data-icon="inline-start" />
-            {submitLabel}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -1038,7 +903,10 @@ function ScanJobDetails({ run }: { run: ScanRun }) {
   const progressTargets = progress.targets_completed;
   const progressPorts = progress.ports_completed;
   return (
-    <div aria-label="Scan job details" className="rounded-lg border p-3">
+    <details aria-label="Scan job details" className="rounded-lg border p-3">
+      <summary className="cursor-pointer text-sm font-medium">
+        Technical details and activity log
+      </summary>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <p className="text-sm font-medium">Job activity</p>
@@ -1081,10 +949,8 @@ function ScanJobDetails({ run }: { run: ScanRun }) {
         </p>
       ) : null}
       {run.logs?.length ? (
-        <details className="mt-3 border-t pt-3">
-          <summary className="cursor-pointer text-sm font-medium">
-            Activity log ({run.logs.length})
-          </summary>
+        <div className="mt-3 border-t pt-3">
+          <p className="text-sm font-medium">Activity ({run.logs.length})</p>
           <ol className="mt-2 flex flex-col gap-2 text-xs text-muted-foreground">
             {run.logs.map((log) => (
               <li className="flex flex-wrap gap-x-2 gap-y-1" key={log.id}>
@@ -1092,20 +958,31 @@ function ScanJobDetails({ run }: { run: ScanRun }) {
                   {formatScanTime(log.occurred_at)}
                 </time>
                 <span className="font-medium text-foreground">
-                  {log.action}
+                  {scanLogLabel(log.action)}
                 </span>
                 <span>{log.result}</span>
               </li>
             ))}
           </ol>
-        </details>
+        </div>
       ) : (
         <p className="mt-3 border-t pt-3 text-xs text-muted-foreground">
           No activity events have been recorded for this job yet.
         </p>
       )}
-    </div>
+    </details>
   );
+}
+
+function scanLogLabel(action: string): string {
+  switch (action) {
+    case "scan_run.create":
+      return "Scan queued";
+    case "scan_run.cancel":
+      return "Cancellation requested";
+    default:
+      return action.replaceAll("_", " ").replaceAll(".", ": ");
+  }
 }
 
 function ScanHistory({ history }: { history: ScanRun[] }) {
@@ -1122,7 +999,10 @@ function ScanHistory({ history }: { history: ScanRun[] }) {
             key={run.id}
           >
             <div>
-              <p className="font-medium">{scanKindLabel(run.kind)}</p>
+              <p className="font-medium">
+                {scanKindLabel(run.kind)}
+                {run.target_address ? ` · ${run.target_address}` : ""}
+              </p>
               <p className="text-xs text-muted-foreground">
                 {formatScanTime(run.created_at)} ·{" "}
                 {formatCount(run.targets_completed)} of{" "}
@@ -1141,26 +1021,27 @@ function ScanHistory({ history }: { history: ScanRun[] }) {
   );
 }
 
-function ScanRunStatus({
-  run,
-  targetCount,
-}: {
-  run: ScanRun;
-  targetCount: string | null;
-}) {
+function ScanRunStatus({ run }: { run: ScanRun }) {
   const completedTargets = formatCount(run.targets_completed);
-  const plannedTargets = targetCount ?? formatCount(run.targets_planned);
+  const plannedTargets = formatCount(run.targets_planned);
   const portProgress = `${formatCount(run.ports_completed)} of ${formatCount(run.ports_planned)} ports completed.`;
+  const scanLabel =
+    run.ports_planned === run.targets_planned * 65_535
+      ? "Full TCP scan"
+      : "Standard scan";
+  const targetDescription = run.target_address
+    ? `Device address ${run.target_address}. `
+    : "";
 
   switch (run.status) {
     case "pending":
       return (
         <Alert aria-live="polite">
           <NetworkIcon />
-          <AlertTitle>Initial discovery queued</AlertTitle>
+          <AlertTitle>{scanLabel} queued</AlertTitle>
           <AlertDescription>
-            Server accepted scan for {plannedTargets} confirmed targets. Work
-            has not started yet. {portProgress}
+            {targetDescription}Server accepted scan for {plannedTargets}{" "}
+            confirmed targets. Work has not started yet. {portProgress}
           </AlertDescription>
         </Alert>
       );
@@ -1168,8 +1049,9 @@ function ScanRunStatus({
       return (
         <Alert aria-live="polite">
           <NetworkIcon />
-          <AlertTitle>Initial discovery running</AlertTitle>
+          <AlertTitle>{scanLabel} running</AlertTitle>
           <AlertDescription>
+            {targetDescription}
             {completedTargets} of {plannedTargets} confirmed targets completed.{" "}
             {portProgress}
           </AlertDescription>
@@ -1179,10 +1061,10 @@ function ScanRunStatus({
       return (
         <Alert aria-live="polite">
           <CheckIcon />
-          <AlertTitle>Initial discovery completed</AlertTitle>
+          <AlertTitle>{scanLabel} completed</AlertTitle>
           <AlertDescription>
             {run.authoritative && run.complete
-              ? `Full TCP scan completed for ${plannedTargets} confirmed targets. Results are authoritative.`
+              ? `${targetDescription}${plannedTargets} confirmed targets scanned. Results cover scanned ports.`
               : "Server reported success without a complete authoritative result."}
           </AlertDescription>
         </Alert>
@@ -1191,7 +1073,7 @@ function ScanRunStatus({
       return (
         <Alert aria-live="polite" variant="destructive">
           <CircleAlertIcon />
-          <AlertTitle>Initial discovery failed</AlertTitle>
+          <AlertTitle>{scanLabel} failed</AlertTitle>
           <AlertDescription>
             {getUserFacingError(
               run.error,
@@ -1205,7 +1087,7 @@ function ScanRunStatus({
       return (
         <Alert aria-live="polite" variant="destructive">
           <CircleAlertIcon />
-          <AlertTitle>Initial discovery cancelled</AlertTitle>
+          <AlertTitle>{scanLabel} cancelled</AlertTitle>
           <AlertDescription>
             Scan stopped after {completedTargets} of {plannedTargets} confirmed
             targets completed. {portProgress} Partial results are not
