@@ -322,8 +322,8 @@ function EnrollmentDialog({
     createEnrollment();
   }, [createEnrollment, open, resetEnrollment]);
 
-  const shellQuote = (value: string) =>
-    "'" + value.replaceAll("'", "'\\''") + "'";
+  const shellQuote = (value: string | null | undefined) =>
+    "'" + String(value ?? "").replaceAll("'", "'\\''") + "'";
   const enrollment = enrollmentMutation.data;
   const installCommand = enrollment
     ? "curl -fsSL " +

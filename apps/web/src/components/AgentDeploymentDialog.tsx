@@ -17,6 +17,7 @@ import {
   type Credential,
   type DeviceDetail,
 } from "@/lib/api";
+import { labelize } from "@/lib/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -247,7 +248,7 @@ export function AgentDeploymentDialog({
                 <option value="">Enter SSH details below</option>
                 {credentials.map((credential) => (
                   <option key={credential.id} value={credential.id}>
-                    {credential.name} ({credential.kind.replaceAll("_", " ")})
+                    {credential.name} ({labelize(credential.kind)})
                   </option>
                 ))}
               </select>
@@ -439,5 +440,5 @@ export function AgentDeploymentDialog({
 }
 
 export function credentialLabel(credential: Credential): string {
-  return `${credential.name} (${credential.kind.replaceAll("_", " ")})`;
+  return `${credential.name} (${labelize(credential.kind)})`;
 }

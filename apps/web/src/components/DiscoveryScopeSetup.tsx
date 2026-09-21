@@ -913,14 +913,15 @@ function ScanJobDetails({ run }: { run: ScanRun }) {
   );
 }
 
-function scanLogLabel(action: string): string {
-  switch (action) {
+function scanLogLabel(action: string | null | undefined): string {
+  const value = String(action ?? "");
+  switch (value) {
     case "scan_run.create":
       return "Scan queued";
     case "scan_run.cancel":
       return "Cancellation requested";
     default:
-      return action.replaceAll("_", " ").replaceAll(".", ": ");
+      return value.replaceAll("_", " ").replaceAll(".", ": ");
   }
 }
 

@@ -2,8 +2,9 @@ export function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
-export function labelize(value: string): string {
-  return value
+export function labelize(value: unknown): string {
+  const text = value === null || value === undefined ? "Unknown" : String(value);
+  return text
     .replaceAll("_", " ")
     .replaceAll("-", " ")
     .replaceAll(".", " ")

@@ -298,7 +298,9 @@ function describeEntity(change: ChangeEvent): {
     | "/networks"
     | null;
 } {
-  const kind = change.entity_kind.replaceAll("-", "_").toLowerCase();
+  const kind = String(change.entity_kind ?? "")
+    .replaceAll("-", "_")
+    .toLowerCase();
   if (kind === "devices" || kind === "device") {
     return { action: "Open inventory", label: "Device", to: "/devices" };
   }
