@@ -78,32 +78,15 @@ test("operator can see and cancel the active discovery job", async ({
   await page
     .getByRole("button", { name: "Confirm and launch initial discovery" })
     .click();
-  const reviewDialog = page.getByRole("dialog", {
-    name: "Review initial discovery",
-  });
-  await expect(reviewDialog).toBeVisible();
   await expect(
-    reviewDialog.getByText(/65,535 TCP ports per target/),
-  ).toBeVisible();
-  await reviewDialog
-    .getByRole("checkbox", {
-      name: /understand this will scan the confirmed target set/i,
-    })
-    .check();
-  await reviewDialog
-    .getByRole("button", { name: "Launch initial discovery" })
-    .click();
-
-  await expect(
-    page.getByText(/Initial discovery (queued|running)/),
+    page.getByText(/Standard scan (queued|running)/),
   ).toBeVisible({
     timeout: 30_000,
   });
-  await expect(page.getByText("Scan job already running")).toBeVisible();
   await expect(
     page
       .locator("#main-content")
-      .getByRole("button", { name: "Launch initial discovery" }),
+      .getByRole("button", { name: "Scan standard ports" }),
   ).toBeDisabled();
   await expect(page.getByLabel("Scan job details")).toBeVisible();
 
@@ -111,5 +94,5 @@ test("operator can see and cancel the active discovery job", async ({
   await expect(page.getByText("Cancellation requested.").first()).toBeVisible({
     timeout: 30_000,
   });
-  await expect(page.getByText(/Activity log/)).toBeVisible();
+  await expect(page.getByText(/Technical details and activity log/)).toBeVisible();
 });
