@@ -35,7 +35,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Empty,
   EmptyDescription,
@@ -45,7 +44,6 @@ import {
 } from "@/components/ui/empty";
 import {
   Field,
-  FieldContent,
   FieldDescription,
   FieldError,
   FieldGroup,
@@ -64,7 +62,6 @@ import { Textarea } from "@/components/ui/textarea";
 
 type ScanProfile = "normal" | "low_impact";
 const SCAN_RUN_POLL_INTERVAL_MS = 2_500;
-const STANDARD_TCP_PORT_COUNT = 39;
 
 interface ScopeDraftState {
   excludedCidrs: string;
@@ -72,7 +69,6 @@ interface ScopeDraftState {
   scope: DiscoveryScope | null;
   appliedExcludedCidrs: string[] | null;
   appliedScanProfile: ScanProfile | null;
-  acknowledged: boolean;
   scanRun: ScanRun | null;
 }
 
@@ -82,7 +78,6 @@ const DEFAULT_SCOPE_STATE: ScopeDraftState = {
   scope: null,
   appliedExcludedCidrs: null,
   appliedScanProfile: null,
-  acknowledged: false,
   scanRun: null,
 };
 
@@ -154,7 +149,6 @@ export function DiscoveryScopeSetup({
               scope: persistedScope,
               appliedExcludedCidrs: persistedScope.excluded_cidrs,
               appliedScanProfile: persistedProfile,
-              acknowledged: false,
               scanRun: discoveryStateQuery.data.scan_run,
             }
           : DEFAULT_SCOPE_STATE,
@@ -186,7 +180,6 @@ export function DiscoveryScopeSetup({
           scope,
           appliedExcludedCidrs: variables.excludedCidrs,
           appliedScanProfile: variables.scanProfile,
-          acknowledged: false,
           scanRun: null,
         },
       }));
@@ -232,7 +225,6 @@ export function DiscoveryScopeSetup({
         [variables.networkId]: {
           ...(current[variables.networkId] ?? DEFAULT_SCOPE_STATE),
           scope,
-          acknowledged: false,
           scanRun: null,
         },
       }));
@@ -274,11 +266,36 @@ export function DiscoveryScopeSetup({
       excludedCidrs.join("\n") ||
       selectedState.appliedScanProfile !== selectedState.scanProfile);
   const canConfirm =
-    selectedState.scope !== null &&
-    !scopeIsDirty &&
-    selectedState.acknowledged &&
+    Boolean(selectedNetwork) &&
+    !invalidExcludedCidr &&
+    !draftMutation.isPending &&
     !confirmMutation.isPending &&
     !scanMutation.isPending;
+  const saveScope = (launch: boolean) => {
+    if (!selectedNetwork || !canConfirm) return;
+    const networkId = selectedNetwork.id;
+    const confirmScope = (scope: DiscoveryScope) => {
+      confirmMutation.mutate({
+        networkId,
+        targetCount: scope.target_count,
+        launch,
+      });
+    };
+
+    if (selectedState.scope && !scopeIsDirty) {
+      confirmScope(selectedState.scope);
+      return;
+    }
+
+    draftMutation.mutate(
+      {
+        networkId,
+        excludedCidrs,
+        scanProfile: selectedState.scanProfile,
+      },
+      { onSuccess: confirmScope },
+    );
+  };
   const scanHistory = scansQuery.data?.items ?? [];
   const activeScan =
     scansQuery.data?.active_scan ??
@@ -427,7 +444,6 @@ export function DiscoveryScopeSetup({
             </div>
             {selectedNetwork ? (
               <ScopeForm
-                acknowledged={selectedState.acknowledged}
                 canConfirm={canConfirm}
                 confirmPending={confirmMutation.isPending}
                 draftPending={draftMutation.isPending}
@@ -452,18 +468,11 @@ export function DiscoveryScopeSetup({
                 scanHistory={scanHistory}
                 scanRun={selectedScanRun}
                 stateLoading={discoveryStateQuery.isLoading}
-                onAcknowledge={(acknowledged) =>
-                  setSelectedState((current) => ({
-                    ...current,
-                    acknowledged,
-                  }))
-                }
                 onExcludedCidrsChange={(excludedCidrs) => {
                   scanMutation.reset();
                   setSelectedState((current) => ({
                     ...current,
                     excludedCidrs,
-                    acknowledged: false,
                   }));
                 }}
                 onProfileChange={(scanProfile) => {
@@ -471,43 +480,15 @@ export function DiscoveryScopeSetup({
                   setSelectedState((current) => ({
                     ...current,
                     scanProfile,
-                    acknowledged: false,
                   }));
                 }}
                 onConfirm={() => {
-                  if (selectedState.scope) {
-                    scanMutation.reset();
-                    confirmMutation.mutate({
-                      networkId: selectedNetwork.id,
-                      targetCount: selectedState.scope.target_count,
-                      launch: false,
-                    });
-                  }
+                  scanMutation.reset();
+                  saveScope(false);
                 }}
                 onConfirmAndLaunch={() => {
-                  if (selectedState.scope) {
-                    const idempotencyKey =
-                      launchKeysByNetwork.current.get(selectedNetwork.id) ??
-                      createIdempotencyKey();
-                    launchKeysByNetwork.current.set(
-                      selectedNetwork.id,
-                      idempotencyKey,
-                    );
-                    confirmMutation.mutate({
-                      networkId: selectedNetwork.id,
-                      targetCount: selectedState.scope.target_count,
-                      launch: true,
-                    });
-                  }
-                }}
-                onDraft={() => {
                   scanMutation.reset();
-                  if (invalidExcludedCidr) return;
-                  draftMutation.mutate({
-                    networkId: selectedNetwork.id,
-                    excludedCidrs,
-                    scanProfile: selectedState.scanProfile,
-                  });
+                  saveScope(true);
                 }}
                 onLaunch={() => {
                   if (
@@ -537,7 +518,6 @@ function ScopeForm({
   excludedCidrs,
   invalidExcludedCidr,
   profile,
-  acknowledged,
   isDirty,
   canConfirm,
   draftPending,
@@ -550,8 +530,6 @@ function ScopeForm({
   stateLoading,
   onExcludedCidrsChange,
   onProfileChange,
-  onAcknowledge,
-  onDraft,
   onConfirm,
   onConfirmAndLaunch,
   onLaunch,
@@ -561,7 +539,6 @@ function ScopeForm({
   excludedCidrs: string;
   invalidExcludedCidr: string | null;
   profile: ScanProfile;
-  acknowledged: boolean;
   isDirty: boolean;
   canConfirm: boolean;
   draftPending: boolean;
@@ -574,20 +551,17 @@ function ScopeForm({
   stateLoading: boolean;
   onExcludedCidrsChange: (value: string) => void;
   onProfileChange: (value: ScanProfile) => void;
-  onAcknowledge: (value: boolean) => void;
-  onDraft: () => void;
   onConfirm: () => void;
   onConfirmAndLaunch: () => void;
   onLaunch: () => void;
 }) {
   const confirmed = isScopeConfirmed(scope, isDirty);
-  const targetCount = scope ? formatCount(scope.target_count) : null;
   const status = confirmed
     ? "Confirmed"
     : isDirty
-      ? "Needs calculation"
+      ? "Changes not saved"
       : scope
-        ? "Draft"
+        ? "Ready to enable"
         : "Not set up";
   const exclusionCount = parseExcludedCidrs(excludedCidrs).length;
   const optionsSummary = `${profile === "low_impact" ? "Low impact" : "Normal"} · ${
@@ -601,7 +575,7 @@ function ScopeForm({
       className="flex flex-col gap-5"
       onSubmit={(event) => {
         event.preventDefault();
-        onDraft();
+        onConfirm();
       }}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -677,92 +651,41 @@ function ScopeForm({
         </div>
       </details>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          disabled={
-            stateLoading || draftPending || Boolean(invalidExcludedCidr)
-          }
-          type="submit"
-          variant="outline"
-        >
-          {draftPending ? <Spinner data-icon="inline-start" /> : null}
-          Calculate targets
-        </Button>
-        {isDirty ? (
-          <span className="text-xs text-muted-foreground">
-            Recalculate after changing scope settings.
-          </span>
-        ) : null}
-      </div>
-
-      {scope ? (
-        <Alert>
-          <NetworkIcon />
-          <AlertTitle>
-            {targetCount} scan targets ·{" "}
-            {formatCount(scope.target_count * STANDARD_TCP_PORT_COUNT)} standard
-            TCP probes
-          </AlertTitle>
-          <AlertDescription>
-            {isDirty
-              ? "Scope settings changed. Calculate targets again before confirming."
-              : `Routine discovery checks ${STANDARD_TCP_PORT_COUNT} common TCP ports on each approved address. Full scans can be started from a device. ${profile === "low_impact" ? "Low impact" : "Normal"} profile selected.`}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
       {stateLoading ? (
         <p aria-live="polite" className="text-sm text-muted-foreground">
           Loading saved discovery state…
         </p>
       ) : null}
 
-      {scope && !confirmed ? (
-        <Field orientation="horizontal">
-          <Checkbox
-            checked={acknowledged}
-            id={`scope-confirm-${network.id}`}
-            onCheckedChange={(checked) => onAcknowledge(checked === true)}
-          />
-          <FieldContent>
-            <FieldLabel htmlFor={`scope-confirm-${network.id}`}>
-              I reviewed the target and probe count
-            </FieldLabel>
-            <FieldDescription>
-              Confirm the scope to enable discovery.
-            </FieldDescription>
-          </FieldContent>
-        </Field>
-      ) : null}
-
       <ScopeError error={error} />
 
-      {scope && !confirmed ? (
+      {!confirmed ? (
         <div className="flex flex-wrap gap-2">
           <Button
             disabled={stateLoading || !canConfirm}
             onClick={onConfirmAndLaunch}
             type="button"
           >
-            {confirmPending || scanPending ? (
+            {draftPending || confirmPending || scanPending ? (
               <Spinner data-icon="inline-start" />
             ) : (
               <PlayIcon data-icon="inline-start" />
             )}
-            {confirmPending
-              ? "Confirming scope…"
-              : scanPending
-                ? "Queueing initial discovery…"
-                : "Confirm and launch initial discovery"}
+            {draftPending
+              ? "Saving scope…"
+              : confirmPending
+                ? "Enabling discovery…"
+                : scanPending
+                  ? "Queueing initial discovery…"
+                  : "Save and launch initial discovery"}
           </Button>
           <Button
             disabled={stateLoading || !canConfirm}
-            onClick={onConfirm}
-            type="button"
+            type="submit"
             variant="outline"
           >
             <CheckIcon data-icon="inline-start" />
-            Confirm scope only
+            Enable discovery
           </Button>
         </div>
       ) : null}
@@ -770,7 +693,7 @@ function ScopeForm({
         <>
           <p className="flex items-center gap-2 text-sm text-muted-foreground">
             <CheckIcon className="text-primary" />
-            Discovery scope confirmed for {targetCount} targets.
+            Discovery scope confirmed.
           </p>
           <ScanLaunch
             error={scanError}
@@ -828,8 +751,8 @@ export function ScanLaunch({
         <div>
           <p className="font-medium">Network scan</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Scan approved addresses in {network.cidr}. Standard discovery checks
-            {STANDARD_TCP_PORT_COUNT} common TCP ports per target.
+            Scan approved addresses in {network.cidr} using the standard
+            discovery profile.
           </p>
         </div>
         <Button
@@ -1041,10 +964,7 @@ function ScanRunStatus({ run }: { run: ScanRun }) {
   const completedTargets = formatCount(run.targets_completed);
   const plannedTargets = formatCount(run.targets_planned);
   const portProgress = `${formatCount(run.ports_completed)} of ${formatCount(run.ports_planned)} ports completed.`;
-  const scanLabel =
-    run.ports_planned === run.targets_planned * 65_535
-      ? "Full TCP scan"
-      : "Standard scan";
+  const scanLabel = run.kind === "full_tcp" ? "Full TCP scan" : "Standard scan";
   const targetDescription = run.target_address
     ? `Device address ${run.target_address}. `
     : "";

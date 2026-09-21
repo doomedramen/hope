@@ -88,12 +88,13 @@ beforeEach(() => {
 describe("ScanLaunch", () => {
   it("polls an active run until server reports completion", async () => {
     const running = makeRun("running", {
+      kind: "full_tcp",
       targets_completed: 1,
       ports_completed: 65_535,
       complete: false,
       authoritative: false,
     });
-    const completed = makeRun("succeeded");
+    const completed = makeRun("succeeded", { kind: "full_tcp" });
     let statusRequests = 0;
     const fetchMock = vi
       .fn()
@@ -121,8 +122,9 @@ describe("ScanLaunch", () => {
   });
 
   it("offers cancellation for active runs and removes it after cancellation", async () => {
-    const pending = makeRun("pending");
+    const pending = makeRun("pending", { kind: "full_tcp" });
     const cancelled = makeRun("cancelled", {
+      kind: "full_tcp",
       complete: false,
       authoritative: false,
       cancellation_requested: true,
@@ -187,6 +189,7 @@ describe("DiscoveryScopeSetup", () => {
       version: 2,
     };
     const persistedRun = makeRun("running", {
+      kind: "full_tcp",
       targets_planned: 252,
       targets_completed: 12,
       ports_planned: 16_514_820,
@@ -257,7 +260,7 @@ describe("DiscoveryScopeSetup", () => {
     expect(onDeleteNetwork).toHaveBeenCalledWith(network);
   });
 
-  it("identifies invalid exclusion CIDRs before calculating targets", () => {
+  it("disables discovery actions for invalid exclusion CIDRs", () => {
     const queryClient = new QueryClient({
       defaultOptions: {
         mutations: { retry: false },
@@ -282,11 +285,16 @@ describe("DiscoveryScopeSetup", () => {
       screen.getByText("CIDR must be a valid network range."),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Calculate targets" }),
+      screen.getByRole("button", {
+        name: "Save and launch initial discovery",
+      }),
     ).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Calculate targets" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("summarizes scan cost and supports one-step confirmation and launch", async () => {
+  it("saves scope and launches without a target calculation review", async () => {
     const queryClient = new QueryClient({
       defaultOptions: {
         mutations: { retry: false },
@@ -342,22 +350,23 @@ describe("DiscoveryScopeSetup", () => {
       </QueryClientProvider>,
     );
 
-    const calculateButton = await screen.findByRole("button", {
-      name: "Calculate targets",
+    const launchButton = await screen.findByRole("button", {
+      name: "Save and launch initial discovery",
     });
-    await waitFor(() => expect(calculateButton).not.toBeDisabled());
-    fireEvent.submit(calculateButton.closest("form")!);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    await waitFor(() =>
-      expect(document.body.textContent).toContain("9,828 standard TCP probes"),
-    );
-    fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Confirm and launch initial discovery",
-      }),
-    );
+    await waitFor(() => expect(launchButton).not.toBeDisabled());
+    expect(
+      screen.queryByText(/scan targets|standard TCP probes/i),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/reviewed the target/i)).not.toBeInTheDocument();
+    fireEvent.click(launchButton);
+
     expect(await screen.findByText("Standard scan queued")).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(
+        ([path, init]) =>
+          String(path).endsWith("/discovery-scope") && init?.method === "POST",
+      ),
+    ).toBe(true);
     expect(
       fetchMock.mock.calls.some(
         ([path, init]) =>

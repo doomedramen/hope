@@ -72,11 +72,8 @@ test("operator can see and cancel the active discovery job", async ({
   await expect(networkButton).toBeVisible();
   await networkButton.click();
 
-  await page.getByRole("button", { name: "Calculate targets" }).click();
-  await expect(page.getByText(/254 scan targets/)).toBeVisible();
-  await page.getByRole("checkbox", { name: /reviewed the target/i }).check();
   await page
-    .getByRole("button", { name: "Confirm and launch initial discovery" })
+    .getByRole("button", { name: "Save and launch initial discovery" })
     .click();
   await expect(page.getByText(/Standard scan (queued|running)/)).toBeVisible({
     timeout: 30_000,

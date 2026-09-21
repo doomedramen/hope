@@ -125,8 +125,9 @@ targets.
 ## Discovery and forms
 
 Discovery keeps its safe scope boundary visible. A network scan distinguishes
-the configured range, exclusions, calculated target count, scan profile, and
-the explicit confirmation before launch. Advanced concurrency, scheduling, and
+the configured range, exclusions, scan profile, and the explicit confirmation
+before launch. Target and probe arithmetic stays server-side rather than adding
+an extra calculation step to the page. Advanced concurrency, scheduling, and
 pressure options are disclosed beside the summary that explains their current
 effective values. Scan progress, zero-result runs, cancellation, and technical
 logs remain available in the selected network context.

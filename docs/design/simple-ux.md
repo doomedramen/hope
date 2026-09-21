@@ -140,7 +140,7 @@ Do not collapse everything technical. A field belongs in the initial form when o
 | Action | Initially visible | Reveal on request | Completion |
 | --- | --- | --- | --- |
 | Install agent | Target platform, command, server address summary | Change address; troubleshooting | Intended device connected, or waiting/error |
-| Scan network | Range, calculated scope, explicit launch confirmation | Exclusions, scan pressure, scheduling | Progress and results, including zero results |
+| Scan network | Range, exclusions, scan profile, explicit launch confirmation | Scheduling and pressure details | Progress and results, including zero results |
 | Configure check | Name, type, target, applicable required fields | Timing, thresholds, assertions, protocol options | Saved settings distinct from the next result |
 | Notifications | Object/scope, destination, relevant events | Delivery-specific options | Saved configuration; delivery test if supported |
 | Maintenance | Target, start, duration | Recurrence and dependencies | Confirmed schedule or actionable conflict |
