@@ -284,13 +284,6 @@ export function InfrastructurePage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <a
-            className="inline-flex min-h-9 items-center justify-center rounded-md border px-3 text-sm font-medium hover:bg-muted"
-            href="/networks"
-          >
-            <NetworkIcon className="mr-2 size-4" />
-            Manage networks
-          </a>
           <Button onClick={() => setDialog("create")}>
             <PlusIcon data-icon="inline-start" />
             Add device

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, createFileRoute } from "@tanstack/react-router";
-import { PlusIcon, ServerIcon } from "lucide-react";
+import { createFileRoute } from "@tanstack/react-router";
+import { PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { DiscoveryScopeSetup } from "@/components/DiscoveryScopeSetup";
 import { AddNetworkDialog } from "./infrastructure";
@@ -67,13 +67,6 @@ export function NetworksPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Link
-            className="inline-flex min-h-9 items-center justify-center rounded-md border px-3 text-sm font-medium hover:bg-muted"
-            to="/devices"
-          >
-            <ServerIcon className="mr-2 size-4" />
-            View devices
-          </Link>
           <Button
             onClick={() => {
               networkCreateMutation.reset();

@@ -1,5 +1,24 @@
 import { expect, test } from "./fixtures";
 
+test("keeps device and network pages focused", async ({ page }) => {
+  await page.goto("/devices");
+  await expect(
+    page.getByRole("heading", { name: "Devices", level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "Manage networks" })).toHaveCount(
+    0,
+  );
+  await expect(page.getByRole("link", { name: "View networks" })).toHaveCount(
+    0,
+  );
+
+  await page.goto("/networks");
+  await expect(
+    page.getByRole("heading", { name: "Networks", level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "View devices" })).toHaveCount(0);
+});
+
 test("operator can add a network before configuring discovery", async ({
   page,
 }) => {
