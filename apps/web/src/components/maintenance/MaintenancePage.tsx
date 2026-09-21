@@ -18,6 +18,7 @@ import {
   createMaintenanceEvent,
   fetchMaintenanceConflicts,
   fetchMaintenanceEvents,
+  getUserFacingError,
   patchMaintenanceEvent,
   startMaintenanceEvent,
   type MaintenanceConflict,
@@ -225,7 +226,7 @@ export function MaintenancePage() {
         </Button>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="order-2 grid gap-4 sm:order-none sm:grid-cols-2 xl:grid-cols-4">
         <SummaryCard
           detail={`${occurrenceCount} expanded occurrence${occurrenceCount === 1 ? "" : "s"}`}
           icon={<CalendarClockIcon />}
@@ -256,7 +257,7 @@ export function MaintenancePage() {
         />
       </div>
 
-      <Card>
+      <Card className="order-1 sm:order-none">
         <CardHeader className="border-b">
           <div>
             <CardTitle>Schedule</CardTitle>
@@ -278,9 +279,10 @@ export function MaintenancePage() {
               <CircleAlertIcon />
               <AlertTitle>Maintenance unavailable</AlertTitle>
               <AlertDescription>
-                {eventsQuery.error instanceof Error
-                  ? eventsQuery.error.message
-                  : "Maintenance events could not be loaded."}
+                {getUserFacingError(
+                  eventsQuery.error,
+                  "Maintenance events could not be loaded.",
+                )}
               </AlertDescription>
               <Button
                 onClick={() => eventsQuery.refetch()}
@@ -498,9 +500,7 @@ function MaintenanceDetail({
             <CircleAlertIcon />
             <AlertTitle>Lifecycle change was not saved</AlertTitle>
             <AlertDescription>
-              {lifecycleError instanceof Error
-                ? lifecycleError.message
-                : "Try again."}
+              {getUserFacingError(lifecycleError, "Try again.")}
             </AlertDescription>
           </Alert>
         ) : null}
@@ -685,9 +685,7 @@ function MaintenanceDetail({
               <CircleAlertIcon />
               <AlertTitle>Conflict check unavailable</AlertTitle>
               <AlertDescription>
-                {conflictsError instanceof Error
-                  ? conflictsError.message
-                  : "Try again."}
+                {getUserFacingError(conflictsError, "Try again.")}
               </AlertDescription>
             </Alert>
           ) : conflicts.length > 0 ? (

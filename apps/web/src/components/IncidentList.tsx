@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { CheckIcon, CircleAlertIcon, TriangleAlertIcon } from "lucide-react";
 import { useState } from "react";
-import { fetchIncidents, type Incident } from "@/lib/api";
+import { fetchIncidents, getUserFacingError, type Incident } from "@/lib/api";
 import { formatDate, formatRelative, labelize, shortId } from "@/lib/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -29,11 +29,22 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 type IncidentFilter = "open" | "recovered" | "all";
 
 export function IncidentList() {
   const [filter, setFilter] = useState<IncidentFilter>("open");
+  const [selectedIncident, setSelectedIncident] = useState<Incident | null>(
+    null,
+  );
   const state = filter === "all" ? undefined : filter;
   const incidentsQuery = useQuery({
     queryKey: ["incidents", state],
@@ -71,9 +82,10 @@ export function IncidentList() {
             <CircleAlertIcon />
             <AlertTitle>Incidents unavailable</AlertTitle>
             <AlertDescription>
-              {incidentsQuery.error instanceof Error
-                ? incidentsQuery.error.message
-                : "The incident list could not be loaded."}
+              {getUserFacingError(
+                incidentsQuery.error,
+                "The incident list could not be loaded.",
+              )}
             </AlertDescription>
             <Button
               onClick={() => incidentsQuery.refetch()}
@@ -96,29 +108,63 @@ export function IncidentList() {
           </Empty>
         </CardContent>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>State</TableHead>
-              <TableHead>Target</TableHead>
-              <TableHead>Severity</TableHead>
-              <TableHead>Opened</TableHead>
-              <TableHead>Last event</TableHead>
-              <TableHead className="text-right">Failures</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+        <>
+          <div className="hidden overflow-x-auto md:block">
+            <Table className="min-w-[58rem]">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>State</TableHead>
+                  <TableHead>Target</TableHead>
+                  <TableHead>Severity</TableHead>
+                  <TableHead>Opened</TableHead>
+                  <TableHead>Last event</TableHead>
+                  <TableHead className="text-right">Failures</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {incidents.map((incident) => (
+                  <IncidentRow
+                    incident={incident}
+                    key={incident.id}
+                    onReview={() => setSelectedIncident(incident)}
+                  />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          <div className="space-y-3 p-4 md:hidden">
             {incidents.map((incident) => (
-              <IncidentRow incident={incident} key={incident.id} />
+              <IncidentMobileCard
+                incident={incident}
+                key={incident.id}
+                onReview={() => setSelectedIncident(incident)}
+              />
             ))}
-          </TableBody>
-        </Table>
+          </div>
+        </>
       )}
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) setSelectedIncident(null);
+        }}
+        open={selectedIncident !== null}
+      >
+        {selectedIncident ? (
+          <IncidentDetails incident={selectedIncident} />
+        ) : null}
+      </Dialog>
     </Card>
   );
 }
 
-function IncidentRow({ incident }: { incident: Incident }) {
+function IncidentRow({
+  incident,
+  onReview,
+}: {
+  incident: Incident;
+  onReview: () => void;
+}) {
   const name =
     incident.service_name ??
     incident.service_product ??
@@ -174,7 +220,132 @@ function IncidentRow({ incident }: { incident: Incident }) {
       <TableCell className="text-right font-medium">
         {incident.failure_count}
       </TableCell>
+      <TableCell className="text-right">
+        <Button onClick={onReview} size="sm" variant="outline">
+          Review
+        </Button>
+      </TableCell>
     </TableRow>
+  );
+}
+
+function IncidentMobileCard({
+  incident,
+  onReview,
+}: {
+  incident: Incident;
+  onReview: () => void;
+}) {
+  const name =
+    incident.service_name ??
+    incident.service_product ??
+    "Service " + shortId(incident.service_id);
+  const endpoint =
+    incident.endpoint_url ??
+    incident.endpoint_dns_name ??
+    formatSocketTarget(incident.endpoint_address, incident.endpoint_port) ??
+    "Endpoint " + shortId(incident.endpoint_id);
+
+  return (
+    <article className="rounded-lg border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            {incident.state === "open" ? (
+              <Badge variant="destructive">
+                <CircleAlertIcon />
+                Open
+              </Badge>
+            ) : (
+              <Badge variant="outline">
+                <CheckIcon className="text-emerald-600 dark:text-emerald-400" />
+                Recovered
+              </Badge>
+            )}
+            {incident.severity === "critical" ? (
+              <Badge variant="destructive">Critical</Badge>
+            ) : (
+              <Badge variant="outline">
+                <TriangleAlertIcon className="text-amber-600 dark:text-amber-400" />
+                {labelize(incident.severity)}
+              </Badge>
+            )}
+          </div>
+          <h3 className="truncate font-medium">{name}</h3>
+          <p className="break-words text-sm text-muted-foreground">
+            {endpoint}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {incident.summary ?? labelize(incident.monitor_type)}
+          </p>
+        </div>
+        <Button onClick={onReview} size="sm" variant="outline">
+          Review
+        </Button>
+      </div>
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-t pt-3 text-sm">
+        <Detail label="Opened" value={formatRelative(incident.opened_at)} />
+        <Detail
+          label="Last event"
+          value={formatRelative(incident.last_event_at)}
+        />
+        <Detail label="Failures" value={String(incident.failure_count)} />
+        <Detail label="Monitor" mono value={shortId(incident.monitor_id)} />
+      </dl>
+    </article>
+  );
+}
+
+function IncidentDetails({ incident }: { incident: Incident }) {
+  const name =
+    incident.service_name ??
+    incident.service_product ??
+    `Service ${shortId(incident.service_id)}`;
+  const endpoint =
+    incident.endpoint_url ??
+    incident.endpoint_dns_name ??
+    formatSocketTarget(incident.endpoint_address, incident.endpoint_port) ??
+    `Endpoint ${shortId(incident.endpoint_id)}`;
+
+  return (
+    <DialogContent className="sm:max-w-lg">
+      <DialogHeader>
+        <DialogTitle>Incident details</DialogTitle>
+        <DialogDescription>
+          {name} · {endpoint}
+        </DialogDescription>
+      </DialogHeader>
+      <dl className="grid gap-3 rounded-lg border p-4 sm:grid-cols-2">
+        <Detail label="State" value={labelize(incident.state)} />
+        <Detail label="Severity" value={labelize(incident.severity)} />
+        <Detail label="Summary" value={incident.summary ?? "No summary"} />
+        <Detail label="Failures" value={String(incident.failure_count)} />
+        <Detail label="Opened" value={formatDate(incident.opened_at)} />
+        <Detail label="Last event" value={formatDate(incident.last_event_at)} />
+        <Detail label="Incident ID" mono value={shortId(incident.id)} />
+        <Detail label="Monitor" mono value={shortId(incident.monitor_id)} />
+      </dl>
+      <DialogFooter showCloseButton />
+    </DialogContent>
+  );
+}
+
+function Detail({
+  label,
+  mono = false,
+  value,
+}: {
+  label: string;
+  mono?: boolean;
+  value: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className={mono ? "truncate font-mono text-sm" : "text-sm"}>
+        {value}
+      </dd>
+    </div>
   );
 }
 

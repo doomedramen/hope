@@ -16,13 +16,21 @@ function MonitoringPage() {
       <Tabs className="gap-4" defaultValue="monitors">
         <TabsList
           aria-label="Monitoring views"
-          className="w-full flex-wrap justify-start"
+          className="grid w-full grid-cols-2 gap-1 sm:inline-flex sm:w-fit sm:grid-cols-none"
           variant="line"
         >
-          <TabsTrigger value="monitors">Monitors</TabsTrigger>
-          <TabsTrigger value="incidents">Incidents</TabsTrigger>
-          <TabsTrigger value="services">Service reviews</TabsTrigger>
-          <TabsTrigger value="proposals">Monitor proposals</TabsTrigger>
+          <TabsTrigger className="min-w-0 whitespace-nowrap" value="monitors">
+            Monitors
+          </TabsTrigger>
+          <TabsTrigger className="min-w-0 whitespace-nowrap" value="incidents">
+            Incidents
+          </TabsTrigger>
+          <TabsTrigger className="min-w-0 whitespace-nowrap" value="services">
+            Service reviews
+          </TabsTrigger>
+          <TabsTrigger className="min-w-0 whitespace-nowrap" value="proposals">
+            Monitor proposals
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="monitors">
           <MonitorList />

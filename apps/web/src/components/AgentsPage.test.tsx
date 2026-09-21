@@ -152,6 +152,10 @@ describe("AgentsPage", () => {
     renderPage();
 
     expect(await screen.findByText("No enrolled agents")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Search agents" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Enrolled")).not.toBeInTheDocument();
   });
 
   it("offers a guided enrollment flow from the empty state", async () => {
@@ -175,10 +179,7 @@ describe("AgentsPage", () => {
     renderPage();
 
     expect(await screen.findByText("No enrolled agents")).toBeInTheDocument();
-    const enrollButtons = screen.getAllByRole("button", {
-      name: "Enroll agent",
-    });
-    fireEvent.click(enrollButtons.at(-1)!);
+    fireEvent.click(screen.getByRole("button", { name: "Enroll agent" }));
 
     expect(
       await screen.findByRole("heading", { name: "Enroll a Linux agent" }),

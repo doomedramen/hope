@@ -11,6 +11,7 @@ import {
   fetchCredentials,
   fetchJob,
   fetchSshHostKeys,
+  getUserFacingError,
   installAgent,
   trustSshHostKey,
   type Credential,
@@ -321,9 +322,10 @@ export function AgentDeploymentDialog({
               <AlertTriangleIcon />
               <AlertTitle>Agent install needs attention</AlertTitle>
               <AlertDescription>
-                {actionError instanceof Error
-                  ? actionError.message
-                  : "The agent install request failed."}
+                {getUserFacingError(
+                  actionError,
+                  "The agent install request failed.",
+                )}
               </AlertDescription>
             </Alert>
           ) : null}
@@ -377,7 +379,10 @@ export function AgentDeploymentDialog({
               </div>
               {job.last_error ? (
                 <p className="mt-2 text-sm text-destructive">
-                  {job.last_error}
+                  {getUserFacingError(
+                    job.last_error,
+                    "The deployment job reported an error.",
+                  )}
                 </p>
               ) : null}
               <p className="mt-1 text-xs text-muted-foreground">

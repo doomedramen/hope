@@ -7,7 +7,7 @@ import {
   ShieldAlertIcon,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import { fetchChanges, type ChangeEvent } from "@/lib/api";
+import { fetchChanges, getUserFacingError, type ChangeEvent } from "@/lib/api";
 import { formatDate, formatRelative, labelize, shortId } from "@/lib/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -67,7 +67,7 @@ export function ChangesPage() {
         <h1 className="text-3xl font-semibold tracking-tight">Changes</h1>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="order-2 grid gap-4 sm:order-none sm:grid-cols-3">
         <Summary
           icon={<ActivityIcon />}
           label="Events"
@@ -95,7 +95,7 @@ export function ChangesPage() {
         />
       </div>
 
-      <Card>
+      <Card className="order-1 sm:order-none">
         <CardHeader>
           <CardTitle>Change history</CardTitle>
           <CardAction>
@@ -155,7 +155,9 @@ export function ChangesPage() {
             <Alert variant="destructive">
               <CircleAlertIcon />
               <AlertTitle>Changes unavailable</AlertTitle>
-              <AlertDescription>{changesQuery.error.message}</AlertDescription>
+              <AlertDescription>
+                {getUserFacingError(changesQuery.error, "Try again.")}
+              </AlertDescription>
               <Button
                 onClick={() => changesQuery.refetch()}
                 size="sm"
@@ -218,6 +220,7 @@ function Summary({
 
 function ChangeRow({ change }: { change: ChangeEvent }) {
   const summary = summarize(change.before, change.after);
+  const entity = describeEntity(change);
   const severityVariant =
     change.severity === "critical"
       ? "destructive"
@@ -245,33 +248,90 @@ function ChangeRow({ change }: { change: ChangeEvent }) {
             {formatRelative(change.occurred_at)}
           </time>
         </div>
-        <h3 className="mt-2 font-medium">
-          {labelize(change.entity_kind)} record changed
-        </h3>
+        <h3 className="mt-2 font-medium">{entity.label} changed</h3>
         <p className="mt-1 text-sm text-muted-foreground">
           {summary || "An event was recorded without field snapshots."}
         </p>
         <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-          <span className="font-mono">{shortId(change.entity_id)}</span>
+          <span>
+            {entity.label}{" "}
+            <span className="font-mono">{shortId(change.entity_id)}</span>
+          </span>
           <span>
             Source:{" "}
             {change.evidence_source
               ? labelize(change.evidence_source)
               : "system"}
           </span>
-          {change.entity_kind === "devices" ? (
+          {entity.to === "/devices" ? (
             <Link
+              aria-label={`Open inventory for device ${shortId(change.entity_id)}`}
               className="inline-flex items-center gap-1 rounded-sm text-foreground outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
               search={{ device: change.entity_id }}
-              to="/devices"
+              to={entity.to}
             >
-              Open inventory <ExternalLinkIcon className="size-3" />
+              {entity.action} <ExternalLinkIcon className="size-3" />
+            </Link>
+          ) : entity.to ? (
+            <Link
+              aria-label={`${entity.action} for ${shortId(change.entity_id)}`}
+              className="inline-flex items-center gap-1 rounded-sm text-foreground outline-none hover:underline focus-visible:ring-3 focus-visible:ring-ring/50"
+              to={entity.to}
+            >
+              {entity.action} <ExternalLinkIcon className="size-3" />
             </Link>
           ) : null}
         </div>
       </div>
     </article>
   );
+}
+
+function describeEntity(change: ChangeEvent): {
+  action: string;
+  label: string;
+  to:
+    | "/agents"
+    | "/devices"
+    | "/maintenance"
+    | "/monitoring"
+    | "/networks"
+    | null;
+} {
+  const kind = change.entity_kind.replaceAll("-", "_").toLowerCase();
+  if (kind === "devices" || kind === "device") {
+    return { action: "Open inventory", label: "Device", to: "/devices" };
+  }
+  if (kind === "networks" || kind === "network") {
+    return { action: "Open networks", label: "Network", to: "/networks" };
+  }
+  if (kind === "agents" || kind === "agent") {
+    return { action: "Open agents", label: "Agent", to: "/agents" };
+  }
+  if (
+    kind === "monitors" ||
+    kind === "monitor" ||
+    kind === "incidents" ||
+    kind === "incident" ||
+    kind === "services" ||
+    kind === "service" ||
+    kind === "monitor_proposals" ||
+    kind === "monitor_proposal"
+  ) {
+    return {
+      action: "Open monitoring",
+      label: labelize(kind),
+      to: "/monitoring",
+    };
+  }
+  if (kind === "maintenance" || kind === "maintenance_events") {
+    return {
+      action: "Open maintenance",
+      label: "Maintenance event",
+      to: "/maintenance",
+    };
+  }
+  return { action: "", label: labelize(change.entity_kind), to: null };
 }
 
 function summarize(

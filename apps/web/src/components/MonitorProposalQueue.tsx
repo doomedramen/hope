@@ -10,6 +10,7 @@ import {
 import { useState } from "react";
 import {
   fetchMonitorProposals,
+  getUserFacingError,
   resolveMonitorProposal,
   type MonitorProposal,
 } from "@/lib/api";
@@ -56,6 +57,7 @@ import {
 export function MonitorProposalQueue() {
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [bulkApproveOpen, setBulkApproveOpen] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
   const proposalsQuery = useQuery({
     queryKey: ["monitor-proposals", "pending"],
@@ -113,7 +115,7 @@ export function MonitorProposalQueue() {
           {proposals.length > 1 ? (
             <Button
               disabled={bulkApproveMutation.isPending}
-              onClick={() => bulkApproveMutation.mutate()}
+              onClick={() => setBulkApproveOpen(true)}
               size="sm"
               variant="outline"
             >
@@ -134,9 +136,10 @@ export function MonitorProposalQueue() {
             <CircleAlertIcon />
             <AlertTitle>Monitor proposals unavailable</AlertTitle>
             <AlertDescription>
-              {proposalsQuery.error instanceof Error
-                ? proposalsQuery.error.message
-                : "The monitor proposal queue could not be loaded."}
+              {getUserFacingError(
+                proposalsQuery.error,
+                "The monitor proposal queue could not be loaded.",
+              )}
             </AlertDescription>
             <Button
               onClick={() => proposalsQuery.refetch()}
@@ -186,9 +189,7 @@ export function MonitorProposalQueue() {
             <CircleAlertIcon />
             <AlertTitle>Decision was not saved</AlertTitle>
             <AlertDescription>
-              {resolveMutation.error instanceof Error
-                ? resolveMutation.error.message
-                : "Try again."}
+              {getUserFacingError(resolveMutation.error, "Try again.")}
             </AlertDescription>
           </Alert>
         </div>
@@ -199,9 +200,7 @@ export function MonitorProposalQueue() {
             <CircleAlertIcon />
             <AlertTitle>Bulk approval was not completed</AlertTitle>
             <AlertDescription>
-              {bulkApproveMutation.error instanceof Error
-                ? bulkApproveMutation.error.message
-                : "Try again."}
+              {getUserFacingError(bulkApproveMutation.error, "Try again.")}
             </AlertDescription>
           </Alert>
         </div>
@@ -228,6 +227,60 @@ export function MonitorProposalQueue() {
             >
               {resolveMutation.isPending ? <Spinner /> : null}
               Reject proposal
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog onOpenChange={setBulkApproveOpen} open={bulkApproveOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogMedia>
+              <CheckCheckIcon />
+            </AlertDialogMedia>
+            <AlertDialogTitle>Approve all monitor proposals?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will approve {proposals.length} pending proposal
+              {proposals.length === 1 ? "" : "s"} and create the suggested
+              monitors. Review the individual proposals first if any target is
+              uncertain.
+            </AlertDialogDescription>
+            <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+              <p className="font-medium">Targets to approve</p>
+              <ul className="mt-2 grid gap-1 text-muted-foreground">
+                {proposals.slice(0, 5).map((proposal) => (
+                  <li
+                    className="flex items-center justify-between gap-3"
+                    key={proposal.id}
+                  >
+                    <span className="min-w-0 truncate">
+                      {proposal.target_identity}
+                    </span>
+                    <span className="shrink-0 text-xs">
+                      {proposal.check_type.toUpperCase()}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {proposals.length > 5 ? (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  …and {proposals.length - 5} more pending proposals.
+                </p>
+              ) : null}
+            </div>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={bulkApproveMutation.isPending}>
+              Keep for review
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={bulkApproveMutation.isPending}
+              onClick={() => {
+                bulkApproveMutation.mutate();
+                setBulkApproveOpen(false);
+              }}
+            >
+              {bulkApproveMutation.isPending ? <Spinner /> : null}
+              Approve all proposals
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

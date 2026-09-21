@@ -79,12 +79,12 @@ describe("ChangesPage", () => {
     });
     fireEvent.click(trigger);
     const option = await screen.findByRole("option", {
-      name: "Monitor.Created",
+      name: "Monitor Created",
     });
     fireEvent.pointerDown(option, { pointerType: "mouse" });
     fireEvent.click(option, { detail: 1 });
 
-    await waitFor(() => expect(trigger).toHaveTextContent("Monitor.Created"));
+    await waitFor(() => expect(trigger).toHaveTextContent("Monitor Created"));
     expect(
       await screen.findByRole("link", { name: /Open inventory/ }),
     ).toHaveAttribute("href", "/devices?device=monitor-1");

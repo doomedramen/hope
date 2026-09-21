@@ -17,6 +17,7 @@ import {
   deleteNotificationChannel,
   fetchNotificationChannels,
   fetchNotificationRoutes,
+  getUserFacingError,
   patchNotificationChannel,
   testNotificationChannel,
   type NotificationChannel,
@@ -233,8 +234,8 @@ export function SettingsPage() {
             {channelActionError ? "Channel action failed" : "Channel updated"}
           </AlertTitle>
           <AlertDescription>
-            {channelActionError instanceof Error
-              ? channelActionError.message
+            {channelActionError
+              ? getUserFacingError(channelActionError, "Try again.")
               : channelNotice}
           </AlertDescription>
         </Alert>
@@ -244,10 +245,16 @@ export function SettingsPage() {
           <CircleAlertIcon />
           <AlertTitle>Notification settings unavailable</AlertTitle>
           <AlertDescription>
-            {channelsQuery.error instanceof Error
-              ? channelsQuery.error.message
-              : routesQuery.error instanceof Error
-                ? routesQuery.error.message
+            {channelsQuery.error
+              ? getUserFacingError(
+                  channelsQuery.error,
+                  "Notification settings could not be loaded.",
+                )
+              : routesQuery.error
+                ? getUserFacingError(
+                    routesQuery.error,
+                    "Notification settings could not be loaded.",
+                  )
                 : "Notification settings could not be loaded."}
           </AlertDescription>
           <Button
@@ -496,9 +503,7 @@ export function SettingsPage() {
                     : "Channel was not created"}
                 </AlertTitle>
                 <AlertDescription>
-                  {channelMutationError instanceof Error
-                    ? channelMutationError.message
-                    : "Try again."}
+                  {getUserFacingError(channelMutationError, "Try again.")}
                 </AlertDescription>
               </Alert>
             ) : null}

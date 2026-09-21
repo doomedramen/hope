@@ -31,6 +31,7 @@ import {
   fetchMonitors,
   fetchNetworks,
   fetchServiceReviews,
+  getUserFacingError,
   type ChangeEvent,
   type MonitorResult,
 } from "@/lib/api";
@@ -192,16 +193,17 @@ function OverviewDashboard() {
           <CircleAlertIcon />
           <AlertTitle>Some dashboard data is unavailable</AlertTitle>
           <AlertDescription>
-            {dashboardError instanceof Error
-              ? dashboardError.message
-              : "Refresh to try loading the missing data again."}
+            {getUserFacingError(
+              dashboardError,
+              "Refresh to try loading the missing data again.",
+            )}
           </AlertDescription>
           <Button onClick={retryDashboard} size="sm" variant="outline">
             Retry
           </Button>
         </Alert>
       ) : null}
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="order-2 grid gap-4 sm:order-none sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           detail={`${networks.length} networks`}
           icon={ServerIcon}
@@ -231,7 +233,7 @@ function OverviewDashboard() {
           value={changes.length}
         />
       </section>
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,0.78fr)]">
+      <section className="order-1 grid gap-4 sm:order-none xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,0.78fr)]">
         <div className="grid gap-4">
           <ServiceHealthCard
             degraded={degraded}
@@ -262,7 +264,9 @@ function OverviewDashboard() {
           onRetry={retryDashboard}
         />
       </section>
-      <RecentChangesCard changes={changes} loading={changesQuery.isLoading} />
+      <div className="order-3 sm:order-none">
+        <RecentChangesCard changes={changes} loading={changesQuery.isLoading} />
+      </div>
     </div>
   );
 }
@@ -344,54 +348,79 @@ function ServiceHealthCard({
         {loading ? (
           <Skeleton className="h-48 w-full" />
         ) : series.length ? (
-          <ChartContainer className="h-48 w-full" config={healthChartConfig}>
-            <AreaChart
-              accessibilityLayer
-              data={series}
-              margin={{ left: -22, right: 8, top: 8 }}
+          <div>
+            <ChartContainer
+              aria-describedby="service-health-chart-summary"
+              aria-label="Service health trend"
+              className="h-48 w-full"
+              config={healthChartConfig}
+              role="img"
             >
-              <defs>
-                <linearGradient id="health-fill" x1="0" x2="0" y1="0" y2="1">
-                  <stop
-                    offset="5%"
-                    stopColor="var(--color-healthy)"
-                    stopOpacity={0.28}
-                  />
-                  <stop
-                    offset="95%"
-                    stopColor="var(--color-healthy)"
-                    stopOpacity={0.02}
-                  />
-                </linearGradient>
-              </defs>
-              <CartesianGrid vertical={false} />
-              <XAxis
-                axisLine={false}
-                dataKey="time"
-                tickLine={false}
-                tickMargin={8}
-                minTickGap={24}
-              />
-              <YAxis
-                axisLine={false}
-                domain={[0, 100]}
-                tickFormatter={(value) => `${value}%`}
-                tickLine={false}
-                width={34}
-              />
-              <ChartTooltip
-                content={<ChartTooltipContent indicator="line" />}
-                cursor={false}
-              />
-              <Area
-                dataKey="health"
-                fill="url(#health-fill)"
-                stroke="var(--color-healthy)"
-                strokeWidth={2}
-                type="monotone"
-              />
-            </AreaChart>
-          </ChartContainer>
+              <AreaChart
+                accessibilityLayer
+                data={series}
+                margin={{ left: -22, right: 8, top: 8 }}
+              >
+                <defs>
+                  <linearGradient id="health-fill" x1="0" x2="0" y1="0" y2="1">
+                    <stop
+                      offset="5%"
+                      stopColor="var(--color-healthy)"
+                      stopOpacity={0.28}
+                    />
+                    <stop
+                      offset="95%"
+                      stopColor="var(--color-healthy)"
+                      stopOpacity={0.02}
+                    />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid vertical={false} />
+                <XAxis
+                  axisLine={false}
+                  dataKey="time"
+                  tickLine={false}
+                  tickMargin={8}
+                  minTickGap={24}
+                />
+                <YAxis
+                  axisLine={false}
+                  domain={[0, 100]}
+                  tickFormatter={(value) => `${value}%`}
+                  tickLine={false}
+                  width={34}
+                />
+                <ChartTooltip
+                  content={<ChartTooltipContent indicator="line" />}
+                  cursor={false}
+                />
+                <Area
+                  dataKey="health"
+                  fill="url(#health-fill)"
+                  stroke="var(--color-healthy)"
+                  strokeWidth={2}
+                  type="monotone"
+                />
+              </AreaChart>
+            </ChartContainer>
+            <p className="sr-only" id="service-health-chart-summary">
+              {summarizeChart(
+                series.map((point) => ({
+                  time: point.time,
+                  value: point.health,
+                })),
+                "health percentage",
+              )}
+            </p>
+            <ChartDataTable
+              label="Service health readings"
+              rows={series.map((point) => ({
+                time: point.time,
+                value: `${point.health}%`,
+              }))}
+              valueHeading="Healthy"
+            />
+          </div>
         ) : (
           <EmptyChart label="No monitor history yet." />
         )}
@@ -435,39 +464,64 @@ function InfrastructureSignalsCard({
         {loading ? (
           <Skeleton className="h-40 w-full" />
         ) : series.length ? (
-          <ChartContainer className="h-40 w-full" config={changeChartConfig}>
-            <LineChart
-              accessibilityLayer
-              data={series}
-              margin={{ left: -22, right: 8, top: 8 }}
+          <div>
+            <ChartContainer
+              aria-describedby="infrastructure-signals-chart-summary"
+              aria-label="Infrastructure signals trend"
+              className="h-40 w-full"
+              config={changeChartConfig}
+              role="img"
             >
-              <CartesianGrid vertical={false} />
-              <XAxis
-                axisLine={false}
-                dataKey="time"
-                tickLine={false}
-                tickMargin={8}
-                minTickGap={24}
-              />
-              <YAxis
-                allowDecimals={false}
-                axisLine={false}
-                tickLine={false}
-                width={24}
-              />
-              <ChartTooltip
-                content={<ChartTooltipContent indicator="line" />}
-                cursor={false}
-              />
-              <Line
-                dataKey="changes"
-                dot={false}
-                stroke="var(--color-changes)"
-                strokeWidth={2}
-                type="monotone"
-              />
-            </LineChart>
-          </ChartContainer>
+              <LineChart
+                accessibilityLayer
+                data={series}
+                margin={{ left: -22, right: 8, top: 8 }}
+              >
+                <CartesianGrid vertical={false} />
+                <XAxis
+                  axisLine={false}
+                  dataKey="time"
+                  tickLine={false}
+                  tickMargin={8}
+                  minTickGap={24}
+                />
+                <YAxis
+                  allowDecimals={false}
+                  axisLine={false}
+                  tickLine={false}
+                  width={24}
+                />
+                <ChartTooltip
+                  content={<ChartTooltipContent indicator="line" />}
+                  cursor={false}
+                />
+                <Line
+                  dataKey="changes"
+                  dot={false}
+                  stroke="var(--color-changes)"
+                  strokeWidth={2}
+                  type="monotone"
+                />
+              </LineChart>
+            </ChartContainer>
+            <p className="sr-only" id="infrastructure-signals-chart-summary">
+              {summarizeChart(
+                series.map((point) => ({
+                  time: point.time,
+                  value: point.changes,
+                })),
+                "recorded changes",
+              )}
+            </p>
+            <ChartDataTable
+              label="Infrastructure signal readings"
+              rows={series.map((point) => ({
+                time: point.time,
+                value: String(point.changes),
+              }))}
+              valueHeading="Changes"
+            />
+          </div>
         ) : (
           <EmptyChart label="No changes in this range." />
         )}
@@ -720,6 +774,54 @@ function EmptyChart({ label }: { label: string }) {
     </Empty>
   );
 }
+
+function ChartDataTable({
+  label,
+  rows,
+  valueHeading,
+}: {
+  label: string;
+  rows: Array<{ time: string; value: string }>;
+  valueHeading: string;
+}) {
+  return (
+    <details className="mt-3 rounded-lg border px-3 py-2 text-sm">
+      <summary className="cursor-pointer font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+        View data table
+      </summary>
+      <div className="mt-3 overflow-x-auto">
+        <Table>
+          <caption className="sr-only">{label}</caption>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Time</TableHead>
+              <TableHead>{valueHeading}</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow key={`${row.time}-${row.value}`}>
+                <TableCell>{row.time}</TableCell>
+                <TableCell>{row.value}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </details>
+  );
+}
+
+function summarizeChart(
+  rows: Array<{ time: string; value: number }>,
+  valueLabel: string,
+): string {
+  if (!rows.length) return `No ${valueLabel} readings are available.`;
+  const values = rows.map((row) => row.value);
+  const latest = rows[rows.length - 1];
+  return `${rows.length} readings. ${valueLabel} ranged from ${Math.min(...values)} to ${Math.max(...values)}. Latest reading: ${latest.value} at ${latest.time}.`;
+}
+
 function EmptyState({ label }: { label: string }) {
   return (
     <Empty className="min-h-32 rounded-lg p-4">

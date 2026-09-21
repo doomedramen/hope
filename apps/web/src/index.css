@@ -65,7 +65,7 @@
   --card-foreground: oklch(0.22 0.028 265);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.22 0.028 265);
-  --primary: oklch(0.57 0.16 262);
+  --primary: oklch(0.54 0.16 262);
   --primary-foreground: oklch(0.99 0.004 260);
   --secondary: oklch(0.965 0.009 252);
   --secondary-foreground: oklch(0.28 0.035 265);
@@ -73,7 +73,7 @@
   --muted-foreground: oklch(0.52 0.027 260);
   --accent: oklch(0.94 0.026 258);
   --accent-foreground: oklch(0.42 0.1 263);
-  --destructive: oklch(0.55 0.14 25);
+  --destructive: oklch(0.46 0.14 25);
   --border: oklch(0.91 0.012 255);
   --input: oklch(0.91 0.012 255);
   --ring: oklch(0.62 0.12 260);
@@ -85,9 +85,9 @@
   --status-healthy-bg: oklch(0.93 0.035 180);
   --status-healthy-fg: oklch(0.43 0.09 180);
   --status-attention-bg: oklch(0.95 0.043 78);
-  --status-attention-fg: oklch(0.54 0.1 72);
+  --status-attention-fg: oklch(0.48 0.1 72);
   --status-critical-bg: oklch(0.94 0.035 25);
-  --status-critical-fg: oklch(0.54 0.1 25);
+  --status-critical-fg: oklch(0.48 0.1 25);
   --status-info-bg: oklch(0.93 0.035 250);
   --status-info-fg: oklch(0.48 0.1 250);
   --status-neutral-bg: oklch(0.95 0.01 255);
@@ -95,7 +95,7 @@
   --radius: 0.625rem;
   --sidebar: oklch(0.992 0.004 250);
   --sidebar-foreground: oklch(0.28 0.035 265);
-  --sidebar-primary: oklch(0.57 0.16 262);
+  --sidebar-primary: oklch(0.54 0.16 262);
   --sidebar-primary-foreground: oklch(0.99 0.004 260);
   --sidebar-accent: oklch(0.94 0.026 258);
   --sidebar-accent-foreground: oklch(0.42 0.1 263);
@@ -160,5 +160,38 @@
   }
   html {
     @apply font-sans;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 767px) {
+  [data-slot="button"],
+  [data-slot="checkbox"],
+  [data-slot="input"],
+  [data-slot="select-trigger"],
+  [data-slot="sidebar-menu-button"],
+  [data-slot="sidebar-trigger"],
+  [data-slot="switch"],
+  [data-slot="tabs-trigger"],
+  [data-slot="textarea"],
+  [data-slot="toggle-group-item"] {
+    min-height: 2.75rem;
+  }
+
+  [data-slot="button"],
+  [data-slot="checkbox"],
+  [data-slot="sidebar-trigger"],
+  [data-slot="switch"] {
+    min-width: 2.75rem;
   }
 }

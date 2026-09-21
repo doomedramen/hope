@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import {
   MaintenanceApiError,
+  getUserFacingError,
   type MaintenanceEvent,
   type MaintenanceEventInput,
   type MaintenanceResource,
@@ -652,11 +653,11 @@ export function MaintenanceEventForm({
   }
 
   const conflicts = error instanceof MaintenanceApiError ? error.conflicts : [];
-  const errorMessage = error instanceof Error ? error.message : null;
+  const errorMessage = error ? getUserFacingError(error, "Try again.") : null;
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-h-[min(90vh,60rem)] overflow-y-auto sm:max-w-[min(90vw,80rem)]">
+      <DialogContent className="flex max-h-[min(90vh,60rem)] flex-col overflow-hidden sm:max-w-[min(90vw,80rem)]">
         <DialogHeader>
           <DialogTitle>
             {event ? "Edit maintenance event" : "Create maintenance event"}
@@ -667,654 +668,672 @@ export function MaintenanceEventForm({
           </DialogDescription>
         </DialogHeader>
 
-        <form className="flex flex-col gap-6" onSubmit={submit}>
-          {validationError || errorMessage ? (
-            <Alert variant="destructive">
-              <CircleAlertIcon />
-              <AlertTitle>
-                {conflicts.length > 0
-                  ? "Reservation conflict"
-                  : "Event not saved"}
-              </AlertTitle>
-              <AlertDescription>
-                {validationError ?? errorMessage}
-                {conflicts.length > 0 ? (
-                  <div className="mt-3">
-                    <MaintenanceConflictList conflicts={conflicts} />
-                  </div>
-                ) : null}
-              </AlertDescription>
-            </Alert>
-          ) : null}
+        <form
+          className="min-h-0 flex-1 overflow-y-auto pr-1"
+          id="maintenance-event-form"
+          onSubmit={submit}
+        >
+          <div className="flex flex-col gap-6 pb-2">
+            {validationError || errorMessage ? (
+              <Alert variant="destructive">
+                <CircleAlertIcon />
+                <AlertTitle>
+                  {conflicts.length > 0
+                    ? "Reservation conflict"
+                    : "Event not saved"}
+                </AlertTitle>
+                <AlertDescription>
+                  {validationError ?? errorMessage}
+                  {conflicts.length > 0 ? (
+                    <div className="mt-3">
+                      <MaintenanceConflictList conflicts={conflicts} />
+                    </div>
+                  ) : null}
+                </AlertDescription>
+              </Alert>
+            ) : null}
 
-          <FieldGroup>
-            <Field>
-              <FieldLabel htmlFor="maintenance-name">Event name</FieldLabel>
-              <Input
-                autoComplete="off"
-                id="maintenance-name"
-                onChange={(eventObject) =>
-                  update("name", eventObject.target.value)
-                }
-                placeholder="Router firmware window"
-                required
-                value={form.name}
-              />
-            </Field>
-
-            <Field>
-              <FieldLabel htmlFor="maintenance-description">
-                Description
-              </FieldLabel>
-              <Textarea
-                id="maintenance-description"
-                onChange={(eventObject) =>
-                  update("description", eventObject.target.value)
-                }
-                placeholder="What changes during this window?"
-                value={form.description}
-              />
-            </Field>
-
-            <div className="grid gap-4 sm:grid-cols-2">
+            <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="maintenance-timezone">Timezone</FieldLabel>
+                <FieldLabel htmlFor="maintenance-name">Event name</FieldLabel>
                 <Input
-                  id="maintenance-timezone"
+                  autoComplete="off"
+                  id="maintenance-name"
                   onChange={(eventObject) =>
-                    update("timezone", eventObject.target.value)
+                    update("name", eventObject.target.value)
                   }
-                  placeholder="Europe/London"
-                  value={form.timezone}
+                  placeholder="Router firmware window"
+                  required
+                  value={form.name}
                 />
-                <FieldDescription>
-                  Used for recurrence and daylight-saving expansion.
-                </FieldDescription>
               </Field>
-              {!event ? (
-                <Field>
-                  <FieldLabel htmlFor="maintenance-state">
-                    Initial state
-                  </FieldLabel>
-                  <Select
-                    onValueChange={(value) => {
-                      if (value === "draft" || value === "scheduled")
-                        update("state", value);
-                    }}
-                    value={form.state}
-                  >
-                    <SelectTrigger id="maintenance-state">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="scheduled">Scheduled</SelectItem>
-                      <SelectItem value="draft">Draft</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
-              ) : null}
-            </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
               <Field>
-                <FieldLabel htmlFor="maintenance-start">Start</FieldLabel>
-                <LocalDateTimePicker
-                  id="maintenance-start"
-                  label="Start"
-                  onChange={(value) => update("start", value)}
-                  value={form.start}
+                <FieldLabel htmlFor="maintenance-description">
+                  Description
+                </FieldLabel>
+                <Textarea
+                  id="maintenance-description"
+                  onChange={(eventObject) =>
+                    update("description", eventObject.target.value)
+                  }
+                  placeholder="What changes during this window?"
+                  value={form.description}
                 />
               </Field>
-              <Field>
-                <FieldLabel htmlFor="maintenance-end">End</FieldLabel>
-                <LocalDateTimePicker
-                  id="maintenance-end"
-                  label="End"
-                  onChange={(value) => update("end", value)}
-                  value={form.end}
-                />
-              </Field>
-            </div>
 
-            <section
-              aria-labelledby="maintenance-recurrence-title"
-              className="flex flex-col gap-3 rounded-lg border p-4"
-            >
-              <div>
-                <h3
-                  className="text-sm font-medium"
-                  id="maintenance-recurrence-title"
-                >
-                  Recurrence
-                </h3>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Build a common schedule, or enter an advanced RRULE. Expansion
-                  horizon is 90 days.
-                </p>
-              </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field>
-                  <FieldLabel htmlFor="maintenance-recurrence-mode">
-                    Recurrence input mode
+                  <FieldLabel htmlFor="maintenance-timezone">
+                    Timezone
                   </FieldLabel>
-                  <Select
-                    onValueChange={switchRecurrenceMode}
-                    value={recurrenceMode}
-                  >
-                    <SelectTrigger id="maintenance-recurrence-mode">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="guided">Guided builder</SelectItem>
-                      <SelectItem value="advanced">Advanced RRULE</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Input
+                    id="maintenance-timezone"
+                    onChange={(eventObject) =>
+                      update("timezone", eventObject.target.value)
+                    }
+                    placeholder="Europe/London"
+                    value={form.timezone}
+                  />
+                  <FieldDescription>
+                    Used for recurrence and daylight-saving expansion.
+                  </FieldDescription>
+                </Field>
+                {!event ? (
+                  <Field>
+                    <FieldLabel htmlFor="maintenance-state">
+                      Initial state
+                    </FieldLabel>
+                    <Select
+                      onValueChange={(value) => {
+                        if (value === "draft" || value === "scheduled")
+                          update("state", value);
+                      }}
+                      value={form.state}
+                    >
+                      <SelectTrigger id="maintenance-state">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="scheduled">Scheduled</SelectItem>
+                        <SelectItem value="draft">Draft</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                ) : null}
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field>
+                  <FieldLabel htmlFor="maintenance-start">Start</FieldLabel>
+                  <LocalDateTimePicker
+                    id="maintenance-start"
+                    label="Start"
+                    onChange={(value) => update("start", value)}
+                    value={form.start}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="maintenance-end">End</FieldLabel>
+                  <LocalDateTimePicker
+                    id="maintenance-end"
+                    label="End"
+                    onChange={(value) => update("end", value)}
+                    value={form.end}
+                  />
                 </Field>
               </div>
-              {recurrenceMode === "guided" ? (
-                <div className="flex flex-col gap-4">
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <Field>
-                      <FieldLabel htmlFor="maintenance-recurrence-frequency">
-                        Frequency
-                      </FieldLabel>
-                      <Select
-                        onValueChange={(value) => {
-                          if (value === "none") {
-                            updateGuidedRecurrence({ frequency: "" });
-                          } else if (
-                            RECURRENCE_FREQUENCIES.includes(
-                              value as RecurrenceFrequency,
-                            )
-                          ) {
-                            updateGuidedRecurrence({
-                              frequency: value as RecurrenceFrequency,
-                            });
-                          }
-                        }}
-                        value={guidedRecurrence.frequency || "none"}
-                      >
-                        <SelectTrigger
-                          aria-label="Recurrence frequency"
-                          id="maintenance-recurrence-frequency"
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="none">Does not repeat</SelectItem>
-                          {RECURRENCE_FREQUENCIES.map((frequency) => (
-                            <SelectItem key={frequency} value={frequency}>
-                              {frequency[0] + frequency.slice(1).toLowerCase()}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </Field>
-                    {guidedRecurrence.frequency ? (
-                      <Field>
-                        <FieldLabel htmlFor="maintenance-recurrence-interval">
-                          Repeat every
-                        </FieldLabel>
-                        <div className="flex items-center gap-2">
-                          <Input
-                            aria-label="Repeat every"
-                            id="maintenance-recurrence-interval"
-                            min="1"
-                            onChange={(eventObject) =>
-                              updateGuidedRecurrence({
-                                interval: eventObject.target.value,
-                              })
-                            }
-                            type="number"
-                            value={guidedRecurrence.interval}
-                          />
-                          <span className="text-sm text-muted-foreground">
-                            {guidedRecurrence.frequency.toLowerCase()}
-                          </span>
-                        </div>
-                      </Field>
-                    ) : null}
-                  </div>
-                  {guidedRecurrence.frequency === "WEEKLY" ? (
-                    <fieldset className="grid gap-2">
-                      <legend className="text-sm font-medium">
-                        Days of week
-                      </legend>
-                      <div className="flex flex-wrap gap-3">
-                        {RECURRENCE_WEEKDAYS.map(([code, label]) => (
-                          <label
-                            className="flex items-center gap-2 text-sm"
-                            key={code}
-                          >
-                            <Checkbox
-                              aria-label={label}
-                              checked={guidedRecurrence.weekdays.includes(code)}
-                              onCheckedChange={(checked) =>
-                                updateGuidedRecurrence({
-                                  weekdays:
-                                    checked === true
-                                      ? [...guidedRecurrence.weekdays, code]
-                                      : guidedRecurrence.weekdays.filter(
-                                          (day) => day !== code,
-                                        ),
-                                })
-                              }
-                            />
-                            {label}
-                          </label>
-                        ))}
-                      </div>
-                    </fieldset>
-                  ) : null}
-                  {guidedRecurrence.frequency ? (
+
+              <section
+                aria-labelledby="maintenance-recurrence-title"
+                className="flex flex-col gap-3 rounded-lg border p-4"
+              >
+                <div>
+                  <h3
+                    className="text-sm font-medium"
+                    id="maintenance-recurrence-title"
+                  >
+                    Recurrence
+                  </h3>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Build a common schedule, or enter an advanced RRULE.
+                    Expansion horizon is 90 days.
+                  </p>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field>
+                    <FieldLabel htmlFor="maintenance-recurrence-mode">
+                      Recurrence input mode
+                    </FieldLabel>
+                    <Select
+                      onValueChange={switchRecurrenceMode}
+                      value={recurrenceMode}
+                    >
+                      <SelectTrigger id="maintenance-recurrence-mode">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="guided">Guided builder</SelectItem>
+                        <SelectItem value="advanced">Advanced RRULE</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                </div>
+                {recurrenceMode === "guided" ? (
+                  <div className="flex flex-col gap-4">
                     <div className="grid gap-4 sm:grid-cols-2">
                       <Field>
-                        <FieldLabel htmlFor="maintenance-recurrence-end">
-                          Recurrence end
+                        <FieldLabel htmlFor="maintenance-recurrence-frequency">
+                          Frequency
                         </FieldLabel>
                         <Select
                           onValueChange={(value) => {
-                            if (value === "never" || value === "count") {
+                            if (value === "none") {
+                              updateGuidedRecurrence({ frequency: "" });
+                            } else if (
+                              RECURRENCE_FREQUENCIES.includes(
+                                value as RecurrenceFrequency,
+                              )
+                            ) {
                               updateGuidedRecurrence({
-                                end: value,
+                                frequency: value as RecurrenceFrequency,
                               });
                             }
                           }}
-                          value={guidedRecurrence.end}
+                          value={guidedRecurrence.frequency || "none"}
                         >
                           <SelectTrigger
-                            aria-label="Recurrence end"
-                            id="maintenance-recurrence-end"
+                            aria-label="Recurrence frequency"
+                            id="maintenance-recurrence-frequency"
                           >
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="never">Never ends</SelectItem>
-                            <SelectItem value="count">
-                              After a fixed number of occurrences
+                            <SelectItem value="none">
+                              Does not repeat
                             </SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                      {guidedRecurrence.end === "count" ? (
-                        <Field>
-                          <FieldLabel htmlFor="maintenance-recurrence-count">
-                            Occurrences
-                          </FieldLabel>
-                          <Input
-                            aria-label="Occurrences"
-                            id="maintenance-recurrence-count"
-                            min="1"
-                            onChange={(eventObject) =>
-                              updateGuidedRecurrence({
-                                count: eventObject.target.value,
-                              })
-                            }
-                            type="number"
-                            value={guidedRecurrence.count}
-                          />
-                        </Field>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  <p className="text-xs text-muted-foreground">
-                    Generated rule: {form.recurrence_rule || "One-time event"}
-                  </p>
-                </div>
-              ) : (
-                <Field>
-                  <FieldLabel htmlFor="maintenance-recurrence">
-                    Advanced recurrence rule
-                  </FieldLabel>
-                  <Input
-                    id="maintenance-recurrence"
-                    onChange={(eventObject) =>
-                      update("recurrence_rule", eventObject.target.value)
-                    }
-                    placeholder="FREQ=WEEKLY;BYDAY=SA"
-                    value={form.recurrence_rule}
-                  />
-                  <FieldDescription>
-                    Optional RRULE content for advanced schedules.
-                  </FieldDescription>
-                </Field>
-              )}
-            </section>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="flex flex-col justify-end gap-3 rounded-lg border p-3">
-                <div className="flex items-center justify-between gap-3">
-                  <Label htmlFor="maintenance-disruptive">
-                    Disruptive event
-                  </Label>
-                  <Switch
-                    checked={form.disruptive}
-                    id="maintenance-disruptive"
-                    onCheckedChange={(checked) => update("disruptive", checked)}
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Disruptive events use global one-at-a-time conflict policy
-                  when enabled.
-                </p>
-              </div>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field>
-                <FieldLabel htmlFor="maintenance-lead-in">
-                  Lead-in reservation (minutes)
-                </FieldLabel>
-                <Input
-                  id="maintenance-lead-in"
-                  min="0"
-                  onChange={(eventObject) =>
-                    update("lead_in_minutes", eventObject.target.value)
-                  }
-                  type="number"
-                  value={form.lead_in_minutes}
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="maintenance-cooldown">
-                  Cooldown reservation (minutes)
-                </FieldLabel>
-                <Input
-                  id="maintenance-cooldown"
-                  min="0"
-                  onChange={(eventObject) =>
-                    update("cooldown_minutes", eventObject.target.value)
-                  }
-                  type="number"
-                  value={form.cooldown_minutes}
-                />
-              </Field>
-            </div>
-          </FieldGroup>
-
-          <section
-            aria-labelledby="maintenance-resources-title"
-            className="flex flex-col gap-3 rounded-lg border p-4"
-          >
-            <div>
-              <h3
-                className="text-sm font-medium"
-                id="maintenance-resources-title"
-              >
-                Reserved resources
-              </h3>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Use a resource key such as network-core, or an entity kind and
-                UUID.
-              </p>
-            </div>
-            {form.resources.length === 0 ? (
-              <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-                No resources reserved.
-              </p>
-            ) : (
-              <div className="flex flex-col gap-3">
-                {form.resources.map((resource, index) => (
-                  <div
-                    className="rounded-lg border bg-muted/20 p-3"
-                    key={`${resource.role}-${index}`}
-                  >
-                    <div className="grid gap-3 sm:grid-cols-[10rem_9rem_minmax(0,1fr)_auto] sm:items-end">
-                      <Field>
-                        <FieldLabel
-                          htmlFor={`maintenance-resource-role-${index}`}
-                        >
-                          Role
-                        </FieldLabel>
-                        <Select
-                          onValueChange={(value) => {
-                            if (
-                              RESOURCE_ROLES.includes(
-                                value as FormResource["role"],
-                              )
-                            ) {
-                              setForm((current) => ({
-                                ...current,
-                                resources: current.resources.map(
-                                  (item, itemIndex) =>
-                                    itemIndex === index
-                                      ? {
-                                          ...item,
-                                          role: value as FormResource["role"],
-                                        }
-                                      : item,
-                                ),
-                              }));
-                            }
-                          }}
-                          value={resource.role}
-                        >
-                          <SelectTrigger
-                            id={`maintenance-resource-role-${index}`}
-                          >
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {RESOURCE_ROLES.map((role) => (
-                              <SelectItem key={role} value={role}>
-                                {role}
+                            {RECURRENCE_FREQUENCIES.map((frequency) => (
+                              <SelectItem key={frequency} value={frequency}>
+                                {frequency[0] +
+                                  frequency.slice(1).toLowerCase()}
                               </SelectItem>
                             ))}
                           </SelectContent>
                         </Select>
                       </Field>
-                      <Field>
-                        <FieldLabel
-                          htmlFor={`maintenance-resource-mode-${index}`}
-                        >
-                          Identifier
-                        </FieldLabel>
-                        <Select
-                          onValueChange={(value) => {
-                            if (value === "key" || value === "entity") {
-                              setForm((current) => ({
-                                ...current,
-                                resources: current.resources.map(
-                                  (item, itemIndex) =>
-                                    itemIndex === index
-                                      ? { ...item, mode: value }
-                                      : item,
-                                ),
-                              }));
-                            }
-                          }}
-                          value={resource.mode}
-                        >
-                          <SelectTrigger
-                            id={`maintenance-resource-mode-${index}`}
+                      {guidedRecurrence.frequency ? (
+                        <Field>
+                          <FieldLabel htmlFor="maintenance-recurrence-interval">
+                            Repeat every
+                          </FieldLabel>
+                          <div className="flex items-center gap-2">
+                            <Input
+                              aria-label="Repeat every"
+                              id="maintenance-recurrence-interval"
+                              min="1"
+                              onChange={(eventObject) =>
+                                updateGuidedRecurrence({
+                                  interval: eventObject.target.value,
+                                })
+                              }
+                              type="number"
+                              value={guidedRecurrence.interval}
+                            />
+                            <span className="text-sm text-muted-foreground">
+                              {guidedRecurrence.frequency.toLowerCase()}
+                            </span>
+                          </div>
+                        </Field>
+                      ) : null}
+                    </div>
+                    {guidedRecurrence.frequency === "WEEKLY" ? (
+                      <fieldset className="grid gap-2">
+                        <legend className="text-sm font-medium">
+                          Days of week
+                        </legend>
+                        <div className="flex flex-wrap gap-3">
+                          {RECURRENCE_WEEKDAYS.map(([code, label]) => (
+                            <label
+                              className="flex items-center gap-2 text-sm"
+                              key={code}
+                            >
+                              <Checkbox
+                                aria-label={label}
+                                checked={guidedRecurrence.weekdays.includes(
+                                  code,
+                                )}
+                                onCheckedChange={(checked) =>
+                                  updateGuidedRecurrence({
+                                    weekdays:
+                                      checked === true
+                                        ? [...guidedRecurrence.weekdays, code]
+                                        : guidedRecurrence.weekdays.filter(
+                                            (day) => day !== code,
+                                          ),
+                                  })
+                                }
+                              />
+                              {label}
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                    ) : null}
+                    {guidedRecurrence.frequency ? (
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <Field>
+                          <FieldLabel htmlFor="maintenance-recurrence-end">
+                            Recurrence end
+                          </FieldLabel>
+                          <Select
+                            onValueChange={(value) => {
+                              if (value === "never" || value === "count") {
+                                updateGuidedRecurrence({
+                                  end: value,
+                                });
+                              }
+                            }}
+                            value={guidedRecurrence.end}
                           >
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="key">Resource key</SelectItem>
-                            <SelectItem value="entity">Entity</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                      {resource.mode === "key" ? (
+                            <SelectTrigger
+                              aria-label="Recurrence end"
+                              id="maintenance-recurrence-end"
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="never">Never ends</SelectItem>
+                              <SelectItem value="count">
+                                After a fixed number of occurrences
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        {guidedRecurrence.end === "count" ? (
+                          <Field>
+                            <FieldLabel htmlFor="maintenance-recurrence-count">
+                              Occurrences
+                            </FieldLabel>
+                            <Input
+                              aria-label="Occurrences"
+                              id="maintenance-recurrence-count"
+                              min="1"
+                              onChange={(eventObject) =>
+                                updateGuidedRecurrence({
+                                  count: eventObject.target.value,
+                                })
+                              }
+                              type="number"
+                              value={guidedRecurrence.count}
+                            />
+                          </Field>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <p className="text-xs text-muted-foreground">
+                      Generated rule: {form.recurrence_rule || "One-time event"}
+                    </p>
+                  </div>
+                ) : (
+                  <Field>
+                    <FieldLabel htmlFor="maintenance-recurrence">
+                      Advanced recurrence rule
+                    </FieldLabel>
+                    <Input
+                      id="maintenance-recurrence"
+                      onChange={(eventObject) =>
+                        update("recurrence_rule", eventObject.target.value)
+                      }
+                      placeholder="FREQ=WEEKLY;BYDAY=SA"
+                      value={form.recurrence_rule}
+                    />
+                    <FieldDescription>
+                      Optional RRULE content for advanced schedules.
+                    </FieldDescription>
+                  </Field>
+                )}
+              </section>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="flex flex-col justify-end gap-3 rounded-lg border p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <Label htmlFor="maintenance-disruptive">
+                      Disruptive event
+                    </Label>
+                    <Switch
+                      checked={form.disruptive}
+                      id="maintenance-disruptive"
+                      onCheckedChange={(checked) =>
+                        update("disruptive", checked)
+                      }
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Disruptive events use global one-at-a-time conflict policy
+                    when enabled.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field>
+                  <FieldLabel htmlFor="maintenance-lead-in">
+                    Lead-in reservation (minutes)
+                  </FieldLabel>
+                  <Input
+                    id="maintenance-lead-in"
+                    min="0"
+                    onChange={(eventObject) =>
+                      update("lead_in_minutes", eventObject.target.value)
+                    }
+                    type="number"
+                    value={form.lead_in_minutes}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="maintenance-cooldown">
+                    Cooldown reservation (minutes)
+                  </FieldLabel>
+                  <Input
+                    id="maintenance-cooldown"
+                    min="0"
+                    onChange={(eventObject) =>
+                      update("cooldown_minutes", eventObject.target.value)
+                    }
+                    type="number"
+                    value={form.cooldown_minutes}
+                  />
+                </Field>
+              </div>
+            </FieldGroup>
+
+            <section
+              aria-labelledby="maintenance-resources-title"
+              className="flex flex-col gap-3 rounded-lg border p-4"
+            >
+              <div>
+                <h3
+                  className="text-sm font-medium"
+                  id="maintenance-resources-title"
+                >
+                  Reserved resources
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Use a resource key such as network-core, or an entity kind and
+                  UUID.
+                </p>
+              </div>
+              {form.resources.length === 0 ? (
+                <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                  No resources reserved.
+                </p>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {form.resources.map((resource, index) => (
+                    <div
+                      className="rounded-lg border bg-muted/20 p-3"
+                      key={`${resource.role}-${index}`}
+                    >
+                      <div className="grid gap-3 sm:grid-cols-[10rem_9rem_minmax(0,1fr)_auto] sm:items-end">
                         <Field>
                           <FieldLabel
-                            htmlFor={`maintenance-resource-key-${index}`}
+                            htmlFor={`maintenance-resource-role-${index}`}
                           >
-                            Resource key
+                            Role
                           </FieldLabel>
-                          <Input
-                            id={`maintenance-resource-key-${index}`}
-                            onChange={(eventObject) =>
-                              updateResource(setForm, index, {
-                                key: eventObject.target.value,
-                              })
-                            }
-                            placeholder="network-core"
-                            value={resource.key}
-                          />
+                          <Select
+                            onValueChange={(value) => {
+                              if (
+                                RESOURCE_ROLES.includes(
+                                  value as FormResource["role"],
+                                )
+                              ) {
+                                setForm((current) => ({
+                                  ...current,
+                                  resources: current.resources.map(
+                                    (item, itemIndex) =>
+                                      itemIndex === index
+                                        ? {
+                                            ...item,
+                                            role: value as FormResource["role"],
+                                          }
+                                        : item,
+                                  ),
+                                }));
+                              }
+                            }}
+                            value={resource.role}
+                          >
+                            <SelectTrigger
+                              id={`maintenance-resource-role-${index}`}
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {RESOURCE_ROLES.map((role) => (
+                                <SelectItem key={role} value={role}>
+                                  {role}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
                         </Field>
-                      ) : (
-                        <div className="grid gap-3 sm:grid-cols-2">
+                        <Field>
+                          <FieldLabel
+                            htmlFor={`maintenance-resource-mode-${index}`}
+                          >
+                            Identifier
+                          </FieldLabel>
+                          <Select
+                            onValueChange={(value) => {
+                              if (value === "key" || value === "entity") {
+                                setForm((current) => ({
+                                  ...current,
+                                  resources: current.resources.map(
+                                    (item, itemIndex) =>
+                                      itemIndex === index
+                                        ? { ...item, mode: value }
+                                        : item,
+                                  ),
+                                }));
+                              }
+                            }}
+                            value={resource.mode}
+                          >
+                            <SelectTrigger
+                              id={`maintenance-resource-mode-${index}`}
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="key">Resource key</SelectItem>
+                              <SelectItem value="entity">Entity</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                        {resource.mode === "key" ? (
                           <Field>
                             <FieldLabel
-                              htmlFor={`maintenance-resource-kind-${index}`}
+                              htmlFor={`maintenance-resource-key-${index}`}
                             >
-                              Kind
+                              Resource key
                             </FieldLabel>
                             <Input
-                              id={`maintenance-resource-kind-${index}`}
+                              id={`maintenance-resource-key-${index}`}
                               onChange={(eventObject) =>
                                 updateResource(setForm, index, {
-                                  kind: eventObject.target.value,
+                                  key: eventObject.target.value,
                                 })
                               }
-                              placeholder="devices"
-                              value={resource.kind}
+                              placeholder="network-core"
+                              value={resource.key}
                             />
                           </Field>
-                          <Field>
-                            <FieldLabel
-                              htmlFor={`maintenance-resource-id-${index}`}
-                            >
-                              UUID
-                            </FieldLabel>
-                            <Input
-                              id={`maintenance-resource-id-${index}`}
-                              onChange={(eventObject) =>
-                                updateResource(setForm, index, {
-                                  id: eventObject.target.value,
-                                })
-                              }
-                              placeholder="00000000-0000-0000-0000-000000000000"
-                              value={resource.id}
-                            />
-                          </Field>
-                        </div>
-                      )}
-                      <Button
-                        aria-label={`Remove resource ${index + 1}`}
-                        onClick={() =>
-                          setForm((current) => ({
-                            ...current,
-                            resources: current.resources.filter(
-                              (_, itemIndex) => itemIndex !== index,
-                            ),
-                          }))
-                        }
-                        size="icon-sm"
-                        type="button"
-                        variant="ghost"
-                      >
-                        <Trash2Icon data-icon="inline-start" />
-                      </Button>
+                        ) : (
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <Field>
+                              <FieldLabel
+                                htmlFor={`maintenance-resource-kind-${index}`}
+                              >
+                                Kind
+                              </FieldLabel>
+                              <Input
+                                id={`maintenance-resource-kind-${index}`}
+                                onChange={(eventObject) =>
+                                  updateResource(setForm, index, {
+                                    kind: eventObject.target.value,
+                                  })
+                                }
+                                placeholder="devices"
+                                value={resource.kind}
+                              />
+                            </Field>
+                            <Field>
+                              <FieldLabel
+                                htmlFor={`maintenance-resource-id-${index}`}
+                              >
+                                UUID
+                              </FieldLabel>
+                              <Input
+                                id={`maintenance-resource-id-${index}`}
+                                onChange={(eventObject) =>
+                                  updateResource(setForm, index, {
+                                    id: eventObject.target.value,
+                                  })
+                                }
+                                placeholder="00000000-0000-0000-0000-000000000000"
+                                value={resource.id}
+                              />
+                            </Field>
+                          </div>
+                        )}
+                        <Button
+                          aria-label={`Remove resource ${index + 1}`}
+                          onClick={() =>
+                            setForm((current) => ({
+                              ...current,
+                              resources: current.resources.filter(
+                                (_, itemIndex) => itemIndex !== index,
+                              ),
+                            }))
+                          }
+                          size="icon-sm"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <Trash2Icon data-icon="inline-start" />
+                        </Button>
+                      </div>
+                      <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+                        <Checkbox
+                          checked={resource.expected_failure}
+                          id={`maintenance-resource-expected-failure-${index}`}
+                          onCheckedChange={(checked) =>
+                            updateResource(setForm, index, {
+                              expected_failure: checked === true,
+                            })
+                          }
+                        />
+                        <Label
+                          htmlFor={`maintenance-resource-expected-failure-${index}`}
+                        >
+                          Expected monitor failure during reservation
+                        </Label>
+                      </div>
                     </div>
-                    <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-                      <Checkbox
-                        checked={resource.expected_failure}
-                        id={`maintenance-resource-expected-failure-${index}`}
-                        onCheckedChange={(checked) =>
-                          updateResource(setForm, index, {
-                            expected_failure: checked === true,
-                          })
-                        }
-                      />
-                      <Label
-                        htmlFor={`maintenance-resource-expected-failure-${index}`}
-                      >
-                        Expected monitor failure during reservation
-                      </Label>
-                    </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
+              )}
+              <Button
+                className="self-start"
+                onClick={() =>
+                  setForm((current) => ({
+                    ...current,
+                    resources: [
+                      ...current.resources,
+                      {
+                        role: "affected",
+                        mode: "key",
+                        key: "",
+                        kind: "",
+                        id: "",
+                        expected_failure: true,
+                      },
+                    ],
+                  }))
+                }
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <PlusIcon data-icon="inline-start" />
+                Add resource
+              </Button>
+            </section>
+
+            <FieldGroup>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field>
+                  <FieldLabel htmlFor="maintenance-owner">Owner</FieldLabel>
+                  <Input
+                    id="maintenance-owner"
+                    onChange={(eventObject) =>
+                      update("owner", eventObject.target.value)
+                    }
+                    value={form.owner}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="maintenance-source">Source</FieldLabel>
+                  <Input
+                    id="maintenance-source"
+                    onChange={(eventObject) =>
+                      update("source", eventObject.target.value)
+                    }
+                    placeholder="operator"
+                    value={form.source}
+                  />
+                </Field>
               </div>
-            )}
-            <Button
-              className="self-start"
-              onClick={() =>
-                setForm((current) => ({
-                  ...current,
-                  resources: [
-                    ...current.resources,
-                    {
-                      role: "affected",
-                      mode: "key",
-                      key: "",
-                      kind: "",
-                      id: "",
-                      expected_failure: true,
-                    },
-                  ],
-                }))
-              }
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <PlusIcon data-icon="inline-start" />
-              Add resource
-            </Button>
-          </section>
-
-          <FieldGroup>
-            <div className="grid gap-4 sm:grid-cols-2">
               <Field>
-                <FieldLabel htmlFor="maintenance-owner">Owner</FieldLabel>
-                <Input
-                  id="maintenance-owner"
+                <FieldLabel htmlFor="maintenance-notes">Notes</FieldLabel>
+                <Textarea
+                  id="maintenance-notes"
                   onChange={(eventObject) =>
-                    update("owner", eventObject.target.value)
+                    update("notes", eventObject.target.value)
                   }
-                  value={form.owner}
+                  value={form.notes}
                 />
               </Field>
               <Field>
-                <FieldLabel htmlFor="maintenance-source">Source</FieldLabel>
-                <Input
-                  id="maintenance-source"
+                <FieldLabel htmlFor="maintenance-links">Links</FieldLabel>
+                <Textarea
+                  id="maintenance-links"
                   onChange={(eventObject) =>
-                    update("source", eventObject.target.value)
+                    update("links", eventObject.target.value)
                   }
-                  placeholder="operator"
-                  value={form.source}
+                  placeholder="One URL per line"
+                  value={form.links}
                 />
               </Field>
-            </div>
-            <Field>
-              <FieldLabel htmlFor="maintenance-notes">Notes</FieldLabel>
-              <Textarea
-                id="maintenance-notes"
-                onChange={(eventObject) =>
-                  update("notes", eventObject.target.value)
-                }
-                value={form.notes}
-              />
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="maintenance-links">Links</FieldLabel>
-              <Textarea
-                id="maintenance-links"
-                onChange={(eventObject) =>
-                  update("links", eventObject.target.value)
-                }
-                placeholder="One URL per line"
-                value={form.links}
-              />
-            </Field>
-          </FieldGroup>
-
-          <DialogFooter>
-            <Button
-              onClick={() => onOpenChange(false)}
-              type="button"
-              variant="outline"
-            >
-              Cancel
-            </Button>
-            <Button disabled={pending} type="submit">
-              {pending ? "Saving…" : event ? "Save changes" : "Create event"}
-            </Button>
-          </DialogFooter>
+            </FieldGroup>
+          </div>
         </form>
+        <DialogFooter className="shrink-0">
+          <Button
+            onClick={() => onOpenChange(false)}
+            type="button"
+            variant="outline"
+          >
+            Cancel
+          </Button>
+          <Button
+            disabled={pending}
+            form="maintenance-event-form"
+            type="submit"
+          >
+            {pending ? "Saving…" : event ? "Save changes" : "Create event"}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

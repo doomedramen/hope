@@ -10,6 +10,7 @@ import {
 import { useState } from "react";
 import {
   fetchServiceReviews,
+  getUserFacingError,
   resolveServiceReview,
   type FingerprintCandidate,
   type ServiceReviewItem,
@@ -118,9 +119,10 @@ export function ServiceReviewQueue() {
             <CircleAlertIcon />
             <AlertTitle>Review queue unavailable</AlertTitle>
             <AlertDescription>
-              {reviewsQuery.error instanceof Error
-                ? reviewsQuery.error.message
-                : "The service review queue could not be loaded."}
+              {getUserFacingError(
+                reviewsQuery.error,
+                "The service review queue could not be loaded.",
+              )}
             </AlertDescription>
             <Button
               onClick={() => reviewsQuery.refetch()}
@@ -170,9 +172,7 @@ export function ServiceReviewQueue() {
             <CircleAlertIcon />
             <AlertTitle>Decision was not saved</AlertTitle>
             <AlertDescription>
-              {resolveMutation.error instanceof Error
-                ? resolveMutation.error.message
-                : "Try again."}
+              {getUserFacingError(resolveMutation.error, "Try again.")}
             </AlertDescription>
           </Alert>
         </div>

@@ -758,6 +758,50 @@ export class MaintenanceApiError extends ApiError {
   }
 }
 
+const TECHNICAL_ERROR_PATTERNS = [
+  /\bdatabase\b/i,
+  /\bsql\b/i,
+  /\bsyntax error\b/i,
+  /\binternal server error\b/i,
+  /\btraceback\b/i,
+  /\bstack trace\b/i,
+  /\bpanic\b/i,
+  /\bat [^\s]+:\d+(?::\d+)?\b/i,
+];
+
+/**
+ * Convert request failures and server-provided error fields into copy that is
+ * safe to show to an operator. Detailed failures stay available in logs and
+ * developer tooling, never in the primary UI surface.
+ */
+export function getUserFacingError(
+  error: unknown,
+  fallback = "Something went wrong. Please try again.",
+): string {
+  const message =
+    error instanceof ApiError || typeof error === "string"
+      ? error instanceof ApiError
+        ? error.message
+        : error
+      : null;
+
+  if (
+    !message ||
+    TECHNICAL_ERROR_PATTERNS.some((pattern) => pattern.test(message))
+  ) {
+    return fallback;
+  }
+
+  // Do not disclose unexpected server failures, even when the backend sends a
+  // technically readable message. Client errors are intentionally allowed to
+  // explain validation and permission problems near the affected action.
+  if (error instanceof ApiError && error.status >= 500) {
+    return fallback;
+  }
+
+  return message;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body) {

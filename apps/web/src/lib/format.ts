@@ -6,6 +6,7 @@ export function labelize(value: string): string {
   return value
     .replaceAll("_", " ")
     .replaceAll("-", " ")
+    .replaceAll(".", " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
@@ -53,4 +54,33 @@ export function displayValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+export function formatEvidenceValue(value: unknown): string {
+  return formatReadableValue(value);
+}
+
+function formatReadableValue(value: unknown, depth = 0): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (depth >= 3) {
+    return Array.isArray(value)
+      ? `${value.length} items`
+      : `${Object.keys(value as Record<string, unknown>).length} fields`;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => formatReadableValue(item, depth + 1)).join(", ");
+  }
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(
+        ([key, item]) =>
+          `${labelize(key)}: ${formatReadableValue(item, depth + 1)}`,
+      )
+      .join(" · ");
+  }
+  return String(value);
 }

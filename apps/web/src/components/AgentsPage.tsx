@@ -24,6 +24,7 @@ import {
   createAgentEnrollment,
   fetchAgent,
   fetchAgents,
+  getUserFacingError,
   type Agent,
   type AgentContainerInventory,
   type AgentDetail,
@@ -102,6 +103,8 @@ export function AgentsPage() {
     refetchInterval: 15_000,
   });
   const agents = agentsQuery.data?.items ?? EMPTY_AGENTS;
+  const isEmptyState =
+    !agentsQuery.isLoading && !agentsQuery.isError && agents.length === 0;
   const selectedAgentId = agents.some((agent) => agent.id === requestedAgentId)
     ? requestedAgentId
     : (agents[0]?.id ?? null);
@@ -155,59 +158,67 @@ export function AgentsPage() {
             <RefreshCwIcon data-icon="inline-start" />
             Refresh
           </Button>
-          <Button onClick={() => setEnrollmentOpen(true)} size="sm">
-            <DownloadIcon data-icon="inline-start" />
-            Enroll agent
-          </Button>
+          {!isEmptyState ? (
+            <Button onClick={() => setEnrollmentOpen(true)} size="sm">
+              <DownloadIcon data-icon="inline-start" />
+              Enroll agent
+            </Button>
+          ) : null}
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard
-          detail="Enrolled agents"
-          icon={<ServerIcon />}
-          label="Enrolled"
-          value={agents.length}
-        />
-        <MetricCard
-          detail="Heartbeat within threshold"
-          icon={<ActivityIcon />}
-          label="Online"
-          value={onlineCount}
-        />
-        <MetricCard
-          detail="Heartbeat is delayed"
-          icon={<Clock3Icon />}
-          label="Stale"
-          value={staleCount}
-        />
-        <MetricCard
-          detail="No current connection"
-          icon={<CircleAlertIcon />}
-          label="Offline"
-          value={offlineCount}
-        />
-      </div>
+      {!isEmptyState ? (
+        <div className="order-2 grid gap-4 sm:order-none sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard
+            detail="Enrolled agents"
+            icon={<ServerIcon />}
+            label="Enrolled"
+            value={agents.length}
+          />
+          <MetricCard
+            detail="Heartbeat within threshold"
+            icon={<ActivityIcon />}
+            label="Online"
+            value={onlineCount}
+          />
+          <MetricCard
+            detail="Heartbeat is delayed"
+            icon={<Clock3Icon />}
+            label="Stale"
+            value={staleCount}
+          />
+          <MetricCard
+            detail="No current connection"
+            icon={<CircleAlertIcon />}
+            label="Offline"
+            value={offlineCount}
+          />
+        </div>
+      ) : null}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.8fr)]">
+      <div className="order-1 grid gap-6 sm:order-none xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.8fr)]">
         <Card aria-busy={agentsQuery.isLoading} className="min-w-0">
           <CardHeader className="border-b max-sm:grid-cols-1">
             <CardTitle>Enrolled agents</CardTitle>
             <CardDescription>
-              {visibleAgents.length} shown of {agents.length}
+              {isEmptyState
+                ? "Enroll your first Linux agent to collect host inventory."
+                : `${visibleAgents.length} shown of ${agents.length}`}
             </CardDescription>
-            <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-stretch">
-              <div className="relative">
-                <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  aria-label="Search agents"
-                  className="w-full pl-8 sm:w-56"
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search agents"
-                  value={search}
-                />
-              </div>
-            </CardAction>
+            {!isEmptyState ? (
+              <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-stretch">
+                <div className="relative">
+                  <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    aria-label="Search agents"
+                    className="w-full pl-8 sm:w-56"
+                    onChange={(event) => setSearch(event.target.value)}
+                    placeholder="Search agents"
+                    value={search}
+                  />
+                </div>
+              </CardAction>
+            ) : null}
           </CardHeader>
           {agentsQuery.isLoading ? (
             <AgentListLoading />
@@ -335,9 +346,10 @@ function EnrollmentDialog({
             <CircleAlertIcon />
             <AlertTitle>Could not prepare the installer</AlertTitle>
             <AlertDescription>
-              {enrollmentMutation.error instanceof Error
-                ? enrollmentMutation.error.message
-                : "The server did not return an enrollment code."}
+              {getUserFacingError(
+                enrollmentMutation.error,
+                "The server did not return an enrollment code.",
+              )}
             </AlertDescription>
           </Alert>
         ) : installCommand && enrollment ? (
@@ -455,13 +467,12 @@ function AgentTable({
         {agents.map((agent) => (
           <TableRow
             aria-selected={agent.id === selectedAgentId}
-            className="cursor-pointer"
             data-state={agent.id === selectedAgentId ? "selected" : undefined}
             key={agent.id}
-            onClick={() => selectAgent(agent.id)}
           >
             <TableCell className="min-w-48">
               <button
+                aria-label={`Select ${agent.hostname || "agent"}`}
                 aria-pressed={agent.id === selectedAgentId}
                 className="flex min-w-0 w-full items-center gap-2 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                 onClick={() => selectAgent(agent.id)}
@@ -553,6 +564,7 @@ function AgentDetailPanel({
   }
 
   if (!detail || !selectedAgent) {
+    if (!loading && !error) return null;
     return (
       <Card>
         <CardContent>
@@ -1386,7 +1398,7 @@ function LoadError({
       <CircleAlertIcon />
       <AlertTitle>{title}</AlertTitle>
       <AlertDescription>
-        {error instanceof Error ? error.message : "Request failed."}
+        {getUserFacingError(error, "Request failed.")}
       </AlertDescription>
       {retry ? (
         <Button onClick={retry} size="sm" variant="outline">

@@ -22,6 +22,7 @@ import {
   fetchDevice,
   fetchDevices,
   fetchIdentitySuggestions,
+  getUserFacingError,
   mergeDevice,
   patchDevice,
   resolveIdentitySuggestion,
@@ -34,7 +35,7 @@ import {
   type IdentitySuggestion,
   type Network,
 } from "@/lib/api";
-import { displayValue, labelize, shortId } from "@/lib/format";
+import { formatEvidenceValue, labelize, shortId } from "@/lib/format";
 import {
   validateNetworkFields,
   type NetworkField,
@@ -291,7 +292,7 @@ export function InfrastructurePage() {
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="order-2 grid gap-4 sm:order-none sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           icon={<ServerIcon />}
           label="Devices"
@@ -318,7 +319,7 @@ export function InfrastructurePage() {
         />
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_25rem]">
+      <div className="order-1 grid gap-6 sm:order-none xl:grid-cols-[minmax(0,1fr)_25rem]">
         <Card aria-busy={devicesQuery.isLoading}>
           <CardHeader className="border-b max-sm:grid-cols-1">
             <CardTitle>Devices</CardTitle>
@@ -689,8 +690,8 @@ function DeviceDetail({
                     <p className="font-medium">
                       {labelize(evidence.attribute)}
                     </p>
-                    <p className="truncate text-xs text-muted-foreground">
-                      {displayValue(evidence.value)}
+                    <p className="break-words text-sm leading-5 text-muted-foreground">
+                      {formatEvidenceValue(evidence.value)}
                     </p>
                   </div>
                   <div className="shrink-0 text-right text-xs">
@@ -1450,7 +1451,7 @@ function MutationError({ error }: { error: unknown }) {
       <CircleAlertIcon />
       <AlertTitle>Action failed</AlertTitle>
       <AlertDescription>
-        {error instanceof Error ? error.message : "Try again."}
+        {getUserFacingError(error, "Try again.")}
       </AlertDescription>
     </Alert>
   );
@@ -1470,7 +1471,7 @@ function LoadError({
       <CircleAlertIcon />
       <AlertTitle>{title}</AlertTitle>
       <AlertDescription>
-        {error instanceof Error ? error.message : "Try again."}
+        {getUserFacingError(error, "Try again.")}
       </AlertDescription>
       {retry ? (
         <Button onClick={retry} size="sm" variant="outline">

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { ArrowRightIcon, KeyRoundIcon, ShieldCheckIcon } from "lucide-react";
-import { login, setupAdmin } from "@/lib/api";
+import { getUserFacingError, login, setupAdmin } from "@/lib/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -43,9 +43,7 @@ export function AuthPanel({
       await login({ email, password });
       onAuthenticated();
     } catch (caught) {
-      setError(
-        caught instanceof Error ? caught.message : "Authentication failed.",
-      );
+      setError(getUserFacingError(caught, "Authentication failed."));
     } finally {
       setIsBusy(false);
     }

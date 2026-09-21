@@ -24,7 +24,36 @@ import {
   testNotificationChannel,
   deleteNotificationChannel,
   ApiError,
+  getUserFacingError,
 } from "./api";
+
+describe("getUserFacingError", () => {
+  it("hides technical server details", () => {
+    expect(
+      getUserFacingError(
+        new ApiError(
+          500,
+          "error returned from database: syntax error at or near '='",
+        ),
+        "Dashboard data is unavailable.",
+      ),
+    ).toBe("Dashboard data is unavailable.");
+  });
+
+  it("keeps actionable client validation messages", () => {
+    expect(
+      getUserFacingError(
+        new ApiError(400, "Please correct the highlighted network fields."),
+      ),
+    ).toBe("Please correct the highlighted network fields.");
+  });
+
+  it("does not expose arbitrary Error messages", () => {
+    expect(getUserFacingError(new Error("request internals"))).toBe(
+      "Something went wrong. Please try again.",
+    );
+  });
+});
 
 describe("fetchHealthReady", () => {
   afterEach(() => {

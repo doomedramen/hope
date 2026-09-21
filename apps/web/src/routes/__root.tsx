@@ -1,5 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, Outlet, createRootRoute } from "@tanstack/react-router";
+import {
+  Link,
+  Outlet,
+  createRootRoute,
+  useRouterState,
+} from "@tanstack/react-router";
 import {
   ActivityIcon,
   CalendarDaysIcon,
@@ -12,9 +17,25 @@ import {
   Settings2Icon,
   ShieldCheckIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AuthPanel } from "@/components/AuthPanel";
 import { HealthIndicator } from "@/components/HealthIndicator";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+  SidebarTrigger,
+  useSidebar,
+} from "@/components/ui/sidebar";
 import { ApiError, fetchDevices, fetchSetupStatus } from "@/lib/api";
 
 const NAV_ITEMS = [
@@ -34,6 +55,11 @@ export const Route = createRootRoute({
 
 function RootLayout() {
   const queryClient = useQueryClient();
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+  const mainContentRef = useRef<HTMLDivElement>(null);
+  const previousPathname = useRef(pathname);
   const [authenticatedThisVisit, setAuthenticatedThisVisit] = useState(false);
   const sessionQuery = useQuery({
     queryKey: ["session-probe"],
@@ -49,6 +75,12 @@ function RootLayout() {
   });
   const requiresLogin =
     sessionQuery.error instanceof ApiError && sessionQuery.error.status === 401;
+
+  useEffect(() => {
+    if (previousPathname.current === pathname) return;
+    previousPathname.current = pathname;
+    mainContentRef.current?.focus();
+  }, [pathname]);
 
   if (
     (sessionQuery.isLoading || setupQuery.isLoading) &&
@@ -86,99 +118,118 @@ function RootLayout() {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <SidebarProvider>
       <a
         className="fixed top-2 left-4 z-50 -translate-y-16 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground transition-transform focus:translate-y-0 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
         href="#main-content"
       >
         Skip to content
       </a>
-      <div className="flex min-h-screen">
-        <aside className="hidden w-60 shrink-0 border-r bg-sidebar p-4 text-sidebar-foreground md:flex md:flex-col">
+      <AppSidebar />
+      <SidebarInset>
+        <header className="flex h-14 items-center gap-2 border-b bg-card/70 px-4 md:px-8">
+          <SidebarTrigger />
           <Link
             aria-label="Hope overview"
-            className="mb-8 flex items-center gap-2 rounded-lg px-2 text-lg font-semibold tracking-tight outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="rounded-lg font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50 md:hidden"
             to="/"
           >
-            <span className="grid size-8 place-items-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-              <ShieldCheckIcon aria-hidden="true" className="size-4" />
-            </span>
             Hope
           </Link>
-          {renderPrimaryNavigation()}
-          <div className="border-t pt-4">
-            <HealthIndicator />
-          </div>
-        </aside>
-        <div className="flex min-w-0 flex-1 flex-col">
-          <header className="flex h-14 items-center justify-between border-b px-5 md:hidden">
-            <Link
-              aria-label="Hope overview"
-              className="rounded-lg font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-              to="/"
-            >
-              Hope
-            </Link>
-            <HealthIndicator />
-          </header>
-          {renderPrimaryNavigation({ mobile: true })}
-          <header className="hidden h-14 items-center justify-end border-b bg-card/70 px-8 md:flex">
+          <div className="ml-auto flex items-center gap-3">
+            <div className="md:hidden">
+              <HealthIndicator />
+            </div>
             <Link
               aria-label="Search devices"
-              className="flex h-8 w-full max-w-sm items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+              className="hidden h-8 w-full max-w-sm items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50 md:flex"
               search={{ focus: "search" }}
               to="/devices"
             >
               <SearchIcon aria-hidden="true" className="size-4" />
               Search devices
             </Link>
-          </header>
-          <main
-            className="min-w-0 flex-1 scroll-mt-4 p-4 sm:p-5 md:p-8"
-            id="main-content"
-            tabIndex={-1}
-          >
-            <Outlet />
-          </main>
+          </div>
+        </header>
+        <div
+          className="min-w-0 flex-1 scroll-mt-4 p-4 outline-none sm:p-5 md:p-8"
+          id="main-content"
+          ref={mainContentRef}
+          tabIndex={-1}
+        >
+          <Outlet />
         </div>
-      </div>
-    </div>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }
 
-function renderPrimaryNavigation({
-  mobile = false,
-}: { mobile?: boolean } = {}) {
+function AppSidebar() {
+  const { isMobile, setOpenMobile } = useSidebar();
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+
   return (
-    <nav
-      aria-label="Primary navigation"
-      className={
-        mobile
-          ? "grid grid-cols-2 gap-1 border-b px-3 py-2 md:hidden"
-          : "flex flex-1 flex-col gap-1"
-      }
-    >
-      {NAV_ITEMS.map((item) => {
-        const Icon = item.icon;
-        return (
-          <Link
-            activeProps={{
-              "aria-current": "page",
-              className: "bg-sidebar-accent text-sidebar-accent-foreground",
-            }}
-            className={
-              mobile
-                ? "flex min-h-10 items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
-                : "flex min-h-10 items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-sidebar-foreground/70 outline-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
-            }
-            key={item.to}
-            to={item.to}
-          >
-            <Icon aria-hidden="true" className="size-4 shrink-0" />
-            {item.label}
-          </Link>
-        );
-      })}
-    </nav>
+    <Sidebar collapsible="icon">
+      <SidebarHeader>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              render={<Link aria-label="Hope overview" to="/" />}
+              size="lg"
+              tooltip="Hope overview"
+            >
+              <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+                <ShieldCheckIcon aria-hidden="true" className="size-4" />
+              </span>
+              <span className="font-semibold tracking-tight group-data-[collapsible=icon]/menu-button:hidden">
+                Hope
+              </span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarHeader>
+      <SidebarContent>
+        <SidebarGroup>
+          <SidebarGroupLabel>Workspace</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {NAV_ITEMS.map((item) => {
+                const Icon = item.icon;
+                const isActive =
+                  item.to === "/"
+                    ? pathname === "/"
+                    : pathname === item.to ||
+                      pathname.startsWith(`${item.to}/`);
+                return (
+                  <SidebarMenuItem key={item.to}>
+                    <SidebarMenuButton
+                      isActive={isActive}
+                      onClick={() => {
+                        if (isMobile) setOpenMobile(false);
+                      }}
+                      render={
+                        <Link
+                          activeProps={{ "aria-current": "page" }}
+                          to={item.to}
+                        />
+                      }
+                      tooltip={item.label}
+                    >
+                      <Icon aria-hidden="true" />
+                      <span>{item.label}</span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+      </SidebarContent>
+      <SidebarFooter>
+        <HealthIndicator />
+      </SidebarFooter>
+    </Sidebar>
   );
 }

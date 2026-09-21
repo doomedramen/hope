@@ -17,6 +17,7 @@ import {
   fetchDiscoveryState,
   fetchNetworkScans,
   fetchScanRun,
+  getUserFacingError,
   launchNetworkScan,
   type DiscoveryScope,
   type Network,
@@ -907,9 +908,10 @@ export function ScanLaunch({
           <CircleAlertIcon />
           <AlertTitle>Scan cancellation failed</AlertTitle>
           <AlertDescription>
-            {cancelMutation.error instanceof Error
-              ? cancelMutation.error.message
-              : "Server returned no cancellation error details."}
+            {getUserFacingError(
+              cancelMutation.error,
+              "The scan cancellation request failed.",
+            )}
           </AlertDescription>
         </Alert>
       ) : null}
@@ -918,9 +920,10 @@ export function ScanLaunch({
           <CircleAlertIcon />
           <AlertTitle>Scan status update failed</AlertTitle>
           <AlertDescription>
-            {runQuery.error instanceof Error
-              ? runQuery.error.message
-              : "Server returned no scan status error details."}
+            {getUserFacingError(
+              runQuery.error,
+              "The scan status could not be refreshed.",
+            )}
           </AlertDescription>
         </Alert>
       ) : null}
@@ -1070,7 +1073,12 @@ function ScanJobDetails({ run }: { run: ScanRun }) {
         </div>
       </dl>
       {job.last_error ? (
-        <p className="mt-3 text-xs text-destructive">{job.last_error}</p>
+        <p className="mt-3 text-xs text-destructive">
+          {getUserFacingError(
+            job.last_error,
+            "The scan job reported an error.",
+          )}
+        </p>
       ) : null}
       {run.logs?.length ? (
         <details className="mt-3 border-t pt-3">
@@ -1185,8 +1193,10 @@ function ScanRunStatus({
           <CircleAlertIcon />
           <AlertTitle>Initial discovery failed</AlertTitle>
           <AlertDescription>
-            {run.error ??
-              "Server marked scan run failed without an error message."}{" "}
+            {getUserFacingError(
+              run.error,
+              "The server marked this scan as failed without more detail.",
+            )}{" "}
             {portProgress} Partial results are not authoritative.
           </AlertDescription>
         </Alert>
@@ -1216,9 +1226,10 @@ function ScanLaunchError({ error }: { error: unknown }) {
       <CircleAlertIcon />
       <AlertTitle>Initial discovery launch failed</AlertTitle>
       <AlertDescription>
-        {error instanceof Error
-          ? error.message
-          : "Server rejected initial discovery launch without an error message."}
+        {getUserFacingError(
+          error,
+          "The server rejected the initial discovery launch.",
+        )}
       </AlertDescription>
     </Alert>
   );
@@ -1248,9 +1259,7 @@ function ScopeError({ error }: { error: unknown }) {
       <CircleAlertIcon />
       <AlertTitle>Scope action failed</AlertTitle>
       <AlertDescription>
-        {error instanceof Error
-          ? error.message
-          : "Scope server returned no error details."}
+        {getUserFacingError(error, "The discovery scope action failed.")}
       </AlertDescription>
     </Alert>
   );

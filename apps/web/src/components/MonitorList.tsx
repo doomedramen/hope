@@ -5,9 +5,11 @@ import {
   CircleHelpIcon,
   Clock3Icon,
   CheckIcon,
+  SearchIcon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { fetchMonitors, type Monitor } from "@/lib/api";
+import { useState } from "react";
+import { fetchMonitors, getUserFacingError, type Monitor } from "@/lib/api";
 import { formatDate, formatRelative, labelize, shortId } from "@/lib/format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +28,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Table,
   TableBody,
@@ -34,11 +37,23 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
+type MonitorFilter = "all" | "up" | "degraded" | "down" | "stale";
 
 export function MonitorList() {
+  const [filter, setFilter] = useState<MonitorFilter>("all");
+  const [selectedMonitor, setSelectedMonitor] = useState<Monitor | null>(null);
   const monitorsQuery = useQuery({
-    queryKey: ["monitors"],
-    queryFn: () => fetchMonitors(),
+    queryKey: ["monitors", filter],
+    queryFn: () => fetchMonitors(filter === "all" ? undefined : filter),
     refetchInterval: 15_000,
   });
   const monitors = monitorsQuery.data?.items ?? [];
@@ -47,7 +62,21 @@ export function MonitorList() {
     <Card aria-busy={monitorsQuery.isLoading} className="overflow-hidden">
       <CardHeader className="border-b">
         <CardTitle>Monitors</CardTitle>
-        <CardAction>
+        <CardAction className="flex flex-wrap items-center gap-2">
+          <ToggleGroup
+            aria-label="Filter monitors by state"
+            onValueChange={(values) => {
+              const next = values[0] as MonitorFilter | undefined;
+              if (next) setFilter(next);
+            }}
+            size="sm"
+            value={[filter]}
+            variant="outline"
+          >
+            <ToggleGroupItem value="all">All</ToggleGroupItem>
+            <ToggleGroupItem value="down">Down</ToggleGroupItem>
+            <ToggleGroupItem value="degraded">Degraded</ToggleGroupItem>
+          </ToggleGroup>
           <Badge variant={monitors.length ? "outline" : "secondary"}>
             {monitors.length}
           </Badge>
@@ -61,9 +90,10 @@ export function MonitorList() {
             <CircleAlertIcon />
             <AlertTitle>Monitors unavailable</AlertTitle>
             <AlertDescription>
-              {monitorsQuery.error instanceof Error
-                ? monitorsQuery.error.message
-                : "The monitor list could not be loaded."}
+              {getUserFacingError(
+                monitorsQuery.error,
+                "The monitor list could not be loaded.",
+              )}
             </AlertDescription>
             <Button
               onClick={() => monitorsQuery.refetch()}
@@ -86,29 +116,61 @@ export function MonitorList() {
           </Empty>
         </CardContent>
       ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>State</TableHead>
-              <TableHead>Target</TableHead>
-              <TableHead>Check</TableHead>
-              <TableHead>Last result</TableHead>
-              <TableHead>Next run</TableHead>
-              <TableHead className="text-right">Failures</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+        <>
+          <div className="hidden overflow-x-auto md:block">
+            <Table className="min-w-[58rem]">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>State</TableHead>
+                  <TableHead>Target</TableHead>
+                  <TableHead>Check</TableHead>
+                  <TableHead>Last result</TableHead>
+                  <TableHead>Next run</TableHead>
+                  <TableHead className="text-right">Failures</TableHead>
+                  <TableHead className="text-right">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {monitors.map((monitor) => (
+                  <MonitorRow
+                    key={monitor.id}
+                    monitor={monitor}
+                    onInspect={() => setSelectedMonitor(monitor)}
+                  />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          <div className="space-y-3 p-4 md:hidden">
             {monitors.map((monitor) => (
-              <MonitorRow key={monitor.id} monitor={monitor} />
+              <MonitorMobileCard
+                key={monitor.id}
+                monitor={monitor}
+                onInspect={() => setSelectedMonitor(monitor)}
+              />
             ))}
-          </TableBody>
-        </Table>
+          </div>
+        </>
       )}
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) setSelectedMonitor(null);
+        }}
+        open={selectedMonitor !== null}
+      >
+        {selectedMonitor ? <MonitorDetails monitor={selectedMonitor} /> : null}
+      </Dialog>
     </Card>
   );
 }
 
-function MonitorRow({ monitor }: { monitor: Monitor }) {
+function MonitorRow({
+  monitor,
+  onInspect,
+}: {
+  monitor: Monitor;
+  onInspect: () => void;
+}) {
   const target = monitorTarget(monitor);
   const path =
     typeof monitor.config.path === "string" ? monitor.config.path : null;
@@ -153,7 +215,108 @@ function MonitorRow({ monitor }: { monitor: Monitor }) {
       >
         {monitor.consecutive_failures}
       </TableCell>
+      <TableCell className="text-right">
+        <Button onClick={onInspect} size="sm" variant="outline">
+          <SearchIcon data-icon="inline-start" />
+          Inspect
+        </Button>
+      </TableCell>
     </TableRow>
+  );
+}
+
+function MonitorMobileCard({
+  monitor,
+  onInspect,
+}: {
+  monitor: Monitor;
+  onInspect: () => void;
+}) {
+  const target = monitorTarget(monitor);
+  const path =
+    typeof monitor.config.path === "string" ? monitor.config.path : null;
+
+  return (
+    <article className="rounded-lg border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="mb-1">
+            <MonitorStateBadge state={monitor.state} />
+          </div>
+          <h3 className="truncate font-medium">{target.name}</h3>
+          <p className="break-words text-sm text-muted-foreground">
+            {target.endpoint}
+            {path ? ` ${path}` : ""}
+          </p>
+        </div>
+        <Button onClick={onInspect} size="sm" variant="outline">
+          <SearchIcon data-icon="inline-start" />
+          Inspect
+        </Button>
+      </div>
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-t pt-3 text-sm">
+        <Detail label="Check" value={labelize(monitor.monitor_type)} />
+        <Detail label="Failures" value={String(monitor.consecutive_failures)} />
+        <Detail
+          label="Last result"
+          value={formatRelative(monitor.last_result_at)}
+        />
+        <Detail label="Next run" value={formatRelative(monitor.next_run_at)} />
+      </dl>
+    </article>
+  );
+}
+
+function MonitorDetails({ monitor }: { monitor: Monitor }) {
+  const target = monitorTarget(monitor);
+  return (
+    <DialogContent className="sm:max-w-lg">
+      <DialogHeader>
+        <DialogTitle>Monitor details</DialogTitle>
+        <DialogDescription>
+          {target.name} · {target.endpoint}
+        </DialogDescription>
+      </DialogHeader>
+      <dl className="grid gap-3 rounded-lg border p-4 sm:grid-cols-2">
+        <Detail label="State" value={labelize(monitor.state)} />
+        <Detail label="Check" value={labelize(monitor.monitor_type)} />
+        <Detail
+          label="Interval"
+          value={formatInterval(monitor.interval_seconds)}
+        />
+        <Detail label="Timeout" value={`${monitor.timeout_ms}ms`} />
+        <Detail
+          label="Failures"
+          value={`${monitor.consecutive_failures} consecutive`}
+        />
+        <Detail label="Monitor ID" mono value={shortId(monitor.id)} />
+        <Detail
+          label="Last result"
+          value={formatDate(monitor.last_result_at)}
+        />
+        <Detail label="Next run" value={formatDate(monitor.next_run_at)} />
+      </dl>
+      <DialogFooter showCloseButton />
+    </DialogContent>
+  );
+}
+
+function Detail({
+  label,
+  mono = false,
+  value,
+}: {
+  label: string;
+  mono?: boolean;
+  value: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className={mono ? "truncate font-mono text-sm" : "text-sm"}>
+        {value}
+      </dd>
+    </div>
   );
 }
 
