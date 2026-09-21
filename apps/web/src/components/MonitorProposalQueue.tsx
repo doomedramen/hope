@@ -361,7 +361,9 @@ function ProposalListItem({
         <Badge variant="secondary">{labelize(proposal.check_type)}</Badge>
       </div>
       <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span className="font-mono">{shortId(proposal.endpoint_id)}</span>
+        <span className="font-mono">
+          {proposal.endpoint_id ? shortId(proposal.endpoint_id) : "Not linked"}
+        </span>
         <span>
           {proposal.auto_create_allowed
             ? "Policy allows auto-create"
@@ -405,7 +407,11 @@ function ProposalDetail({
           </h3>
           <p className="mt-1 text-sm text-muted-foreground">
             Endpoint{" "}
-            <span className="font-mono">{shortId(proposal.endpoint_id)}</span>
+            <span className="font-mono">
+              {proposal.endpoint_id
+                ? shortId(proposal.endpoint_id)
+                : "Not linked"}
+            </span>
             {proposal.product_version
               ? ` · version ${proposal.product_version}`
               : ""}
@@ -433,7 +439,12 @@ function ProposalDetail({
           label="Rule"
           value={`${proposal.rule_id} · v${proposal.rule_version}`}
         />
-        <DetailValue label="Service" value={shortId(proposal.service_id)} />
+        <DetailValue
+          label="Service"
+          value={
+            proposal.service_id ? shortId(proposal.service_id) : "Not linked"
+          }
+        />
         <DetailValue label="Created" value={formatDate(proposal.created_at)} />
       </div>
 

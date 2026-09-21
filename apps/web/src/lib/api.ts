@@ -498,8 +498,8 @@ export type MonitorState =
 export interface Monitor {
   id: string;
   proposal_id: string | null;
-  service_id: string;
-  endpoint_id: string;
+  service_id: string | null;
+  endpoint_id: string | null;
   monitor_type: "icmp" | "tcp" | "http" | "https" | "dns" | "tls" | string;
   config: Record<string, unknown>;
   interval_seconds: number;
@@ -558,8 +558,8 @@ export interface Incident {
   summary: string | null;
   created_at: string;
   updated_at: string;
-  service_id: string;
-  endpoint_id: string;
+  service_id: string | null;
+  endpoint_id: string | null;
   monitor_type: string;
   monitor_state: MonitorState;
   endpoint_address: string | null;

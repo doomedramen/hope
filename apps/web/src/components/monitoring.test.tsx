@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MonitorList } from "./MonitorList";
 import { MonitorProposalQueue } from "./MonitorProposalQueue";
+import { IncidentList } from "./IncidentList";
 import type {
   Incident,
   Monitor,
@@ -154,6 +155,52 @@ afterEach(() => {
 });
 
 describe("MonitorList", () => {
+  it("renders an agent monitor without service or endpoint links", async () => {
+    monitorSearch = { monitor: "agent-monitor" };
+    const agentMonitor = monitor({
+      id: "agent-monitor",
+      service_id: null,
+      endpoint_id: null,
+      monitor_type: "agent_heartbeat",
+      config: {},
+      state: "unknown",
+      underlying_state: "unknown",
+      last_result_at: null,
+      last_success_at: null,
+      endpoint_address: null,
+      endpoint_port: null,
+      endpoint_url: null,
+      endpoint_dns_name: null,
+      service_name: null,
+      service_product: null,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/monitors?limit=100") {
+          return Promise.resolve(jsonResponse({ items: [agentMonitor] }));
+        }
+        if (path === "/api/v1/monitors/agent-monitor/results?limit=100") {
+          return Promise.resolve(jsonResponse({ items: [] }));
+        }
+        if (path === "/api/v1/incidents?limit=100") {
+          return Promise.resolve(jsonResponse({ items: [] }));
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
+    );
+
+    renderWithClient(<MonitorList />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Agent monitor" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Agent target")).not.toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Check details" }));
+    expect(screen.getByText("Not linked")).toBeInTheDocument();
+  });
+
   it("selects a monitor through the validated URL search state", async () => {
     const selected = monitor();
     vi.stubGlobal(
@@ -345,6 +392,37 @@ describe("MonitorList", () => {
     );
     expect(details?.open).toBe(true);
     expect(screen.getByText("Technical details")).toHaveFocus();
+  });
+});
+
+describe("IncidentList", () => {
+  it("renders agent incidents without service or endpoint links", async () => {
+    const agentIncident = incident({
+      service_id: null,
+      endpoint_id: null,
+      monitor_type: "agent_heartbeat",
+      monitor_state: "down",
+      endpoint_address: null,
+      endpoint_port: null,
+      endpoint_url: null,
+      endpoint_dns_name: null,
+      service_name: null,
+      service_product: null,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input) === "/api/v1/incidents?limit=100&state=open") {
+          return Promise.resolve(jsonResponse({ items: [agentIncident] }));
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
+    );
+
+    renderWithClient(<IncidentList />);
+
+    expect(await screen.findAllByText("Agent monitor")).not.toHaveLength(0);
+    expect(screen.getAllByText("Agent target")).not.toHaveLength(0);
   });
 });
 

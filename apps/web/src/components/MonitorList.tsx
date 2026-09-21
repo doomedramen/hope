@@ -578,7 +578,11 @@ function MonitorDetail({
               <Detail
                 label="Endpoint ID"
                 mono
-                value={shortId(monitor.endpoint_id)}
+                value={
+                  monitor.endpoint_id
+                    ? shortId(monitor.endpoint_id)
+                    : "Not linked"
+                }
               />
             </dl>
           </details>
@@ -785,15 +789,24 @@ function ResultStatusIcon({ status }: { status: string }) {
 }
 
 function monitorTarget(monitor: Monitor) {
+  const agentMonitor = monitor.monitor_type.startsWith("agent_");
   const name =
     monitor.service_name ??
     monitor.service_product ??
-    `Service ${shortId(monitor.service_id)}`;
+    (monitor.service_id
+      ? `Service ${shortId(monitor.service_id)}`
+      : agentMonitor
+        ? "Agent monitor"
+        : "Service unavailable");
   const endpoint =
     monitor.endpoint_url ??
     monitor.endpoint_dns_name ??
     formatSocketTarget(monitor.endpoint_address, monitor.endpoint_port) ??
-    `Endpoint ${shortId(monitor.endpoint_id)}`;
+    (monitor.endpoint_id
+      ? `Endpoint ${shortId(monitor.endpoint_id)}`
+      : agentMonitor
+        ? "Agent target"
+        : "Endpoint unavailable");
   return { name, endpoint };
 }
 

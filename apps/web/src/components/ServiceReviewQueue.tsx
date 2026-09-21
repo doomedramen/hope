@@ -236,7 +236,9 @@ function ReviewListItem({
         </Badge>
       </div>
       <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span className="font-mono">{shortId(review.service_id)}</span>
+        <span className="font-mono">
+          {review.service_id ? shortId(review.service_id) : "Not linked"}
+        </span>
         <span>{Math.round(review.confidence * 100)}%</span>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
@@ -279,7 +281,9 @@ function ReviewDetail({
           </h3>
           <p className="mt-1 text-sm text-muted-foreground">
             Service{" "}
-            <span className="font-mono">{shortId(review.service_id)}</span>
+            <span className="font-mono">
+              {review.service_id ? shortId(review.service_id) : "Not linked"}
+            </span>
             {version ? ` · version ${version}` : ""}
           </p>
         </div>

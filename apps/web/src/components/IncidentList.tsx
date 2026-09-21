@@ -165,15 +165,7 @@ function IncidentRow({
   incident: Incident;
   onReview: () => void;
 }) {
-  const name =
-    incident.service_name ??
-    incident.service_product ??
-    "Service " + shortId(incident.service_id);
-  const endpoint =
-    incident.endpoint_url ??
-    incident.endpoint_dns_name ??
-    formatSocketTarget(incident.endpoint_address, incident.endpoint_port) ??
-    "Endpoint " + shortId(incident.endpoint_id);
+  const { name, endpoint } = incidentTarget(incident);
 
   return (
     <TableRow>
@@ -236,15 +228,7 @@ function IncidentMobileCard({
   incident: Incident;
   onReview: () => void;
 }) {
-  const name =
-    incident.service_name ??
-    incident.service_product ??
-    "Service " + shortId(incident.service_id);
-  const endpoint =
-    incident.endpoint_url ??
-    incident.endpoint_dns_name ??
-    formatSocketTarget(incident.endpoint_address, incident.endpoint_port) ??
-    "Endpoint " + shortId(incident.endpoint_id);
+  const { name, endpoint } = incidentTarget(incident);
 
   return (
     <article className="rounded-lg border p-3">
@@ -297,15 +281,7 @@ function IncidentMobileCard({
 }
 
 function IncidentDetails({ incident }: { incident: Incident }) {
-  const name =
-    incident.service_name ??
-    incident.service_product ??
-    `Service ${shortId(incident.service_id)}`;
-  const endpoint =
-    incident.endpoint_url ??
-    incident.endpoint_dns_name ??
-    formatSocketTarget(incident.endpoint_address, incident.endpoint_port) ??
-    `Endpoint ${shortId(incident.endpoint_id)}`;
+  const { name, endpoint } = incidentTarget(incident);
 
   return (
     <DialogContent className="sm:max-w-lg">
@@ -328,6 +304,29 @@ function IncidentDetails({ incident }: { incident: Incident }) {
       <DialogFooter showCloseButton />
     </DialogContent>
   );
+}
+
+function incidentTarget(incident: Incident) {
+  const agentMonitor = incident.monitor_type.startsWith("agent_");
+  const name =
+    incident.service_name ??
+    incident.service_product ??
+    (incident.service_id
+      ? `Service ${shortId(incident.service_id)}`
+      : agentMonitor
+        ? "Agent monitor"
+        : "Service unavailable");
+  const endpoint =
+    incident.endpoint_url ??
+    incident.endpoint_dns_name ??
+    formatSocketTarget(incident.endpoint_address, incident.endpoint_port) ??
+    (incident.endpoint_id
+      ? `Endpoint ${shortId(incident.endpoint_id)}`
+      : agentMonitor
+        ? "Agent target"
+        : "Endpoint unavailable");
+
+  return { name, endpoint };
 }
 
 function Detail({
