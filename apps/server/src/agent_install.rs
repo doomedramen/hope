@@ -4,6 +4,8 @@
 //! the UI. Release downloads are resolved through the verified, filesystem
 //! backed repository; GitHub is never consulted by an agent host.
 
+use axum::Extension;
+use axum::Json;
 use axum::body::Body;
 use axum::extract::Path;
 use axum::http::header;
@@ -12,10 +14,15 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::agents;
+use crate::auth_mw::CurrentUser;
+use crate::config::Config;
+use crate::pki;
 use crate::release_repository::{ReleaseRepository, RepositoryError};
 
 const INSTALL_SCRIPT: &str = include_str!("../../../deploy/agent/install-agent.sh");
 const SUPPORTED_PLATFORM: &str = "linux";
+const ENROLLMENT_TTL_MINUTES: i64 = 15;
 
 #[derive(Debug, Deserialize)]
 pub struct ReleasePath {
@@ -25,7 +32,52 @@ pub struct ReleasePath {
     file: String,
 }
 
-/// GET /install-agent.sh
+/// Create the short-lived bootstrap code used by the one-command installer.
+/// The plaintext code is returned only to the authenticated operator that
+/// requested it; the database stores only its hash.
+pub async fn create_enrollment(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    Extension(_user): Extension<CurrentUser>,
+) -> Response {
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "agent enrollment is not configured",
+            );
+        }
+    };
+    let ca = match pki::load_ca(&config) {
+        Ok(ca) => ca,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "agent enrollment CA is unavailable",
+            );
+        }
+    };
+    let token = match agents::create_enrollment_token(&state.pool, ENROLLMENT_TTL_MINUTES).await {
+        Ok(token) => token,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "could not create an agent enrollment code",
+            );
+        }
+    };
+    let code = format!("{token}.{}", pki::fingerprint_der(ca.cert.der()));
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "code": code,
+            "expires_in_minutes": ENROLLMENT_TTL_MINUTES,
+        })),
+    )
+        .into_response()
+}
+
+/// GET /agent/install.sh (with `/install-agent.sh` kept as a compatibility alias)
 pub async fn script() -> Response {
     bytes_response(
         INSTALL_SCRIPT.as_bytes().to_vec(),

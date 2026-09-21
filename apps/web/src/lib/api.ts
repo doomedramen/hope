@@ -44,6 +44,11 @@ export interface DiscoveryState {
   scan_run: ScanRun | null;
 }
 
+export interface AgentEnrollmentBootstrap {
+  code: string;
+  expires_in_minutes: number;
+}
+
 export type ScanRunKind = "initial_discovery" | "change_scan" | "full_tcp";
 
 export type ScanRunStatus =
@@ -951,6 +956,12 @@ export async function fetchDevice(id: string): Promise<DeviceDetail> {
 
 export async function fetchAgents(): Promise<ApiPage<Agent>> {
   return request<ApiPage<Agent>>("/api/v1/agents?limit=100");
+}
+
+export async function createAgentEnrollment(): Promise<AgentEnrollmentBootstrap> {
+  return request<AgentEnrollmentBootstrap>("/api/v1/agent-enrollment", {
+    method: "POST",
+  });
 }
 
 export async function fetchAgent(id: string): Promise<AgentDetail> {

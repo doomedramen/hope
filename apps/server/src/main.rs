@@ -189,6 +189,10 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             get(agent_inventory::get_agent_inventory_history),
         )
         .route(
+            "/api/v1/agent-enrollment",
+            post(agent_install::create_enrollment),
+        )
+        .route(
             "/api/v1/agents/{id}/health",
             get(agent_inventory::get_agent_health),
         )
@@ -469,6 +473,7 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
         .route("/health/live", get(routes::health::live))
         .route("/health/ready", get(routes::health::ready))
         .route("/install-agent.sh", get(agent_install::script))
+        .route("/agent/install.sh", get(agent_install::script))
         .route(
             "/agent-download/latest/{platform}/{arch}",
             get(agent_install::latest_version),

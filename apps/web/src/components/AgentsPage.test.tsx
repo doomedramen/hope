@@ -157,7 +157,19 @@ describe("AgentsPage", () => {
   it("offers a guided enrollment flow from the empty state", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(jsonResponse({ items: [], next_cursor: null })),
+      vi.fn().mockImplementation((path: string) =>
+        Promise.resolve(
+          path === "/api/v1/agent-enrollment"
+            ? jsonResponse(
+                {
+                  code: "token.fingerprint",
+                  expires_in_minutes: 15,
+                },
+                201,
+              )
+            : jsonResponse({ items: [], next_cursor: null }),
+        ),
+      ),
     );
 
     renderPage();
@@ -172,11 +184,13 @@ describe("AgentsPage", () => {
       await screen.findByRole("heading", { name: "Enroll a Linux agent" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("server enroll-token create --ttl-minutes 15"),
+      await screen.findByText(
+        /curl -fsSL .*agent\/install\.sh.*HOPE_ENROLLMENT_CODE='token\.fingerprint'.*bash/,
+      ),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: "Download installer" }),
-    ).toHaveAttribute("href", "/install-agent.sh");
+      screen.getByRole("button", { name: "Copy agent install command" }),
+    ).toBeInTheDocument();
   });
 
   it("shows an actionable error state when the list cannot load", async () => {

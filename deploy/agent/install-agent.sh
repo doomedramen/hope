@@ -18,6 +18,13 @@ RELEASE_URL=""
 VERSION="latest"
 CODE_STDIN=false
 YES=false
+# The one-command bootstrap flow supplies these environment variables. The
+# older explicit flags remain supported for scripted upgrades and recovery.
+BOOTSTRAP_SERVER="${HOPE_SERVER:-${HSERV:-}}"
+BOOTSTRAP_CODE="${HOPE_ENROLLMENT_CODE:-}"
+if [[ -z "$BOOTSTRAP_CODE" && -n "${HPKEY:-}" && -n "${HHKEY:-}" ]]; then
+    BOOTSTRAP_CODE="$HPKEY.$HHKEY"
+fi
 ARCH=""
 SERVICE_GROUP=""
 TEMP_DIR=""
@@ -55,11 +62,17 @@ trap cleanup EXIT
 usage() {
     cat <<'EOF'
 Usage:
+  curl -fsSL https://hope.example.com/agent/install.sh | \
+    sudo env HOPE_SERVER=https://hope.example.com \
+      HOPE_ENROLLMENT_CODE=TOKEN.FINGERPRINT bash
   install-agent.sh --enroll-url URL --gateway-url URL \
     (--release-base-url URL | --release-url URL) [--version VERSION]
   install-agent.sh --uninstall --yes [--purge]
 
 Install options:
+  HOPE_SERVER URL         Hope control-plane origin; derives enroll/gateway URLs.
+  HOPE_ENROLLMENT_CODE    Single-use TOKEN.FINGERPRINT bootstrap code.
+  HHKEY/HPKEY/HSERV       Compatibility aliases for CA fingerprint, token, server.
   --enroll-url URL        HTTPS enrollment endpoint.
   --gateway-url URL       WSS/WS gateway endpoint written to systemd.
   --release-base-url URL  Hope server base URL; appends /agent-download.
@@ -73,7 +86,8 @@ Uninstall options:
   --purge                  With --uninstall, remove state and service user.
   --yes                    Required for uninstall and purge.
 
-The release source must be supplied explicitly. No release host is inferred.
+When HOPE_SERVER is set, the release host and listener ports are derived from
+that origin. Explicit flags override the derived values.
 EOF
 }
 
@@ -240,6 +254,32 @@ trim_trailing_slashes() {
         value=${value%/}
     done
     printf '%s' "$value"
+}
+
+derive_bootstrap_urls() {
+    local server authority hostport host
+
+    [[ -n "$BOOTSTRAP_SERVER" ]] || return 0
+    server=$(trim_trailing_slashes "$BOOTSTRAP_SERVER")
+    if [[ "$server" != *://* ]]; then
+        server="https://$server"
+    fi
+    validate_url_chars "HOPE_SERVER" "$server"
+    [[ "$server" =~ ^https?://[^/]+$ ]] \
+        || die "HOPE_SERVER must be an HTTP(S) origin without a path"
+
+    authority=${server#*://}
+    hostport=$authority
+    if [[ "$hostport" == \[*\]* ]]; then
+        host="${hostport%%]*}]"
+    else
+        host="${hostport%%:*}"
+    fi
+    [[ -n "$host" ]] || die "HOPE_SERVER does not contain a host"
+
+    [[ -n "$RELEASE_BASE_URL" ]] || RELEASE_BASE_URL="$server"
+    [[ -n "$ENROLL_URL" ]] || ENROLL_URL="https://$host:8444"
+    [[ -n "$GATEWAY_URL" ]] || GATEWAY_URL="wss://$host:8443"
 }
 
 detect_architecture() {
@@ -481,7 +521,15 @@ enroll_agent() {
         return
     fi
 
-    if [[ "$CODE_STDIN" == true ]]; then
+    if [[ -n "$BOOTSTRAP_CODE" ]]; then
+        if ! printf '%s\n' "$BOOTSTRAP_CODE" | run_as_service "$AGENT_PATH" enroll \
+            --server "$ENROLL_URL" --code-stdin --state-dir "$STATE_DIR" \
+            > "$enrollment_log" 2>&1; then
+            unset BOOTSTRAP_CODE
+            die "enrollment failed; enrollment code was not logged"
+        fi
+        unset BOOTSTRAP_CODE
+    elif [[ "$CODE_STDIN" == true ]]; then
         if ! run_as_service "$AGENT_PATH" enroll \
             --server "$ENROLL_URL" --code-stdin --state-dir "$STATE_DIR" \
             > "$enrollment_log" 2>&1; then
@@ -632,6 +680,13 @@ if [[ "$OPERATION" == "uninstall" ]]; then
 fi
 
 [[ "$PURGE" == false ]] || die "--purge requires --uninstall"
+derive_bootstrap_urls
+if [[ -n "$BOOTSTRAP_CODE" ]]; then
+    CODE_STDIN=true
+    YES=true
+fi
+# Do not pass bootstrap material to downloaded binaries or the systemd unit.
+unset HOPE_SERVER HOPE_ENROLLMENT_CODE HHKEY HPKEY HSERV
 [[ -n "$ENROLL_URL" ]] || die "--enroll-url is required"
 [[ -n "$GATEWAY_URL" ]] || die "--gateway-url is required"
 [[ -n "$RELEASE_BASE_URL" || -n "$RELEASE_URL" ]] \

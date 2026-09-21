@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ActivityIcon,
   CheckIcon,
@@ -19,8 +19,9 @@ import {
   ShieldCheckIcon,
   XIcon,
 } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
+  createAgentEnrollment,
   fetchAgent,
   fetchAgents,
   type Agent,
@@ -280,14 +281,32 @@ function EnrollmentDialog({
     typeof window === "undefined"
       ? "https://hope.example"
       : window.location.origin;
-  const scriptUrl = `${baseUrl}/install-agent.sh`;
-  const tokenCommand = "server enroll-token create --ttl-minutes 15";
-  const downloadCommand = `curl -fsSL ${scriptUrl} -o /tmp/hope-install-agent.sh && chmod 0700 /tmp/hope-install-agent.sh`;
-  const installCommand = `sudo /tmp/hope-install-agent.sh \\
-  --enroll-url https://<hope-host>:8444 \\
-  --gateway-url wss://<hope-host>:8443 \\
-  --release-base-url ${baseUrl}`;
+  const scriptUrl = baseUrl + "/agent/install.sh";
+  const enrollmentMutation = useMutation({
+    mutationFn: createAgentEnrollment,
+  });
+  const { mutate: createEnrollment, reset: resetEnrollment } =
+    enrollmentMutation;
   const [copied, setCopied] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    resetEnrollment();
+    createEnrollment();
+  }, [createEnrollment, open, resetEnrollment]);
+
+  const shellQuote = (value: string) =>
+    "'" + value.replaceAll("'", "'\\''") + "'";
+  const enrollment = enrollmentMutation.data;
+  const installCommand = enrollment
+    ? "curl -fsSL " +
+      shellQuote(scriptUrl) +
+      " | sudo env HOPE_SERVER=" +
+      shellQuote(baseUrl) +
+      " HOPE_ENROLLMENT_CODE=" +
+      shellQuote(enrollment.code) +
+      " bash"
+    : null;
 
   async function copy(label: string, value: string) {
     if (!navigator.clipboard) return;
@@ -298,51 +317,32 @@ function EnrollmentDialog({
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-h-[min(90vh,48rem)] max-w-2xl overflow-y-auto">
+      <DialogContent className="min-w-0 max-w-2xl">
         <DialogHeader>
           <DialogTitle>Enroll a Linux agent</DialogTitle>
           <DialogDescription>
-            Create a short-lived code, then run the signed installer on the
-            Linux host. The code is single-use and never appears in this UI.
+            Generate a single-use command, then paste it into the Linux host
+            where the agent should run. The signed installer derives the
+            enrollment and gateway endpoints from the Hope server origin.
           </DialogDescription>
         </DialogHeader>
-        <ol className="flex list-decimal flex-col gap-5 pl-5">
-          <li className="grid gap-2 pl-1">
-            <span className="font-medium">Create an enrollment code</span>
-            <CommandBlock
-              copied={copied === "token"}
-              label="enrollment token command"
-              onCopy={() => copy("token", tokenCommand)}
-              value={tokenCommand}
-            />
-            <p className="text-xs text-muted-foreground">
-              Run this on the Hope server and transfer the printed
-              <code className="mx-1 rounded bg-muted px-1">code=</code> value to
-              the target host through a trusted channel.
-            </p>
-          </li>
-          <li className="grid gap-2 pl-1">
-            <span className="font-medium">Download the installer</span>
-            <CommandBlock
-              copied={copied === "download"}
-              label="installer download command"
-              onCopy={() => copy("download", downloadCommand)}
-              value={downloadCommand}
-            />
-            <Button
-              className="w-fit"
-              render={
-                <a href="/install-agent.sh" rel="noreferrer" target="_blank" />
-              }
-              size="sm"
-              variant="outline"
-            >
-              <DownloadIcon data-icon="inline-start" />
-              Download installer
-            </Button>
-          </li>
-          <li className="grid gap-2 pl-1">
-            <span className="font-medium">Install and enroll the host</span>
+        {enrollmentMutation.isPending ? (
+          <p aria-live="polite" className="text-sm text-muted-foreground">
+            Preparing a one-time installer command…
+          </p>
+        ) : enrollmentMutation.error ? (
+          <Alert variant="destructive">
+            <CircleAlertIcon />
+            <AlertTitle>Could not prepare the installer</AlertTitle>
+            <AlertDescription>
+              {enrollmentMutation.error instanceof Error
+                ? enrollmentMutation.error.message
+                : "The server did not return an enrollment code."}
+            </AlertDescription>
+          </Alert>
+        ) : installCommand && enrollment ? (
+          <div className="grid gap-3">
+            <p className="text-sm font-medium">Run this on the target host</p>
             <CommandBlock
               copied={copied === "install"}
               label="agent install command"
@@ -350,16 +350,22 @@ function EnrollmentDialog({
               value={installCommand}
             />
             <p className="text-xs text-muted-foreground">
-              Replace{" "}
-              <code className="rounded bg-muted px-1">&lt;hope-host&gt;</code>
-              with the server hostname. The installer prompts for the code
-              without echoing it; add{" "}
-              <code className="rounded bg-muted px-1">--code-stdin --yes</code>
-              when piping the code from a secret manager.
+              This command downloads the signed installer, enrolls the host,
+              enables the agent service, and expires in{" "}
+              {enrollment.expires_in_minutes} minutes. Treat it like a password
+              and do not paste it into a shared terminal.
             </p>
-          </li>
-        </ol>
+          </div>
+        ) : null}
         <DialogFooter>
+          {enrollmentMutation.error ? (
+            <Button
+              onClick={() => enrollmentMutation.mutate()}
+              variant="outline"
+            >
+              Try again
+            </Button>
+          ) : null}
           <DialogClose render={<Button variant="outline" />}>Done</DialogClose>
         </DialogFooter>
       </DialogContent>
@@ -379,7 +385,7 @@ function CommandBlock({
   onCopy: () => void;
 }) {
   return (
-    <div className="flex items-start gap-2 rounded-lg border bg-muted/40 p-2">
+    <div className="flex min-w-0 items-start gap-2 rounded-lg border bg-muted/40 p-2">
       <pre className="min-w-0 flex-1 overflow-x-auto whitespace-pre-wrap p-1 font-mono text-xs leading-relaxed">
         {value}
       </pre>

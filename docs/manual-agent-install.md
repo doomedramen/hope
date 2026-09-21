@@ -1,4 +1,4 @@
-# Manual agent installation
+# Linux agent installation
 
 The installer supports Linux `amd64` and `arm64`. It downloads the selected
 agent from the Hope server, verifies the signed release bundle, enrolls the
@@ -13,45 +13,35 @@ The normal endpoints are:
 
 ## Install
 
-Create a short-lived enrollment code on the Hope server:
+The Agents page generates a short-lived, single-use bootstrap code. Copy the
+resulting command to the target Linux host:
 
 ```sh
-server enroll-token create --ttl-minutes 15
+curl -fsSL 'https://hope.example/agent/install.sh' | \
+  sudo env \
+    HOPE_SERVER='https://hope.example' \
+    HOPE_ENROLLMENT_CODE='<token>.<ca-fingerprint>' \
+    bash
 ```
 
-When running from a checkout, use `cargo run -p server --` before the
-subcommand. Transfer the printed `code=<token>.<ca-fingerprint>` value to the
-target host through a trusted channel. It is single-use and must be treated as
-a password. Do not put it in shell history, a unit file, or logs.
+The command downloads the signed installer, derives the enrollment and gateway
+URLs from `HOPE_SERVER`, enrolls the host, installs the matching `amd64` or
+`arm64` release, and enables the hardened systemd service. The code expires
+after 15 minutes and must be treated like a password.
 
-On the target Linux host, download the installer from the same Hope origin:
+The installer also accepts the shorter compatibility aliases `HSERV`, `HPKEY`,
+and `HHKEY` (server, token, and CA fingerprint respectively). Explicit
+`--enroll-url`, `--gateway-url`, and `--release-base-url` flags remain available
+for recovery and unusual topologies:
 
 ```sh
-curl -fsSL https://hope.example/install-agent.sh -o /tmp/hope-install-agent.sh
+curl -fsSL https://hope.example/agent/install.sh -o /tmp/hope-install-agent.sh
 chmod 0700 /tmp/hope-install-agent.sh
 sudo /tmp/hope-install-agent.sh \
   --enroll-url https://hope.example:8444 \
   --gateway-url wss://hope.example:8443 \
   --release-base-url https://hope.example
 ```
-
-The installer detects `x86_64`/`aarch64`, selects the matching Linux artifact,
-and prompts for the enrollment code without echoing it. `latest` is the default
-release selection. To supply the code through a pipe without exposing it in
-the process list, use `--code-stdin --yes`:
-
-```sh
-printf '%s\n' '<token>.<ca-fingerprint>' | \
-  sudo /tmp/hope-install-agent.sh \
-    --enroll-url https://hope.example:8444 \
-    --gateway-url wss://hope.example:8443 \
-    --release-base-url https://hope.example \
-    --code-stdin --yes
-```
-
-The UI should generate these values from the configured public URL. The
-installer URL is always the current Hope origin with `/install-agent.sh`
-appended; `hope.example` above is only an example.
 
 For a pinned release, add `--version 0.1.0`. For an explicit release
 repository root, use `--release-url https://hope.example/agent-download` with
@@ -98,12 +88,12 @@ sudo /tmp/hope-install-agent.sh --uninstall --purge --yes
 
 ## Security and recovery
 
-- Use the HTTPS enrollment URL and the exact CA fingerprint printed with the
-  enrollment code. The agent refuses enrollment when the fingerprint does not
+- Use HTTPS for `HOPE_SERVER` and only paste the generated command into the
+  intended target host. The code never appears in the systemd unit or
+  installer logs, but it is visible briefly in the shell command and process
+  environment while bootstrapping.
+- The agent refuses enrollment when the CA fingerprint in the code does not
   match the Hope CA.
-- The enrollment code never appears in the systemd unit, command-line
-  arguments, or installer logs when using the interactive prompt or
-  `--code-stdin`.
 - The service account has no login shell and cannot write the installed binary.
 - Docker socket access is root-equivalent. Do not add `hope-agent` to the
   Docker group unless that trust is intended.

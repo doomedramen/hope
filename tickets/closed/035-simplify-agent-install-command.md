@@ -1,10 +1,10 @@
 ---
 id: "035"
 title: "Simplify Linux agent installation to one command"
-status: open
+status: closed
 priority: high
 created: "2026-09-20T22:18:11Z"
-updated: "2026-09-20T22:18:51Z"
+updated: "2026-09-21T08:35:15Z"
 tags: ["agents", "installation", "enrollment", "ux", "cli"]
 ---
 
@@ -49,3 +49,22 @@ curl -sL https://get.beszel.dev -o /tmp/install-agent.sh && chmod +x /tmp/instal
 
 The requested flow removes the manual server-side token creation, transfer,
 and argument wiring from the operator's normal path.
+
+## Resolution
+
+- Added authenticated `POST /api/v1/agent-enrollment`, returning a 15-minute single-use token plus CA fingerprint to the Agents UI.
+- Replaced the three-step dialog with one copyable command that streams `/agent/install.sh`, derives listener/release URLs from `HOPE_SERVER`, and passes bootstrap material through the installer environment.
+- Kept explicit installer flags and `HSERV`/`HPKEY`/`HHKEY` aliases for recovery and unusual topologies.
+- Kept `/install-agent.sh` as a compatibility route and added `/agent/install.sh` as the canonical route.
+
+## Verification
+
+- `pnpm -C apps/web test -- --run src/components/AgentsPage.test.tsx`
+- `pnpm -C apps/web build`
+- `pnpm -C apps/web lint` (existing warnings only)
+- `cargo fmt --check`
+- `cargo check -p server`
+- `cargo test -p server` (185 passed, 1 ignored)
+- `bash -n deploy/agent/install-agent.sh`
+- `HOPE_SERVER=hope.example.com HOPE_ENROLLMENT_CODE=token.fingerprint bash deploy/agent/install-agent.sh` reaches the root check without requiring URL flags.
+- Live authenticated UI generated a single-use command; phone viewport `390x844` had no horizontal page overflow and kept footer controls visible.
