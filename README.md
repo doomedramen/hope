@@ -86,7 +86,7 @@ docker compose -f deploy/compose/docker-compose.yml up -d
 Open <http://localhost>. On an empty database, the web UI presents the first-run
 form for creating the operator account. Set `HOPE_HTTP_PORT=8080` in `.env` if
 port 80 is already in use. No account, key, certificate, or manual migration
-command is required. The image includes signed Linux amd64 and arm64 agents
+command is required. The image includes a signed Linux amd64 agent
 and their release trust key. Hope creates its HTTPS identity and credential
 key on first start and keeps them in the `server-pki` volume. PostgreSQL
 migrations run when the server and worker start.

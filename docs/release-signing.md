@@ -35,7 +35,7 @@ Writes `data/release-keys/signing-key.hex` (private, `0600`, hex-encoded
 
 ```sh
 just release-sign VERSION=0.1.0 \
-  ARTIFACTS="target/x86_64-unknown-linux-musl/release/agent=linux=amd64 target/aarch64-unknown-linux-musl/release/agent=linux=arm64"
+  ARTIFACTS="target/x86_64-unknown-linux-musl/release/agent=linux=amd64"
 ```
 
 The `just` recipe emits a stable release without notes. Set channel and notes
@@ -105,19 +105,17 @@ agent verify-release --manifest dist/release/manifest.json --binary dist/release
 
 ## CI
 
-`.github/workflows/ci.yml` builds both `linux/amd64` and `linux/arm64`, signs
-one manifest covering both artifacts, and packages the verified bundle and
+`.github/workflows/ci.yml` runs on pushes to `main`, builds `linux/amd64`, signs
+its manifest, and packages the verified bundle and
 public trust key in the matching Hope image. The server serves releases from
 that image; installation and updates do not require GitHub access from the
 homelab. CI embeds the same release version in the agent's Hello message.
 Operators do not manage keys or release files.
 
-- If the repository secrets `HOPE_RELEASE_SIGNING_KEY_HEX` /
-  `HOPE_RELEASE_PUBLIC_KEY_HEX` are configured, CI signs with the real
-  release key.
-- For pull requests without secrets, CI generates an ephemeral test keypair.
-  Pushes and release tags **fail before publishing** if either production
-  signing secret is unavailable. The signing command checks that the public
+- CI requires repository secrets `HOPE_RELEASE_SIGNING_KEY_HEX` and
+  `HOPE_RELEASE_PUBLIC_KEY_HEX` and signs with the production release key.
+  A `main` push **fails before publishing** if either secret is unavailable.
+  The signing command checks that the public
   key matches the private key before producing the bundle.
 
 ## Key rotation (spec §7.7)

@@ -5,6 +5,8 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 test.describe("agent deployment", () => {
+  test.skip(process.arch !== "x64", "The published agent supports amd64 hosts only.");
+
   test("serves a verified agent release from the web origin", async ({ request }) => {
     const response = await request.get("/agent/v1/releases/latest/linux/amd64");
     expect(response.ok()).toBeTruthy();

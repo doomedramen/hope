@@ -256,15 +256,10 @@ pub async fn install_or_repair(
     if platform != "Linux" {
         return Err(InstallError::UnsupportedHost);
     }
-    if !matches!(architecture, "x86_64" | "aarch64") {
+    if architecture != "x86_64" {
         return Err(InstallError::UnsupportedHost);
     }
-
-    let release_arch = match architecture {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        _ => return Err(InstallError::UnsupportedHost),
-    };
+    let release_arch = "amd64";
     let repository =
         ReleaseRepository::from_environment().map_err(|_| InstallError::BinaryUnavailable)?;
     let (release, artifact) = repository
@@ -397,9 +392,7 @@ pub async fn update_or_rollback(
     if request.binary.is_empty() || request.binary.len() as u64 > MAX_AGENT_BINARY_BYTES {
         return Err(InstallError::BinaryUnavailable);
     }
-    if request.expected_platform != "linux"
-        || !matches!(request.expected_architecture.as_str(), "amd64" | "arm64")
-    {
+    if request.expected_platform != "linux" || request.expected_architecture != "amd64" {
         return Err(InstallError::UnsupportedHost);
     }
 
@@ -441,7 +434,6 @@ pub async fn update_or_rollback(
         single_line(&architecture_output.stdout).ok_or(InstallError::UnsupportedHost)?;
     let architecture = match remote_arch {
         "x86_64" => "amd64",
-        "aarch64" => "arm64",
         _ => return Err(InstallError::UnsupportedHost),
     };
     if platform != "Linux"

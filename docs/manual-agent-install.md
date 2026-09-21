@@ -1,6 +1,6 @@
 # Deploying Hope agents
 
-Hope's published image includes signed Linux `amd64` and `arm64` agents, the
+Hope's published image includes a signed Linux `amd64` agent, the
 release manifest, and the public trust key. Operators do not create or mount
 an `agent-releases` directory. Agents download from Hope itself, not GitHub.
 
@@ -39,7 +39,7 @@ Hope's connection address.
 
 ## Troubleshooting
 
-- A 503 from `/agent/v1/releases/latest/linux/amd64` or `arm64` means the
+- A 503 from `/agent/v1/releases/latest/linux/amd64` means the
   running image does not contain a verified matching release. Use an official
   published Hope image; production publishing is blocked without signing.
 - If the installer cannot reach Hope, edit the connection address to an IP or

@@ -16,14 +16,12 @@ pub async fn live() -> Json<serde_json::Value> {
 pub async fn ready(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     if std::env::var("HOPE_REQUIRE_BUNDLED_AGENTS").as_deref() == Ok("true") {
         let verified = ReleaseRepository::from_environment().and_then(|repository| {
-            for arch in ["amd64", "arm64"] {
-                repository.latest_compatible_for_channel(
-                    "linux",
-                    arch,
-                    protocol::PROTOCOL_VERSION,
-                    release::ReleaseChannel::Stable,
-                )?;
-            }
+            repository.latest_compatible_for_channel(
+                "linux",
+                "amd64",
+                protocol::PROTOCOL_VERSION,
+                release::ReleaseChannel::Stable,
+            )?;
             Ok(())
         });
         if verified.is_err() {

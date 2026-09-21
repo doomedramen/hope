@@ -201,7 +201,7 @@ pub async fn file(Path(path): Path<ReleasePath>) -> Response {
 }
 
 fn supported_target(platform: &str, arch: &str) -> bool {
-    platform == SUPPORTED_PLATFORM && matches!(arch, "amd64" | "arm64")
+    platform == SUPPORTED_PLATFORM && arch == "amd64"
 }
 
 fn bytes_response(
@@ -247,4 +247,16 @@ fn repository_error_response(error: RepositoryError) -> Response {
         ),
     };
     error_response(status, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::supported_target;
+
+    #[test]
+    fn only_linux_amd64_agent_is_published() {
+        assert!(supported_target("linux", "amd64"));
+        assert!(!supported_target("linux", "arm64"));
+        assert!(!supported_target("darwin", "amd64"));
+    }
 }

@@ -297,11 +297,8 @@ detect_architecture() {
         x86_64|amd64)
             ARCH="amd64"
             ;;
-        aarch64|arm64)
-            ARCH="arm64"
-            ;;
         *)
-            die "unsupported Linux architecture: $(uname -m); supported architectures are x86_64 and aarch64"
+            die "unsupported Linux architecture: $(uname -m); currently supported architecture is x86_64"
             ;;
     esac
 }
