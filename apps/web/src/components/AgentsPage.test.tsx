@@ -14,6 +14,7 @@ const agent: Agent = {
   arch: "amd64",
   capabilities: ["filesystem", "socket"],
   last_seen: "2026-09-19T10:00:00Z",
+  last_heartbeat_at: "2026-09-19T10:00:00Z",
   inventory_summary: {
     interfaces: 2,
     filesystems: 3,
@@ -25,7 +26,72 @@ const agent: Agent = {
   protocol_version: 1,
   revoked_at: null,
   created_at: "2026-09-19T09:00:00Z",
-  updated_at: "2026-09-19T10:00:00Z",
+};
+
+const metrics = {
+  range: "1h" as const,
+  from: "2026-09-19T09:00:00Z",
+  to: "2026-09-19T10:00:00Z",
+  latest: {
+    sample_id: "sample-1",
+    collected_at: "2026-09-19T10:00:00Z",
+    received_at: "2026-09-19T10:00:01Z",
+    metrics: {
+      memory: { used_percent: 25 },
+      network: { interfaces: [{ name: "eth0", rx_bytes_per_sec: 1024 }] },
+      disk: { devices: [{ name: "sda", utilization_percent: 10 }] },
+      pressure: { io: { some_avg10: 1 } },
+      gpu: { devices: [] },
+    },
+  },
+  freshness: { state: "fresh", age_seconds: 1 },
+  availability: {
+    status: "partial",
+    collectors: { cpu: "available", gpu: "unavailable" },
+  },
+  dimensions: {
+    network_interfaces: ["eth0"],
+    disk_devices: ["sda"],
+    gpu_devices: [],
+  },
+  series: [
+    {
+      timestamp: "2026-09-19T10:00:00Z",
+      sample_count: 1,
+      values: {
+        "cpu.usage_percent": {
+          average: 42,
+          minimum: 42,
+          maximum: 42,
+          latest: 42,
+        },
+        "memory.used_percent": {
+          average: 25,
+          minimum: 25,
+          maximum: 25,
+          latest: 25,
+        },
+        "network.interfaces.eth0.rx_bytes_per_sec": {
+          average: 1024,
+          minimum: 1024,
+          maximum: 1024,
+          latest: 1024,
+        },
+        "disk.devices.sda.utilization_percent": {
+          average: 10,
+          minimum: 10,
+          maximum: 10,
+          latest: 10,
+        },
+        "pressure.io.some_avg10": {
+          average: 1,
+          minimum: 1,
+          maximum: 1,
+          latest: 1,
+        },
+      },
+    },
+  ],
 };
 
 const detail: AgentDetail = {
@@ -126,7 +192,9 @@ describe("AgentsPage", () => {
         Promise.resolve(
           path === "/api/v1/agents?limit=100"
             ? jsonResponse({ items: [agent], next_cursor: null })
-            : jsonResponse(detail),
+            : path.startsWith("/api/v1/agents/agent-1/metrics")
+              ? jsonResponse(metrics)
+              : jsonResponse(detail),
         ),
       );
     vi.stubGlobal("fetch", fetchMock);
@@ -141,6 +209,66 @@ describe("AgentsPage", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Sockets" }));
     expect(await screen.findByText("Listening")).toBeInTheDocument();
     expect(await screen.findByText("Reachable")).toBeInTheDocument();
+  });
+
+  it("loads Metrics and renders charts plus unavailable GPU state", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((path: string) =>
+        Promise.resolve(
+          path === "/api/v1/agents?limit=100"
+            ? jsonResponse({ items: [agent], next_cursor: null })
+            : path.startsWith("/api/v1/agents/agent-1/metrics")
+              ? jsonResponse(metrics)
+              : jsonResponse(detail),
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Metrics" }));
+    expect(await screen.findByText("Resource telemetry")).toBeInTheDocument();
+    expect(screen.getByText("GPU utilization")).toBeInTheDocument();
+    expect(
+      screen.getByText("No supported GPU telemetry reported."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "6 hours" }));
+    expect(
+      await screen.findByRole("button", { name: "6 hours" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/agents/agent-1/metrics?range=6h",
+      expect.anything(),
+    );
+  });
+
+  it("makes stale and empty metric history explicit", async () => {
+    const staleMetrics = {
+      ...metrics,
+      series: [],
+      freshness: { state: "stale", age_seconds: 600 },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementation((path: string) =>
+          Promise.resolve(
+            path === "/api/v1/agents?limit=100"
+              ? jsonResponse({ items: [agent], next_cursor: null })
+              : path.startsWith("/api/v1/agents/agent-1/metrics")
+                ? jsonResponse(staleMetrics)
+                : jsonResponse(detail),
+          ),
+        ),
+    );
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("tab", { name: "Metrics" }));
+
+    expect(await screen.findByText("Samples are stale")).toBeInTheDocument();
+    expect(screen.getAllByText("No chart data").length).toBeGreaterThan(0);
   });
 
   it("shows an empty state when no agents are enrolled", async () => {

@@ -201,12 +201,19 @@ export interface Agent {
   arch: string | null;
   capabilities: string[];
   last_seen: string | null;
+  last_heartbeat_at: string | null;
   inventory_summary: AgentInventorySummary;
   device_id: string | null;
   protocol_version: number | null;
   revoked_at: string | null;
   created_at: string;
-  updated_at: string;
+  collector_status?: AgentCollectorStatus[];
+}
+
+export interface AgentCollectorStatus {
+  capability: string;
+  status: "available" | "partial" | "unavailable" | string;
+  error: string | null;
 }
 
 export interface AgentHostInventory {
@@ -331,6 +338,58 @@ export interface AgentDetail extends Agent {
   containers: AgentContainerInventory[];
   evidence: AgentEvidenceItem[];
   reconciliation: AgentReconciliation;
+}
+
+export type AgentMetricRange = "1h" | "6h" | "24h" | "7d";
+
+export interface AgentMetricStats {
+  average: number;
+  minimum: number;
+  maximum: number;
+  latest: number;
+}
+
+export interface AgentMetricSeriesPoint {
+  timestamp: string;
+  sample_count: number;
+  values: Record<string, AgentMetricStats>;
+}
+
+export interface AgentMetricGpuDimension {
+  id: string;
+  name: string | null;
+  vendor: string | null;
+}
+
+export interface AgentMetricsResponse {
+  range: AgentMetricRange;
+  from: string;
+  to: string;
+  latest: {
+    sample_id: string;
+    collected_at: string;
+    received_at: string;
+    metrics: Record<string, unknown>;
+  } | null;
+  freshness: {
+    state: "fresh" | "stale" | "empty" | string;
+    age_seconds: number | null;
+    collected_at?: string;
+    received_at?: string | null;
+  };
+  availability: {
+    status: "available" | "partial" | "unavailable" | "empty" | string;
+    collectors: Record<
+      string,
+      "available" | "partial" | "unavailable" | string
+    >;
+  };
+  dimensions: {
+    network_interfaces: string[];
+    disk_devices: string[];
+    gpu_devices: AgentMetricGpuDimension[];
+  };
+  series: AgentMetricSeriesPoint[];
 }
 
 export type CredentialKind = "ssh_private_key" | "ssh_password" | string;
@@ -1073,6 +1132,15 @@ export async function createAgentEnrollment(): Promise<AgentEnrollmentBootstrap>
 
 export async function fetchAgent(id: string): Promise<AgentDetail> {
   return request<AgentDetail>(`/api/v1/agents/${id}`);
+}
+
+export async function fetchAgentMetrics(
+  id: string,
+  range: AgentMetricRange = "1h",
+): Promise<AgentMetricsResponse> {
+  return request<AgentMetricsResponse>(
+    `/api/v1/agents/${id}/metrics?range=${encodeURIComponent(range)}`,
+  );
 }
 
 export async function fetchCredentials(): Promise<ApiPage<Credential>> {

@@ -6,6 +6,7 @@ import {
   deleteNetwork,
   draftDiscoveryScope,
   fetchAgent,
+  fetchAgentMetrics,
   fetchAgents,
   fetchCredentials,
   createCredential,
@@ -134,6 +135,26 @@ describe("fetchHealthReady", () => {
     expect(result.sockets[0]?.reachability.state).toBe("reachable");
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/agents/agent-1",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+  });
+
+  it("fetches agent metrics with an explicit range", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ range: "6h", series: [], dimensions: {} }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchAgentMetrics("agent-1", "6h");
+
+    expect(result.range).toBe("6h");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/agents/agent-1/metrics?range=6h",
       expect.objectContaining({ credentials: "same-origin" }),
     );
   });

@@ -19,10 +19,12 @@ import {
   ShieldCheckIcon,
   XIcon,
 } from "lucide-react";
+import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   createAgentEnrollment,
   fetchAgent,
+  fetchAgentMetrics,
   fetchAgents,
   getUserFacingError,
   type Agent,
@@ -31,6 +33,8 @@ import {
   type AgentFilesystemInventory,
   type AgentHostInventory,
   type AgentInventorySummary,
+  type AgentMetricRange,
+  type AgentMetricsResponse,
   type AgentNetworkInventory,
   type AgentProcessInventory,
   type AgentReachabilityState,
@@ -55,6 +59,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+} from "@/components/ui/chart";
 import {
   Dialog,
   DialogClose,
@@ -83,7 +92,10 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "cn";
-import { agentConnectionAddress, saveAgentConnectionAddress } from "@/lib/agentConnection";
+import {
+  agentConnectionAddress,
+  saveAgentConnectionAddress,
+} from "@/lib/agentConnection";
 
 const EMPTY_AGENTS: Agent[] = [];
 const EMPTY_INVENTORY_SUMMARY: AgentInventorySummary = {
@@ -291,7 +303,9 @@ function EnrollmentDialog({
 }) {
   const [baseUrl, setBaseUrl] = useState(agentConnectionAddress);
   const [addressError, setAddressError] = useState<string | null>(null);
-  const scriptOrigin = new URL(addressError ? agentConnectionAddress() : baseUrl);
+  const scriptOrigin = new URL(
+    addressError ? agentConnectionAddress() : baseUrl,
+  );
   scriptOrigin.protocol = "https:";
   const scriptUrl = scriptOrigin.origin + "/agent/install.sh";
   const enrollmentMutation = useMutation({
@@ -346,14 +360,34 @@ function EnrollmentDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">
-          <label className="text-sm font-medium" htmlFor="agent-connection-address">Agent connection address</label>
-          <Input id="agent-connection-address" value={baseUrl} onChange={(event) => {
-            setBaseUrl(event.target.value);
-            try { saveAgentConnectionAddress(event.target.value); setAddressError(null); }
-            catch { setAddressError("Enter the HTTP LAN address or HTTPS proxy address agents can reach."); }
-          }} />
-          <p className="text-xs text-muted-foreground">Use the address reachable from your devices. An HTTP LAN address uses Hope’s pinned HTTPS on port 443.</p>
-          {addressError ? <p className="text-xs text-destructive">{addressError}</p> : null}
+          <label
+            className="text-sm font-medium"
+            htmlFor="agent-connection-address"
+          >
+            Agent connection address
+          </label>
+          <Input
+            id="agent-connection-address"
+            value={baseUrl}
+            onChange={(event) => {
+              setBaseUrl(event.target.value);
+              try {
+                saveAgentConnectionAddress(event.target.value);
+                setAddressError(null);
+              } catch {
+                setAddressError(
+                  "Enter the HTTP LAN address or HTTPS proxy address agents can reach.",
+                );
+              }
+            }}
+          />
+          <p className="text-xs text-muted-foreground">
+            Use the address reachable from your devices. An HTTP LAN address
+            uses Hope’s pinned HTTPS on port 443.
+          </p>
+          {addressError ? (
+            <p className="text-xs text-destructive">{addressError}</p>
+          ) : null}
         </div>
         {enrollmentMutation.isPending ? (
           <p aria-live="polite" className="text-sm text-muted-foreground">
@@ -555,6 +589,15 @@ function AgentDetailPanel({
   onRetry: () => void;
   selectedAgent: Agent | null;
 }) {
+  const [activeTab, setActiveTab] = useState("overview");
+  const [metricRange, setMetricRange] = useState<AgentMetricRange>("1h");
+  const metricsQuery = useQuery({
+    queryKey: ["agent-metrics", detail?.id, metricRange],
+    queryFn: () => fetchAgentMetrics(detail!.id, metricRange),
+    enabled: activeTab === "metrics" && Boolean(detail?.id),
+    refetchInterval: 15_000,
+  });
+
   if (loading) {
     return (
       <Card>
@@ -628,6 +671,11 @@ function AgentDetailPanel({
             title={formatDate(detail.last_seen)}
           />
           <InfoPair
+            label="Last heartbeat"
+            value={formatRelative(detail.last_heartbeat_at)}
+            title={formatDate(detail.last_heartbeat_at)}
+          />
+          <InfoPair
             label="Device"
             value={detail.device_id ? shortId(detail.device_id) : "Unlinked"}
             mono={Boolean(detail.device_id)}
@@ -643,7 +691,11 @@ function AgentDetailPanel({
           />
         </div>
 
-        <Tabs className="min-w-0" defaultValue="overview">
+        <Tabs
+          className="min-w-0"
+          onValueChange={setActiveTab}
+          value={activeTab}
+        >
           <TabsList
             aria-label="Agent inventory views"
             className="w-full flex-wrap justify-start"
@@ -676,6 +728,10 @@ function AgentDetailPanel({
             <TabsTrigger value="containers">
               <ContainerIcon data-icon="inline-start" />
               Containers
+            </TabsTrigger>
+            <TabsTrigger value="metrics">
+              <ActivityIcon data-icon="inline-start" />
+              Metrics
             </TabsTrigger>
           </TabsList>
 
@@ -720,6 +776,16 @@ function AgentDetailPanel({
           </TabsContent>
           <TabsContent className="pt-4" value="containers">
             <ContainerInventory containers={detail.containers} />
+          </TabsContent>
+          <TabsContent className="pt-4" value="metrics">
+            <AgentMetricsView
+              data={metricsQuery.data}
+              error={metricsQuery.error}
+              loading={metricsQuery.isLoading}
+              onRangeChange={setMetricRange}
+              range={metricRange}
+              retry={() => void metricsQuery.refetch()}
+            />
           </TabsContent>
         </Tabs>
       </CardContent>
@@ -772,6 +838,543 @@ function ReconciliationSummary({ detail }: { detail: AgentDetail }) {
       </Alert>
     </section>
   );
+}
+
+function AgentMetricsView({
+  data,
+  error,
+  loading,
+  onRangeChange,
+  range,
+  retry,
+}: {
+  data: AgentMetricsResponse | undefined;
+  error: unknown;
+  loading: boolean;
+  onRangeChange: (range: AgentMetricRange) => void;
+  range: AgentMetricRange;
+  retry: () => void;
+}) {
+  const networkInterfaces = data?.dimensions.network_interfaces ?? [];
+  const diskDevices = data?.dimensions.disk_devices ?? [];
+  const gpuDevices = data?.dimensions.gpu_devices ?? [];
+  const [interfaceSelection, setInterfaceSelection] = useState("");
+  const [diskSelection, setDiskSelection] = useState("");
+  const [gpuSelection, setGpuSelection] = useState("");
+  const selectedInterface = networkInterfaces.includes(interfaceSelection)
+    ? interfaceSelection
+    : (networkInterfaces[0] ?? "");
+  const selectedDisk = diskDevices.includes(diskSelection)
+    ? diskSelection
+    : (diskDevices[0] ?? "");
+  const selectedGpu = gpuDevices.some((device) => device.id === gpuSelection)
+    ? gpuSelection
+    : (gpuDevices[0]?.id ?? "");
+
+  if (loading) {
+    return (
+      <div className="grid gap-4">
+        <Skeleton className="h-9 w-56" />
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }, (_, index) => (
+            <Skeleton className="h-24" key={index} />
+          ))}
+        </div>
+        <Skeleton className="h-64 w-full" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <LoadError error={error} retry={retry} title="Metrics unavailable" />
+    );
+  }
+
+  if (!data) {
+    return (
+      <MetricEmpty
+        description="No resource telemetry response has been received."
+        title="No metrics"
+      />
+    );
+  }
+
+  const latestMetrics = data.latest?.metrics;
+  const cpu = latestSeriesValue(data, "cpu.usage_percent");
+  const memory = metricNumber(latestMetrics, ["memory", "used_percent"]);
+  const network = sumLatestDeviceMetric(
+    latestMetrics,
+    ["network", "interfaces"],
+    "rx_bytes_per_sec",
+  );
+  const disk = sumLatestDeviceMetric(
+    latestMetrics,
+    ["disk", "devices"],
+    "utilization_percent",
+  );
+  const pressure = metricNumber(latestMetrics, [
+    "pressure",
+    "io",
+    "some_avg10",
+  ]);
+  const gpu = selectedGpu
+    ? latestDeviceMetric(
+        latestMetrics,
+        ["gpu", "devices"],
+        selectedGpu,
+        "utilization_percent",
+      )
+    : null;
+  const stale = data.freshness.state === "stale";
+  const partial = !["available", "empty"].includes(data.availability.status);
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-medium">Resource telemetry</h2>
+          <p className="text-xs text-muted-foreground">
+            Host and device samples. No per-process or container series in this
+            view.
+          </p>
+        </div>
+        <div aria-label="Metric range" className="flex gap-1" role="group">
+          {(
+            [
+              ["1h", "1 hour"],
+              ["6h", "6 hours"],
+              ["24h", "24 hours"],
+              ["7d", "7 days"],
+            ] as const
+          ).map(([value, label]) => (
+            <Button
+              aria-pressed={range === value}
+              key={value}
+              onClick={() => onRangeChange(value)}
+              size="sm"
+              variant={range === value ? "default" : "outline"}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      {stale ? (
+        <Alert>
+          <Clock3Icon />
+          <AlertTitle>Samples are stale</AlertTitle>
+          <AlertDescription>
+            Latest sample is {formatAge(data.freshness.age_seconds)} old.
+            Heartbeat liveness is tracked separately.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {partial ? (
+        <Alert>
+          <CircleHelpIcon />
+          <AlertTitle>Partial telemetry</AlertTitle>
+          <AlertDescription>
+            Some collectors are unavailable or returned partial data. Missing
+            values are left blank.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricValueCard label="CPU used" value={formatMetricPercent(cpu)} />
+        <MetricValueCard
+          label="Memory used"
+          value={formatMetricPercent(memory)}
+        />
+        <MetricValueCard label="Network receive" value={formatRate(network)} />
+        <MetricValueCard label="Disk busy" value={formatMetricPercent(disk)} />
+        <MetricValueCard
+          label="I/O pressure (some)"
+          value={formatMetricPercent(pressure)}
+        />
+        <MetricValueCard
+          label="GPU utilization"
+          value={gpuDevices.length ? formatMetricPercent(gpu) : "Unavailable"}
+        />
+      </div>
+
+      <MetricChart
+        color="var(--chart-1)"
+        data={seriesFor(data, "cpu.usage_percent")}
+        description="CPU busy percentage over the selected range."
+        id="agent-cpu-metrics"
+        title="CPU"
+        unit="percent"
+      />
+      <MetricChart
+        color="var(--chart-2)"
+        data={seriesFor(data, "memory.used_percent")}
+        description="Memory utilization over the selected range."
+        id="agent-memory-metrics"
+        title="Memory"
+        unit="percent"
+      />
+      <MetricChart
+        color="var(--chart-3)"
+        data={
+          selectedInterface
+            ? seriesFor(
+                data,
+                `network.interfaces.${selectedInterface}.rx_bytes_per_sec`,
+              )
+            : []
+        }
+        description="Receive throughput for the selected interface."
+        id="agent-network-metrics"
+        selector={
+          networkInterfaces.length > 1 ? (
+            <MetricSelector
+              ariaLabel="Network interface"
+              onChange={setInterfaceSelection}
+              options={networkInterfaces}
+              value={selectedInterface}
+            />
+          ) : null
+        }
+        title="Network receive"
+        unit="bytes"
+      />
+      <MetricChart
+        color="var(--chart-4)"
+        data={
+          selectedDisk
+            ? seriesFor(
+                data,
+                `disk.devices.${selectedDisk}.utilization_percent`,
+              )
+            : []
+        }
+        description="Disk utilization for the selected block device."
+        id="agent-disk-metrics"
+        selector={
+          diskDevices.length > 1 ? (
+            <MetricSelector
+              ariaLabel="Disk device"
+              onChange={setDiskSelection}
+              options={diskDevices}
+              value={selectedDisk}
+            />
+          ) : null
+        }
+        title="Disk I/O"
+        unit="percent"
+      />
+      <MetricChart
+        color="var(--chart-5)"
+        data={seriesFor(data, "pressure.io.some_avg10")}
+        description="Linux I/O pressure some average over ten seconds."
+        id="agent-pressure-metrics"
+        title="I/O pressure"
+        unit="percent"
+      />
+      <MetricChart
+        color="var(--chart-1)"
+        data={
+          selectedGpu
+            ? seriesFor(data, `gpu.devices.${selectedGpu}.utilization_percent`)
+            : []
+        }
+        description="GPU utilization for the selected device."
+        emptyLabel={
+          gpuDevices.length ? undefined : "No supported GPU telemetry reported."
+        }
+        id="agent-gpu-metrics"
+        selector={
+          gpuDevices.length > 1 ? (
+            <MetricSelector
+              ariaLabel="GPU device"
+              labelForOption={(id) =>
+                gpuDevices.find((device) => device.id === id)?.name ?? id
+              }
+              onChange={setGpuSelection}
+              options={gpuDevices.map((device) => device.id)}
+              value={selectedGpu}
+            />
+          ) : null
+        }
+        title="GPU"
+        unit="percent"
+      />
+
+      <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+        <span>Collectors:</span>
+        {Object.entries(data.availability.collectors).map(
+          ([collector, status]) => (
+            <Badge
+              key={collector}
+              variant={status === "available" ? "secondary" : "outline"}
+            >
+              {labelize(collector)}: {labelize(status)}
+            </Badge>
+          ),
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MetricValueCard({ label, value }: { label: string; value: string }) {
+  return (
+    <Card className="gap-2 py-4">
+      <CardContent>
+        <p className="text-xs text-muted-foreground">{label}</p>
+        <p className="mt-1 text-xl font-semibold tabular-nums">{value}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function MetricChart({
+  color,
+  data,
+  description,
+  emptyLabel = "No samples in this range.",
+  id,
+  selector,
+  title,
+  unit,
+}: {
+  color: string;
+  data: Array<{ time: string; value: number }>;
+  description: string;
+  emptyLabel?: string;
+  id: string;
+  selector?: ReactNode;
+  title: string;
+  unit: "bytes" | "percent";
+}) {
+  return (
+    <section className="rounded-lg border p-4">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-medium">{title}</h3>
+          <p className="text-xs text-muted-foreground">{description}</p>
+        </div>
+        {selector}
+      </div>
+      {data.length ? (
+        <>
+          <ChartContainer
+            aria-describedby={`${id}-summary`}
+            aria-label={`${title} chart`}
+            className="h-52 w-full"
+            config={{ value: { label: title, color } }}
+            role="img"
+          >
+            <LineChart
+              accessibilityLayer
+              data={data}
+              margin={{ left: -18, right: 8, top: 8 }}
+            >
+              <CartesianGrid vertical={false} />
+              <XAxis
+                axisLine={false}
+                dataKey="time"
+                minTickGap={28}
+                tickLine={false}
+                tickMargin={8}
+              />
+              <YAxis
+                axisLine={false}
+                tickFormatter={(value) => formatMetricAxis(value, unit)}
+                tickLine={false}
+                width={52}
+              />
+              <ChartTooltip
+                content={
+                  <ChartTooltipContent
+                    formatter={(value) => formatMetricAxis(Number(value), unit)}
+                    indicator="line"
+                  />
+                }
+                cursor={false}
+              />
+              <Line
+                dataKey="value"
+                dot={false}
+                stroke="var(--color-value)"
+                strokeWidth={2}
+                type="monotone"
+              />
+            </LineChart>
+          </ChartContainer>
+          <p className="sr-only" id={`${id}-summary`}>
+            {summarizeMetricChart(data, title, unit)}
+          </p>
+        </>
+      ) : (
+        <MetricEmpty description={emptyLabel} title="No chart data" />
+      )}
+    </section>
+  );
+}
+
+function MetricSelector({
+  ariaLabel,
+  labelForOption,
+  onChange,
+  options,
+  value,
+}: {
+  ariaLabel: string;
+  labelForOption?: (value: string) => string;
+  onChange: (value: string) => void;
+  options: string[];
+  value: string;
+}) {
+  return (
+    <select
+      aria-label={ariaLabel}
+      className="h-8 rounded-md border bg-background px-2 text-xs"
+      onChange={(event) => onChange(event.target.value)}
+      value={value}
+    >
+      {options.map((option) => (
+        <option key={option} value={option}>
+          {labelForOption?.(option) ?? option}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function MetricEmpty({
+  description,
+  title,
+}: {
+  description: string;
+  title: string;
+}) {
+  return (
+    <div className="rounded-lg border border-dashed p-8 text-center">
+      <p className="text-sm font-medium">{title}</p>
+      <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+    </div>
+  );
+}
+
+function seriesFor(data: AgentMetricsResponse, key: string) {
+  return data.series.flatMap((point) => {
+    const value = point.values[key]?.latest;
+    return typeof value === "number" && Number.isFinite(value)
+      ? [{ time: formatMetricTime(point.timestamp), value }]
+      : [];
+  });
+}
+
+function latestSeriesValue(
+  data: AgentMetricsResponse,
+  key: string,
+): number | null {
+  const latest = metricNumber(data.latest?.metrics, key.split("."));
+  if (latest !== null) return latest;
+  const value = data.series.at(-1)?.values[key]?.latest;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function metricNumber(
+  metrics: Record<string, unknown> | undefined,
+  path: string[],
+): number | null {
+  let current: unknown = metrics;
+  for (const part of path) {
+    if (!current || typeof current !== "object") return null;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return typeof current === "number" && Number.isFinite(current)
+    ? current
+    : null;
+}
+
+function latestDeviceMetric(
+  metrics: Record<string, unknown> | undefined,
+  path: string[],
+  id: string,
+  field: string,
+): number | null {
+  const devices = metricNumberArray(metrics, path);
+  const device = devices.find(
+    (item) => String(item.id ?? item.name ?? item.index) === id,
+  );
+  return typeof device?.[field] === "number" ? (device[field] as number) : null;
+}
+
+function sumLatestDeviceMetric(
+  metrics: Record<string, unknown> | undefined,
+  path: string[],
+  field: string,
+): number | null {
+  const values = metricNumberArray(metrics, path)
+    .map((item) => item[field])
+    .filter(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value),
+    );
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+}
+
+function metricNumberArray(
+  metrics: Record<string, unknown> | undefined,
+  path: string[],
+): Array<Record<string, unknown>> {
+  let current: unknown = metrics;
+  for (const part of path) {
+    if (!current || typeof current !== "object") return [];
+    current = (current as Record<string, unknown>)[part];
+  }
+  return Array.isArray(current)
+    ? current.filter(
+        (item): item is Record<string, unknown> =>
+          Boolean(item) && typeof item === "object" && !Array.isArray(item),
+      )
+    : [];
+}
+
+function formatMetricPercent(value: number | null): string {
+  return value === null ? "—" : `${value.toFixed(1)}%`;
+}
+
+function formatRate(value: number | null): string {
+  if (value === null) return "—";
+  if (value < 1024) return `${value.toFixed(0)} B/s`;
+  return `${formatBytes(value)}/s`;
+}
+
+function formatAge(seconds: number | null): string {
+  if (seconds === null) return "unknown";
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m`;
+}
+
+function formatMetricTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf())
+    ? value
+    : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatMetricAxis(value: number, unit: "bytes" | "percent"): string {
+  if (unit === "percent") return `${value.toFixed(0)}%`;
+  return formatRate(value);
+}
+
+function summarizeMetricChart(
+  data: Array<{ time: string; value: number }>,
+  title: string,
+  unit: "bytes" | "percent",
+): string {
+  const values = data.map((point) => point.value);
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  const latest = values.at(-1) ?? minimum;
+  return `${title}: ${data.length} samples; minimum ${formatMetricAxis(minimum, unit)}, maximum ${formatMetricAxis(maximum, unit)}, latest ${formatMetricAxis(latest, unit)}.`;
 }
 
 function ReachabilityExplanation() {
