@@ -57,8 +57,10 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct
 
 Inside an existing Hope LXC, the script takes its update path instead of
 creating another container. It refreshes the managed Compose and backup files,
-pulls only the Hope server/worker image, stops writers, starts PostgreSQL,
-runs `server migrate`, waits for readiness, then starts the worker.
+pulls only the Hope server/worker image, and compares the image IDs before and
+after the pull. If the image is already current, it exits successfully and
+leaves the running services untouched. Otherwise it stops writers, starts
+PostgreSQL, runs `server migrate`, waits for readiness, then starts the worker.
 
 `/usr/local/sbin/hope-update` performs the same flow without downloading the
 outer Helper Script. Prefer the Helper Script command for normal updates so

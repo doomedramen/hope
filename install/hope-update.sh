@@ -120,6 +120,25 @@ wait_for_server() {
   die "Hope server did not become ready"
 }
 
+image_snapshot() {
+  local image_ref
+  local image_id
+  local image_refs
+
+  image_refs="$(compose config --images)" || die "could not read Hope image references"
+  [[ -n "$image_refs" ]] || die "Compose file does not define any images"
+
+  while IFS= read -r image_ref; do
+    [[ -z "$image_ref" ]] && continue
+    if image_id="$(docker image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null)" &&
+      [[ -n "$image_id" ]]; then
+      printf '%s=%s\n' "$image_ref" "$image_id"
+    else
+      printf '%s=<missing>\n' "$image_ref"
+    fi
+  done <<<"$image_refs"
+}
+
 [[ "$(id -u)" == 0 ]] || die "run as root"
 [[ -f "$HOPE_ENV_FILE" ]] || die "deployment configuration not found: $HOPE_ENV_FILE"
 [[ -f "$HOPE_COMPOSE_FILE" ]] || die "deployment compose file not found: $HOPE_COMPOSE_FILE"
@@ -147,8 +166,14 @@ stage_restore=""
 install_stage "$stage_update" "$HOPE_UPDATE_SCRIPT" 0750
 stage_update=""
 
+images_before="$(image_snapshot)"
 log "Pulling Hope image"
 compose pull server worker
+images_after="$(image_snapshot)"
+if [[ "$images_before" == "$images_after" ]]; then
+  log "Hope image is already current; nothing to update"
+  exit 0
+fi
 
 log "Stopping Hope server and worker"
 services_stopped=1

@@ -102,6 +102,27 @@ EOF
 cat >"$test_root/bin/docker" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$HOPE_TEST_DOCKER_LOG"
+case "$*" in
+  *" config --images")
+  printf 'ghcr.io/doomedramen/hope:main\n'
+  exit 0
+  ;;
+esac
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+  if [ -f "$HOPE_TEST_PULL_STATE" ]; then
+    printf 'sha256:new-image\n'
+  else
+    printf 'sha256:old-image\n'
+  fi
+  exit 0
+fi
+case "$*" in
+  *" pull server worker")
+    if [ "${HOPE_TEST_PULL_CHANGED:-1}" = 1 ]; then
+      : >"$HOPE_TEST_PULL_STATE"
+    fi
+    ;;
+esac
 exit 0
 EOF
 
@@ -126,6 +147,8 @@ HOPE_BIN_DIR="$test_root/hope/bin" \
 HOPE_UPDATE_SCRIPT="$test_root/hope/hope-update" \
 HOPE_SCRIPTS_URL="https://example.invalid/hope" \
 HOPE_TEST_DOCKER_LOG="$test_root/docker.log" \
+HOPE_TEST_PULL_STATE="$test_root/pull-state" \
+HOPE_TEST_PULL_CHANGED=1 \
   bash "$repo_root/install/hope-update.sh"
 
 grep -Fqx 'services: {}' "$test_root/hope/deploy/compose/docker-compose.yml" ||
@@ -150,6 +173,31 @@ worker_line="$(line_number ' up -d worker$' "$test_root/docker.log")"
   fail "updater did not stop writers before migration"
 (( migrate_line < server_line && server_line < worker_line )) ||
   fail "updater did not wait to start worker until server migration path completed"
+
+: >"$test_root/no-update-docker.log"
+PATH="$test_root/bin:$PATH" \
+HOPE_ROOT="$test_root/hope" \
+HOPE_DEPLOY_DIR="$test_root/hope/deploy/compose" \
+HOPE_ENV_FILE="$test_root/hope/.env" \
+HOPE_BIN_DIR="$test_root/hope/bin" \
+HOPE_UPDATE_SCRIPT="$test_root/hope/hope-update" \
+  HOPE_SCRIPTS_URL="https://example.invalid/hope" \
+  HOPE_TEST_DOCKER_LOG="$test_root/no-update-docker.log" \
+  HOPE_TEST_PULL_STATE="$test_root/pull-state" \
+  HOPE_TEST_PULL_CHANGED=0 \
+  bash "$repo_root/install/hope-update.sh" >"$test_root/no-update-output.log"
+
+grep -Fq 'Hope image is already current; nothing to update' "$test_root/no-update-output.log" ||
+  fail "no-update path did not report that the Hope image is current"
+if grep -Fq 'Hope image is already current; nothing to update' "$test_root/no-update-docker.log"; then
+  fail "no-update path leaked its status into Docker command log"
+fi
+if grep -Fq ' stop worker server' "$test_root/no-update-docker.log" ||
+  grep -Fq ' run --rm --no-deps server migrate' "$test_root/no-update-docker.log"; then
+  fail "updater restarted services when the Hope image was already current"
+fi
+grep -Fq ' pull server worker' "$test_root/no-update-docker.log" ||
+  fail "no-update path did not check the remote Hope image"
 
 install_root="$test_root/install-hope"
 framework_functions="$(cat <<'EOF'
