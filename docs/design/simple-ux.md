@@ -1,129 +1,205 @@
-# Simple by default, capable when needed
+# Hope UX: keep the object in focus
 
-Status: UX proposal for review. No application changes are included.
+Status: revised proposal, informed by visual reference inspection on 21 September 2026. No application changes. This replaces the earlier navigation-focused proposal.
 
-## Product direction
+## The underlying problem
 
-Hope should be understandable through its everyday interface. There should be no onboarding wizard, tutorial, setup checklist, or separate beginner mode. First-time and experienced users should use the same screens.
+Hope asks users to interpret its internal model before they can use it: devices, agents, interfaces, evidence, identity confidence, service reviews, proposals, monitors, and incidents. Moving those concepts behind fewer navigation links does not solve that problem.
 
-The default view shows recognizable things, their status, and the actions people use most. Technical detail and uncommon controls remain available on the relevant object. Simplicity comes from fewer concepts and better hierarchy, not from removing capabilities or adding explanatory copy.
+Start with things the user recognizes: a server, router, service, or planned maintenance window. Supporting concepts should appear when they answer a question about that thing. There is no tutorial, setup checklist, wizard, or beginner mode.
 
-## Current friction
+## What the reference images actually show
 
-Code inspection identifies these obstacles:
+These are publisher-provided images, inspected visually. They demonstrate structure, not every behavior of the latest releases. Beszel's dashboard image contains agent version 0.8.0; Kuma's example contains historical dates. Kuma's temporary demo opened at database setup, so no authenticated live interaction is claimed.
 
-- `routes/__root.tsx` presents eight equally prominent destinations. Users must understand the relationship between devices, networks, agents, and monitoring themselves.
-- `components/overview/OverviewDashboard.tsx` leads with counts and analytical panels before users have useful data. It also mixes setup suggestions with operational attention.
-- `routes/monitoring.tsx` exposes four internal categories: monitors, incidents, service reviews, and monitor proposals.
-- `components/MonitorList.tsx` has an empty state with no action. Its normal table includes internal IDs, scheduling details, and failure counters alongside the target and its health.
-- `components/AgentsPage.tsx` makes agent administration a separate destination from devices and ends the install dialog with “Done” without verifying connection.
-- `components/DiscoveryScopeSetup.tsx` exposes scan configuration and calculation mechanics before a scan can start.
-
-These findings come from code inspection, not a completed browser audit or user test.
-
-## Reference principles
-
-[Beszel](https://www.beszel.dev/guide/getting-started) keeps adding a system and its install instructions together, then presents the result in a systems table. Borrow that close relationship between action and result.
-
-[Uptime Kuma](https://github.com/louislam/uptime-kuma) centers its product on monitors and their status. Borrow the focus on recognizable targets and readable health.
-
-For Hope, the proposed equivalent is: **see devices, see what is monitored, act on a problem**. Retain the current typography, shared components, and semantic colors. Change information hierarchy before adding visual styling.
-
-## Navigation
-
-Keep four stable primary destinations:
-
-| Destination | Purpose | Secondary access |
+| Reference | Visible observation | Implication for Hope |
 | --- | --- | --- |
-| Home | What needs attention, and what is being watched? | Recent activity |
-| Devices | Computers, appliances, and their details | Networks, agent management |
-| Monitoring | Checks and their current results | Suggested checks, incident history |
-| Maintenance | Planned work and affected devices | Recurrence, dependencies, conflicts |
+| [Beszel systems](https://www.beszel.dev/image/home-dashboard.png) | One table dominates. Names, CPU, memory, disk, network, and agent information share consistent rows. Filter and Columns sit above it. Add System is distinct. | Useful density can be simple. Repeated structure is easier to scan than unrelated panels. Give the list the space. |
+| [Beszel system details](https://www.beszel.dev/image/home-system.png) | A named system and compact metadata strip frame CPU, memory, Docker, and disk charts. A time selector sits at the top. | Rich detail becomes appropriate after the user selects its subject. Charts need a clear scope. |
+| [Beszel alerts](https://www.beszel.dev/image/home-alerts.webp) | An Alerts dialog overlays the system table. System/all-system scope is explicit. Repeated rules pair switches with thresholds and durations. | Configuration belongs beside the affected object. Keep context and scope visible; repeat a simple form pattern. |
+| [Kuma monitor details](https://user-images.githubusercontent.com/1336778/212262296-e6205815-ad62-488c-83ec-a5b0d0689f7c.jpg) | A searchable monitor list stays on the left. The selected target, status, heartbeat strip, measurements, and history occupy the right. Pause and Edit sit beside the target. | The list is navigation; the detail area answers questions about one selection. Investigating does not require losing the list. |
+| [Kuma settings](https://louislam.net/uptimekuma/2.jpg) | General/account controls and notification destinations occupy a settings screen, away from live status. | Configuration complexity need not be visible during observation. |
 
-Keep Settings at the bottom of the sidebar. Networks and agent management have labeled links on Devices; the agent belonging to a device is accessible from that device's details. Preserve existing route URLs and direct links.
+Neither product contains little information. Each keeps information within recognizable structures. Users understand the subject before interpreting values.
 
-Do not put all advanced features in a generic “Advanced” destination. Network settings belong to networks; check thresholds belong to monitors. Secondary destinations should remain visible links, not hidden gestures or hover-only menus.
+Do not copy everything. Small icons, dense charts, and strongly emphasized destructive controls in the examples are not necessary to reproduce. Preserve accessible labels and deliberate destructive actions.
 
-## Home
+## A concrete diagnosis of Hope
 
-Use a calm status page with a compact health summary and a useful list. A typical populated view could look like this; names and values below are illustrative:
+`routes/infrastructure.tsx` already has a list/detail layout. But its detail area leads with Edit, Deploy agent, Merge, Split, identity confidence, interfaces/IP history, and evidence. The list repeats internal IDs and record versions. Four metric cards and an identity review queue compete with the inventory.
+
+The first detail is effectively an inventory diagnostic view. A user selecting their NAS probably wants its services and current condition before identity reconciliation. Merely reducing columns would miss the problem.
+
+`components/overview/OverviewDashboard.tsx` combines device counts, health, reviews, changes, charts, topology, and attention. Each section introduces another question. Suggestions also resemble operational problems.
+
+`routes/monitoring.tsx` separates monitors, incidents, service reviews, and proposals into top-level tabs. Investigating one service requires knowing which internal category contains the next answer.
+
+`components/AgentsPage.tsx` repeats device inventory from a technical perspective, with another set of summary cards and details. Agents need not be a second everyday representation of the same computer.
+
+These Hope findings are based on code inspection, not a live usability test.
+
+## Three levels of information
+
+| Level | Question | Visible | Deferred |
+| --- | --- | --- | --- |
+| Scan | Which thing needs me? | Names, useful addresses, current condition, compact recent history where supported | Settings, evidence, logs, internal IDs |
+| Inspect | What is happening to this thing? | Current result, meaningful history, related services, relevant incident, freshness | Full configuration and raw diagnostics |
+| Change or diagnose | What should I change, or why did Hope decide this? | Scoped settings, validation, evidence, detailed logs | Unrelated objects and global configuration |
+
+The third level has named entry points: Check settings, Notifications, Network interfaces, Agent details, Identity history. It is not one generic Advanced destination. Users should be able to predict where information lives.
+
+## Remove the redundant dashboard
+
+The previous proposal retained Home plus Devices. The stronger recommendation is to land directly on **Devices**, with **Monitoring** and **Maintenance** as the other primary views. Home is not justified if it repeats fragments from those pages.
+
+Use compact desktop top navigation. A permanent feature sidebar plus another object sidebar would consume space without helping orientation. Keep Settings and Activity secondary in the header. Devices exposes visible Networks and Agents links for administration.
+
+Keep navigation stable between empty and populated installations. Preserve bookmarked routes with redirects or contextual destinations. This is an information architecture proposal, not a requirement to remove every technical route.
+
+## Devices: the default working surface
+
+Start with a full-width searchable list. No detail placeholder consumes half the screen. No device is selected merely because it is first in an API response.
+
+Illustrative layout, with fictional data:
 
 ```text
-Home                                      [Add device]
+Hope      Devices   Monitoring   Maintenance           Activity  Settings
 
-1 service down · 11 checks passing · 2 waiting
+Devices                                                   [Add device]
+Search devices…           All  Needs attention          Networks  Agents
 
-Needs attention
-Jellyfin       Not responding       Checked 30s ago  [View]
-
-Devices                                   [View all]
-nas            Connected           Last seen 12s ago
-mini-pc        Connected           Last seen 18s ago
-
-3 suggested checks                        [Review]
-Recent activity                           [View]
+Device                       Contact             Monitored services
+nas       192.168.1.20        Seen 12s ago         1 failing · 3 passing
+mini-pc   192.168.1.30        Seen 18s ago         6 passing
+router    192.168.1.1         Seen 2h ago          No checks
 ```
 
-Display “Connected” for agent contact and check results for service availability. Neither implies the other. Missing, stale, and unavailable data must remain distinguishable from healthy data.
+Contact reports the freshness/source of observations; service results describe checks. Do not call a device healthy solely because it exists in inventory or its agent reports in.
 
-On an empty installation, keep the same page structure and replace the empty list with “No devices yet” and “Add device.” Omit charts and meaningless zero-value panels. Do not insert a tour or a sequence of tasks.
+Place one address beneath the name instead of an ID. Additional addresses live in Network interfaces. Occasional states such as Maintenance or Identity needs review appear on the affected row, without permanent columns for every exception.
 
-Move analytical charts into device or monitor details. Show actual problems prominently; show configuration suggestions quietly and separately. Users should not interpret an unapproved suggestion as an outage.
+Keep ordering stable, with a visible Needs attention filter. Live updates must not make rows jump while someone is selecting one. A compact exceptional-state count can act as a filter; four permanent summary cards are unnecessary.
 
-## Devices
+Offer Columns for optional Type, Network, Last contact, and supported host metrics. Persist preferences. A simple default should not force experts into repeated detail visits or require customization before use.
 
-Default columns: **Name, Address, Status, Last seen**. Provide search and a direct “Add device” action. Clicking a row opens details with services, useful host information, and available actions.
+### Selecting a device
 
-“Add device” offers clearly named methods inside one dialog: “Install agent” and “Scan network.” Show only the controls for the selected method. This is a normal action dialog, not a wizard.
+On a wide screen, selection turns the list into a compact navigator and opens a substantial detail pane. Keep name, contact, and service condition in the navigator; do not squeeze the complete table into a narrow column.
 
-The agent method reuses the existing install command. Keep the proposed server address visible as an editable summary. Show connection status in the same dialog, with troubleshooting available on failure. A copied command is not success. SSH installation remains available where its existing device prerequisites are met.
+The detail begins with:
 
-The scan method asks for the network and shows the target range and count before launch. Put exclusions and scan profile under “Scan options.” Calculate targets automatically after valid input while retaining explicit scope confirmation. Show results where the action began.
+1. **Identity:** name, current address, observation freshness/source, and a restrained Edit action.
+2. **Current exception, if any:** a service failure or missing agent contact. Report observations without inventing root causes.
+3. **Services:** names, current checks, recent results, and direct actions.
+4. **Resources, when available:** compact host measurements; richer history on request. No empty CPU charts for an agentless router.
 
-Raw evidence, confidence scores, identifiers, process/socket inventories, and reconciliation belong in labeled detail sections. Agent administration remains available for fleet operations; normal device use should not require visiting it.
+Use Overview, Activity, and Details as named sections or tabs. Details groups Network interfaces, Agent details, and Identity history. Merge and Split belong inside Identity history, not beside everyday actions.
 
-## Monitoring
+An identity conflict creates a contextual Review identity link near the name. Open the evidence needed for that decision. Retain a secondary fleet review view for resolving many conflicts.
 
-Default columns: **Name, Status, Response time, Last checked**. Show an honest placeholder when response time is not available. Keep search and simple state filters. Clicking a monitor opens history, incidents, and settings.
+On mobile, selection opens a full detail page with a Devices back link. Preserve search, filters, scroll position, and selection. Support deep links and browser Back on desktop too.
 
-Present proposals as “Suggested checks” beside the list, with a count only when there are suggestions. Offer “Start monitoring” for a recognizable target. Keep service classification and identity review attached to the affected object with a clear explanation of the decision needed.
+## Monitoring: inspect one target without losing the list
 
-Intervals, timeouts, thresholds, assertions, and technical IDs belong in monitor details or “Check options.” Preserve explicit review where the backend needs it; fewer tabs must not mean silently approving proposals.
+Use Kuma's list/detail structure. The list contains a name, text status, and compact recent history supported by actual results. Defer interval, next-run timestamp, UUIDs, and consecutive-failure counters.
 
-An empty list needs a relevant action: review existing suggestions or find services through Devices. A filtered list with no matches offers “Clear filters.”
+The selected monitor reads from top to bottom:
 
-A future “Add monitor” dialog should accept a URL or address directly. This needs backend work: the current web API creates monitors through proposal approval and canonical service/endpoint associations. Do not ship a button promising a direct path before that path exists.
+```text
+Jellyfin                          [Pause] [Check settings] [More]
+nas · http://192.168.1.20:8096
 
-## Maintenance and settings
+Not responding
+Last check 30 seconds ago · Connection timed out
 
-Default maintenance creation should ask for the affected device or service, start time, and duration. Put recurrence and dependency configuration in labeled secondary sections. Show conflicts when relevant, with an understandable resolution.
+Recent checks       | | | | | | | | |    [time range]
+Response time history
 
-Group Settings by user intent, such as notifications and access. Keep technical health and diagnostics accessible without placing them in everyday status summaries. Clearly indicate whether notifications are configured; a check running does not imply an alert will be delivered.
+Current incident / recent state changes
+Notifications: Not configured                          [Configure]
+```
 
-## Interaction rules
+This fictional example illustrates hierarchy, not implemented pause/edit contracts. Only ship actions backed by working APIs. Show uptime and latency summaries only with sufficient data; do not fill metric tiles for symmetry.
 
-- Give each page one clear primary action; use secondary actions for less common work.
-- Use names and addresses before internal identifiers.
-- Put status and actions beside the object they affect.
-- Keep defaults visible in summaries, with controls available to change them.
-- Keep advanced controls in the relevant form or detail view, without a global mode switch.
-- Use short labels and contextual help. Avoid explanatory paragraphs compensating for unclear structure.
-- Preserve keyboard access, readable text statuses, mobile layouts, and direct links.
-- Keep errors and retries in context, retaining entered values and successful partial work.
+An incident is part of its monitor's story. Inspect it without switching to a global tab. Retain secondary cross-monitor incident history for broader investigation.
 
-## Delivery order
+Keep common actions labeled. Put deletion in More with appropriate confirmation. The screenshot's prominent Delete action is not a pattern to copy.
 
-1. **Home and navigation:** reduce default density, distinguish problems from suggestions, and establish secondary access to existing pages.
-2. **Lists and details:** simplify Devices and Monitoring tables; move technical fields into detail sections; add useful empty-state actions.
-3. **Action dialogs:** bring installation and scan results into their originating views; reduce exposed configuration; retain confirmation and validation.
-4. **Direct monitoring:** design and implement URL/address monitor creation, including canonical targets, duplicate handling, authorization, and bounded checks.
+### Suggested checks
 
-Review the existing `ui-overview.md` hierarchy when this proposal is accepted. Its component, accessibility, and semantic-color guidance can remain useful while its dashboard layout changes.
+Show a restrained Suggested checks (3) link above the list when applicable, not a permanent fourth tab and dashboard task queue. The review view shows a target, proposed check, and Start monitoring. Check settings remain available beside each proposal.
+
+On a device, place its suggestions in Services. Global and contextual views operate on the same proposals. Preserve explicit approval and access to classification evidence. A proposal is neither a failure nor an active monitor.
+
+After approval, keep the target visible as Waiting for first result. On partial bulk failure, retain successful work and identify failed targets. Starting monitoring does not imply a passing result.
+
+## Forms: expose decisions when they matter
+
+Do not collapse everything technical. A field belongs in the initial form when omitting it could change the intended target or outcome. Less common tuning can be disclosed later.
+
+| Action | Initially visible | Reveal on request | Completion |
+| --- | --- | --- | --- |
+| Install agent | Target platform, command, server address summary | Change address; troubleshooting | Intended device connected, or waiting/error |
+| Scan network | Range, calculated scope, explicit launch confirmation | Exclusions, scan pressure, scheduling | Progress and results, including zero results |
+| Configure check | Name, type, target, applicable required fields | Timing, thresholds, assertions, protocol options | Saved settings distinct from the next result |
+| Notifications | Object/scope, destination, relevant events | Delivery-specific options | Saved configuration; delivery test if supported |
+| Maintenance | Target, start, duration | Recurrence and dependencies | Confirmed schedule or actionable conflict |
+
+Prefer a collapsed summary such as “Every 60 seconds · timeout 10 seconds” over an unexplained Advanced label. Show actual effective values and overrides. Scope stays visible for multi-target or global changes.
+
+Use dialogs for bounded changes, detail pages for sustained reading, and inline disclosure for a few optional fields. Do not nest settings dialogs. Restore focus after closing.
+
+Add device must distinguish installing an agent, scanning a network, and creating a manual record. A manual record does not promise live data. Preserve it as a secondary option. SSH installation belongs to the selected device where prerequisites are known.
+
+Direct URL monitoring remains a useful later capability. The proposal-based creation path cannot merely be relabeled; target creation and validation need a backend contract.
+
+## Visual discipline and exceptional states
+
+- Use aligned rows and quiet separators. Avoid a card for every number and heading.
+- Reserve emphasis for the main action and meaningful status. Suggestions must not look like alarms.
+- Use consistent row heights, value alignment, and text hierarchy. Repetition reduces scanning effort without deleting useful information.
+- Scope charts to their subjects. Compact histories can remain in lists when useful; large charts belong in details.
+- Omit empty optional sections. Explain missing data where it is expected, rather than displaying walls of No data cards.
+- Keep essential controls labeled and keyboard accessible. Nothing essential depends on hover or color alone.
+- Keep errors and retries local, retain inputs, and preserve successful partial work.
+
+An API failure is not an empty estate. Stale observation is not proof of offline status. Agent contact does not prove service availability. An approved check without results is not healthy.
+
+For a failed service, show the concrete result and check time before technical logs. For maintenance, explain expected effects near the device or service while keeping actual observations accessible. Notification suppression must not turn a failure into a healthy badge.
+
+Refresh quietly without moving focus or announcing every heartbeat. A partial error affects its section, not the entire detail view.
+
+## Where advanced work remains available
+
+| Capability | Contextual entry | Broader access |
+| --- | --- | --- |
+| Agent inventory and connection | Device > Details > Agent | Devices > Agents |
+| Interfaces and address history | Device > Details > Network interfaces | Devices > Networks |
+| Evidence, merge, split | Device > Details > Identity history | Identity review link when relevant |
+| Service classification | Affected service > Details | Suggested checks/review view |
+| Check scheduling and thresholds | Monitor > Check settings | Bulk controls when selected |
+| Incident history | Monitor > Activity | Monitoring > incident history |
+| Change events | Object > Activity | Global Activity |
+| Recurrence and dependencies | Maintenance editor > named options | Maintenance view |
+
+These are discoverability requirements. Removing a navigation item is incomplete unless its replacement path exists and is understandable.
+
+## Implementation implications and delivery
+
+Keep backend entities intact while composing the UI around devices and services. Do not silently resolve uncertain identities to make the interface look simpler.
+
+Validate associations before showing combined rows. Ambiguous or unassociated agents remain visible in Agents and identity review. Multi-endpoint services need a drill-down rather than an ambiguous single healthy badge.
+
+Check contracts for fleet summaries, canonical associations, enrollment-to-agent correlation, monitor changes, histories, and pagination. Never derive estate totals from a bounded first page or a small sample.
+
+Deliver a coherent Devices list and detail experience first, then Monitoring, then their forms. Reducing sidebar items alone would ship the least important part. If adopted, replace the dense hierarchy in ui-overview.md while retaining its shared tokens and accessibility guidance.
 
 ## Validation
 
-Evaluate the ordinary interface, with no coaching: ask new users to add a device, find a failed check, and change a check setting. Ask experienced users to find scan exclusions, agent details, and maintenance conflicts.
+Review the normal list, selected device, failed service, and settings dialog in sequence. Include mobile, empty, and unavailable states. At every level, the user should recognize the subject, current state, and relevant next action.
 
-Measure task completion, wrong destinations, requests for help, and time to a verified result. Establish the current baseline before claiming improvement. Success means fewer decisions for routine work while advanced tasks remain discoverable.
+Ask new users to find a failing service and explain what happened. Ask experienced users to change a threshold, inspect an interface, and resolve an identity conflict. Compare wrong destinations, backtracking, completion, and requests for help with the current UI.
 
-Before implementation, review desktop and mobile mockups for an empty installation, a healthy populated installation, and an installation with a failure. Include loading and unavailable-data states. No tutorial overlays or mandatory setup journey should appear in any version.
+Do not measure simplicity by fewest clicks alone. One deliberate click into named details can be easier than reading ten unrelated sections. Each level should answer its question without requiring knowledge of the next.
+
+Research note: the UI/UX skill's local search did not return relevant progressive-disclosure guidance. These recommendations use the inspected images and Hope's code, not an asserted database match.
