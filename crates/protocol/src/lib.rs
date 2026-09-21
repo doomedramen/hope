@@ -558,6 +558,11 @@ impl MetricSampleBatch {
         if self.agent_id.is_nil() {
             return Err(ValidationError::new("metric agent_id must not be nil"));
         }
+        if self.samples.is_empty() {
+            return Err(ValidationError::new(
+                "metric batch must contain at least one sample",
+            ));
+        }
         if self.samples.len() > MAX_METRIC_SAMPLES {
             return Err(ValidationError::new(format!(
                 "metric samples exceeds {MAX_METRIC_SAMPLES} entries"

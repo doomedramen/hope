@@ -413,12 +413,18 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
+        let metric_retention: (i64,) =
+            sqlx::query_as("select count(*) from jobs where job_type = 'agent_metrics.retention'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
         assert!(session_cleanup.0 >= 1);
         assert!(token_purge.0 >= 1);
         assert!(monitor_retention.0 >= 1);
         assert!(audit_retention.0 >= 1);
         assert!(job_retention.0 >= 1);
+        assert!(metric_retention.0 >= 1);
 
         let monitor_payload: (serde_json::Value,) = sqlx::query_as(
             "select payload from jobs where job_type = 'monitor_results.retention' \
@@ -430,6 +436,14 @@ mod tests {
         assert_eq!(monitor_payload.0["retention_days"], 30);
         assert_eq!(monitor_payload.0["rollup_after_days"], 7);
         assert_eq!(monitor_payload.0["rollup_retention_days"], 365);
+        let metric_payload: (serde_json::Value,) = sqlx::query_as(
+            "select payload from jobs where job_type = 'agent_metrics.retention' \
+             order by created_at desc limit 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(metric_payload.0["retention_days"], 7);
     }
 
     async fn create_test_scope(pool: &PgPool, enabled: bool, confirmed: bool) -> Uuid {
