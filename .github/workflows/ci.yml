@@ -94,6 +94,7 @@ jobs:
           node-version: 26
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
       - run: cargo build -p server
       - name: Create disposable E2E signing key

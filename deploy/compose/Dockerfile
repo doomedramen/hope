@@ -16,13 +16,38 @@ FROM rust:1.96-slim AS rust-build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+# Compile the dependency graph in a stable layer. Source changes then rebuild
+# the application without recompiling every registry and path dependency.
+COPY apps/server/Cargo.toml apps/server/Cargo.toml
+COPY apps/agent/Cargo.toml apps/agent/Cargo.toml
+COPY crates/domain/Cargo.toml crates/domain/Cargo.toml
+COPY crates/jobs/Cargo.toml crates/jobs/Cargo.toml
+COPY crates/protocol/Cargo.toml crates/protocol/Cargo.toml
+COPY crates/release/Cargo.toml crates/release/Cargo.toml
+COPY xtask/Cargo.toml xtask/Cargo.toml
+RUN mkdir -p \
+      apps/server/src apps/agent/src crates/domain/src crates/jobs/src \
+      crates/protocol/src crates/release/src xtask/src \
+    && printf 'fn main() {}\n' > apps/server/src/main.rs \
+    && printf 'fn main() {}\n' > apps/agent/src/main.rs \
+    && printf 'fn main() {}\n' > apps/agent/build.rs \
+    && printf 'pub fn placeholder() {}\n' > crates/domain/src/lib.rs \
+    && printf 'pub fn placeholder() {}\n' > crates/jobs/src/lib.rs \
+    && printf 'pub fn placeholder() {}\n' > crates/protocol/src/lib.rs \
+    && printf 'pub fn placeholder() {}\n' > crates/release/src/lib.rs \
+    && printf 'fn main() {}\n' > xtask/src/main.rs
+RUN cargo build --release -p server
+
 COPY apps/server apps/server
 COPY apps/agent apps/agent
 COPY crates crates
 COPY xtask xtask
 COPY migrations migrations
 COPY deploy/agent deploy/agent
-RUN cargo build --release -p server
+# COPY preserves source mtimes; refresh them so Cargo notices the real sources
+# replacing the placeholder files used by the dependency layer.
+RUN find apps/server apps/agent crates xtask -type f -name '*.rs' -exec touch {} + \
+    && cargo build --release -p server
 
 # --- Stage 3: runtime --------------------------------------------------
 FROM debian:trixie-slim AS runtime
