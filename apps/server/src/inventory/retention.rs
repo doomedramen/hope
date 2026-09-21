@@ -49,6 +49,37 @@ pub async fn purge_old_change_events(pool: &PgPool, retention_days: i64) -> sqlx
     Ok(total)
 }
 
+/// Delete old host resource samples in bounded batches. Metric samples have
+/// no alerting references in v1, so the retention window is the sole policy.
+pub async fn purge_old_agent_metric_samples(
+    pool: &PgPool,
+    retention_days: i64,
+) -> sqlx::Result<u64> {
+    let retention_days = validate_retention_days(retention_days, "agent metric retention")?;
+    let mut total = 0u64;
+    loop {
+        let result = sqlx::query(
+            "delete from agent_metric_samples as sample where sample.ctid in ( \
+                select candidate.ctid from agent_metric_samples as candidate \
+                where candidate.collected_at < now() - ($1 || ' days')::interval \
+                order by candidate.collected_at, candidate.id \
+                for update skip locked \
+                limit $2 \
+             )",
+        )
+        .bind(retention_days)
+        .bind(BATCH_SIZE)
+        .execute(pool)
+        .await?;
+        let deleted = result.rows_affected();
+        total += deleted;
+        if deleted < BATCH_SIZE as u64 {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 /// Aggregate unrolled monitor observations into hourly buckets. The worker
 /// claims raw rows in bounded batches, but each upsert replaces the complete
 /// bucket aggregate so a bucket split across batches remains correct.
@@ -385,6 +416,44 @@ mod tests {
         .await
         .unwrap();
         assert!(remaining_recent.0 >= 1);
+    }
+
+    #[tokio::test]
+    async fn purges_agent_metric_samples_by_collection_age() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+
+        let agent_id: Uuid = sqlx::query_scalar(
+            "insert into agents (cert_fingerprint, cert_serial, hostname) \
+             values ($1, $2, 'metric-retention-test') returning id",
+        )
+        .bind(format!("metric-retention-cert-{id}", id = Uuid::new_v4()))
+        .bind(format!("metric-retention-serial-{id}", id = Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into agent_metric_samples \
+                (agent_id, batch_id, sample_id, schema_version, collected_at, metrics) \
+             values ($1, gen_random_uuid(), gen_random_uuid(), 1, now() - interval '8 days', '{\"cpu\":{}}'), \
+                    ($1, gen_random_uuid(), gen_random_uuid(), 1, now(), '{\"cpu\":{}}')",
+        )
+        .bind(agent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(purge_old_agent_metric_samples(&pool, 7).await.unwrap() >= 1);
+        let remaining: (i64,) = sqlx::query_as(
+            "select count(*) from agent_metric_samples where agent_id = $1 and collected_at > now() - interval '1 day'",
+        )
+        .bind(agent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining.0, 1);
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 mod agent_install;
 mod agent_inventory;
+mod agent_metrics;
 mod agent_updates;
 mod agent_web;
 mod agents;
@@ -163,6 +164,10 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
     let inventory_router = Router::new()
         .route("/api/v1/agents", get(agent_inventory::list_agents))
         .route("/api/v1/agents/{id}", get(agent_inventory::get_agent))
+        .route(
+            "/api/v1/agents/{id}/metrics",
+            get(agent_metrics::get_agent_metrics),
+        )
         .route(
             "/api/v1/agents/{id}/update",
             post(agent_updates::start_update),
@@ -618,6 +623,7 @@ async fn main() -> anyhow::Result<()> {
                 config.monitor_result_rollup_retention_days,
                 config.audit_event_retention_days,
                 config.job_retention_days,
+                config.agent_metric_retention_days,
             ));
 
             let api_task = axum::serve(
@@ -828,6 +834,7 @@ mod handshake_tests {
             monitor_result_rollup_retention_days: 365,
             audit_event_retention_days: 365,
             job_retention_days: 30,
+            agent_metric_retention_days: 7,
         }
     }
 

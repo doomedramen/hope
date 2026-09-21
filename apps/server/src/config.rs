@@ -13,6 +13,7 @@ pub(crate) const DEFAULT_MONITOR_ROLLUP_RETENTION_DAYS: i64 = 365;
 pub(crate) const DEFAULT_CHANGE_EVENT_RETENTION_DAYS: i64 = 365;
 pub(crate) const DEFAULT_AUDIT_EVENT_RETENTION_DAYS: i64 = 365;
 pub(crate) const DEFAULT_JOB_RETENTION_DAYS: i64 = 30;
+pub(crate) const DEFAULT_AGENT_METRIC_RETENTION_DAYS: i64 = 7;
 
 /// Server configuration, loaded from (in increasing priority order):
 /// 1. `config/default.toml` if present,
@@ -79,6 +80,10 @@ pub struct Config {
     /// Terminal job records older than this many days are deleted in bounded
     /// batches. Pending and running jobs are never eligible.
     pub job_retention_days: i64,
+
+    /// Host resource metric samples older than this many days are deleted in
+    /// bounded batches. Defaults to seven days.
+    pub agent_metric_retention_days: i64,
 }
 
 fn defaults() -> Config {
@@ -100,6 +105,7 @@ fn defaults() -> Config {
         monitor_result_rollup_retention_days: DEFAULT_MONITOR_ROLLUP_RETENTION_DAYS,
         audit_event_retention_days: DEFAULT_AUDIT_EVENT_RETENTION_DAYS,
         job_retention_days: DEFAULT_JOB_RETENTION_DAYS,
+        agent_metric_retention_days: DEFAULT_AGENT_METRIC_RETENTION_DAYS,
     }
 }
 
@@ -127,6 +133,10 @@ impl Config {
                 self.audit_event_retention_days,
             ),
             ("job_retention_days", self.job_retention_days),
+            (
+                "agent_metric_retention_days",
+                self.agent_metric_retention_days,
+            ),
         ] {
             if !(MIN_RETENTION_DAYS..=MAX_RETENTION_DAYS).contains(&value) {
                 anyhow::bail!(
@@ -180,6 +190,7 @@ mod tests {
         assert_eq!(config.change_event_retention_days, 365);
         assert_eq!(config.audit_event_retention_days, 365);
         assert_eq!(config.job_retention_days, 30);
+        assert_eq!(config.agent_metric_retention_days, 7);
         assert!(config.validate().is_ok());
     }
 

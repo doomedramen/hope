@@ -15,7 +15,7 @@ use std::io::Read;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Stdio;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{
     Capability, CollectorSnapshot, CollectorStatus, InventorySnapshot, M5_SCHEMA_VERSION,
@@ -35,6 +35,7 @@ pub const MAX_TEXT_BYTES: usize = 512;
 pub const MAX_FILE_BYTES: usize = 128 * 1024;
 pub const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+pub const METRIC_SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
 
 fn now_unix_secs() -> i64 {
     SystemTime::now()
@@ -116,6 +117,643 @@ fn result_from(capability: Capability, result: Result<Value, String>) -> Collect
 /// visible in the snapshot with an explicit status.
 pub fn capabilities() -> Vec<Capability> {
     default_agent_capabilities()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CpuStatCounters {
+    pub user: u64,
+    pub nice: u64,
+    pub system: u64,
+    pub idle: u64,
+    pub iowait: u64,
+    pub irq: u64,
+    pub softirq: u64,
+    pub steal: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetworkCounters {
+    pub rx_bytes: u64,
+    pub rx_packets: u64,
+    pub rx_errors: u64,
+    pub rx_drops: u64,
+    pub tx_bytes: u64,
+    pub tx_packets: u64,
+    pub tx_errors: u64,
+    pub tx_drops: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiskCounters {
+    pub read_ios: u64,
+    pub read_sectors: u64,
+    pub write_ios: u64,
+    pub write_sectors: u64,
+    pub io_time_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PsiAverages {
+    pub some_avg10: Option<f64>,
+    pub some_avg60: Option<f64>,
+    pub some_avg300: Option<f64>,
+    pub full_avg10: Option<f64>,
+    pub full_avg60: Option<f64>,
+    pub full_avg300: Option<f64>,
+}
+
+#[derive(Debug, Default)]
+pub struct MetricSampler {
+    previous_cpu: Option<CpuStatCounters>,
+    previous_network: BTreeMap<String, NetworkCounters>,
+    previous_disk: BTreeMap<String, DiskCounters>,
+    previous_at: Option<Instant>,
+}
+
+impl MetricSampler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Collect one bounded host sample. Every collector has its own failure
+    /// boundary; a missing proc file or GPU tool produces a partial payload.
+    pub async fn collect(&mut self) -> protocol::MetricSample {
+        let collected_at_unix_secs = now_unix_secs();
+        let now = Instant::now();
+        let _elapsed = self
+            .previous_at
+            .replace(now)
+            .map(|previous| now.duration_since(previous).as_secs_f64().max(0.001));
+
+        #[cfg(target_os = "linux")]
+        let (metrics, statuses) = self.collect_linux(_elapsed).await;
+        #[cfg(not(target_os = "linux"))]
+        let (metrics, statuses) = (
+            json!({}),
+            [
+                ("cpu", "unavailable"),
+                ("memory", "unavailable"),
+                ("network", "unavailable"),
+                ("disk", "unavailable"),
+                ("pressure", "unavailable"),
+                ("gpu", "unavailable"),
+            ],
+        );
+
+        let available = statuses
+            .iter()
+            .filter(|(_, status)| *status == "available")
+            .count();
+        let status = if available == statuses.len() {
+            "available"
+        } else if available > 0 {
+            "partial"
+        } else {
+            "unavailable"
+        };
+        let collectors = statuses
+            .into_iter()
+            .map(|(name, status)| (name.to_string(), Value::String(status.to_string())))
+            .collect::<Map<_, _>>();
+        let mut metrics = metrics;
+        if let Some(object) = metrics.as_object_mut() {
+            object.insert(
+                "availability".into(),
+                json!({"status": status, "collectors": collectors}),
+            );
+        }
+        bound_metric_payload(&mut metrics);
+
+        protocol::MetricSample {
+            sample_id: Uuid::new_v4(),
+            collected_at_unix_secs,
+            metrics,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn collect_linux(
+        &mut self,
+        elapsed: Option<f64>,
+    ) -> (Value, [(&'static str, &'static str); 6]) {
+        let cpu = read_bounded("/proc/stat", MAX_FILE_BYTES)
+            .ok()
+            .and_then(|value| parse_cpu_stat(&value));
+        let cpu_metrics = cpu_metrics(cpu, self.previous_cpu, elapsed);
+        self.previous_cpu = cpu;
+
+        let meminfo = read_bounded("/proc/meminfo", MAX_FILE_BYTES)
+            .ok()
+            .map(|value| parse_meminfo(&value));
+        let memory_metrics = memory_metrics(meminfo.as_ref());
+
+        let network = read_bounded("/proc/net/dev", MAX_FILE_BYTES)
+            .ok()
+            .map(|value| parse_proc_net_dev(&value))
+            .unwrap_or_default();
+        let network_metrics = network_metrics(&network, &self.previous_network, elapsed);
+        self.previous_network = network;
+
+        let disk = read_bounded("/proc/diskstats", MAX_FILE_BYTES)
+            .ok()
+            .map(|value| parse_diskstats(&value))
+            .unwrap_or_default();
+        let disk_metrics = disk_metrics(&disk, &self.previous_disk, elapsed);
+        self.previous_disk = disk;
+
+        let pressure = [
+            ("cpu", "/proc/pressure/cpu"),
+            ("memory", "/proc/pressure/memory"),
+            ("io", "/proc/pressure/io"),
+        ]
+        .into_iter()
+        .map(|(name, path)| {
+            (
+                name,
+                read_bounded(path, MAX_FILE_BYTES)
+                    .ok()
+                    .and_then(|value| parse_psi(&value)),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+        let pressure_metrics = json!({
+            "cpu": pressure.get("cpu").cloned().flatten().map(psi_to_value),
+            "memory": pressure.get("memory").cloned().flatten().map(psi_to_value),
+            "io": pressure.get("io").cloned().flatten().map(psi_to_value),
+        });
+
+        let gpu = collect_gpu_metrics().await;
+        let load = read_trimmed("/proc/loadavg", MAX_TEXT_BYTES)
+            .ok()
+            .and_then(|value| parse_load_average(&value));
+        let mut metrics = Map::new();
+        metrics.insert("cpu".into(), cpu_metrics);
+        metrics.insert("memory".into(), memory_metrics);
+        metrics.insert("network".into(), network_metrics);
+        metrics.insert("disk".into(), disk_metrics);
+        metrics.insert("pressure".into(), pressure_metrics);
+        metrics.insert(
+            "gpu".into(),
+            json!({"available": !gpu.is_empty(), "devices": gpu}),
+        );
+        metrics.insert(
+            "load".into(),
+            load.map(|load| json!({"one": load.one, "five": load.five, "fifteen": load.fifteen}))
+                .unwrap_or(Value::Null),
+        );
+
+        let statuses = [
+            (
+                "cpu",
+                if cpu.is_some() {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+            ),
+            (
+                "memory",
+                if meminfo.is_some() {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+            ),
+            (
+                "network",
+                if !network_metrics["interfaces"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty)
+                {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+            ),
+            (
+                "disk",
+                if !disk_metrics["devices"].as_array().is_none_or(Vec::is_empty) {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+            ),
+            (
+                "pressure",
+                if pressure.values().any(Option::is_some) {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+            ),
+            (
+                "gpu",
+                if metrics["gpu"]["available"] == true {
+                    "available"
+                } else {
+                    "unavailable"
+                },
+            ),
+        ];
+        (Value::Object(metrics), statuses)
+    }
+}
+
+fn bound_metric_payload(metrics: &mut Value) {
+    let mut truncated = false;
+    if let Some(object) = metrics.as_object_mut() {
+        for (section, field) in [
+            ("network", "interfaces"),
+            ("disk", "devices"),
+            ("gpu", "devices"),
+        ] {
+            if let Some(items) = object
+                .get_mut(section)
+                .and_then(Value::as_object_mut)
+                .and_then(|section| section.get_mut(field))
+                .and_then(Value::as_array_mut)
+                && items.len() > 32
+            {
+                items.truncate(32);
+                truncated = true;
+            }
+        }
+    }
+    if serde_json::to_vec(metrics)
+        .map(|bytes| bytes.len() > protocol::MAX_METRIC_SAMPLE_BYTES)
+        .unwrap_or(true)
+    {
+        // Keep scalar host gauges and the first few device dimensions when a
+        // pathological host still exceeds the wire bound.
+        if let Some(object) = metrics.as_object_mut() {
+            for (section, field) in [
+                ("network", "interfaces"),
+                ("disk", "devices"),
+                ("gpu", "devices"),
+            ] {
+                if let Some(items) = object
+                    .get_mut(section)
+                    .and_then(Value::as_object_mut)
+                    .and_then(|section| section.get_mut(field))
+                    .and_then(Value::as_array_mut)
+                {
+                    items.truncate(8);
+                }
+            }
+        }
+        truncated = true;
+    }
+    if truncated {
+        if let Some(availability) = metrics
+            .as_object_mut()
+            .and_then(|object| object.get_mut("availability"))
+            .and_then(Value::as_object_mut)
+        {
+            availability.insert("status".into(), Value::String("partial".into()));
+        }
+    }
+}
+
+pub fn parse_cpu_stat(input: &str) -> Option<CpuStatCounters> {
+    let line = input.lines().find(|line| line.starts_with("cpu "))?;
+    let values = line
+        .split_whitespace()
+        .skip(1)
+        .take(8)
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if values.len() < 4 {
+        return None;
+    }
+    Some(CpuStatCounters {
+        user: values.first().copied().unwrap_or_default(),
+        nice: values.get(1).copied().unwrap_or_default(),
+        system: values.get(2).copied().unwrap_or_default(),
+        idle: values.get(3).copied().unwrap_or_default(),
+        iowait: values.get(4).copied().unwrap_or_default(),
+        irq: values.get(5).copied().unwrap_or_default(),
+        softirq: values.get(6).copied().unwrap_or_default(),
+        steal: values.get(7).copied().unwrap_or_default(),
+    })
+}
+
+fn counter_delta(current: u64, previous: u64) -> u64 {
+    current.checked_sub(previous).unwrap_or(current)
+}
+
+fn cpu_metrics(
+    current: Option<CpuStatCounters>,
+    previous: Option<CpuStatCounters>,
+    _elapsed: Option<f64>,
+) -> Value {
+    let Some(current) = current else {
+        return json!({"usage_percent": null, "user_percent": null, "system_percent": null, "iowait_percent": null, "steal_percent": null});
+    };
+    let Some(previous) = previous else {
+        return json!({"usage_percent": null, "user_percent": null, "system_percent": null, "iowait_percent": null, "steal_percent": null});
+    };
+    let user =
+        counter_delta(current.user, previous.user) + counter_delta(current.nice, previous.nice);
+    let system = counter_delta(current.system, previous.system)
+        + counter_delta(current.irq, previous.irq)
+        + counter_delta(current.softirq, previous.softirq);
+    let idle = counter_delta(current.idle, previous.idle);
+    let iowait = counter_delta(current.iowait, previous.iowait);
+    let steal = counter_delta(current.steal, previous.steal);
+    let total = user + system + idle + iowait + steal;
+    if total == 0 {
+        return json!({"usage_percent": null, "user_percent": null, "system_percent": null, "iowait_percent": null, "steal_percent": null});
+    }
+    let percent = |value: u64| value as f64 / total as f64 * 100.0;
+    json!({
+        "usage_percent": percent(total.saturating_sub(idle + iowait)),
+        "user_percent": percent(user),
+        "system_percent": percent(system),
+        "iowait_percent": percent(iowait),
+        "steal_percent": percent(steal),
+    })
+}
+
+fn memory_metrics(meminfo: Option<&BTreeMap<String, u64>>) -> Value {
+    let Some(meminfo) = meminfo else {
+        return json!({"total_bytes": null, "used_bytes": null, "available_bytes": null, "used_percent": null, "swap_total_bytes": null, "swap_used_bytes": null, "swap_used_percent": null});
+    };
+    let total = meminfo.get("MemTotal").copied();
+    let available = meminfo.get("MemAvailable").copied();
+    let used = total
+        .zip(available)
+        .map(|(total, available)| total.saturating_sub(available));
+    let swap_total = meminfo.get("SwapTotal").copied();
+    let swap_free = meminfo.get("SwapFree").copied();
+    let swap_used = swap_total
+        .zip(swap_free)
+        .map(|(total, free)| total.saturating_sub(free));
+    json!({
+        "total_bytes": total,
+        "used_bytes": used,
+        "available_bytes": available,
+        "used_percent": total.zip(used).map(|(total, used)| used as f64 / total.max(1) as f64 * 100.0),
+        "swap_total_bytes": swap_total,
+        "swap_used_bytes": swap_used,
+        "swap_used_percent": swap_total.zip(swap_used).map(|(total, used)| used as f64 / total.max(1) as f64 * 100.0),
+    })
+}
+
+pub fn parse_proc_net_dev(input: &str) -> BTreeMap<String, NetworkCounters> {
+    input
+        .lines()
+        .skip(2)
+        .take(MAX_ITEMS)
+        .filter_map(|line| {
+            let (name, values) = line.split_once(':')?;
+            let fields = values.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 16 {
+                return None;
+            }
+            Some((
+                bounded_text(name.trim(), MAX_TEXT_BYTES),
+                NetworkCounters {
+                    rx_bytes: fields[0].parse().ok()?,
+                    rx_packets: fields[1].parse().ok()?,
+                    rx_errors: fields[2].parse().ok()?,
+                    rx_drops: fields[3].parse().ok()?,
+                    tx_bytes: fields[8].parse().ok()?,
+                    tx_packets: fields[9].parse().ok()?,
+                    tx_errors: fields[10].parse().ok()?,
+                    tx_drops: fields[11].parse().ok()?,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn network_metrics(
+    current: &BTreeMap<String, NetworkCounters>,
+    previous: &BTreeMap<String, NetworkCounters>,
+    elapsed: Option<f64>,
+) -> Value {
+    let interfaces = current
+        .iter()
+        .map(|(name, current)| {
+            let previous = previous.get(name).copied();
+            json!({
+                "name": name,
+                "rx_bytes_per_sec": rate(previous.map(|value| counter_delta(current.rx_bytes, value.rx_bytes)), elapsed),
+                "tx_bytes_per_sec": rate(previous.map(|value| counter_delta(current.tx_bytes, value.tx_bytes)), elapsed),
+                "rx_packets_per_sec": rate(previous.map(|value| counter_delta(current.rx_packets, value.rx_packets)), elapsed),
+                "tx_packets_per_sec": rate(previous.map(|value| counter_delta(current.tx_packets, value.tx_packets)), elapsed),
+                "rx_errors_per_sec": rate(previous.map(|value| counter_delta(current.rx_errors, value.rx_errors)), elapsed),
+                "tx_errors_per_sec": rate(previous.map(|value| counter_delta(current.tx_errors, value.tx_errors)), elapsed),
+                "rx_drops_per_sec": rate(previous.map(|value| counter_delta(current.rx_drops, value.rx_drops)), elapsed),
+                "tx_drops_per_sec": rate(previous.map(|value| counter_delta(current.tx_drops, value.tx_drops)), elapsed),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({"interfaces": interfaces})
+}
+
+pub fn parse_diskstats(input: &str) -> BTreeMap<String, DiskCounters> {
+    input
+        .lines()
+        .take(MAX_ITEMS)
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 14 {
+                return None;
+            }
+            Some((
+                bounded_text(fields[2], MAX_TEXT_BYTES),
+                DiskCounters {
+                    read_ios: fields[3].parse().ok()?,
+                    read_sectors: fields[5].parse().ok()?,
+                    write_ios: fields[7].parse().ok()?,
+                    write_sectors: fields[9].parse().ok()?,
+                    io_time_ms: fields[12].parse().ok()?,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn disk_metrics(
+    current: &BTreeMap<String, DiskCounters>,
+    previous: &BTreeMap<String, DiskCounters>,
+    elapsed: Option<f64>,
+) -> Value {
+    let devices = current
+        .iter()
+        .map(|(name, current)| {
+            let previous = previous.get(name).copied();
+            json!({
+                "name": name,
+                "read_bytes_per_sec": rate(previous.map(|value| counter_delta(current.read_sectors, value.read_sectors) * 512), elapsed),
+                "write_bytes_per_sec": rate(previous.map(|value| counter_delta(current.write_sectors, value.write_sectors) * 512), elapsed),
+                "read_iops": rate(previous.map(|value| counter_delta(current.read_ios, value.read_ios)), elapsed),
+                "write_iops": rate(previous.map(|value| counter_delta(current.write_ios, value.write_ios)), elapsed),
+                "utilization_percent": elapsed.and_then(|seconds| previous.map(|value| (counter_delta(current.io_time_ms, value.io_time_ms) as f64 / (seconds * 1000.0) * 100.0).clamp(0.0, 100.0))),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({"devices": devices})
+}
+
+fn rate(delta: Option<u64>, elapsed: Option<f64>) -> Option<f64> {
+    delta.map(|delta| delta as f64 / elapsed.unwrap_or(1.0))
+}
+
+pub fn parse_psi(input: &str) -> Option<PsiAverages> {
+    let mut result = PsiAverages::default();
+    let mut found = false;
+    for line in input.lines().take(4) {
+        let mut fields = line.split_whitespace();
+        let kind = fields.next()?;
+        let mut values = BTreeMap::new();
+        for field in fields {
+            let (name, value) = field.split_once('=')?;
+            if let Ok(value) = value.parse::<f64>() {
+                values.insert(name, value);
+            }
+        }
+        let target = match kind {
+            "some" => true,
+            "full" => false,
+            _ => continue,
+        };
+        found = true;
+        if target {
+            result.some_avg10 = values.get("avg10").copied();
+            result.some_avg60 = values.get("avg60").copied();
+            result.some_avg300 = values.get("avg300").copied();
+        } else {
+            result.full_avg10 = values.get("avg10").copied();
+            result.full_avg60 = values.get("avg60").copied();
+            result.full_avg300 = values.get("avg300").copied();
+        }
+    }
+    found.then_some(result)
+}
+
+fn psi_to_value(psi: PsiAverages) -> Value {
+    json!({
+        "some_avg10": psi.some_avg10,
+        "some_avg60": psi.some_avg60,
+        "some_avg300": psi.some_avg300,
+        "full_avg10": psi.full_avg10,
+        "full_avg60": psi.full_avg60,
+        "full_avg300": psi.full_avg300,
+    })
+}
+
+async fn collect_gpu_metrics() -> Vec<Value> {
+    let mut devices = command_output(
+        "nvidia-smi",
+        &[
+            "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ],
+        COMMAND_TIMEOUT,
+        MAX_COMMAND_OUTPUT_BYTES,
+    )
+    .await
+    .ok()
+    .map(|output| parse_nvidia_smi(&output))
+    .unwrap_or_default();
+    if devices.is_empty() {
+        devices = collect_sysfs_gpus();
+    }
+    devices
+}
+
+pub fn parse_nvidia_smi(input: &str) -> Vec<Value> {
+    input
+        .lines()
+        .take(MAX_ITEMS)
+        .filter_map(|line| {
+            let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+            if fields.len() < 6 {
+                return None;
+            }
+            Some(json!({
+                "id": bounded_text(fields[0], MAX_TEXT_BYTES),
+                "index": fields[0].parse::<u32>().ok(),
+                "name": bounded_text(fields[1], MAX_TEXT_BYTES),
+                "vendor": "nvidia",
+                "utilization_percent": fields[2].parse::<f64>().ok(),
+                "memory_used_bytes": fields[3].parse::<u64>().ok().map(|value| value * 1024 * 1024),
+                "memory_total_bytes": fields[4].parse::<u64>().ok().map(|value| value * 1024 * 1024),
+                "temperature_celsius": fields[5].parse::<f64>().ok(),
+            }))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn collect_sysfs_gpus() -> Vec<Value> {
+    let Ok(entries) = fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("card"))
+        .take(MAX_ITEMS)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let device = entry.path().join("device");
+            let vendor_id = read_trimmed(device.join("vendor"), MAX_TEXT_BYTES).ok();
+            let vendor = match vendor_id.as_deref() {
+                Some("0x10de") => "nvidia",
+                Some("0x1002") => "amd",
+                Some("0x8086") => "intel",
+                _ => "unknown",
+            };
+            let utilization = read_trimmed(device.join("gpu_busy_percent"), MAX_TEXT_BYTES)
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok());
+            let memory_used = read_trimmed(device.join("mem_info_vram_used"), MAX_TEXT_BYTES)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok());
+            let memory_total = read_trimmed(device.join("mem_info_vram_total"), MAX_TEXT_BYTES)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok());
+            if utilization.is_none() && memory_used.is_none() && memory_total.is_none() {
+                return None;
+            }
+            Some(json!({
+                "id": name,
+                "name": Value::Null,
+                "vendor": vendor,
+                "utilization_percent": utilization,
+                "memory_used_bytes": memory_used,
+                "memory_total_bytes": memory_total,
+                "temperature_celsius": sysfs_gpu_temperature(&device),
+            }))
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn collect_sysfs_gpus() -> Vec<Value> {
+    Vec::new()
+}
+
+#[cfg(target_os = "linux")]
+fn sysfs_gpu_temperature(device: &Path) -> Option<f64> {
+    let entries = fs::read_dir(device.join("hwmon")).ok()?;
+    for entry in entries.filter_map(Result::ok).take(MAX_ITEMS) {
+        for index in 0..8 {
+            let value = read_trimmed(
+                entry.path().join(format!("temp{index}_input")),
+                MAX_TEXT_BYTES,
+            )
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok());
+            if let Some(value) = value {
+                return Some(value / 1000.0);
+            }
+        }
+    }
+    None
 }
 
 /// Collect all M5 sections. Each section has an independent failure boundary.
@@ -1326,5 +1964,75 @@ mod tests {
                 .is_some_and(|statuses| statuses.len() <= MAX_COLLECTORS)
         );
         assert!(serde_json::to_vec(&snapshot).unwrap().len() <= MAX_SNAPSHOT_BYTES);
+    }
+
+    #[test]
+    fn resource_parsers_cover_rates_pressure_and_gpu() {
+        let first = parse_cpu_stat("cpu  10 0 10 80 0 0 0 0\n").unwrap();
+        let second = parse_cpu_stat("cpu  20 0 20 100 0 0 0 0\n").unwrap();
+        let cpu = cpu_metrics(Some(second), Some(first), Some(1.0));
+        assert_eq!(cpu["usage_percent"], 50.0);
+
+        let reset = parse_cpu_stat("cpu  1 0 1 1 0 0 0 0\n").unwrap();
+        let reset_cpu = cpu_metrics(Some(reset), Some(second), Some(1.0));
+        assert!(reset_cpu["usage_percent"].as_f64().unwrap() >= 0.0);
+
+        let network = parse_proc_net_dev(
+            "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast |bytes packets errs drop fifo colls carrier compressed\neth0: 100 10 1 2 0 0 0 0 200 20 3 4 0 0 0 0\n",
+        );
+        let network_next = parse_proc_net_dev(
+            "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast |bytes packets errs drop fifo colls carrier compressed\neth0: 200 20 2 4 0 0 0 0 400 40 5 8 0 0 0 0\n",
+        );
+        let network_value = network_metrics(&network_next, &network, Some(2.0));
+        assert_eq!(network_value["interfaces"][0]["rx_bytes_per_sec"], 50.0);
+        assert_eq!(network_value["interfaces"][0]["tx_errors_per_sec"], 1.0);
+
+        let disk = parse_diskstats("8 0 sda 10 0 100 0 20 0 200 0 0 50 0\n");
+        let disk_next = parse_diskstats("8 0 sda 20 0 200 0 30 0 400 0 0 70 0\n");
+        let disk_value = disk_metrics(&disk_next, &disk, Some(2.0));
+        assert_eq!(disk_value["devices"][0]["read_iops"], 5.0);
+        assert_eq!(disk_value["devices"][0]["utilization_percent"], 1.0);
+
+        let psi = parse_psi(
+            "some avg10=1.00 avg60=2.00 avg300=3.00 total=4\nfull avg10=0.10 avg60=0.20 avg300=0.30 total=1\n",
+        )
+        .unwrap();
+        assert_eq!(psi.some_avg60, Some(2.0));
+        assert_eq!(psi.full_avg300, Some(0.3));
+
+        let gpu = parse_nvidia_smi("0, NVIDIA RTX, 42, 512, 8192, 55\n");
+        assert_eq!(gpu[0]["vendor"], "nvidia");
+        assert_eq!(gpu[0]["memory_used_bytes"], 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn missing_resource_files_are_represented_as_unavailable_values() {
+        let memory = memory_metrics(None);
+        assert!(memory["total_bytes"].is_null());
+        let network = network_metrics(&BTreeMap::new(), &BTreeMap::new(), None);
+        assert!(network["interfaces"].as_array().unwrap().is_empty());
+        let disk = disk_metrics(&BTreeMap::new(), &BTreeMap::new(), None);
+        assert!(disk["devices"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sampler_emits_bounded_partial_sample_without_gpu_requirement() {
+        let mut sampler = MetricSampler::new();
+        let sample = sampler.collect().await;
+        assert!(sample.metrics.is_object());
+        assert!(sample.metrics["availability"]["status"].is_string());
+        assert!(
+            serde_json::to_vec(&sample.metrics).unwrap().len() <= protocol::MAX_METRIC_SAMPLE_BYTES
+        );
+        assert!(
+            protocol::MetricSampleBatch {
+                schema_version: M5_SCHEMA_VERSION,
+                batch_id: Uuid::new_v4(),
+                agent_id: Uuid::new_v4(),
+                samples: vec![sample],
+            }
+            .validate()
+            .is_ok()
+        );
     }
 }

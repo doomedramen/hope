@@ -24,8 +24,9 @@ use crate::identity::{Paths, write_private};
 use crate::pinning::PinnedFingerprintVerifier;
 use protocol::{
     Capability, CapabilityAck, CapabilityOffer, Envelope, Heartbeat, Hello, InventorySnapshot,
-    InventorySnapshotAck, MAX_OBSERVATION_BATCH_BYTES, MAX_SNAPSHOT_BYTES, Message,
-    ObservationBatch, SUPPORTED_PROTOCOL_VERSIONS, negotiate_capabilities,
+    InventorySnapshotAck, MAX_METRIC_BATCH_BYTES, MAX_OBSERVATION_BATCH_BYTES, MAX_SNAPSHOT_BYTES,
+    Message, MetricSampleBatch, ObservationBatch, SUPPORTED_PROTOCOL_VERSIONS,
+    negotiate_capabilities,
 };
 
 const MAX_BACKOFF_SECS: u64 = 60;
@@ -71,6 +72,16 @@ fn inventory_refresh_interval() -> tokio::time::Interval {
 
 fn inventory_refresh_deadline(connected_at: tokio::time::Instant) -> tokio::time::Instant {
     connected_at + INVENTORY_REFRESH_INTERVAL
+}
+
+fn metric_refresh_interval() -> tokio::time::Interval {
+    let connected_at = tokio::time::Instant::now();
+    let mut interval = tokio::time::interval_at(
+        connected_at + collectors::METRIC_SAMPLE_INTERVAL,
+        collectors::METRIC_SAMPLE_INTERVAL,
+    );
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
 }
 
 pub async fn run(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
@@ -206,6 +217,9 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     let mut snapshot_acknowledged = false;
     let mut observations_acknowledged = false;
     let mut negotiated_capabilities: Option<protocol::NegotiatedCapabilities> = None;
+    let mut metric_sampler = collectors::MetricSampler::new();
+    let mut metric_refresh = metric_refresh_interval();
+    let mut pending_metric_batch: Option<MetricSampleBatch> = None;
 
     loop {
         tokio::select! {
@@ -244,6 +258,22 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                 .await?;
                 snapshot_sent = true;
             }
+            _ = metric_refresh.tick() => {
+                let Some(negotiated) = negotiated_capabilities.as_ref() else {
+                    continue;
+                };
+                if !negotiated.capabilities.contains(&Capability::ResourceMetrics) {
+                    continue;
+                }
+                send_pending_metrics(
+                    &mut write,
+                    &mut pending_metric_batch,
+                    &mut metric_sampler,
+                    negotiated.protocol_version,
+                    agent_id,
+                )
+                .await?;
+            }
             msg = read.next() => {
                 let Some(msg) = msg else {
                     tracing::warn!("gateway closed the connection");
@@ -267,6 +297,18 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                                         .capabilities
                                         .contains(&Capability::BoundedObservations);
                                     negotiated_capabilities = Some(negotiated);
+                                    if let Some(negotiated) = negotiated_capabilities.as_ref()
+                                        && negotiated.capabilities.contains(&Capability::ResourceMetrics)
+                                    {
+                                        send_pending_metrics(
+                                            &mut write,
+                                            &mut pending_metric_batch,
+                                            &mut metric_sampler,
+                                            negotiated.protocol_version,
+                                            agent_id,
+                                        )
+                                        .await?;
+                                    }
                                     if !snapshot_sent
                                         && inventory_enabled
                                         && let (Some(pending), Some(negotiated)) = (
@@ -328,6 +370,15 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                                     observations_acknowledged = false;
                                 }
                             }
+                            Message::MetricSampleBatchAck(ack) => {
+                                if ack.accepted
+                                    && pending_metric_batch.as_ref().is_some_and(|pending| {
+                                        pending.batch_id == ack.batch_id
+                                    })
+                                {
+                                    pending_metric_batch = None;
+                                }
+                            }
                             other => tracing::info!(?other, "received from gateway"),
                         },
                         Err(err) => tracing::warn!(error = %err, "malformed envelope from gateway"),
@@ -376,6 +427,44 @@ where
             .map_err(|error| anyhow::anyhow!("send inventory observations: {error}"))?;
     }
 
+    Ok(())
+}
+
+async fn send_pending_metrics<S>(
+    write: &mut S,
+    pending: &mut Option<MetricSampleBatch>,
+    sampler: &mut collectors::MetricSampler,
+    protocol_version: u32,
+    agent_id: Uuid,
+) -> anyhow::Result<()>
+where
+    S: Sink<WsMessage> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    if pending.is_none() {
+        let sample = sampler.collect().await;
+        let batch = MetricSampleBatch {
+            schema_version: protocol::M5_SCHEMA_VERSION,
+            batch_id: Uuid::new_v4(),
+            agent_id,
+            samples: vec![sample],
+        };
+        if serde_json::to_vec(&batch)?.len() > MAX_METRIC_BATCH_BYTES {
+            anyhow::bail!("metric sample batch exceeds protocol bound");
+        }
+        *pending = Some(batch);
+    }
+
+    if let Some(batch) = pending.as_ref() {
+        let envelope = Envelope::with_protocol_version(
+            protocol_version,
+            Message::MetricSampleBatch(batch.clone()),
+        );
+        write
+            .send(WsMessage::Text(protocol::serialize_envelope(&envelope)?))
+            .await
+            .map_err(|error| anyhow::anyhow!("send metric sample batch: {error}"))?;
+    }
     Ok(())
 }
 

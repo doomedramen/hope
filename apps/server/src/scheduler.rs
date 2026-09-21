@@ -43,6 +43,7 @@ pub(crate) async fn enqueue_periodic_jobs(
     monitor_result_rollup_retention_days: i64,
     audit_event_retention_days: i64,
     job_retention_days: i64,
+    agent_metric_retention_days: i64,
 ) {
     let session_cleanup_key = hourly_period_key("hourly");
     if let Err(err) = jobs::enqueue(
@@ -166,6 +167,18 @@ pub(crate) async fn enqueue_periodic_jobs(
     .await
     {
         tracing::warn!(error = %err, "failed to enqueue jobs.retention");
+    }
+
+    let agent_metric_retention_key = daily_period_key("daily-agent-metrics");
+    if let Err(err) = jobs::enqueue(
+        pool,
+        "agent_metrics.retention",
+        &agent_metric_retention_key,
+        serde_json::json!({"retention_days": agent_metric_retention_days}),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "failed to enqueue agent_metrics.retention");
     }
 
     match enqueue_due_change_scans(pool).await {
@@ -297,6 +310,7 @@ pub async fn run(
     monitor_result_rollup_retention_days: i64,
     audit_event_retention_days: i64,
     job_retention_days: i64,
+    agent_metric_retention_days: i64,
 ) {
     loop {
         enqueue_periodic_jobs(
@@ -307,6 +321,7 @@ pub async fn run(
             monitor_result_rollup_retention_days,
             audit_event_retention_days,
             job_retention_days,
+            agent_metric_retention_days,
         )
         .await;
         tokio::time::sleep(CHECK_INTERVAL).await;
@@ -344,14 +359,14 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30).await;
+        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30, 7).await;
         let after_first: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
 
-        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30).await;
+        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30, 7).await;
         let after_second: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
@@ -370,7 +385,7 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30).await;
+        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30, 7).await;
 
         let session_cleanup: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")

@@ -20,6 +20,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use uuid::Uuid;
 
 use crate::agent_inventory::{self, AgentInventoryError};
+use crate::agent_metrics::{self, AgentMetricError};
 use crate::agents;
 #[cfg(test)]
 use crate::config::Config;
@@ -306,6 +307,7 @@ where
                                     *capability,
                                     Capability::InventorySnapshots
                                         | Capability::BoundedObservations
+                                        | Capability::ResourceMetrics
                                 )
                             });
                         }
@@ -536,10 +538,96 @@ where
                     }
                 }
             }
+            "metric_sample_batch" => {
+                let Some(negotiated) = negotiated_capabilities.as_ref() else {
+                    let response = protocol_error(
+                        message_id,
+                        "capability_not_negotiated",
+                        "resource metrics capability was not negotiated",
+                    );
+                    write.send(WsMessage::Text(response)).await?;
+                    continue;
+                };
+                if negotiated.protocol_version != protocol_version
+                    || !negotiated
+                        .capabilities
+                        .contains(&Capability::ResourceMetrics)
+                {
+                    let response = protocol_error(
+                        message_id,
+                        "unsupported_capability",
+                        "resource metrics are not available for this protocol session",
+                    );
+                    write.send(WsMessage::Text(response)).await?;
+                    continue;
+                }
+
+                let batch = match agent_metrics::parse_metric_sample_batch_value(value) {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        let code = match error {
+                            AgentMetricError::UnsupportedProtocol(_) => "unsupported_protocol",
+                            AgentMetricError::PayloadTooLarge => "payload_too_large",
+                            AgentMetricError::AgentIdentityMismatch => "agent_identity_mismatch",
+                            _ => "metric_rejected",
+                        };
+                        let response = protocol_error(message_id, code, &error.to_string());
+                        write.send(WsMessage::Text(response)).await?;
+                        continue;
+                    }
+                };
+                match agent_metrics::ingest_metric_sample_batch(
+                    &pool,
+                    agent.id,
+                    batch.protocol_version,
+                    &batch,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        let ack = Envelope::with_protocol_version(
+                            negotiated.protocol_version,
+                            Message::MetricSampleBatchAck(protocol::MetricSampleBatchAck {
+                                batch_id: outcome.batch_id,
+                                accepted: true,
+                                sample_count: u32::try_from(outcome.sample_count)
+                                    .unwrap_or(u32::MAX),
+                                replayed: outcome.replayed,
+                                reason: None,
+                            }),
+                        );
+                        write
+                            .send(WsMessage::Text(serde_json::to_string(&ack)?))
+                            .await?;
+                    }
+                    Err(error @ AgentMetricError::UnknownAgent(_))
+                    | Err(error @ AgentMetricError::RevokedAgent(_)) => {
+                        let response =
+                            protocol_error(message_id, "agent_rejected", &error.to_string());
+                        write.send(WsMessage::Text(response)).await?;
+                        break;
+                    }
+                    Err(error @ AgentMetricError::AgentIdentityMismatch) => {
+                        let response = protocol_error(
+                            message_id,
+                            "agent_identity_mismatch",
+                            &error.to_string(),
+                        );
+                        write.send(WsMessage::Text(response)).await?;
+                        break;
+                    }
+                    Err(error) => {
+                        let response =
+                            protocol_error(message_id, "metric_rejected", &error.to_string());
+                        write.send(WsMessage::Text(response)).await?;
+                    }
+                }
+            }
             "hello_ack"
             | "heartbeat_ack"
             | "inventory_snapshot_ack"
             | "observation_batch_ack"
+            | "metric_sample_batch_ack"
             | "protocol_error" => {
                 tracing::debug!(agent_id = %agent.id, message_type, "ignored server message from agent");
             }

@@ -17,9 +17,10 @@ use uuid::Uuid;
 use crate::agent_updates;
 use crate::agents;
 use crate::config::{
-    DEFAULT_AUDIT_EVENT_RETENTION_DAYS, DEFAULT_CHANGE_EVENT_RETENTION_DAYS,
-    DEFAULT_JOB_RETENTION_DAYS, DEFAULT_MONITOR_ROLLUP_AFTER_DAYS,
-    DEFAULT_MONITOR_ROLLUP_RETENTION_DAYS, DEFAULT_RAW_MONITOR_RETENTION_DAYS,
+    DEFAULT_AGENT_METRIC_RETENTION_DAYS, DEFAULT_AUDIT_EVENT_RETENTION_DAYS,
+    DEFAULT_CHANGE_EVENT_RETENTION_DAYS, DEFAULT_JOB_RETENTION_DAYS,
+    DEFAULT_MONITOR_ROLLUP_AFTER_DAYS, DEFAULT_MONITOR_ROLLUP_RETENTION_DAYS,
+    DEFAULT_RAW_MONITOR_RETENTION_DAYS,
 };
 use crate::dependency_graph;
 use crate::discovery::service_collectors::{self, CollectorConfig, CollectorProtocol};
@@ -266,6 +267,36 @@ impl JobHandler for JobRetention {
         let deleted = retention::purge_old_jobs(pool, retention_days).await?;
         if deleted > 0 {
             tracing::info!(count = deleted, retention_days, "purged old terminal jobs");
+        }
+        Ok(JobOutcome::Completed)
+    }
+}
+
+/// Delete host resource samples outside the configured bounded history.
+struct AgentMetricRetention;
+
+#[async_trait]
+impl JobHandler for AgentMetricRetention {
+    async fn handle(
+        &self,
+        pool: &PgPool,
+        _job_id: Uuid,
+        _worker_id: &str,
+        payload: Value,
+    ) -> anyhow::Result<JobOutcome> {
+        let retention_days = payload
+            .get("retention_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_AGENT_METRIC_RETENTION_DAYS);
+        let retention_days =
+            retention::validate_retention_days(retention_days, "agent metric retention")?;
+        let deleted = retention::purge_old_agent_metric_samples(pool, retention_days).await?;
+        if deleted > 0 {
+            tracing::info!(
+                count = deleted,
+                retention_days,
+                "purged old agent metric samples"
+            );
         }
         Ok(JobOutcome::Completed)
     }
@@ -611,6 +642,7 @@ impl Registry {
         );
         handlers.insert("audit_events.retention", Box::new(AuditEventRetention));
         handlers.insert("jobs.retention", Box::new(JobRetention));
+        handlers.insert("agent_metrics.retention", Box::new(AgentMetricRetention));
         handlers.insert("notifications.deliver", Box::new(NotificationDelivery));
         handlers.insert(
             "notifications.deliver_maintenance",
@@ -658,6 +690,7 @@ mod tests {
         assert!(registry.get("monitor_results.retention").is_some());
         assert!(registry.get("audit_events.retention").is_some());
         assert!(registry.get("jobs.retention").is_some());
+        assert!(registry.get("agent_metrics.retention").is_some());
         assert!(registry.get("notifications.deliver").is_some());
         assert!(registry.get("notifications.deliver_maintenance").is_some());
         assert!(registry.get("discovery.full_tcp").is_some());

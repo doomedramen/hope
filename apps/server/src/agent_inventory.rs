@@ -38,6 +38,7 @@ pub const SUPPORTED_PROTOCOL_MAX: u32 = protocol::PROTOCOL_VERSION;
 pub const SUPPORTED_CAPABILITIES: &[protocol::Capability] = &[
     protocol::Capability::InventorySnapshots,
     protocol::Capability::BoundedObservations,
+    protocol::Capability::ResourceMetrics,
 ];
 
 #[derive(Debug, Error)]
@@ -684,12 +685,15 @@ fn host_identifiers(
         cert_fingerprint,
     );
     for (kind, names) in [
-        (IdentifierType::MachineId, ["machine_id", "machineId"]),
+        (
+            IdentifierType::MachineId,
+            &["machine_id", "machineId", "machine_id_sha256"] as &[&str],
+        ),
         (
             IdentifierType::HardwareUuid,
-            ["hardware_uuid", "hardwareUuid"],
+            &["hardware_uuid", "hardwareUuid"],
         ),
-        (IdentifierType::Hostname, ["hostname", "host_name"]),
+        (IdentifierType::Hostname, &["hostname", "host_name"]),
     ] {
         if let Some(value) = inventory_string(&snapshot.inventory, &names) {
             push_identifier(&mut identifiers, kind, value);
@@ -700,12 +704,15 @@ fn host_identifiers(
             continue;
         };
         for (kind, names) in [
-            (IdentifierType::MachineId, ["machine_id", "machineId"]),
+            (
+                IdentifierType::MachineId,
+                &["machine_id", "machineId", "machine_id_sha256"] as &[&str],
+            ),
             (
                 IdentifierType::HardwareUuid,
-                ["hardware_uuid", "hardwareUuid"],
+                &["hardware_uuid", "hardwareUuid"],
             ),
-            (IdentifierType::Hostname, ["hostname", "host_name"]),
+            (IdentifierType::Hostname, &["hostname", "host_name"]),
         ] {
             if let Some(value) = object_string(system, &names) {
                 push_identifier(&mut identifiers, kind, value);
@@ -982,7 +989,12 @@ async fn project_inventory(
 
     let sockets = first_array(
         &snapshot.inventory,
-        &["sockets", "listening_sockets", "listening.services"],
+        &[
+            "sockets.sockets",
+            "sockets",
+            "listening_sockets",
+            "listening.services",
+        ],
     )
     .cloned()
     .unwrap_or_default();
@@ -2421,5 +2433,21 @@ mod tests {
         assert_eq!(inventory_summary(&inventory)["processes"], 1);
         assert_eq!(inventory_summary(&inventory)["sockets"], 1);
         assert_eq!(inventory_summary(&inventory)["containers"], 1);
+    }
+
+    #[tokio::test]
+    async fn agent_detail_uses_current_agent_schema_heartbeat_column() {
+        let Some(pool) = pool_or_skip().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let agent_id = Uuid::new_v4();
+        insert_test_agent(&pool, agent_id, false).await;
+        let detail = build_agent_detail(&pool, agent_id)
+            .await
+            .expect("agent detail query")
+            .expect("agent detail");
+        assert!(detail.get("last_heartbeat_at").is_some());
+        assert!(detail.get("updated_at").is_none());
     }
 }
