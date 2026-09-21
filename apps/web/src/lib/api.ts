@@ -47,6 +47,7 @@ export interface DiscoveryState {
 export interface AgentEnrollmentBootstrap {
   code: string;
   expires_in_minutes: number;
+  tls_pin: string;
 }
 
 export type ScanRunKind = "initial_discovery" | "change_scan" | "full_tcp";
@@ -1061,7 +1062,9 @@ export async function installAgent(
     host: string;
     port: number;
     credential_id: string;
+    connection_url: string;
     disassociate_after_enrollment?: boolean;
+    delete_credential_after?: boolean;
     idempotencyKey: string;
   },
 ): Promise<{ job_id: string; status: JobStatus }> {
@@ -1074,6 +1077,8 @@ export async function installAgent(
         host: input.host,
         port: input.port,
         credential_id: input.credential_id,
+        connection_url: input.connection_url,
+        delete_credential_after: input.delete_credential_after ?? false,
         disassociate_after_enrollment:
           input.disassociate_after_enrollment ?? false,
       }),
@@ -1087,6 +1092,7 @@ export async function repairAgent(
     host: string;
     port: number;
     credential_id: string;
+    connection_url: string;
     disassociate_after_enrollment?: boolean;
     idempotencyKey: string;
   },
@@ -1100,6 +1106,7 @@ export async function repairAgent(
         host: input.host,
         port: input.port,
         credential_id: input.credential_id,
+        connection_url: input.connection_url,
         disassociate_after_enrollment:
           input.disassociate_after_enrollment ?? false,
       }),

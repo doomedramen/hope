@@ -45,6 +45,9 @@ enum Command {
         /// Path to the signing-key.hex private key file (from `keygen`).
         #[arg(long)]
         key: PathBuf,
+        /// Fail if this configured public key does not match the signing key.
+        #[arg(long)]
+        public_key: Option<PathBuf>,
         /// Output directory for manifest.json, manifest.json.sig, and
         /// SHA256SUMS.
         #[arg(long, default_value = "dist/release")]
@@ -65,6 +68,7 @@ fn main() -> anyhow::Result<()> {
             release_notes,
             min_protocol_version,
             key,
+            public_key,
             out,
             artifacts,
         } => sign(
@@ -73,6 +77,7 @@ fn main() -> anyhow::Result<()> {
             release_notes,
             min_protocol_version,
             &key,
+            public_key.as_deref(),
             &out,
             &artifacts,
         ),
@@ -119,12 +124,14 @@ fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sign(
     version: &str,
     channel: ReleaseChannel,
     release_notes: Option<String>,
     min_protocol_version: u32,
     key_path: &Path,
+    public_key_path: Option<&Path>,
     out: &Path,
     artifact_specs: &[String],
 ) -> anyhow::Result<()> {
@@ -140,6 +147,12 @@ fn sign(
         .map_err(|_| anyhow::anyhow!("signing key must decode to 32 bytes"))?;
     let signing_key = SigningKey::from_bytes(&key_bytes);
     let verifying_key = signing_key.verifying_key();
+    if let Some(path) = public_key_path {
+        let expected = fs::read_to_string(path)?;
+        if expected.trim() != hex::encode(verifying_key.to_bytes()) {
+            anyhow::bail!("configured public key does not match the release signing key");
+        }
+    }
 
     fs::create_dir_all(out)?;
 
@@ -153,6 +166,7 @@ fn sign(
         };
 
         let binary = fs::read(path)?;
+        validate_binary_target(&binary, platform, arch)?;
         let sha256 = ArtifactRecord::sha256_of(&binary);
         let record = ArtifactRecord {
             version: version.to_string(),
@@ -204,6 +218,10 @@ fn sign(
     fs::write(out.join("manifest.json.sig"), manifest_signature)?;
 
     fs::write(out.join("SHA256SUMS"), sha256sums)?;
+    fs::write(
+        out.join("public-key.hex"),
+        hex::encode(verifying_key.to_bytes()),
+    )?;
 
     println!("wrote {}", manifest_path.display());
     println!(
@@ -211,6 +229,26 @@ fn sign(
         hex::encode(verifying_key.to_bytes())
     );
 
+    Ok(())
+}
+
+fn validate_binary_target(binary: &[u8], platform: &str, arch: &str) -> anyhow::Result<()> {
+    if platform != "linux" {
+        anyhow::bail!("only Linux agent releases are currently supported");
+    }
+    let machine = match arch {
+        "amd64" => 62_u16,
+        "arm64" => 183_u16,
+        _ => anyhow::bail!("unsupported Linux agent architecture: {arch}"),
+    };
+    if binary.len() < 20
+        || &binary[..4] != b"\x7fELF"
+        || binary[4] != 2
+        || binary[5] != 1
+        || u16::from_le_bytes([binary[18], binary[19]]) != machine
+    {
+        anyhow::bail!("agent artifact is not a Linux ELF64 binary for {arch}");
+    }
     Ok(())
 }
 
@@ -222,7 +260,7 @@ fn parse_release_channel(value: &str) -> Result<ReleaseChannel, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_release_channel;
+    use super::{parse_release_channel, validate_binary_target};
     use release::ReleaseChannel;
 
     #[test]
@@ -237,5 +275,17 @@ mod tests {
         assert_eq!(parse_release_channel("stable"), Ok(ReleaseChannel::Stable));
         assert_eq!(parse_release_channel("canary"), Ok(ReleaseChannel::Canary));
         assert!(parse_release_channel("beta").is_err());
+    }
+
+    #[test]
+    fn signing_rejects_wrong_binary_platform_or_architecture() {
+        assert!(validate_binary_target(b"Mach-O", "linux", "amd64").is_err());
+        let mut elf = vec![0_u8; 20];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[18..20].copy_from_slice(&183_u16.to_le_bytes());
+        assert!(validate_binary_target(&elf, "linux", "arm64").is_ok());
+        assert!(validate_binary_target(&elf, "linux", "amd64").is_err());
     }
 }

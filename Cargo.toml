@@ -18,7 +18,7 @@ publish = false
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "request-id", "fs", "util"] }
 tower-sessions = { version = "0.15", features = ["axum-core"] }

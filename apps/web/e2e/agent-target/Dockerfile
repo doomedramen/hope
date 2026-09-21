@@ -11,6 +11,7 @@ RUN apt-get update \
         systemd \
         systemd-sysv \
         ca-certificates \
+        curl \
     && rm -rf /var/lib/apt/lists/* \
     && echo 'root:hope-e2e-root' | chpasswd \
     && mkdir -p /run/sshd \

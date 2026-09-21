@@ -11,8 +11,10 @@ use axum::extract::Path;
 use axum::http::header;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::agents;
 use crate::auth_mw::CurrentUser;
@@ -48,15 +50,6 @@ pub async fn create_enrollment(
             );
         }
     };
-    let ca = match pki::load_ca(&config) {
-        Ok(ca) => ca,
-        Err(_) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "agent enrollment CA is unavailable",
-            );
-        }
-    };
     let token = match agents::create_enrollment_token(&state.pool, ENROLLMENT_TTL_MINUTES).await {
         Ok(token) => token,
         Err(_) => {
@@ -66,18 +59,45 @@ pub async fn create_enrollment(
             );
         }
     };
-    let code = format!("{token}.{}", pki::fingerprint_der(ca.cert.der()));
+    let cert_bytes = match std::fs::read(&config.server_cert_path) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "agent TLS certificate is unavailable",
+            );
+        }
+    };
+    let mut cert_reader = cert_bytes.as_slice();
+    let Some(Ok(leaf)) = rustls_pemfile::certs(&mut cert_reader).next() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "agent TLS certificate is invalid",
+        );
+    };
+    let code = format!("{token}.{}", pki::fingerprint_der(leaf.as_ref()));
+    let Ok((_, parsed)) = x509_parser::parse_x509_certificate(leaf.as_ref()) else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "agent TLS certificate is invalid",
+        );
+    };
+    let tls_pin = format!(
+        "sha256//{}",
+        base64::engine::general_purpose::STANDARD.encode(Sha256::digest(parsed.public_key().raw)),
+    );
     (
         StatusCode::CREATED,
         Json(json!({
             "code": code,
             "expires_in_minutes": ENROLLMENT_TTL_MINUTES,
+            "tls_pin": tls_pin,
         })),
     )
         .into_response()
 }
 
-/// GET /agent/install.sh (with `/install-agent.sh` kept as a compatibility alias)
+/// GET /agent/install.sh
 pub async fn script() -> Response {
     bytes_response(
         INSTALL_SCRIPT.as_bytes().to_vec(),
@@ -87,7 +107,7 @@ pub async fn script() -> Response {
     )
 }
 
-/// GET /agent-download/latest/:platform/:arch
+/// GET /agent/v1/releases/latest/:platform/:arch
 ///
 /// Returns only the selected version. Keeping this separate from the bundle
 /// files gives the shell installer a stable, dependency-free way to pin all
@@ -117,7 +137,7 @@ pub async fn latest_version(Path((platform, arch)): Path<(String, String)>) -> R
     }
 }
 
-/// GET /agent-download/:version/:platform/:arch/:file
+/// GET /agent/v1/releases/:version/:platform/:arch/:file
 ///
 /// `file` is deliberately an allow-list rather than a path. The repository
 /// validates the complete release before any bytes are returned, and

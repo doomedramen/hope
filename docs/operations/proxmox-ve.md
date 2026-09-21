@@ -70,8 +70,8 @@ forward-fix or clean-restore path.
 
 ## Configuration and agents
 
-Edit `/opt/hope/.env` for image pins, HTTP bind settings, and agent endpoint
-URLs. Run the update command after changing `HOPE_IMAGE`; for other Compose
+Edit `/opt/hope/.env` for image pins and HTTP/HTTPS bind settings. Run the
+update command after changing `HOPE_IMAGE`; for other Compose
 settings, restart the stack with:
 
 ```sh
@@ -79,10 +79,10 @@ docker compose --project-name hope --env-file /opt/hope/.env \
   -f /opt/hope/deploy/compose/docker-compose.yml up -d
 ```
 
-The initial agent URLs use `localhost`. Before enrolling remote agents,
-configure reachable public URLs and matching TLS server certificate names.
-See [Manual agent installation](../manual-agent-install.md) for the enrollment
-requirements.
+Signed agents and release trust ship inside the image. Hope listens on host
+ports 80 and 443; no release directory or other inbound port is required.
+On the Agents page, set the connection address to the LXC's HTTP origin or
+your public HTTPS Proxy Host. See [Manual agent installation](../manual-agent-install.md).
 
 Never use `docker compose down -v` unless intentionally discarding the Hope
 database and server PKI.

@@ -1,27 +1,25 @@
-//! On-disk agent identity: private key, signed client cert, and the CA
-//! cert used to verify the gateway's server cert. Written with 0600
-//! permissions; never logged.
+//! On-disk agent identity and TLS trust, written with 0600 permissions.
 
 use std::path::{Path, PathBuf};
 
 pub struct Paths {
-    pub key: PathBuf,
-    pub cert: PathBuf,
-    pub ca: PathBuf,
+    pub identity_key: PathBuf,
+    pub agent_id: PathBuf,
+    pub tls_trust: PathBuf,
 }
 
 impl Paths {
     pub fn new(state_dir: &str) -> Self {
         let dir = Path::new(state_dir);
         Self {
-            key: dir.join("agent-key.pem"),
-            cert: dir.join("agent-cert.pem"),
-            ca: dir.join("ca-cert.pem"),
+            identity_key: dir.join("agent-identity.hex"),
+            agent_id: dir.join("agent-id"),
+            tls_trust: dir.join("tls-trust"),
         }
     }
 
     pub fn exist(&self) -> bool {
-        self.key.exists() && self.cert.exists() && self.ca.exists()
+        self.identity_key.exists() && self.agent_id.exists() && self.tls_trust.exists()
     }
 }
 

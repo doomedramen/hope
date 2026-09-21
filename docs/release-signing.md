@@ -67,8 +67,10 @@ Each `--artifact` is `PATH=PLATFORM=ARCH`. Produces, under `dist/release/`:
   spot-checks independent of the signing tooling (`sha256sum -c
   SHA256SUMS`).
 - `agent-<platform>-<arch>` — a copy of each signed binary.
+- `public-key.hex` — the matching public verification key for the image.
 
-`xtask sign` self-verifies every artifact immediately after signing
+`xtask sign` first rejects artifacts whose ELF architecture does not match
+their declared Linux target, then self-verifies every artifact after signing
 (fails loudly at sign time, not at first download, if anything is
 inconsistent).
 
@@ -103,19 +105,20 @@ agent verify-release --manifest dist/release/manifest.json --binary dist/release
 
 ## CI
 
-`.github/workflows/ci.yml`'s `agent-cross-compile` job currently builds, signs,
-and uploads a release bundle for `linux/amd64` on every push/PR. Arm64 remains
-supported by the release format and local build instructions, but is excluded
-from active CI until the project is stable on the amd64 path:
+`.github/workflows/ci.yml` builds both `linux/amd64` and `linux/arm64`, signs
+one manifest covering both artifacts, and packages the verified bundle and
+public trust key in the matching Hope image. The server serves releases from
+that image; installation and updates do not require GitHub access from the
+homelab. CI embeds the same release version in the agent's Hello message.
+Operators do not manage keys or release files.
 
 - If the repository secrets `HOPE_RELEASE_SIGNING_KEY_HEX` /
   `HOPE_RELEASE_PUBLIC_KEY_HEX` are configured, CI signs with the real
   release key.
-- Otherwise it generates an ephemeral, CI-run-only keypair (via
-  `cargo xtask keygen`) so the full pipeline — build, embed, sign,
-  self-verify — is exercised on every run, and flags the run with a
-  workflow warning so nobody mistakes an ephemeral-signed artifact for a
-  trusted release.
+- For pull requests without secrets, CI generates an ephemeral test keypair.
+  Pushes and release tags **fail before publishing** if either production
+  signing secret is unavailable. The signing command checks that the public
+  key matches the private key before producing the bundle.
 
 ## Key rotation (spec §7.7)
 

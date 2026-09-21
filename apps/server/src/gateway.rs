@@ -1,26 +1,33 @@
-//! Agent gateway: mTLS WebSocket listener (ADR-0007 client-cert auth,
-//! ADR-0008 WebSocket transport). Every connection must present a client
-//! certificate signed by the internal CA; the certificate's SHA-256
-//! fingerprint must map to a known, non-revoked agent.
+//! Agent WebSocket message processor. The web router authenticates the
+//! agent's signed challenge before handing the socket to this module.
 
+#[cfg(test)]
 use std::sync::Arc;
 
-use futures_util::{SinkExt, StreamExt};
+use axum::extract::ws::{Message as AxumMessage, WebSocket};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
+#[cfg(test)]
 use rustls::server::WebPkiClientVerifier;
+#[cfg(test)]
 use rustls::{RootCertStore, ServerConfig};
 use serde_json::{Value, json};
 use sqlx::PgPool;
+#[cfg(test)]
 use tokio::net::TcpListener;
+#[cfg(test)]
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use uuid::Uuid;
 
 use crate::agent_inventory::{self, AgentInventoryError};
 use crate::agents;
+#[cfg(test)]
 use crate::config::Config;
+#[cfg(test)]
 use crate::pki;
 use protocol::{Capability, CapabilityAck, CapabilityOffer, Envelope, Message};
 
+#[cfg(test)]
 fn build_server_config(config: &Config) -> anyhow::Result<ServerConfig> {
     let cert_pem = std::fs::read_to_string(&config.server_cert_path)?;
     let key_pem = std::fs::read_to_string(&config.server_key_path)?;
@@ -45,6 +52,7 @@ fn build_server_config(config: &Config) -> anyhow::Result<ServerConfig> {
     Ok(server_config)
 }
 
+#[cfg(test)]
 pub async fn serve(config: Config, pool: PgPool) -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -74,6 +82,7 @@ pub async fn serve(config: Config, pool: PgPool) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(test)]
 async fn handle_connection(
     acceptor: TlsAcceptor,
     tcp: tokio::net::TcpStream,
@@ -103,6 +112,46 @@ async fn handle_connection(
     }
 
     let ws_stream = tokio_tungstenite::accept_async(tls_stream).await?;
+    handle_messages(ws_stream, pool, agent).await
+}
+
+/// Handles an authenticated agent after the ordinary web router upgrades the
+/// connection. The same message processor serves direct and proxied clients.
+pub async fn handle_socket(socket: WebSocket, pool: PgPool, agent_id: Uuid) {
+    let stream = socket
+        .with(|message: WsMessage| async move {
+            let message = match message {
+                WsMessage::Text(text) => AxumMessage::Text(text.to_string().into()),
+                _ => AxumMessage::Close(None),
+            };
+            Ok::<_, axum::Error>(message)
+        })
+        .map(|result| {
+            result.map(|message| match message {
+                AxumMessage::Text(text) => WsMessage::Text(text.to_string()),
+                AxumMessage::Close(_) => WsMessage::Close(None),
+                _ => WsMessage::Ping(Vec::new()),
+            })
+        });
+    let agent = agents::AgentRecord {
+        id: agent_id,
+        #[cfg(test)]
+        revoked_at: None,
+    };
+    if let Err(error) = handle_messages(Box::pin(stream), pool, agent).await {
+        tracing::warn!(agent_id = %agent_id, error = %error, "agent websocket ended");
+    }
+}
+
+async fn handle_messages<S, E>(
+    ws_stream: S,
+    pool: PgPool,
+    agent: agents::AgentRecord,
+) -> anyhow::Result<()>
+where
+    S: Stream<Item = Result<WsMessage, E>> + Sink<WsMessage, Error = E> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
+{
     let (mut write, mut read) = ws_stream.split();
     let mut negotiated_capabilities: Option<protocol::NegotiatedCapabilities> = None;
 

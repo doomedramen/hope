@@ -16,7 +16,8 @@ FROM rust:1.96-slim AS rust-build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY apps apps
+COPY apps/server apps/server
+COPY apps/agent apps/agent
 COPY crates crates
 COPY xtask xtask
 COPY migrations migrations
@@ -30,6 +31,7 @@ WORKDIR /app
 COPY --from=rust-build /src/target/release/server ./server
 COPY --from=rust-build /src/migrations ./migrations
 COPY --from=web-build /src/apps/web/dist ./apps/web/dist
+COPY dist/release ./agent-releases
 COPY deploy/compose/entrypoint.sh /usr/local/bin/hope-entrypoint
 RUN chmod 0755 /usr/local/bin/hope-entrypoint
 
@@ -40,13 +42,10 @@ ENV HOPE_CA_KEY_PATH=/app/data/pki/ca-key.pem
 ENV HOPE_SERVER_CERT_PATH=/app/data/pki/server-cert.pem
 ENV HOPE_SERVER_KEY_PATH=/app/data/pki/server-key.pem
 ENV HOPE_CREDENTIAL_MASTER_KEY_FILE=/app/data/pki/credential-master-key
-ENV HOPE_AGENT_ENROLL_URL=https://localhost:8444
-ENV HOPE_AGENT_GATEWAY_URL=wss://localhost:8443
 ENV HOPE_AGENT_RELEASE_DIR=/app/agent-releases
 ENV HOPE_RELEASE_PUBLIC_KEY_FILE=/app/agent-releases/public-key.hex
-ENV HOPE_AGENT_BINARY_X86_64=/app/agent-releases/agent-linux-amd64
-ENV HOPE_AGENT_BINARY_AARCH64=/app/agent-releases/agent-linux-arm64
-EXPOSE 8080 8443 8444
+ENV HOPE_REQUIRE_BUNDLED_AGENTS=true
+EXPOSE 8080 8443
 
 ENTRYPOINT ["/usr/local/bin/hope-entrypoint"]
 CMD ["serve"]

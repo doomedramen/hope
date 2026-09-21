@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { agentConnectionAddress, saveAgentConnectionAddress } from "@/lib/agentConnection";
 
 const TERMINAL_JOB_STATES = new Set(["succeeded", "failed", "cancelled"]);
 
@@ -55,6 +56,10 @@ export function AgentDeploymentDialog({
   const [credentialName, setCredentialName] = useState("");
   const [username, setUsername] = useState("root");
   const [password, setPassword] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
+  const [sshMethod, setSshMethod] = useState<"password" | "key">("password");
+  const [saveCredential, setSaveCredential] = useState(false);
+  const [connectionAddress, setConnectionAddress] = useState(agentConnectionAddress);
   const [jobId, setJobId] = useState<string | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState<string | null>(null);
 
@@ -110,18 +115,29 @@ export function AgentDeploymentDialog({
   });
 
   const installMutation = useMutation({
-    mutationFn: () => {
-      if (!device || !credentialId) {
-        throw new Error(
-          "Choose an SSH credential before installing the agent.",
-        );
+    mutationFn: async (forceNewJob: boolean) => {
+      if (!device) throw new Error("Select a device before deploying the agent.");
+      const address = saveAgentConnectionAddress(connectionAddress);
+      let selectedCredentialId = credentialId;
+      if (!selectedCredentialId) {
+        const credential = await createCredential({
+          name: credentialName.trim() || `Agent deployment: ${device.name}`,
+          scope: { kind: "device", device_id: device.id },
+          secret: sshMethod === "password"
+            ? { type: "ssh_password", username, password }
+            : { type: "ssh_private_key", username, private_key_pem: privateKey },
+        });
+        selectedCredentialId = credential.id;
       }
-      const nextKey = idempotencyKey ?? crypto.randomUUID();
+      const nextKey = forceNewJob ? crypto.randomUUID() : (idempotencyKey ?? crypto.randomUUID());
       setIdempotencyKey(nextKey);
       return installAgent(device.id, {
         host: host.trim(),
         port: Number(port),
-        credential_id: credentialId,
+        credential_id: selectedCredentialId,
+        connection_url: address,
+        disassociate_after_enrollment: !saveCredential && !credentialId,
+        delete_credential_after: !saveCredential && !credentialId,
         idempotencyKey: nextKey,
       });
     },
@@ -136,6 +152,7 @@ export function AgentDeploymentDialog({
       });
       if (jobId)
         await queryClient.invalidateQueries({ queryKey: ["job", jobId] });
+      if (jobQuery.data?.status === "failed") installMutation.mutate(true);
     },
   });
 
@@ -148,18 +165,16 @@ export function AgentDeploymentDialog({
     setCredentialName("");
     setUsername("root");
     setPassword("");
+    setPrivateKey("");
+    setSaveCredential(false);
+    setConnectionAddress(agentConnectionAddress());
     setJobId(null);
     setIdempotencyKey(null);
   }, [open, device?.id]);
 
-  useEffect(() => {
-    if (!credentialId && credentials.length > 0)
-      setCredentialId(credentials[0].id);
-  }, [credentialId, credentials]);
-
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    installMutation.mutate();
+    installMutation.mutate(job?.status === "failed");
   }
 
   const job = jobQuery.data;
@@ -179,7 +194,7 @@ export function AgentDeploymentDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-h-[min(90vh,52rem)] max-w-2xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Install an agent</DialogTitle>
+          <DialogTitle>Deploy agent</DialogTitle>
           <DialogDescription>
             Connect to {device?.name || "this device"} over SSH, install the
             signed agent, and wait for its first check-in.
@@ -188,6 +203,11 @@ export function AgentDeploymentDialog({
 
         <form className="grid gap-5" onSubmit={submit}>
           <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor="agent-deploy-connection">Agent connection address</FieldLabel>
+              <Input id="agent-deploy-connection" value={connectionAddress} onChange={(event) => setConnectionAddress(event.target.value)} required />
+              <FieldDescription>Address this device can reach: Hope’s HTTP LAN address or your HTTPS proxy host.</FieldDescription>
+            </Field>
             <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_8rem]">
               <Field>
                 <FieldLabel htmlFor="agent-install-host">SSH host</FieldLabel>
@@ -224,7 +244,7 @@ export function AgentDeploymentDialog({
                 onChange={(event) => setCredentialId(event.target.value)}
                 value={credentialId}
               >
-                <option value="">Select a credential</option>
+                <option value="">Enter SSH details below</option>
                 {credentials.map((credential) => (
                   <option key={credential.id} value={credential.id}>
                     {credential.name} ({credential.kind.replaceAll("_", " ")})
@@ -253,7 +273,10 @@ export function AgentDeploymentDialog({
                 ) : null}
               </div>
               <Button
-                onClick={() => setShowCreateCredential((current) => !current)}
+                onClick={() => {
+                  setShowCreateCredential((current) => !current);
+                  setCredentialId("");
+                }}
                 size="sm"
                 type="button"
                 variant="outline"
@@ -262,7 +285,7 @@ export function AgentDeploymentDialog({
                 {showCreateCredential ? "Use existing" : "Create credential"}
               </Button>
             </div>
-            {showCreateCredential ? (
+            {showCreateCredential || !credentialId ? (
               <div className="mt-4 grid gap-4">
                 <div className="grid gap-4 sm:grid-cols-2">
                   <Field>
@@ -274,7 +297,6 @@ export function AgentDeploymentDialog({
                       onChange={(event) =>
                         setCredentialName(event.target.value)
                       }
-                      required
                       value={credentialName}
                     />
                   </Field>
@@ -291,17 +313,13 @@ export function AgentDeploymentDialog({
                   </Field>
                 </div>
                 <Field>
-                  <FieldLabel htmlFor="agent-credential-password">
-                    Password
-                  </FieldLabel>
-                  <Input
-                    id="agent-credential-password"
-                    onChange={(event) => setPassword(event.target.value)}
-                    required
-                    type="password"
-                    value={password}
-                  />
+                  <FieldLabel htmlFor="agent-ssh-method">Authentication</FieldLabel>
+                  <select id="agent-ssh-method" className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm" value={sshMethod} onChange={(event) => setSshMethod(event.target.value as "password" | "key")}>
+                    <option value="password">Password</option><option value="key">Private key</option>
+                  </select>
                 </Field>
+                {sshMethod === "password" ? <Field><FieldLabel htmlFor="agent-credential-password">Password</FieldLabel><Input id="agent-credential-password" onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></Field> : <Field><FieldLabel htmlFor="agent-credential-key">Private key (PEM)</FieldLabel><textarea id="agent-credential-key" className="min-h-28 w-full rounded-lg border border-input bg-transparent p-2.5 font-mono text-xs" value={privateKey} onChange={(event) => setPrivateKey(event.target.value)} required /></Field>}
+                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={saveCredential} onChange={(event) => setSaveCredential(event.target.checked)} />Save SSH credential for later</label>
                 <Button
                   disabled={isBusy || !credentialName.trim() || !password}
                   onClick={() => createCredentialMutation.mutate()}
@@ -311,7 +329,7 @@ export function AgentDeploymentDialog({
                   {createCredentialMutation.isPending ? (
                     <Spinner data-icon="inline-start" />
                   ) : null}
-                  Save credential
+                  Save credential now
                 </Button>
               </div>
             ) : null}
@@ -402,7 +420,7 @@ export function AgentDeploymentDialog({
             <Button
               disabled={
                 isBusy ||
-                !credentialId ||
+                (!credentialId && !(sshMethod === "password" ? password : privateKey)) ||
                 !host.trim() ||
                 Boolean(job && job.status === "succeeded")
               }
@@ -411,7 +429,7 @@ export function AgentDeploymentDialog({
               {installMutation.isPending ? (
                 <Spinner data-icon="inline-start" />
               ) : null}
-              Install agent
+              Deploy agent
             </Button>
           </DialogFooter>
         </form>

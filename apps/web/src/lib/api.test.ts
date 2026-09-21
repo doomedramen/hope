@@ -217,6 +217,7 @@ describe("fetchHealthReady", () => {
       host: "198.51.100.10",
       port: 22,
       credential_id: "credential-1",
+      connection_url: "http://hope.lan",
       idempotencyKey: "deploy-device-1",
     });
     const job = await fetchJob(deployment.job_id);

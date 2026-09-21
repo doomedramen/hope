@@ -1,135 +1,50 @@
-# Linux agent installation
+# Deploying Hope agents
 
-The installer supports Linux `amd64` and `arm64`. It downloads the selected
-agent from the Hope server, verifies the signed release bundle, enrolls the
-host with a single-use code, and creates a hardened systemd service.
+Hope's published image includes signed Linux `amd64` and `arm64` agents, the
+release manifest, and the public trust key. Operators do not create or mount
+an `agent-releases` directory. Agents download from Hope itself, not GitHub.
 
-The server must already be running with its CA and agent listeners available.
-The normal endpoints are:
+## One command on the target
 
-- enrollment: `https://<hope-host>:8444`
-- gateway: `wss://<hope-host>:8443`
-- HTTP/API origin: `https://<hope-host>`
+Open **Agents → Enroll agent**, check the **Agent connection address**, and
+copy the generated command. Paste it into a Linux terminal with `sudo`.
+The command contains a one-time enrollment code that expires after 15 minutes;
+do not share it. It downloads the installer over HTTPS, verifies Hope's TLS
+identity, fetches the signed release, installs a systemd service, and checks in.
 
-## Install
+For a direct LAN install, open Hope at `http://<hope-ip>` and use that HTTP
+origin as the connection address. Hope exposes the UI on port 80 and pinned
+agent HTTPS on port 443. The generated command includes the TLS public-key
+pin; the agent keeps Hope's leaf-certificate fingerprint for later connections. The local
+HTTP UI is intended only for a trusted LAN.
 
-The Agents page generates a short-lived, single-use bootstrap code. Copy the
-resulting command to the target Linux host:
+If Hope is behind Nginx Proxy Manager, make one HTTPS Proxy Host pointing to
+Hope's HTTP port 80 with **WebSocket support enabled**. Open Hope through the
+public HTTPS host and use that origin as the connection address. Agent TLS
+uses the proxy's normal publicly trusted certificate. No NPM Stream, extra
+agent port, or Hope-specific certificate name is needed. After an NPM restart,
+the agent reconnects through the same address.
 
-```sh
-curl -fsSL 'https://hope.example/agent/install.sh' | \
-  sudo env \
-    HOPE_SERVER='https://hope.example' \
-    HOPE_ENROLLMENT_CODE='<token>.<ca-fingerprint>' \
-    bash
-```
+## Deploy from a device
 
-The command downloads the signed installer, derives the enrollment and gateway
-URLs from `HOPE_SERVER`, enrolls the host, installs the matching `amd64` or
-`arm64` release, and enables the hardened systemd service. The code expires
-after 15 minutes and must be treated like a password.
+Open **Infrastructure overview**, select a device, and choose **Deploy agent**.
+Enter the target's SSH address, port, username, and password or private key.
+You can select an existing credential or explicitly save the new one. Hope
+pauses at an unfamiliar or changed SSH host key: compare the displayed
+fingerprint with the host before trusting it. The dialog shows the deployment
+job and waits for the first agent check-in. If the credential was not saved,
+Hope deletes it after the completed job. Hope must be able to reach the
+target's SSH port; the agent needs only outbound HTTPS/WebSocket access to
+Hope's connection address.
 
-The installer also accepts the shorter compatibility aliases `HSERV`, `HPKEY`,
-and `HHKEY` (server, token, and CA fingerprint respectively). Explicit
-`--enroll-url`, `--gateway-url`, and `--release-base-url` flags remain available
-for recovery and unusual topologies:
+## Troubleshooting
 
-```sh
-curl -fsSL https://hope.example/agent/install.sh -o /tmp/hope-install-agent.sh
-chmod 0700 /tmp/hope-install-agent.sh
-sudo /tmp/hope-install-agent.sh \
-  --enroll-url https://hope.example:8444 \
-  --gateway-url wss://hope.example:8443 \
-  --release-base-url https://hope.example
-```
-
-For a pinned release, add `--version 0.1.0`. For an explicit release
-repository root, use `--release-url https://hope.example/agent-download` with
-an exact `--version`; `--release-base-url` is required when using `latest`.
-
-The installer:
-
-1. downloads `manifest.json`, its detached signature, and the architecture-
-   specific binary from the server's verified release repository;
-2. runs the downloaded binary's `verify-release` command before replacing an
-   installed binary;
-3. installs `/usr/local/libexec/hope-agent` as a root-owned executable;
-4. creates the non-login `hope-agent` service account and `/var/lib/hope` with
-   mode `0700`;
-5. enrolls the host using the code and writes the private identity only in
-   that state directory; and
-6. enables and starts `hope-agent.service` with systemd hardening.
-
-Re-running the installer is safe. Existing enrollment state is kept and the
-binary/unit are replaced only after release verification succeeds.
-
-Check the service:
-
-```sh
-sudo systemctl status hope-agent
-sudo journalctl -u hope-agent -f
-```
-
-## Uninstall
-
-Remove the unit and binary but preserve the enrolled identity for recovery:
-
-```sh
-sudo /tmp/hope-install-agent.sh --uninstall --yes
-```
-
-To also remove the service account and enrolled identity:
-
-```sh
-sudo /tmp/hope-install-agent.sh --uninstall --purge --yes
-```
-
-`--purge` is intentionally separate and requires `--yes`.
-
-## Security and recovery
-
-- Use HTTPS for `HOPE_SERVER` and only paste the generated command into the
-  intended target host. The code never appears in the systemd unit or
-  installer logs, but it is visible briefly in the shell command and process
-  environment while bootstrapping.
-- The agent refuses enrollment when the CA fingerprint in the code does not
-  match the Hope CA.
-- The service account has no login shell and cannot write the installed binary.
-- Docker socket access is root-equivalent. Do not add `hope-agent` to the
-  Docker group unless that trust is intended.
-- If enrollment expires or has already been used, create a new code. Do not
-  disable TLS or reuse an old code.
-- The current agent certificate lifetime is 30 days. Re-enroll before expiry
-  until certificate renewal is implemented.
-
-Automatic self-update is not exposed by this installer yet. The update and
-rollback path must be complete before an unattended update switch is offered.
-
-Automated SSH installation and repair are documented in the API section below
-and use the same verified release repository.
-
-## Automated SSH install and repair
-
-The API exposes `POST /api/v1/devices/<device-id>/agent-install` and
-`POST /api/v1/devices/<device-id>/agent-repair`. Both require an
-`Idempotency-Key` header and a JSON body containing `host`, `port`, and the
-selected `credential_id`. Set `disassociate_after_enrollment` to `true` when
-the SSH credential should be detached after successful enrollment.
-
-The server and worker deployment must provide:
-
-```text
-HOPE_CREDENTIAL_MASTER_KEY_FILE=/app/data/pki/credential-master-key
-HOPE_AGENT_ENROLL_URL=https://hope.example:8444
-HOPE_AGENT_GATEWAY_URL=wss://hope.example:8443
-HOPE_AGENT_BINARY_X86_64=/app/agent-releases/agent-linux-amd64
-HOPE_AGENT_BINARY_AARCH64=/app/agent-releases/agent-linux-arm64
-```
-
-The worker detects Linux architecture over SSH, verifies the saved SSH host
-key, uploads the matching verified artifact, creates the dedicated service
-account, and enrolls the agent. First use and host-key changes deliberately
-fail with a pending/changed trust record; review the fingerprint through
-`GET /api/v1/ssh-host-keys` and explicitly call its `/trust` action before
-retrying. The worker executes only the fixed install/repair sequence; it is not
-a general-purpose shell runner.
+- A 503 from `/agent/v1/releases/latest/linux/amd64` or `arm64` means the
+  running image does not contain a verified matching release. Use an official
+  published Hope image; production publishing is blocked without signing.
+- If the installer cannot reach Hope, edit the connection address to an IP or
+  hostname resolvable **from the target**, then generate a fresh command.
+- If SSH deployment pauses, review the host-key fingerprint in the same
+  dialog. Never trust an unexpected changed key without checking the host.
+- Enrollment codes are one-use and expire after 15 minutes; generate another
+  command if one has expired.

@@ -4,12 +4,14 @@
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+#[cfg(test)]
+use sqlx::Row;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 pub const HEARTBEAT_TIMEOUT_SECONDS: i64 = 90;
 
-fn hash_token(token: &str) -> String {
+pub(crate) fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     hex::encode(hasher.finalize())
@@ -45,6 +47,7 @@ pub async fn create_enrollment_token(pool: &PgPool, ttl_minutes: i64) -> sqlx::R
 /// Atomically consume a token: succeeds only if it exists, is unexpired,
 /// and unused. Marks it used in the same statement so a replayed token can
 /// never succeed twice, even under concurrent requests.
+#[cfg(test)]
 pub async fn consume_enrollment_token(pool: &PgPool, token: &str) -> sqlx::Result<bool> {
     let hash = hash_token(token);
 
@@ -76,11 +79,17 @@ pub async fn purge_expired_tokens(pool: &PgPool) -> sqlx::Result<u64> {
     )
     .execute(pool)
     .await?;
-    Ok(result.rows_affected())
+    let challenges = sqlx::query(
+        "delete from agent_connection_challenges where expires_at < now() or used_at is not null",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() + challenges.rows_affected())
 }
 
 pub struct AgentRecord {
     pub id: Uuid,
+    #[cfg(test)]
     pub revoked_at: Option<time::OffsetDateTime>,
 }
 
@@ -119,6 +128,7 @@ pub async fn update_hello(
     tx.commit().await
 }
 
+#[cfg(test)]
 pub async fn insert_agent(
     pool: &PgPool,
     cert_fingerprint: &str,
@@ -141,6 +151,7 @@ pub async fn insert_agent(
     Ok(row.get("id"))
 }
 
+#[cfg(test)]
 pub async fn find_by_fingerprint(
     pool: &PgPool,
     cert_fingerprint: &str,

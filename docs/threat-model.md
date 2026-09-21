@@ -53,26 +53,24 @@ a free-form shell command.
 
 ## 3. Enrollment and server identity
 
-The operator creates a short-lived, single-use enrollment token. The command
-prints the token, the CA SHA-256 fingerprint, and a combined transfer code.
-The agent pins the supplied fingerprint before sending the token or CSR. The
-server signs only the submitted public key and derives CA status, usages, and
-validity itself. Enrollment is rate-limited per client IP.
+The operator creates a short-lived, single-use enrollment token. The generated
+command carries the token and Hope's pinned HTTPS identity. The agent pins
+the leaf-certificate fingerprint before sending its generated Ed25519 public
+key and token. Enrollment atomically consumes the code and registers that
+public key. Enrollment is rate-limited per client IP.
 
 The CA key, CA certificate, server certificate, and server key live in the
 `server-pki` volume. They are identity material, not disposable container
-state. Losing the CA key or replacing the CA changes the fingerprint and
-strands existing agents until each agent is re-enrolled.
+state. Replacing the server leaf certificate changes the fingerprint and
+strands direct-LAN agents until each is re-enrolled. Agents behind a trusted
+HTTPS proxy use the system trust store instead.
 
 *Gap*: the fingerprint must cross a trusted operator channel. A compromised
 bootstrap channel can defeat pinning before enrollment.
 
-*Gap*: the current client certificate lifetime is 30 days and there is no
-renewal flow. Operators must re-enroll before expiry.
-
-*Gap*: revocation blocks the next gateway connection but does not force-close
-an already open connection. There is no CRL or OCSP enforcement at the TLS
-layer; application checks enforce revocation after the handshake.
+Each WebSocket connection uses a one-minute challenge signed by the agent's
+identity key. Challenges are one-use; revoked agents cannot obtain or consume
+them. *Gap*: revocation does not force-close an already open connection.
 
 ## 4. Agent privilege and runtime
 
@@ -89,8 +87,8 @@ identity is required.
 container host and its mounted secret/PKI volumes as privileged deployment
 surfaces until a later hardening change proves a non-root runtime compatible.
 
-If an agent state directory loses its private key, client certificate, or CA
-certificate, that host cannot authenticate or verify the gateway. Re-enroll the
+If an agent state directory loses its identity key or TLS trust file, that
+host cannot authenticate or verify Hope. Re-enroll the
 host with a new token; never copy another host's private key.
 
 ## 5. Signed agent updates and release repository
@@ -98,8 +96,8 @@ host with a new token; never copy another host's private key.
 M7 verifies the detached manifest signature, each artifact signature, size,
 SHA-256, regular-file status, platform, architecture, release version,
 protocol floor, and signed channel metadata. The server and worker use the
-same filesystem-backed repository. Compose mounts it read-only. The private
-Ed25519 signing key remains outside the server and worker.
+same verified bundle packaged inside the official image. The private Ed25519
+signing key remains outside the server and worker.
 
 The configured public-key file or bounded public-key list is trust
 configuration. During rotation, both old and new keys can be accepted until
@@ -118,9 +116,8 @@ unreviewed key: that changes the update trust root.
 *Gap*: signing-key compromise requires key rotation and fleet recovery. The
 update worker cannot revoke a malicious release already trusted by an agent.
 
-*Gap*: release publication is an operator-controlled filesystem step. The
-repository is not an internet download service and has no independent
-multi-party approval or transparency log.
+*Gap*: release publication has no independent multi-party approval or
+transparency log.
 
 ## 6. Web authentication and transport
 
@@ -139,11 +136,11 @@ and worker actions.
 is no account lockout or distributed attack mitigation.
 
 *Gap*: the main API listener (`/api/v1/*`, `/health/*`, and the web SPA) is
-plain HTTP. The Compose example publishes it to localhost by default, but any
-non-local deployment must put a TLS reverse proxy in front and keep
-`HOPE_COOKIE_SECURE=true`. The 8443 mTLS gateway must use TCP passthrough so
-the server sees the client certificate. Preserve the server certificate and CA
-fingerprint for enrollment on 8444 as well.
+plain HTTP on a trusted LAN. Any internet-facing deployment must put a TLS
+reverse proxy in front and keep `HOPE_COOKIE_SECURE=true`. Agent enrollment,
+downloads, and WebSockets share the web router and are reachable through one
+ordinary HTTPS Proxy Host with WebSocket support. Direct-LAN agents use Hope's
+pinned HTTPS listener on port 443.
 
 *Gap*: `HOPE_TRUST_PROXY_HEADERS` must remain false unless the proxy strips and
 rewrites forwarded headers. A client-controlled `X-Forwarded-For` can otherwise

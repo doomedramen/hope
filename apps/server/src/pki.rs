@@ -1,20 +1,20 @@
-//! Internal CA for agent mTLS (ADR-0007). No key material is ever embedded
-//! or defaulted: `server ca init` generates a CA keypair/cert and a server
-//! leaf cert (used for TLS server auth on the enroll and gateway
-//! listeners), writing them to the configured file paths.
+//! Persistent internal TLS identity for Hope's direct HTTPS listener.
 
 use std::path::Path;
 
 use rand::RngCore;
+#[cfg(test)]
+use rcgen::CertificateSigningRequestParams;
 use rcgen::{
-    CertificateParams, CertificateSigningRequestParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
+    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose, SanType, SerialNumber,
 };
 
 use crate::config::Config;
 
 pub struct Ca {
     pub cert: rcgen::Certificate,
+    #[cfg(test)]
     pub key: KeyPair,
 }
 
@@ -118,12 +118,17 @@ pub fn load_ca(config: &Config) -> anyhow::Result<Ca> {
     let cert_params = CertificateParams::from_ca_cert_pem(&cert_pem)?;
     let cert = cert_params.self_signed(&key)?;
 
-    Ok(Ca { cert, key })
+    Ok(Ca {
+        cert,
+        #[cfg(test)]
+        key,
+    })
 }
 
 /// Sign an agent-submitted CSR (PEM) with the CA, producing a short-lived
 /// client certificate (30 day validity; renewal is a TODO for a later
 /// slice). Returns `(cert_pem, serial_hex, sha256_fingerprint_hex)`.
+#[cfg(test)]
 pub fn sign_agent_csr(ca: &Ca, csr_pem: &str) -> anyhow::Result<(String, String, String)> {
     let csr = CertificateSigningRequestParams::from_pem(csr_pem)?;
 

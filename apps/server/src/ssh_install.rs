@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::agents;
 use crate::credentials::{CredentialSecret, CredentialStore, redact_sensitive};
+use crate::release_repository::ReleaseRepository;
 use crate::ssh_trust::{self, HostKeyDecision};
 
 const MAX_COMMAND_OUTPUT: usize = 64 * 1024;
@@ -55,6 +56,8 @@ pub enum InstallError {
     Enrollment,
     #[error("agent service did not become active")]
     ServiceUnavailable,
+    #[error("agent did not check in; verify the connection address is reachable from the target")]
+    FirstCheckInTimeout,
     #[error("credential vault error: {0}")]
     Credential(#[from] crate::credentials::CredentialError),
     #[error("host-key trust error: {0}")]
@@ -76,6 +79,7 @@ pub struct DeploymentRequest {
     pub actor_user_id: Option<Uuid>,
     pub repair: bool,
     pub disassociate_after_enrollment: bool,
+    pub connection_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,19 +127,14 @@ pub struct AgentUpdateResult {
 struct DeploymentConfig {
     enroll_url: String,
     gateway_url: String,
-    binary_x86_64: String,
-    binary_aarch64: String,
     state_dir: String,
     service_user: String,
     timeout: Duration,
 }
 
 impl DeploymentConfig {
-    fn from_environment() -> Result<Self> {
-        let enroll_url = required_env("HOPE_AGENT_ENROLL_URL")?;
-        let gateway_url = required_env("HOPE_AGENT_GATEWAY_URL")?;
-        let binary_x86_64 = required_env("HOPE_AGENT_BINARY_X86_64")?;
-        let binary_aarch64 = required_env("HOPE_AGENT_BINARY_AARCH64")?;
+    fn from_environment(connection_url: &str) -> Result<Self> {
+        let (enroll_url, gateway_url, _) = connection_endpoints(connection_url)?;
         validate_url(&enroll_url, "https://")?;
         validate_url(&gateway_url, "wss://")?;
         let state_dir =
@@ -153,20 +152,10 @@ impl DeploymentConfig {
         Ok(Self {
             enroll_url,
             gateway_url,
-            binary_x86_64,
-            binary_aarch64,
             state_dir,
             service_user,
             timeout: Duration::from_secs(timeout_seconds),
         })
-    }
-
-    fn binary_path(&self, architecture: &str) -> Result<&str> {
-        match architecture {
-            "x86_64" => Ok(&self.binary_x86_64),
-            "aarch64" => Ok(&self.binary_aarch64),
-            _ => Err(InstallError::UnsupportedHost),
-        }
     }
 }
 
@@ -230,7 +219,7 @@ pub async fn install_or_repair(
     store: &CredentialStore,
     request: DeploymentRequest,
 ) -> Result<DeploymentResult> {
-    let config = DeploymentConfig::from_environment()?;
+    let config = DeploymentConfig::from_environment(&request.connection_url)?;
     let host = ssh_trust::normalize_host(&request.host)?;
     ssh_trust::validate_port(request.port)?;
     let secret = store
@@ -271,8 +260,24 @@ pub async fn install_or_repair(
         return Err(InstallError::UnsupportedHost);
     }
 
-    let binary_path = config.binary_path(architecture)?;
-    let binary = read_binary(binary_path).await?;
+    let release_arch = match architecture {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => return Err(InstallError::UnsupportedHost),
+    };
+    let repository =
+        ReleaseRepository::from_environment().map_err(|_| InstallError::BinaryUnavailable)?;
+    let (release, artifact) = repository
+        .latest_compatible_for_channel(
+            "linux",
+            release_arch,
+            protocol::PROTOCOL_VERSION,
+            release::ReleaseChannel::Stable,
+        )
+        .map_err(|_| InstallError::BinaryUnavailable)?;
+    let binary = repository
+        .read_artifact(&release, &artifact)
+        .map_err(|_| InstallError::BinaryUnavailable)?;
     let sudo = privilege_prefix(&mut session, config.timeout).await?;
     let remote_upload = format!("/tmp/hope-agent-upload-{}", Uuid::new_v4().simple());
     upload_binary(&mut session, &sudo, &remote_upload, &binary, config.timeout).await?;
@@ -289,8 +294,8 @@ pub async fn install_or_repair(
     let state_present = run_command(
         &mut session,
         &format!(
-            "{sudo}test -s {state}/agent-key.pem && test -s {state}/agent-cert.pem && \
-             test -s {state}/ca-cert.pem && echo enrolled || echo missing",
+            "{sudo}test -s {state}/agent-identity.hex && test -s {state}/agent-id && \
+             test -s {state}/tls-trust && echo enrolled || echo missing",
             state = sh_quote(&config.state_dir),
         ),
         config.timeout,
@@ -300,17 +305,19 @@ pub async fn install_or_repair(
     let mut enrolled = false;
     if state_present.trim() != "enrolled" {
         let token = agents::create_enrollment_token(pool, 15).await?;
-        let ca_fingerprint = ca_fingerprint_from_environment()?;
-        let code = format!("{token}.{ca_fingerprint}");
+        let tls_fingerprint = tls_fingerprint_from_environment()?;
+        let code = format!("{token}.{tls_fingerprint}");
         let user_prefix = if sudo.is_empty() {
             format!("runuser -u {} -- ", sh_quote(&config.service_user))
         } else {
             format!("{sudo}-u {} ", sh_quote(&config.service_user))
         };
+        let (_, _, system_tls) = connection_endpoints(&request.connection_url)?;
         let command = format!(
-            "{user_prefix}{AGENT_PATH} enroll --server {} --code-stdin --state-dir {}",
+            "{user_prefix}{AGENT_PATH} enroll --server {} --code-stdin --state-dir {}{}",
             sh_quote(&config.enroll_url),
             sh_quote(&config.state_dir),
+            if system_tls { " --system-tls" } else { "" },
         );
         let output = run_with_stdin(&mut session, &command, code.as_bytes(), config.timeout).await;
         if let Err(error) = output {
@@ -323,17 +330,8 @@ pub async fn install_or_repair(
         enrolled = true;
     }
 
-    if request.disassociate_after_enrollment && enrolled {
-        store
-            .disassociate_device(
-                request.credential_id,
-                request.device_id,
-                request.actor_user_id,
-            )
-            .await?;
-    }
-
     install_service_unit(&mut session, &sudo, &config, config.timeout).await?;
+    let restart_started_at = time::OffsetDateTime::now_utc();
     run_command(
         &mut session,
         &format!("{sudo}systemctl daemon-reload && {sudo}systemctl enable --now hope-agent"),
@@ -348,6 +346,28 @@ pub async fn install_or_repair(
     .await;
     if active.is_err() {
         return Err(InstallError::ServiceUnavailable);
+    }
+
+    let agent_id_output = run_command(
+        &mut session,
+        &format!("{sudo}cat {}/agent-id", sh_quote(&config.state_dir)),
+        config.timeout,
+    )
+    .await?;
+    let agent_id =
+        Uuid::parse_str(agent_id_output.stdout.trim()).map_err(|_| InstallError::Enrollment)?;
+    if !wait_for_first_check_in(pool, agent_id, restart_started_at, Duration::from_secs(90)).await?
+    {
+        return Err(InstallError::FirstCheckInTimeout);
+    }
+    if request.disassociate_after_enrollment {
+        store
+            .disassociate_device(
+                request.credential_id,
+                request.device_id,
+                request.actor_user_id,
+            )
+            .await?;
     }
 
     let _ = session
@@ -383,7 +403,9 @@ pub async fn update_or_rollback(
         return Err(InstallError::UnsupportedHost);
     }
 
-    let config = DeploymentConfig::from_environment()?;
+    let connection_url = std::env::var("HOPE_AGENT_CONNECTION_URL")
+        .unwrap_or_else(|_| "http://localhost".to_string());
+    let config = DeploymentConfig::from_environment(&connection_url)?;
     let host = ssh_trust::normalize_host(&request.host)?;
     ssh_trust::validate_port(request.port)?;
     let secret = store
@@ -508,6 +530,7 @@ pub async fn update_or_rollback(
                     actor_user_id: request.actor_user_id,
                     repair: true,
                     disassociate_after_enrollment: false,
+                    connection_url,
                 },
             )
             .await?;
@@ -552,6 +575,31 @@ async fn rollback_remote(
         )),
     );
     run_command(session, &command, timeout).await
+}
+
+async fn wait_for_first_check_in(
+    pool: &PgPool,
+    agent_id: Uuid,
+    started_at: time::OffsetDateTime,
+    deadline: Duration,
+) -> Result<bool> {
+    let until = tokio::time::Instant::now() + deadline;
+    loop {
+        let ready: bool = sqlx::query_scalar(
+            "select exists(select 1 from agents where id = $1 and revoked_at is null and last_seen >= $2)",
+        )
+        .bind(agent_id)
+        .bind(started_at)
+        .fetch_one(pool)
+        .await?;
+        if ready {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= until {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 async fn wait_for_agent_check_in(
@@ -810,16 +858,6 @@ struct CommandOutput {
     exit_status: Option<u32>,
 }
 
-async fn read_binary(path: &str) -> Result<Vec<u8>> {
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .map_err(InstallError::LocalFile)?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_AGENT_BINARY_BYTES {
-        return Err(InstallError::BinaryUnavailable);
-    }
-    tokio::fs::read(path).await.map_err(InstallError::LocalFile)
-}
-
 async fn privilege_prefix(
     session: &mut client::Handle<HostKeyHandler>,
     timeout: Duration,
@@ -886,8 +924,9 @@ async fn install_service_unit(
     Ok(())
 }
 
-fn ca_fingerprint_from_environment() -> Result<String> {
-    let path = std::env::var("HOPE_CA_CERT_PATH").unwrap_or_else(|_| "data/pki/ca-cert.pem".into());
+fn tls_fingerprint_from_environment() -> Result<String> {
+    let path = std::env::var("HOPE_SERVER_CERT_PATH")
+        .unwrap_or_else(|_| "data/pki/server-cert.pem".into());
     let pem = std::fs::read(path).map_err(InstallError::LocalFile)?;
     let mut pem = pem.as_slice();
     let cert = rustls_pemfile::certs(&mut pem)
@@ -899,12 +938,30 @@ fn ca_fingerprint_from_environment() -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn required_env(name: &'static str) -> Result<String> {
-    let value = std::env::var(name).map_err(|_| InstallError::Configuration)?;
-    if value.trim().is_empty() || value.len() > 1024 {
+fn connection_endpoints(connection_url: &str) -> Result<(String, String, bool)> {
+    let mut url = reqwest::Url::parse(connection_url).map_err(|_| InstallError::Configuration)?;
+    let system_tls = match url.scheme() {
+        "http" => false,
+        "https" => true,
+        _ => return Err(InstallError::Configuration),
+    };
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || connection_url.len() > 1024
+    {
         return Err(InstallError::Configuration);
     }
-    Ok(value)
+    url.set_scheme("https")
+        .map_err(|_| InstallError::Configuration)?;
+    let enroll_url = url.as_str().trim_end_matches('/').to_string();
+    url.set_scheme("wss")
+        .map_err(|_| InstallError::Configuration)?;
+    url.set_path("/agent/v1/connect");
+    Ok((enroll_url, url.to_string(), system_tls))
 }
 
 fn validate_url(value: &str, scheme: &str) -> Result<()> {
@@ -1010,5 +1067,27 @@ mod tests {
         assert!(validate_service_user("hope agent").is_err());
         assert!(validate_unit_argument("wss://hope.example:8443").is_ok());
         assert!(validate_unit_argument("wss://host/'bad'").is_err());
+    }
+
+    #[test]
+    fn connection_address_selects_pinned_lan_or_system_proxy_tls() {
+        assert_eq!(
+            connection_endpoints("http://192.168.1.163").unwrap(),
+            (
+                "https://192.168.1.163".to_string(),
+                "wss://192.168.1.163/agent/v1/connect".to_string(),
+                false,
+            )
+        );
+        assert_eq!(
+            connection_endpoints("https://hope.example").unwrap(),
+            (
+                "https://hope.example".to_string(),
+                "wss://hope.example/agent/v1/connect".to_string(),
+                true,
+            )
+        );
+        assert!(connection_endpoints("https://user:pass@hope.example").is_err());
+        assert!(connection_endpoints("https://hope.example/path").is_err());
     }
 }

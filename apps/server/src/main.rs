@@ -1,6 +1,7 @@
 mod agent_install;
 mod agent_inventory;
 mod agent_updates;
+mod agent_web;
 mod agents;
 mod auth_mw;
 mod config;
@@ -8,6 +9,7 @@ mod credentials;
 mod csrf;
 pub mod dependency_graph;
 mod discovery;
+#[cfg(test)]
 mod enroll;
 mod gateway;
 mod inventory;
@@ -143,6 +145,8 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
     // it without needing to remember to add it (see csrf.rs doc comment).
     let setup_limiter = RateLimitState::new(10, config.trust_proxy_headers);
     let login_limiter = RateLimitState::new(10, config.trust_proxy_headers);
+    let agent_enroll_limiter = RateLimitState::new(20, config.trust_proxy_headers);
+    let agent_connect_limiter = RateLimitState::new(120, config.trust_proxy_headers);
 
     // The generic dependency resource stays compiled for shared inventory
     // code, while M8 routes use the validated graph handlers below.
@@ -476,14 +480,32 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
     let api = Router::new()
         .route("/health/live", get(routes::health::live))
         .route("/health/ready", get(routes::health::ready))
-        .route("/install-agent.sh", get(agent_install::script))
         .route("/agent/install.sh", get(agent_install::script))
         .route(
-            "/agent-download/latest/{platform}/{arch}",
+            "/agent/v1/enroll",
+            post(agent_web::enroll)
+                .layer(from_fn_with_state(agent_enroll_limiter, ratelimit::enforce)),
+        )
+        .route(
+            "/agent/v1/challenge/{agent_id}",
+            get(agent_web::challenge).layer(from_fn_with_state(
+                agent_connect_limiter.clone(),
+                ratelimit::enforce,
+            )),
+        )
+        .route(
+            "/agent/v1/connect",
+            get(agent_web::connect).layer(from_fn_with_state(
+                agent_connect_limiter,
+                ratelimit::enforce,
+            )),
+        )
+        .route(
+            "/agent/v1/releases/latest/{platform}/{arch}",
             get(agent_install::latest_version),
         )
         .route(
-            "/agent-download/{version}/{platform}/{arch}/{file}",
+            "/agent/v1/releases/{version}/{platform}/{arch}/{file}",
             get(agent_install::file),
         )
         .route(
@@ -515,6 +537,7 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     let config = Config::load()?;
 
@@ -571,21 +594,17 @@ async fn main() -> anyhow::Result<()> {
             let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
             tracing::info!(addr = %config.bind_addr, "server listening");
 
-            let gateway_config = config.clone();
-            let gateway_pool = pool.clone();
-            let gateway_task = tokio::spawn(async move {
-                if let Err(err) = gateway::serve(gateway_config, gateway_pool).await {
-                    tracing::error!(error = %err, "agent gateway stopped");
-                }
-            });
-
-            let enroll_config = config.clone();
-            let enroll_pool = pool.clone();
-            let enroll_task = tokio::spawn(async move {
-                if let Err(err) = enroll::serve(enroll_config, enroll_pool).await {
-                    tracing::error!(error = %err, "enroll listener stopped");
-                }
-            });
+            let tls_addr: SocketAddr = std::env::var("HOPE_TLS_BIND_ADDR")
+                .unwrap_or_else(|_| "0.0.0.0:8443".to_string())
+                .parse()?;
+            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                &config.server_cert_path,
+                &config.server_key_path,
+            )
+            .await?;
+            let tls_app = app.clone();
+            let tls_task = axum_server::bind_rustls(tls_addr, tls_config)
+                .serve(tls_app.into_make_service_with_connect_info::<SocketAddr>());
 
             // Session cleanup and enrollment-token purge run as scheduled
             // jobs (worker role), not a bespoke timer here — see
@@ -608,8 +627,7 @@ async fn main() -> anyhow::Result<()> {
 
             tokio::select! {
                 res = api_task => { res?; }
-                _ = gateway_task => {}
-                _ = enroll_task => {}
+                res = tls_task => { res?; }
                 _ = scheduler_task => {}
             }
         }
@@ -693,21 +711,51 @@ async fn main() -> anyhow::Result<()> {
                         tracing::info!(job_id = %job.id, job_type = %job.job_type, "claimed job");
 
                         match registry.get(&job.job_type) {
-                            Some(handler) => match handler
-                                .handle(&pool, job.id, "worker", job.payload.clone())
-                                .await
-                            {
-                                Ok(jobs_handlers::JobOutcome::Completed) => {
-                                    jobs::complete(&pool, job.id, "worker").await?;
+                            Some(handler) => {
+                                match handler
+                                    .handle(&pool, job.id, "worker", job.payload.clone())
+                                    .await
+                                {
+                                    Ok(jobs_handlers::JobOutcome::Completed) => {
+                                        jobs::complete(&pool, job.id, "worker").await?;
+                                    }
+                                    Ok(jobs_handlers::JobOutcome::Cancelled) => {
+                                        jobs::cancel(&pool, job.id, "worker").await?;
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(job_id = %job.id, error = %err, "job failed");
+                                        jobs::fail(&pool, job.id, "worker", &err.to_string())
+                                            .await?;
+                                        if job.job_type == "agent.install"
+                                            && job
+                                                .payload
+                                                .get("delete_credential_after")
+                                                .and_then(serde_json::Value::as_bool)
+                                                == Some(true)
+                                        {
+                                            let status: Option<String> = sqlx::query_scalar(
+                                                "select status from jobs where id = $1",
+                                            )
+                                            .bind(job.id)
+                                            .fetch_optional(&pool)
+                                            .await?;
+                                            if status.as_deref() == Some("failed")
+                                                && let Some(id) = job
+                                                    .payload
+                                                    .get("credential_id")
+                                                    .and_then(serde_json::Value::as_str)
+                                                    .and_then(|value| Uuid::parse_str(value).ok())
+                                            {
+                                                let store =
+                                                    credentials::CredentialStore::from_environment(
+                                                        pool.clone(),
+                                                    )?;
+                                                store.delete(id, None).await?;
+                                            }
+                                        }
+                                    }
                                 }
-                                Ok(jobs_handlers::JobOutcome::Cancelled) => {
-                                    jobs::cancel(&pool, job.id, "worker").await?;
-                                }
-                                Err(err) => {
-                                    tracing::warn!(job_id = %job.id, error = %err, "job failed");
-                                    jobs::fail(&pool, job.id, "worker", &err.to_string()).await?;
-                                }
-                            },
+                            }
                             None => {
                                 let message = format!("unknown job kind: {}", job.job_type);
                                 tracing::error!(job_id = %job.id, %message);

@@ -727,7 +727,7 @@ function DeviceDetail({
           </Button>
           <Button onClick={onInstall} size="sm" variant="outline">
             <ShieldCheckIcon data-icon="inline-start" />
-            Install agent
+            Deploy agent
           </Button>
           <Button onClick={onMerge} size="sm" variant="outline">
             <GitMergeIcon data-icon="inline-start" />

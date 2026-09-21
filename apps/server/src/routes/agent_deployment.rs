@@ -22,8 +22,11 @@ pub struct DeploymentRequest {
     pub host: String,
     pub port: i32,
     pub credential_id: Uuid,
+    pub connection_url: String,
     #[serde(default)]
     pub disassociate_after_enrollment: bool,
+    #[serde(default)]
+    pub delete_credential_after: bool,
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
@@ -63,6 +66,26 @@ async fn enqueue(
     if ssh_trust::validate_port(request.port).is_err() {
         return error(StatusCode::BAD_REQUEST, "port must be between 1 and 65535");
     }
+    let connection_url = match reqwest::Url::parse(&request.connection_url) {
+        Ok(url)
+            if matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && request.connection_url.len() <= 1024 =>
+        {
+            url
+        }
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "connection address must be an HTTP or HTTPS origin",
+            );
+        }
+    };
 
     let mut transaction = match state.pool.begin().await {
         Ok(transaction) => transaction,
@@ -118,9 +141,11 @@ async fn enqueue(
         "host": host,
         "port": request.port,
         "credential_id": request.credential_id,
+        "connection_url": connection_url.as_str().trim_end_matches('/'),
         "actor_user_id": user.0,
         "repair": repair,
         "disassociate_after_enrollment": request.disassociate_after_enrollment,
+        "delete_credential_after": request.delete_credential_after,
     });
     let job_id = match jobs::enqueue_in(&mut transaction, job_type, key, payload).await {
         Ok(job_id) => job_id,

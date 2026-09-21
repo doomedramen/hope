@@ -52,10 +52,8 @@ POSTGRES_PASSWORD=0123456789abcdef0123456789abcdef0123456789abcdef
 POSTGRES_DB=hope
 HOPE_IMAGE=ghcr.io/doomedramen/hope:main
 HOPE_HTTP_PORT=80
+HOPE_HTTPS_PORT=443
 HOPE_COOKIE_SECURE=false
-HOPE_AGENT_ENROLL_URL=https://localhost:8444
-HOPE_AGENT_GATEWAY_URL=wss://localhost:8443
-HOPE_AGENT_RELEASE_DIR_HOST=./agent-releases
 EOF
 docker compose --project-name hope-helper-test --env-file "$compose_test_dir/.env" \
   -f "$repo_root/deploy/compose/docker-compose.yml" config -q
@@ -187,8 +185,8 @@ grep -Fqx 'COMPOSE_PROJECT_NAME=hope' "$install_root/.env" ||
   fail "installer did not pin its Compose project name"
 grep -Fqx 'HOPE_HTTP_PORT=80' "$install_root/.env" ||
   fail "installer did not publish HTTP on port 80"
-grep -Fqx 'HOPE_AGENT_ENROLL_URL=https://localhost:8444' "$install_root/.env" ||
-  fail "installer did not use safe initial agent endpoint"
+grep -Fqx 'HOPE_HTTPS_PORT=443' "$install_root/.env" ||
+  fail "installer did not publish agent HTTPS on port 443"
 [[ -f "$install_root/deploy/compose/docker-compose.yml" ]] ||
   fail "installer did not deploy Compose file"
 [[ -x "$install_root/deploy/compose/backup.sh" ]] ||

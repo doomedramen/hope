@@ -51,15 +51,11 @@ services:
     environment:
       HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:-postgres://${POSTGRES_USER:-hope}:${POSTGRES_PASSWORD:-hope}@postgres:5432/${POSTGRES_DB:-hope}}
       HOPE_COOKIE_SECURE: ${HOPE_COOKIE_SECURE:-false}
-      HOPE_AGENT_ENROLL_URL: ${HOPE_AGENT_ENROLL_URL:-https://localhost:8444}
-      HOPE_AGENT_GATEWAY_URL: ${HOPE_AGENT_GATEWAY_URL:-wss://localhost:8443}
     ports:
       - "${HOPE_HTTP_BIND:-0.0.0.0}:${HOPE_HTTP_PORT:-80}:8080"
-      - "${HOPE_GATEWAY_BIND:-0.0.0.0}:${HOPE_GATEWAY_PORT:-8443}:8443"
-      - "${HOPE_ENROLL_BIND:-0.0.0.0}:${HOPE_ENROLL_PORT:-8444}:8444"
+      - "${HOPE_HTTPS_BIND:-0.0.0.0}:${HOPE_HTTPS_PORT:-443}:8443"
     volumes:
       - server-pki:/app/data/pki
-      - ${HOPE_AGENT_RELEASE_DIR_HOST:-./agent-releases}:/app/agent-releases:ro
     command: ["serve"]
 
   worker:
@@ -74,7 +70,6 @@ services:
       HOPE_DATABASE_URL: ${HOPE_DATABASE_URL:-postgres://${POSTGRES_USER:-hope}:${POSTGRES_PASSWORD:-hope}@postgres:5432/${POSTGRES_DB:-hope}}
     volumes:
       - server-pki:/app/data/pki:ro
-      - ${HOPE_AGENT_RELEASE_DIR_HOST:-./agent-releases}:/app/agent-releases:ro
     command: ["worker"]
 
 volumes:
@@ -91,11 +86,14 @@ docker compose -f deploy/compose/docker-compose.yml up -d
 Open <http://localhost>. On an empty database, the web UI presents the first-run
 form for creating the operator account. Set `HOPE_HTTP_PORT=8080` in `.env` if
 port 80 is already in use. No account, key, certificate, or manual migration
-command is required. The server image creates the
-credential key and agent CA on first start and keeps them in the `server-pki`
-volume. PostgreSQL migrations run when the server and worker start.
+command is required. The image includes signed Linux amd64 and arm64 agents
+and their release trust key. Hope creates its HTTPS identity and credential
+key on first start and keeps them in the `server-pki` volume. PostgreSQL
+migrations run when the server and worker start.
 
-For a source build, use the checked-in override:
+The default Compose file pulls the official, self-contained image. Maintainers
+building from source must first produce `dist/release` with `xtask sign` using
+a key embedded in the agent build; then use the checked-in override:
 
 ```sh
 docker compose \
@@ -105,12 +103,13 @@ docker compose \
 ```
 
 The HTTP port is published on all interfaces by default for homelab use. Set
-`HOPE_HTTP_BIND=127.0.0.1` for a local-only listener. Put a TLS reverse proxy
-in front of HTTP for an internet-facing deployment, set
-`HOPE_COOKIE_SECURE=true`, use a strong PostgreSQL password, and pin `HOPE_IMAGE`
-to an immutable GHCR digest. Set the agent URLs to the hostname reachable by
-agents. The 8443 gateway needs TCP passthrough and 8444 must preserve the
-server certificate and CA fingerprint.
+`HOPE_HTTP_BIND=127.0.0.1` for a local-only UI. Hope also publishes pinned
+agent HTTPS on host port 443. Behind Nginx Proxy Manager, create one HTTPS
+Proxy Host forwarding to Hope's HTTP port 80 with WebSocket support enabled.
+Set the Agents page connection address to that public HTTPS origin. No NPM
+Stream or special certificate name is required. For an internet-facing UI,
+set `HOPE_COOKIE_SECURE=true`, use a strong PostgreSQL password, and pin
+`HOPE_IMAGE` to an immutable GHCR digest.
 
 Copy `.env.example` to `.env` only when changing those defaults. Public images
 need no registry login. For a private GHCR package, log in with a GitHub token

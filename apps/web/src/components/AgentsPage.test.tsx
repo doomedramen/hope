@@ -167,6 +167,7 @@ describe("AgentsPage", () => {
             ? jsonResponse(
                 {
                   code: "token.fingerprint",
+                  tls_pin: "sha256//test-pin",
                   expires_in_minutes: 15,
                 },
                 201,

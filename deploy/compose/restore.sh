@@ -46,7 +46,7 @@ if [[ "$with_secrets" != 1 ]]; then
   exit 2
 fi
 
-for required in manifest.txt SHA256SUMS postgres.dump postgres-globals.sql pki agent-releases deployment.env; do
+for required in manifest.txt SHA256SUMS postgres.dump postgres-globals.sql pki deployment.env; do
   if [[ ! -e "$backup_dir/$required" ]]; then
     printf 'Backup is missing %s\n' "$required" >&2
     exit 1
@@ -78,7 +78,6 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 compose=(docker compose --env-file "$backup_dir/deployment.env" -f "$script_dir/docker-compose.yml")
-release_dir="${HOPE_AGENT_RELEASE_DIR_HOST:-$script_dir/agent-releases}"
 helper_id=""
 
 cleanup() {
@@ -107,12 +106,6 @@ fi
 
 "${compose[@]}" exec -T postgres sh -c 'dropdb --if-exists --username="$POSTGRES_USER" "$POSTGRES_DB" && createdb --username="$POSTGRES_USER" "$POSTGRES_DB"'
 "${compose[@]}" exec -T postgres sh -c 'pg_restore --exit-on-error --no-owner --no-acl --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"' <"$backup_dir/postgres.dump"
-
-if [[ -e "$release_dir" ]]; then
-  rm -rf "$release_dir"
-fi
-mkdir -p "$(dirname "$release_dir")"
-cp -a "$backup_dir/agent-releases" "$release_dir"
 
 helper_id="$("${compose[@]}" run -d --no-deps --entrypoint sh server -c 'sleep 300')"
 docker exec "$helper_id" sh -c 'find /app/data/pki -mindepth 1 -maxdepth 1 -exec rm -rf {} +'

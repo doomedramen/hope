@@ -14,12 +14,12 @@ export interface AgentTarget {
   containerName: string;
 }
 
-type WorkerFixtures = {
+type AgentFixtures = {
   agentTarget: AgentTarget;
 };
 
-export const test = base.extend<WorkerFixtures>({
-  agentTarget: [
+export const test = base.extend<AgentFixtures>({
+  agentTarget:
     // The fixture does not depend on the base test fixtures.
     // eslint-disable-next-line no-empty-pattern
     async ({}, use, testInfo) => {
@@ -91,8 +91,6 @@ export const test = base.extend<WorkerFixtures>({
         }
       }
     },
-    { scope: "worker" },
-  ],
 });
 
 export { expect };

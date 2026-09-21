@@ -22,6 +22,8 @@ YES=false
 # older explicit flags remain supported for scripted upgrades and recovery.
 BOOTSTRAP_SERVER="${HOPE_SERVER:-${HSERV:-}}"
 BOOTSTRAP_CODE="${HOPE_ENROLLMENT_CODE:-}"
+BOOTSTRAP_PIN="${HOPE_TLS_PIN:-}"
+SYSTEM_TLS="${HOPE_SYSTEM_TLS:-false}"
 if [[ -z "$BOOTSTRAP_CODE" && -n "${HPKEY:-}" && -n "${HHKEY:-}" ]]; then
     BOOTSTRAP_CODE="$HPKEY.$HHKEY"
 fi
@@ -72,11 +74,12 @@ Usage:
 Install options:
   HOPE_SERVER URL         Hope control-plane origin; derives enroll/gateway URLs.
   HOPE_ENROLLMENT_CODE    Single-use TOKEN.FINGERPRINT bootstrap code.
-  HHKEY/HPKEY/HSERV       Compatibility aliases for CA fingerprint, token, server.
+  HOPE_TLS_PIN            Generated pin for direct-LAN Hope HTTPS.
+  HHKEY/HPKEY/HSERV       Compatibility aliases for fingerprint, token, server.
   --enroll-url URL        HTTPS enrollment endpoint.
   --gateway-url URL       WSS/WS gateway endpoint written to systemd.
-  --release-base-url URL  Hope server base URL; appends /agent-download.
-  --release-url URL       Explicit /agent-download route root.
+  --release-base-url URL  Hope server base URL; appends /agent/v1/releases.
+  --release-url URL       Explicit /agent/v1/releases route root.
   --version VERSION       latest (default) or exact semantic version.
   --code-stdin            Read enrollment code from stdin; requires --yes.
   --yes                   Confirm noninteractive or destructive operation.
@@ -257,7 +260,7 @@ trim_trailing_slashes() {
 }
 
 derive_bootstrap_urls() {
-    local server authority hostport host
+    local server authority hostport host secure_origin
 
     [[ -n "$BOOTSTRAP_SERVER" ]] || return 0
     server=$(trim_trailing_slashes "$BOOTSTRAP_SERVER")
@@ -277,9 +280,15 @@ derive_bootstrap_urls() {
     fi
     [[ -n "$host" ]] || die "HOPE_SERVER does not contain a host"
 
-    [[ -n "$RELEASE_BASE_URL" ]] || RELEASE_BASE_URL="$server"
-    [[ -n "$ENROLL_URL" ]] || ENROLL_URL="https://$host:8444"
-    [[ -n "$GATEWAY_URL" ]] || GATEWAY_URL="wss://$host:8443"
+    secure_origin="https://$authority"
+    if [[ "$server" == https://* ]]; then
+        SYSTEM_TLS=true
+    else
+        [[ "$BOOTSTRAP_PIN" == sha256//* ]] || die "HOPE_TLS_PIN is required for direct LAN bootstrap"
+    fi
+    [[ -n "$RELEASE_BASE_URL" ]] || RELEASE_BASE_URL="$secure_origin"
+    [[ -n "$ENROLL_URL" ]] || ENROLL_URL="$secure_origin"
+    [[ -n "$GATEWAY_URL" ]] || GATEWAY_URL="wss://$authority/agent/v1/connect"
 }
 
 detect_architecture() {
@@ -320,16 +329,22 @@ download_file() {
 
     rm -f -- "$destination"
     if command -v curl >/dev/null 2>&1; then
+        local -a tls_args=()
+        if [[ -n "$BOOTSTRAP_PIN" && "$SYSTEM_TLS" != true ]]; then
+            tls_args=(--insecure --pinnedpubkey "$BOOTSTRAP_PIN")
+        fi
         if ! curl \
             --fail --silent --show-error --location \
-            --proto '=http,https' --proto-redir '=http,https' \
+            --proto '=https' --proto-redir '=https' \
             --connect-timeout 10 --max-time 120 --retry 2 \
             --max-filesize "$maximum_bytes" \
+            "${tls_args[@]}" \
             --output "$destination" "$url"; then
             rm -f -- "$destination"
             return 1
         fi
     elif command -v wget >/dev/null 2>&1; then
+        [[ -z "$BOOTSTRAP_PIN" || "$SYSTEM_TLS" == true ]] || return 1
         if ! wget \
             --quiet --max-redirect=5 --timeout=30 --tries=3 \
             --output-document="$destination" "$url"; then
@@ -359,7 +374,7 @@ resolve_release_path() {
         RELEASE_ROOT=$(trim_trailing_slashes "$RELEASE_URL")
     else
         base_url=$(trim_trailing_slashes "$RELEASE_BASE_URL")
-        RELEASE_ROOT="$base_url/agent-download"
+        RELEASE_ROOT="$base_url/agent/v1/releases"
     fi
 
     if [[ "$VERSION" == "latest" ]]; then
@@ -433,7 +448,7 @@ ensure_service_account() {
 
 state_is_enrolled() {
     local name
-    for name in agent-key.pem agent-cert.pem ca-cert.pem; do
+    for name in agent-identity.hex agent-id tls-trust; do
         [[ ! -L "$STATE_DIR/$name" && -s "$STATE_DIR/$name" ]] || return 1
     done
     return 0
@@ -456,7 +471,9 @@ verify_downloaded_release() {
     local verifier_owner
     local expected_line="OK: $VERSION linux/$ARCH verified"
 
-    chmod 0644 "$manifest_path" "$manifest_path.sig" "$binary_path" \
+    chmod 0644 "$manifest_path" "$manifest_path.sig" \
+        || die "could not prepare downloaded release for verification"
+    chmod 0755 "$binary_path" \
         || die "could not prepare downloaded release for verification"
     chmod 0755 "$TEMP_DIR" || die "could not prepare release temporary directory"
 
@@ -469,6 +486,7 @@ verify_downloaded_release() {
     if [[ "$verifier_owner" == "0" ]]; then
         if ! "$AGENT_PATH" verify-release --manifest "$manifest_path" --binary "$binary_path" \
             > "$verification_output" 2>&1; then
+            sed -n '1,8p' "$verification_output" >&2
             die "installed agent rejected signed release $VERSION; binary was not installed"
         fi
     else
@@ -478,6 +496,7 @@ verify_downloaded_release() {
         if ! runuser -u nobody -- "$binary_path" verify-release \
             --manifest "$manifest_path" --binary "$binary_path" \
             > "$verification_output" 2>&1; then
+            sed -n '1,8p' "$verification_output" >&2
             die "downloaded agent could not verify signed release $VERSION; binary was not installed"
         fi
     fi
@@ -515,6 +534,8 @@ install_agent_binary() {
 enroll_agent() {
     local enrollment_log="$TEMP_DIR/enroll.log"
     local code
+    local -a tls_args=()
+    [[ "$SYSTEM_TLS" != true ]] || tls_args=(--system-tls)
 
     if state_is_enrolled; then
         log "existing enrollment found; preserving $STATE_DIR"
@@ -523,7 +544,7 @@ enroll_agent() {
 
     if [[ -n "$BOOTSTRAP_CODE" ]]; then
         if ! printf '%s\n' "$BOOTSTRAP_CODE" | run_as_service "$AGENT_PATH" enroll \
-            --server "$ENROLL_URL" --code-stdin --state-dir "$STATE_DIR" \
+            --server "$ENROLL_URL" --code-stdin --state-dir "$STATE_DIR" "${tls_args[@]}" \
             > "$enrollment_log" 2>&1; then
             unset BOOTSTRAP_CODE
             die "enrollment failed; enrollment code was not logged"
@@ -531,7 +552,7 @@ enroll_agent() {
         unset BOOTSTRAP_CODE
     elif [[ "$CODE_STDIN" == true ]]; then
         if ! run_as_service "$AGENT_PATH" enroll \
-            --server "$ENROLL_URL" --code-stdin --state-dir "$STATE_DIR" \
+            --server "$ENROLL_URL" --code-stdin --state-dir "$STATE_DIR" "${tls_args[@]}" \
             > "$enrollment_log" 2>&1; then
             die "enrollment failed; enrollment code was not logged"
         fi
@@ -542,7 +563,7 @@ enroll_agent() {
         printf '\n' >&2
         [[ -n "$code" ]] || die "enrollment code must not be empty"
         if ! printf '%s\n' "$code" | run_as_service "$AGENT_PATH" enroll \
-            --server "$ENROLL_URL" --code-stdin --state-dir "$STATE_DIR" \
+            --server "$ENROLL_URL" --code-stdin --state-dir "$STATE_DIR" "${tls_args[@]}" \
             > "$enrollment_log" 2>&1; then
             unset code
             die "enrollment failed; enrollment code was not logged"

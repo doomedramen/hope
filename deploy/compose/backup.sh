@@ -8,7 +8,7 @@ usage() {
 Usage: backup.sh [backup-directory]
 
 Creates a complete Hope backup containing the PostgreSQL database, server PKI,
-agent release repository, and credential master key.
+and credential master key. Signed agents are supplied by the Hope image.
 
 The credential master key is intentionally included only when
 HOPE_BACKUP_INCLUDE_SECRETS=1 is set. Store the resulting directory as a
@@ -46,12 +46,6 @@ if [[ -f "$env_path" ]]; then
 fi
 created_at="$(date -u +%Y%m%dT%H%M%SZ)"
 destination="$backup_root/hope-$created_at"
-release_dir="${HOPE_AGENT_RELEASE_DIR_HOST:-$script_dir/agent-releases}"
-
-if [[ ! -d "$release_dir" ]]; then
-  printf 'Agent release repository not found: %s\n' "$release_dir" >&2
-  exit 1
-fi
 
 mkdir -p "$destination"
 cleanup() {
@@ -92,7 +86,6 @@ done
 docker cp "$server_container:/app/data/pki/credential-master-key" \
   "$destination/credential-master-key"
 chmod 600 "$destination/credential-master-key"
-cp -a "$release_dir" "$destination/agent-releases"
 if [[ -f "$env_path" ]]; then
   install -m 600 "$env_path" "$destination/deployment.env"
 else
@@ -107,7 +100,6 @@ git_revision=$git_revision
 postgres_dump=postgres.dump
 postgres_globals=postgres-globals.sql
 server_pki=pki
-agent_releases=agent-releases
 credential_master_key=credential-master-key
 deployment_env=deployment.env
 EOF

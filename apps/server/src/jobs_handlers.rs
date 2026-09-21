@@ -445,6 +445,10 @@ impl JobHandler for AgentDeployment {
             .get("disassociate_after_enrollment")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let connection_url = payload
+            .get("connection_url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("agent deployment payload has no connection_url"))?;
 
         let store = CredentialStore::from_environment(pool.clone())?;
         let result = ssh_install::install_or_repair(
@@ -458,9 +462,17 @@ impl JobHandler for AgentDeployment {
                 actor_user_id,
                 repair,
                 disassociate_after_enrollment,
+                connection_url: connection_url.to_string(),
             },
         )
         .await?;
+        if payload
+            .get("delete_credential_after")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            store.delete(credential_id, actor_user_id).await?;
+        }
         tracing::info!(
             host = %result.host,
             port = result.port,

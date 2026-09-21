@@ -1,10 +1,10 @@
 //! Certificate-fingerprint pinning for the enroll bootstrap TLS connection.
 //!
 //! Replaces TOFU (`danger_accept_invalid_certs`): the operator supplies the
-//! server's CA SHA-256 fingerprint out of band (printed once by
+//! server leaf certificate SHA-256 fingerprint out of band (printed once by
 //! `server enroll-token create`), and this verifier accepts the connection
-//! only if that fingerprint appears somewhere in the presented certificate
-//! chain. Normal PKI chain-of-trust validation is deliberately skipped —
+//! only if that fingerprint matches the presented leaf certificate.
+//! Normal PKI chain-of-trust validation is deliberately skipped —
 //! the trust anchor here is the pinned fingerprint, not a public CA — but
 //! signature verification over the handshake still runs via rustls'
 //! standard webpki signature checks.
@@ -48,20 +48,18 @@ impl ServerCertVerifier for PinnedFingerprintVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
+        _intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        let pinned_match = std::iter::once(end_entity)
-            .chain(intermediates.iter())
-            .any(|cert| sha256_hex(cert.as_ref()) == self.fingerprint_hex);
+        let pinned_match = sha256_hex(end_entity.as_ref()) == self.fingerprint_hex;
 
         if pinned_match {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(Error::General(
-                "server certificate chain does not match the pinned CA fingerprint".into(),
+                "server certificate does not match the pinned fingerprint".into(),
             ))
         }
     }
@@ -143,5 +141,22 @@ mod tests {
         let result =
             verifier.verify_server_cert(&end_entity, &[], &server_name, &[], UnixTime::now());
         assert!(result.is_err(), "wrong fingerprint must be rejected");
+    }
+
+    #[test]
+    fn trusted_certificate_in_unrelated_chain_is_rejected() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let trusted = self_signed_der();
+        let attacker = self_signed_der();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = PinnedFingerprintVerifier::new(sha256_hex(&trusted), provider);
+        let result = verifier.verify_server_cert(
+            &CertificateDer::from(attacker),
+            &[CertificateDer::from(trusted)],
+            &ServerName::try_from("localhost").unwrap(),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_err());
     }
 }

@@ -1,4 +1,4 @@
-//! Agent runtime: connect to the gateway over mTLS WebSocket, send Hello,
+//! Agent runtime: prove its enrolled identity over WebSocket, send Hello,
 //! then heartbeat and periodic inventory refresh (ADR-0007/0008). Reconnects
 //! with exponential backoff + jitter on any error or disconnect; the backoff
 //! counter resets after a session is successfully established.
@@ -7,17 +7,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{Sink, SinkExt, StreamExt};
 use rand::Rng;
-use rustls::RootCertStore;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use tokio_tungstenite::Connector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use uuid::Uuid;
 
 use crate::collectors;
 use crate::identity::{Paths, write_private};
+use crate::pinning::PinnedFingerprintVerifier;
 use protocol::{
     Capability, CapabilityAck, CapabilityOffer, Envelope, Heartbeat, Hello, InventorySnapshot,
     InventorySnapshotAck, MAX_OBSERVATION_BATCH_BYTES, MAX_SNAPSHOT_BYTES, Message,
@@ -98,33 +102,70 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
         );
     }
 
-    let cert_pem = std::fs::read_to_string(&paths.cert)?;
-    let key_pem = std::fs::read_to_string(&paths.key)?;
-    let ca_pem = std::fs::read_to_string(&paths.ca)?;
-
-    let certs: Vec<_> =
-        rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<_, _>>()?;
-    let agent_id = load_or_create_agent_id(state_dir, certs.first().map(|cert| cert.as_ref()))?;
+    let agent_id = Uuid::parse_str(std::fs::read_to_string(&paths.agent_id)?.trim())?;
+    let identity: [u8; 32] = hex::decode(std::fs::read_to_string(&paths.identity_key)?.trim())?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid agent identity key"))?;
+    let signing_key = SigningKey::from_bytes(&identity);
+    let trust = std::fs::read_to_string(&paths.tls_trust)?;
     let pending_snapshot = load_or_collect_pending_snapshot(state_dir, agent_id).await?;
-    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {}", paths.key.display()))?;
-
-    let mut roots = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut ca_pem.as_bytes()) {
-        roots.add(cert?)?;
+    let pinned_config = if let Some(fingerprint) = trust.trim().strip_prefix("pinned:") {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        Some(Arc::new(
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(PinnedFingerprintVerifier::new(
+                    fingerprint.to_string(),
+                    provider,
+                )))
+                .with_no_client_auth(),
+        ))
+    } else if trust.trim() == "system" {
+        None
+    } else {
+        anyhow::bail!("invalid agent TLS trust mode");
+    };
+    let mut challenge_url = reqwest::Url::parse(gateway_url)?;
+    challenge_url
+        .set_scheme("https")
+        .map_err(|_| anyhow::anyhow!("invalid agent gateway URL"))?;
+    challenge_url.set_path(&format!("/agent/v1/challenge/{agent_id}"));
+    challenge_url.set_query(None);
+    let challenge_client = if let Some(config) = pinned_config.as_ref() {
+        reqwest::Client::builder()
+            .use_preconfigured_tls((**config).clone())
+            .build()?
+    } else {
+        reqwest::Client::new()
+    };
+    let response = challenge_client.get(challenge_url).send().await?;
+    if !response.status().is_success() {
+        anyhow::bail!("agent challenge failed: {}", response.status());
     }
-
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_client_auth_cert(certs, key)?;
+    let challenge: serde_json::Value = response.json().await?;
+    let nonce = challenge["nonce"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("agent challenge response is invalid"))?;
+    let message = format!("hope-agent-connect-v1\n{agent_id}\n{nonce}");
+    let signature = hex::encode(signing_key.sign(message.as_bytes()).to_bytes());
+    let mut request = gateway_url.into_client_request()?;
+    request.headers_mut().insert(
+        "x-hope-agent-id",
+        HeaderValue::from_str(&agent_id.to_string())?,
+    );
+    request
+        .headers_mut()
+        .insert("x-hope-challenge", HeaderValue::from_str(nonce)?);
+    request
+        .headers_mut()
+        .insert("x-hope-signature", HeaderValue::from_str(&signature)?);
 
     let (ws_stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
-        gateway_url,
+        request,
         None,
         false,
-        Some(Connector::Rustls(Arc::new(tls_config))),
+        pinned_config.map(Connector::Rustls),
     )
     .await?;
 
@@ -134,7 +175,9 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
 
     let hello = Envelope::new(Message::Hello(Hello {
         agent_id,
-        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+        agent_version: option_env!("HOPE_AGENT_RELEASE_VERSION")
+            .unwrap_or(env!("CARGO_PKG_VERSION"))
+            .to_string(),
         hostname: hostname_or_unknown(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
@@ -484,6 +527,7 @@ fn negotiated_from_ack(
     .ok()
 }
 
+#[cfg(test)]
 fn agent_id_path(state_dir: &str) -> PathBuf {
     Path::new(state_dir).join("agent-id")
 }
@@ -492,6 +536,7 @@ fn agent_id_path(state_dir: &str) -> PathBuf {
 /// it on first run, then always load that value on reconnect. The certificate
 /// hash gives first-run identity a deterministic fallback without generating a
 /// new identity for every WebSocket session.
+#[cfg(test)]
 fn load_or_create_agent_id(
     state_dir: &str,
     certificate_der: Option<&[u8]>,
@@ -511,6 +556,7 @@ fn load_or_create_agent_id(
     Ok(agent_id)
 }
 
+#[cfg(test)]
 fn stable_agent_id_from_certificate(certificate_der: &[u8]) -> Uuid {
     let digest = Sha256::digest(certificate_der);
     let mut bytes = [0_u8; 16];

@@ -26,12 +26,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Exchange a single-use enrollment token for a signed client
-    /// certificate (ADR-0007). The CA fingerprint is required (either
+    /// Register an agent-generated identity key using a single-use token.
+    /// The CA fingerprint is required for direct LAN TLS (either
     /// `--code TOKEN.FINGERPRINT`, or `--token` + `--ca-fingerprint`
     /// separately) and is verified before the token is ever sent.
     Enroll {
-        /// Enrollment HTTPS endpoint, e.g. https://hope.example:8444
+        /// Hope HTTPS origin, e.g. https://hope.example
         #[arg(long)]
         server: String,
         /// Combined `TOKEN.FINGERPRINT` code, as printed by
@@ -49,11 +49,14 @@ enum Command {
         ca_fingerprint: Option<String>,
         #[arg(long, default_value = DEFAULT_STATE_DIR)]
         state_dir: String,
+        /// Trust a certificate issued by the system roots (for an HTTPS proxy).
+        #[arg(long)]
+        system_tls: bool,
     },
     /// Connect to the agent gateway using the enrolled identity and run
     /// the Hello/heartbeat loop, reconnecting with backoff on failure.
     Run {
-        /// Agent gateway WebSocket endpoint, e.g. wss://hope.example:8443
+        /// Agent WebSocket endpoint, e.g. wss://hope.example/agent/v1/connect
         #[arg(long)]
         gateway: String,
         #[arg(long, default_value = DEFAULT_STATE_DIR)]
@@ -75,6 +78,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -91,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
             token,
             ca_fingerprint,
             state_dir,
+            system_tls,
         }) => {
             let code = match code {
                 Some(combined) => EnrollCode::parse_combined(&combined)?,
@@ -108,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                     EnrollCode::new(token, ca_fingerprint)
                 }
             };
-            enroll::run(&server, &code, &state_dir).await?;
+            enroll::run(&server, &code, &state_dir, system_tls).await?;
         }
         Some(Command::Run { gateway, state_dir }) => {
             run::run(&gateway, &state_dir).await?;

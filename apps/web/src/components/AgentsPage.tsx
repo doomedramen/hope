@@ -83,6 +83,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "cn";
+import { agentConnectionAddress, saveAgentConnectionAddress } from "@/lib/agentConnection";
 
 const EMPTY_AGENTS: Agent[] = [];
 const EMPTY_INVENTORY_SUMMARY: AgentInventorySummary = {
@@ -288,11 +289,11 @@ function EnrollmentDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const baseUrl =
-    typeof window === "undefined"
-      ? "https://hope.example"
-      : window.location.origin;
-  const scriptUrl = baseUrl + "/agent/install.sh";
+  const [baseUrl, setBaseUrl] = useState(agentConnectionAddress);
+  const [addressError, setAddressError] = useState<string | null>(null);
+  const scriptOrigin = new URL(addressError ? agentConnectionAddress() : baseUrl);
+  scriptOrigin.protocol = "https:";
+  const scriptUrl = scriptOrigin.origin + "/agent/install.sh";
   const enrollmentMutation = useMutation({
     mutationFn: createAgentEnrollment,
   });
@@ -302,6 +303,7 @@ function EnrollmentDialog({
 
   useEffect(() => {
     if (!open) return;
+    setBaseUrl(agentConnectionAddress());
     resetEnrollment();
     createEnrollment();
   }, [createEnrollment, open, resetEnrollment]);
@@ -311,9 +313,15 @@ function EnrollmentDialog({
   const enrollment = enrollmentMutation.data;
   const installCommand = enrollment
     ? "curl -fsSL " +
+      (baseUrl.startsWith("http:")
+        ? "--insecure --pinnedpubkey " + shellQuote(enrollment.tls_pin) + " "
+        : "") +
       shellQuote(scriptUrl) +
       " | sudo env HOPE_SERVER=" +
       shellQuote(baseUrl) +
+      (baseUrl.startsWith("http:")
+        ? " HOPE_TLS_PIN=" + shellQuote(enrollment.tls_pin)
+        : "") +
       " HOPE_ENROLLMENT_CODE=" +
       shellQuote(enrollment.code) +
       " bash"
@@ -337,6 +345,16 @@ function EnrollmentDialog({
             enrollment and gateway endpoints from the Hope server origin.
           </DialogDescription>
         </DialogHeader>
+        <div className="grid gap-2">
+          <label className="text-sm font-medium" htmlFor="agent-connection-address">Agent connection address</label>
+          <Input id="agent-connection-address" value={baseUrl} onChange={(event) => {
+            setBaseUrl(event.target.value);
+            try { saveAgentConnectionAddress(event.target.value); setAddressError(null); }
+            catch { setAddressError("Enter the HTTP LAN address or HTTPS proxy address agents can reach."); }
+          }} />
+          <p className="text-xs text-muted-foreground">Use the address reachable from your devices. An HTTP LAN address uses Hope’s pinned HTTPS on port 443.</p>
+          {addressError ? <p className="text-xs text-destructive">{addressError}</p> : null}
+        </div>
         {enrollmentMutation.isPending ? (
           <p aria-live="polite" className="text-sm text-muted-foreground">
             Preparing a one-time installer command…
@@ -352,7 +370,7 @@ function EnrollmentDialog({
               )}
             </AlertDescription>
           </Alert>
-        ) : installCommand && enrollment ? (
+        ) : installCommand && enrollment && !addressError ? (
           <div className="grid gap-3">
             <p className="text-sm font-medium">Run this on the target host</p>
             <CommandBlock
