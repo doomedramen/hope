@@ -42,16 +42,6 @@ const SECONDARY_NAV = [
 type NavigationItem =
   (typeof PRIMARY_NAV)[number] | (typeof SECONDARY_NAV)[number];
 
-export function currentSectionLabel(pathname: string): string {
-  if (pathname.startsWith("/networks")) return "Networks";
-  if (pathname.startsWith("/agents")) return "Agents";
-
-  const item = [...PRIMARY_NAV, ...SECONDARY_NAV].find((candidate) =>
-    isActiveNavigationItem(candidate, pathname),
-  );
-  return item?.label ?? "Devices";
-}
-
 function isActiveNavigationItem(
   item: NavigationItem,
   pathname: string,
@@ -226,12 +216,6 @@ function MobileNavigation({ pathname }: { pathname: string }) {
 
   return (
     <div className="ml-auto flex min-w-0 items-center gap-1 md:hidden">
-      <span
-        className="min-w-0 flex-1 truncate px-2 text-sm font-medium text-muted-foreground"
-        data-testid="mobile-current-section"
-      >
-        {currentSectionLabel(pathname)}
-      </span>
       <Link
         aria-label="Search devices"
         className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"

@@ -8,7 +8,6 @@ import {
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { routeTree } from "@/routeTree.gen";
-import { currentSectionLabel } from "./__root";
 
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), {
@@ -64,9 +63,7 @@ describe("Hope navigation", () => {
       expect(
         screen.getByRole("button", { name: "Open navigation menu" }),
       ).toHaveTextContent("Menu");
-      expect(screen.getByTestId("mobile-current-section")).toHaveTextContent(
-        "Devices",
-      );
+      expect(screen.queryByTestId("mobile-current-section")).not.toBeInTheDocument();
     },
   );
 
@@ -108,13 +105,4 @@ describe("Hope navigation", () => {
     );
   });
 
-  it.each([
-    ["/networks", "Networks"],
-    ["/agents", "Agents"],
-    ["/changes", "Activity"],
-    ["/settings", "Settings"],
-    ["/maintenance", "Maintenance"],
-  ])("names the current section for %s", (pathname, label) => {
-    expect(currentSectionLabel(pathname)).toBe(label);
-  });
 });
