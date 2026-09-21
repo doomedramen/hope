@@ -1,0 +1,23 @@
+min_version: 2.0.0
+
+pre-commit:
+  parallel: true
+  commands:
+    rust-format:
+      run: cargo fmt --all -- --check
+    rust-clippy:
+      run: cargo clippy --workspace --all-targets -- -D warnings
+    web-lint:
+      run: pnpm -C apps/web lint
+
+pre-push:
+  parallel: false
+  commands:
+    linux-agent:
+      run: cargo zigbuild --release -p agent --target x86_64-unknown-linux-musl
+    rust-tests:
+      run: cargo test --workspace -- --test-threads=1
+    web-tests:
+      run: pnpm -C apps/web test -- --run
+    web-build:
+      run: pnpm -C apps/web build

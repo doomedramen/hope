@@ -22,6 +22,9 @@ dev:
 web:
     pnpm -C apps/web dev
 
+hooks:
+    lefthook install
+
 migrate:
     cargo run -p server -- migrate
 

@@ -11,6 +11,16 @@ Node.js and pnpm, Docker with Compose v2, and PostgreSQL for DB-gated tests.
 Use `.env` for local values; never commit `.env`, credentials, private keys,
 agent state, release signing keys, or production data.
 
+Install Lefthook and enable the repository hooks before committing:
+
+```sh
+just hooks
+```
+
+The pre-commit hook runs formatting, Clippy, and web lint. The pre-push hook
+also cross-builds the Linux agent with `cargo-zigbuild`, then runs the Rust and
+web tests/build. Install Zig and `cargo-zigbuild` for the Linux agent check.
+
 Useful commands:
 
 ```sh
