@@ -216,12 +216,52 @@ describe("MonitorList", () => {
     expect(
       await screen.findByText("Latest result unavailable"),
     ).toBeInTheDocument();
+    expect(screen.getByText("Unavailable")).toBeInTheDocument();
     expect(
       screen.getByText("History is unavailable until results can be loaded."),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("No result recorded yet."),
     ).not.toBeInTheDocument();
+  });
+
+  it("loads a deep-linked monitor missing from the bounded list page", async () => {
+    monitorSearch = { monitor: "monitor-2" };
+    const deepLinkedMonitor = monitor({
+      id: "monitor-2",
+      service_id: "service-2",
+      endpoint_id: "endpoint-2",
+      service_name: "Plex",
+      service_product: "Plex",
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v1/monitors?limit=100") {
+        return Promise.resolve(jsonResponse({ items: [monitor()] }));
+      }
+      if (path === "/api/v1/monitors/monitor-2") {
+        return Promise.resolve(jsonResponse(deepLinkedMonitor));
+      }
+      if (path === "/api/v1/monitors/monitor-2/results?limit=100") {
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }
+      if (path === "/api/v1/incidents?limit=100") {
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderWithClient(<MonitorList />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Plex" }),
+    ).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/monitors/monitor-2",
+      expect.objectContaining({ credentials: "same-origin" }),
+    );
+    expect(screen.queryByText("Monitor unavailable")).not.toBeInTheDocument();
   });
 
   it("shows only the selected monitor's contextual incident", async () => {
@@ -236,7 +276,9 @@ describe("MonitorList", () => {
           );
         }
         if (path === "/api/v1/monitors/monitor-1/results?limit=100") {
-          return Promise.resolve(jsonResponse({ items: [result()] }));
+          return Promise.resolve(
+            jsonResponse({ items: [result({ error: null })] }),
+          );
         }
         if (path === "/api/v1/incidents?limit=100") {
           return Promise.resolve(
@@ -256,14 +298,53 @@ describe("MonitorList", () => {
       }),
     );
 
-    renderWithClient(<MonitorList />);
+    const openIncidentHistory = vi.fn();
+    renderWithClient(
+      <MonitorList onOpenIncidentHistory={openIncidentHistory} />,
+    );
 
     expect(
       await screen.findByText("Jellyfin is not responding"),
     ).toBeInTheDocument();
     expect(
+      screen.getByText("No error detail was recorded."),
+    ).toBeInTheDocument();
+    expect(
       screen.queryByText("Other service is not responding"),
     ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Incident history" }));
+    expect(openIncidentHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens and focuses technical details from its action", async () => {
+    monitorSearch = { monitor: "monitor-1" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/monitors?limit=100") {
+          return Promise.resolve(jsonResponse({ items: [monitor()] }));
+        }
+        if (path === "/api/v1/monitors/monitor-1/results?limit=100") {
+          return Promise.resolve(jsonResponse({ items: [] }));
+        }
+        if (path === "/api/v1/incidents?limit=100") {
+          return Promise.resolve(jsonResponse({ items: [] }));
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
+    );
+
+    renderWithClient(<MonitorList />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Check details" }),
+    );
+    const details = document.querySelector<HTMLDetailsElement>(
+      "#monitor-technical-details",
+    );
+    expect(details?.open).toBe(true);
+    expect(screen.getByText("Technical details")).toHaveFocus();
   });
 });
 

@@ -475,12 +475,16 @@ pub async fn results(
 
     let limit = query.limit.unwrap_or(100).clamp(1, 100);
     let rows: Result<Vec<(Value,)>, sqlx::Error> = sqlx::query_as(
-        "select row_to_json(t) from (\
-           select * from monitor_results\
-            where monitor_id = $1\
-            order by observed_at desc, id desc\
-            limit $2\
-         ) t",
+        r#"
+        select row_to_json(t)
+        from (
+            select *
+            from monitor_results
+            where monitor_id = $1
+            order by observed_at desc, id desc
+            limit $2
+        ) t
+        "#,
     )
     .bind(id)
     .bind(limit)
@@ -860,6 +864,73 @@ mod tests {
         assert_eq!(item["endpoint_address"], "198.18.0.10/32");
         assert_eq!(item["endpoint_port"], 8080);
         assert_eq!(item["service_name"], "Monitor list test service");
+    }
+
+    #[tokio::test]
+    async fn monitor_results_returns_rows_for_existing_monitor() {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to DATABASE_URL");
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+
+        let device_id: Uuid =
+            sqlx::query_scalar("insert into devices (device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let service_id: Uuid = sqlx::query_scalar(
+            "insert into services (protocol, owner_kind, owner_id) \
+             values ('http', 'device', $1) returning id",
+        )
+        .bind(device_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let endpoint_id: Uuid = sqlx::query_scalar(
+            "insert into endpoints (service_id, endpoint_type, address, port) \
+             values ($1, 'socket', '198.18.0.11'::inet, 8080) returning id",
+        )
+        .bind(service_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let monitor_id: Uuid = sqlx::query_scalar(
+            "insert into monitors (service_id, endpoint_id, monitor_type) \
+             values ($1, $2, 'http') returning id",
+        )
+        .bind(service_id)
+        .bind(endpoint_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let result_id: Uuid = sqlx::query_scalar(
+            "insert into monitor_results (monitor_id, status, latency_ms, error) \
+             values ($1, 'success', 42, null) returning id",
+        )
+        .bind(monitor_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let (status, Json(body)) = results(
+            State(AppState { pool }),
+            Path(monitor_id),
+            Query(MonitorResultsQuery { limit: Some(10) }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "monitor results response: {body}");
+        let item = body["items"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["id"] == json!(result_id)))
+            .expect("created monitor result is listed");
+        assert_eq!(item["monitor_id"], json!(monitor_id));
+        assert_eq!(item["status"], "success");
+        assert_eq!(item["latency_ms"], 42);
     }
 
     #[test]

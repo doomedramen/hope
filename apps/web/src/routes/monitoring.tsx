@@ -3,6 +3,7 @@ import { IncidentList } from "@/components/IncidentList";
 import { MonitorList } from "@/components/MonitorList";
 import { MonitorProposalQueue } from "@/components/MonitorProposalQueue";
 import { ServiceReviewQueue } from "@/components/ServiceReviewQueue";
+import { useRef, useState } from "react";
 
 export const Route = createFileRoute("/monitoring")({
   validateSearch: (search: Record<string, unknown>): { monitor?: string } => {
@@ -14,20 +15,22 @@ export const Route = createFileRoute("/monitoring")({
 });
 
 function MonitoringPage() {
+  const incidentHistoryRef = useRef<HTMLDetailsElement>(null);
+  const [incidentHistoryOpen, setIncidentHistoryOpen] = useState(false);
+  const revealIncidentHistory = () => {
+    setIncidentHistoryOpen(true);
+    if (incidentHistoryRef.current) {
+      incidentHistoryRef.current.open = true;
+      incidentHistoryRef.current.scrollIntoView?.({ block: "start" });
+      incidentHistoryRef.current.querySelector<HTMLElement>("summary")?.focus();
+    }
+  };
+
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
-      <div>
-        <h1 className="text-3xl font-semibold tracking-tight">Monitoring</h1>
-        <p className="mt-2 max-w-2xl text-muted-foreground">
-          See each service in context. Select a monitor to inspect its latest
-          result, recent checks, and related incident.
-        </p>
-      </div>
-      <MonitorList />
+      <h1 className="text-3xl font-semibold tracking-tight">Monitoring</h1>
+      <MonitorList onOpenIncidentHistory={revealIncidentHistory} />
       <section aria-label="Monitoring follow-up" className="space-y-3">
-        <p className="text-sm text-muted-foreground">
-          Follow-up views stay available when you need fleet-wide review.
-        </p>
         <details className="rounded-lg border bg-card" id="suggested-checks">
           <summary className="cursor-pointer px-4 py-3 font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
             Suggested checks
@@ -44,7 +47,13 @@ function MonitoringPage() {
             <ServiceReviewQueue />
           </div>
         </details>
-        <details className="rounded-lg border bg-card" id="incident-history">
+        <details
+          className="rounded-lg border bg-card"
+          id="incident-history"
+          onToggle={(event) => setIncidentHistoryOpen(event.currentTarget.open)}
+          open={incidentHistoryOpen}
+          ref={incidentHistoryRef}
+        >
           <summary className="cursor-pointer px-4 py-3 font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
             Incident history
           </summary>

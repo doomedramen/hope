@@ -11,9 +11,10 @@ import {
   SearchIcon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   fetchIncidents,
+  fetchMonitor,
   fetchMonitorResults,
   fetchMonitors,
   getUserFacingError,
@@ -47,7 +48,11 @@ type MonitorFilter = "all" | "up" | "degraded" | "down" | "stale";
 
 const EMPTY_MONITORS: Monitor[] = [];
 
-export function MonitorList() {
+export function MonitorList({
+  onOpenIncidentHistory,
+}: {
+  onOpenIncidentHistory?: () => void;
+} = {}) {
   const navigate = useNavigate({ from: "/monitoring" });
   const { monitor: requestedMonitorId } = useSearch({ from: "/monitoring" });
   const [filter, setFilter] = useState<MonitorFilter>("all");
@@ -73,8 +78,16 @@ export function MonitorList() {
       ].some((value) => value?.toLowerCase().includes(needle));
     });
   }, [filter, monitors, search]);
-  const selectedMonitor =
+  const selectedFromList =
     monitors.find((monitor) => monitor.id === requestedMonitorId) ?? null;
+  const requestedMonitorQuery = useQuery({
+    queryKey: ["monitor", requestedMonitorId ?? "none"],
+    queryFn: () => fetchMonitor(requestedMonitorId!),
+    enabled: Boolean(requestedMonitorId && !selectedFromList),
+    retry: false,
+  });
+  const selectedMonitor =
+    selectedFromList ?? requestedMonitorQuery.data ?? null;
 
   const selectMonitor = (id: string | null) => {
     void navigate({
@@ -142,6 +155,11 @@ export function MonitorList() {
                 <ToggleGroupItem value="degraded">Degraded</ToggleGroupItem>
                 <ToggleGroupItem value="stale">Stale</ToggleGroupItem>
               </ToggleGroup>
+              {monitors.length >= 100 ? (
+                <p className="text-xs text-muted-foreground">
+                  Showing up to 100 monitors. Search covers this loaded list.
+                </p>
+              ) : null}
             </div>
           </CardHeader>
           {monitorsQuery.isLoading ? (
@@ -209,7 +227,10 @@ export function MonitorList() {
         </Card>
       </section>
 
-      {requestedMonitorId && !selectedMonitor && !monitorsQuery.isLoading ? (
+      {requestedMonitorId &&
+      !selectedMonitor &&
+      !monitorsQuery.isLoading &&
+      !requestedMonitorQuery.isLoading ? (
         <section className="min-w-0" aria-label="Selected monitor">
           <Card>
             <CardContent className="pt-6">
@@ -217,8 +238,10 @@ export function MonitorList() {
                 <CircleAlertIcon />
                 <AlertTitle>Monitor unavailable</AlertTitle>
                 <AlertDescription>
-                  This monitor is not present in the current monitor list. The
-                  list may have changed since this link was created.
+                  {getUserFacingError(
+                    requestedMonitorQuery.error,
+                    "This monitor is not present in the current monitor list.",
+                  )}
                 </AlertDescription>
                 <Button
                   onClick={() => selectMonitor(null)}
@@ -235,6 +258,9 @@ export function MonitorList() {
         <MonitorDetail
           key={selectedMonitor.id}
           monitor={selectedMonitor}
+          monitorListError={monitorsQuery.isError ? monitorsQuery.error : null}
+          onListRetry={() => monitorsQuery.refetch()}
+          onOpenIncidentHistory={onOpenIncidentHistory}
           onBack={() => selectMonitor(null)}
         />
       ) : null}
@@ -283,12 +309,21 @@ function MonitorListItem({
 
 function MonitorDetail({
   monitor,
+  monitorListError,
+  onListRetry,
+  onOpenIncidentHistory,
   onBack,
 }: {
   monitor: Monitor;
+  monitorListError: Error | null;
+  onListRetry: () => void;
+  onOpenIncidentHistory?: () => void;
   onBack: () => void;
 }) {
   const target = monitorTarget(monitor);
+  const technicalDetailsRef = useRef<HTMLDetailsElement>(null);
+  const technicalDetailsSummaryRef = useRef<HTMLElement>(null);
+  const [technicalDetailsOpen, setTechnicalDetailsOpen] = useState(false);
   const resultsQuery = useQuery({
     queryKey: ["monitor-results", monitor.id],
     queryFn: () => fetchMonitorResults(monitor.id),
@@ -317,11 +352,34 @@ function MonitorDetail({
     incidents.find((incident) => incident.state === "open") ??
     incidents[0] ??
     null;
+  const incidentsAreBounded = incidentsQuery.data?.items.length === 100;
+  const resultsAreBounded = resultsQuery.data?.items.length === 100;
+
+  const revealTechnicalDetails = () => {
+    setTechnicalDetailsOpen(true);
+    if (technicalDetailsRef.current) {
+      technicalDetailsRef.current.open = true;
+      technicalDetailsRef.current.scrollIntoView?.({ block: "nearest" });
+      technicalDetailsSummaryRef.current?.focus();
+    }
+  };
 
   return (
     <section aria-label="Selected monitor" className="min-w-0">
       <Card className="overflow-hidden">
         <CardHeader className="gap-4 border-b">
+          {monitorListError ? (
+            <div className="lg:hidden">
+              <LocalUnavailable
+                title="Monitor list unavailable"
+                description={getUserFacingError(
+                  monitorListError,
+                  "The monitor list could not be refreshed. This selected monitor may be stale.",
+                )}
+                onRetry={onListRetry}
+              />
+            </div>
+          ) : null}
           <Button
             className="w-fit lg:hidden"
             onClick={onBack}
@@ -350,12 +408,15 @@ function MonitorDetail({
               </CardDescription>
             </div>
             <div className="flex shrink-0 flex-wrap gap-2">
-              <a
+              <button
+                aria-controls="monitor-technical-details"
+                aria-expanded={technicalDetailsOpen}
                 className={buttonVariants({ size: "sm", variant: "outline" })}
-                href="#monitor-technical-details"
+                onClick={revealTechnicalDetails}
+                type="button"
               >
                 Check details
-              </a>
+              </button>
               <a
                 className={buttonVariants({ size: "sm", variant: "ghost" })}
                 href="#monitor-notifications"
@@ -410,9 +471,15 @@ function MonitorDetail({
                 Recent checks
               </h2>
               <span className="text-sm text-muted-foreground">
-                {results.length
-                  ? `${results.length} recorded`
-                  : "No recorded checks"}
+                {resultsQuery.isLoading
+                  ? "Loading"
+                  : resultsQuery.isError
+                    ? "Unavailable"
+                    : results.length
+                      ? resultsAreBounded
+                        ? `${results.length} latest checks`
+                        : `${results.length} recorded`
+                      : "No recorded checks"}
               </span>
             </div>
             {resultsQuery.isLoading ? (
@@ -431,14 +498,22 @@ function MonitorDetail({
               <h2 className="font-medium" id="monitor-incident">
                 Current incident / recent state changes
               </h2>
-              {incidents.length ? (
+              {onOpenIncidentHistory ? (
+                <button
+                  className="text-sm text-primary underline-offset-4 hover:underline"
+                  onClick={onOpenIncidentHistory}
+                  type="button"
+                >
+                  Incident history
+                </button>
+              ) : (
                 <a
                   className="text-sm text-primary underline-offset-4 hover:underline"
                   href="#incident-history"
                 >
                   Incident history
                 </a>
-              ) : null}
+              )}
             </div>
             {incidentsQuery.isLoading ? (
               <Skeleton className="mt-3 h-16 w-full" />
@@ -455,13 +530,26 @@ function MonitorDetail({
               <IncidentSummary incident={relevantIncident} />
             ) : (
               <p className="mt-3 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                No incident recorded for this monitor.
+                {incidentsAreBounded
+                  ? "No incident found in the latest 100 incidents returned. History may be incomplete."
+                  : "No incident recorded for this monitor."}
               </p>
             )}
           </section>
 
-          <details className="rounded-lg border" id="monitor-technical-details">
-            <summary className="cursor-pointer px-4 py-3 font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+          <details
+            className="rounded-lg border"
+            id="monitor-technical-details"
+            onToggle={(event) =>
+              setTechnicalDetailsOpen(event.currentTarget.open)
+            }
+            open={technicalDetailsOpen}
+            ref={technicalDetailsRef}
+          >
+            <summary
+              className="cursor-pointer px-4 py-3 font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+              ref={technicalDetailsSummaryRef}
+            >
               Technical details
             </summary>
             <dl className="grid gap-4 border-t px-4 py-4 sm:grid-cols-2">
@@ -523,7 +611,7 @@ function LatestResult({ result }: { result: MonitorResult }) {
         <div>
           <p className="font-medium">{resultStatusLabel(result.status)}</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            {result.error ?? "Check completed without an error."}
+            {result.error ?? resultMessage(result.status)}
           </p>
         </div>
       </div>
@@ -745,6 +833,12 @@ function resultStatusLabel(status: string) {
   if (status === "timeout") return "Timed out";
   if (status === "error") return "Error";
   return labelize(status);
+}
+
+function resultMessage(status: string) {
+  return status === "success"
+    ? "Check completed without an error."
+    : "No error detail was recorded.";
 }
 
 function resultStatusClass(status: string) {

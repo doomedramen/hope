@@ -1324,6 +1324,10 @@ export async function fetchMonitors(
   );
 }
 
+export async function fetchMonitor(id: string): Promise<Monitor> {
+  return request<Monitor>(`/api/v1/monitors/${encodeURIComponent(id)}`);
+}
+
 export async function fetchMonitorResults(
   monitorId: string,
 ): Promise<{ items: MonitorResult[] }> {
