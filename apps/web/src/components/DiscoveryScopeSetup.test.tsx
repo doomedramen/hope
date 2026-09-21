@@ -219,6 +219,9 @@ describe("DiscoveryScopeSetup", () => {
     expect(screen.getByLabelText("Excluded addresses or ranges")).toHaveValue(
       "192.168.1.10/32",
     );
+    const optionsSummary = screen.getByText("Scan options").parentElement;
+    expect(optionsSummary).toHaveTextContent("Low impact");
+    expect(optionsSummary).toHaveTextContent("1 exclusion");
     expect(screen.getByRole("combobox")).toHaveTextContent("low_impact");
     expect(
       screen.queryByRole("button", { name: "Scan standard ports" }),

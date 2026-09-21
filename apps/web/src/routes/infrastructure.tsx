@@ -14,7 +14,13 @@ import {
   Undo2Icon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { AgentDeploymentDialog } from "@/components/AgentDeploymentDialog";
 import {
   createDevice,
@@ -138,33 +144,69 @@ const EMPTY_SERVICES: Service[] = [];
 const EMPTY_MONITORS: Monitor[] = [];
 const EMPTY_INTERFACES: InventoryInterface[] = [];
 const MONITOR_PAGE_SIZE = 100;
+const EMPTY_ROUTER_LOCATION = {
+  pathname: "",
+  search: {},
+};
+
+type DeviceSearch = { device?: string; focus?: "search"; q?: string };
+
+function normalizeDeviceSearch(search: Record<string, unknown>): DeviceSearch {
+  const device = typeof search.device === "string" ? search.device : undefined;
+  const focus = search.focus === "search" ? "search" : undefined;
+  const q = typeof search.q === "string" ? search.q : undefined;
+  return {
+    ...(device ? { device } : {}),
+    ...(focus ? { focus } : {}),
+    ...(q ? { q } : {}),
+  };
+}
 
 export function InfrastructurePage() {
   const queryClient = useQueryClient();
   const router = useRouter({ warn: false });
-  type DeviceSearch = { device?: string; focus?: "search"; q?: string };
+  const routerStateStore = router
+    ? (router.stores.__store as unknown as {
+        get: () => { location: typeof EMPTY_ROUTER_LOCATION };
+        subscribe: (listener: (value: unknown) => void) => {
+          unsubscribe: () => void;
+        };
+      })
+    : null;
+  const routerLocation = useSyncExternalStore(
+    routerStateStore
+      ? (listener) => {
+          const subscription = routerStateStore.subscribe(listener);
+          return () => subscription.unsubscribe();
+        }
+      : () => () => {},
+    routerStateStore
+      ? () => routerStateStore.get().location
+      : () => EMPTY_ROUTER_LOCATION,
+    () => EMPTY_ROUTER_LOCATION,
+  );
   const navigate = router
-    ? (search: (previous: DeviceSearch) => DeviceSearch) =>
+    ? (search: (previous: DeviceSearch) => DeviceSearch, replace = false) =>
         router.navigate({
           to: "/devices",
           search,
+          replace,
         } as Parameters<typeof router.navigate>[0])
     : null;
-  const [requestedDeviceId, setRequestedDeviceId] = useState<string | null>(
-    () =>
-      typeof window === "undefined"
-        ? null
-        : new URLSearchParams(window.location.search).get("device"),
-  );
-  const [search, setSearch] = useState(() =>
+  const [fallbackSearch, setFallbackSearch] = useState<DeviceSearch>(() =>
     typeof window === "undefined"
-      ? ""
-      : (new URLSearchParams(window.location.search).get("q") ?? ""),
+      ? {}
+      : normalizeDeviceSearch(
+          Object.fromEntries(new URLSearchParams(window.location.search)),
+        ),
   );
+  const currentSearch = router
+    ? normalizeDeviceSearch(routerLocation.search)
+    : fallbackSearch;
+  const requestedDeviceId = currentSearch.device ?? null;
+  const search = currentSearch.q ?? "";
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const shouldFocusSearch =
-    typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).get("focus") === "search";
+  const shouldFocusSearch = currentSearch.focus === "search";
   const [dialog, setDialog] = useState<
     "create" | "edit" | "merge" | "split" | "agent-install" | null
   >(null);
@@ -224,18 +266,31 @@ export function InfrastructurePage() {
   });
 
   const selectDevice = (id: string | null) => {
-    setRequestedDeviceId(id);
     if (navigate) {
       void navigate((previous) => ({
+        q: previous.q,
+        focus: previous.focus,
+        device: id ?? undefined,
+      }));
+    } else {
+      setFallbackSearch((previous) => ({
         ...previous,
         device: id ?? undefined,
       }));
     }
   };
   const updateSearch = (value: string) => {
-    setSearch(value);
     if (navigate) {
-      void navigate((previous) => ({
+      void navigate(
+        (previous) => ({
+          device: previous.device,
+          focus: previous.focus,
+          q: value.trim() || undefined,
+        }),
+        true,
+      );
+    } else {
+      setFallbackSearch((previous) => ({
         ...previous,
         q: value.trim() || undefined,
       }));
@@ -331,6 +386,11 @@ export function InfrastructurePage() {
   const services = servicesQuery.data?.items ?? EMPTY_SERVICES;
   const monitors = monitorsQuery.data?.items ?? EMPTY_MONITORS;
   const monitorsPossiblyTruncated = monitors.length >= MONITOR_PAGE_SIZE;
+  const observationsReady =
+    !servicesQuery.isLoading &&
+    !servicesQuery.isError &&
+    !monitorsQuery.isLoading &&
+    !monitorsQuery.isError;
   const interfaces = interfacesQuery.data?.items ?? EMPTY_INTERFACES;
   const deviceServices = new Map<string, Service[]>();
   for (const service of services) {
@@ -364,10 +424,6 @@ export function InfrastructurePage() {
       <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
         <div>
           <h1 className="text-3xl font-semibold tracking-tight">Devices</h1>
-          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-            See each device, the services running on it, and the latest useful
-            condition. Select a row when you need the record behind it.
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <a
@@ -438,7 +494,64 @@ export function InfrastructurePage() {
               </div>
             ) : visibleDevices.length === 0 ? (
               <div className="p-6">
-                <NoDevices onCreate={() => setDialog("create")} />
+                {devices.length > 0 && search.trim() ? (
+                  <NoMatchingDevices clear={() => updateSearch("")} />
+                ) : (
+                  <NoDevices onCreate={() => setDialog("create")} />
+                )}
+              </div>
+            ) : selectedId ? (
+              <div className="divide-y">
+                {visibleDevices.map((device) => {
+                  const deviceServiceRows = deviceServices.get(device.id) ?? [];
+                  const checks = deviceServiceRows.flatMap(
+                    (service) => monitorsByService.get(service.id) ?? [],
+                  );
+                  const activeChecks = checks.filter(
+                    (monitor) => monitor.enabled,
+                  );
+                  const failing = activeChecks.filter((monitor) =>
+                    ["down", "degraded"].includes(monitor.state),
+                  ).length;
+                  return (
+                    <button
+                      aria-current={
+                        device.id === selectedId ? "true" : undefined
+                      }
+                      className="flex min-h-16 w-full items-center justify-between gap-3 px-4 py-3 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"
+                      key={device.id}
+                      onClick={() => selectDevice(device.id)}
+                      type="button"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">
+                          {device.name || "Unnamed device"}
+                        </span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {currentIpsByDevice.get(device.id)?.[0] ??
+                            `Record updated ${formatRelative(device.updated_at)}`}
+                        </span>
+                        <span className="mt-1 block text-xs text-muted-foreground">
+                          {!observationsReady
+                            ? "Condition unavailable"
+                            : deviceServiceRows.length
+                              ? `${failing ? `${failing} needs attention · ` : ""}${deviceServiceRows.length} service${deviceServiceRows.length === 1 ? "" : "s"}` +
+                                (monitorsPossiblyTruncated
+                                  ? " · check list limited"
+                                  : "")
+                              : "No service observations"}
+                        </span>
+                      </span>
+                      <StatusBadge
+                        value={aggregateCondition(
+                          device,
+                          checks,
+                          observationsReady,
+                        )}
+                      />
+                    </button>
+                  );
+                })}
               </div>
             ) : (
               <>
@@ -450,11 +563,17 @@ export function InfrastructurePage() {
                       (service) => monitorsByService.get(service.id) ?? [],
                     );
                     const states = checks
+                      .filter((monitor) => monitor.enabled)
                       .map((monitor) => monitor.state)
                       .filter(Boolean);
                     const failing = states.filter((state) =>
                       ["down", "degraded"].includes(state),
                     ).length;
+                    const condition = aggregateCondition(
+                      device,
+                      checks,
+                      observationsReady,
+                    );
                     return (
                       <button
                         aria-pressed={device.id === selectedId}
@@ -490,15 +609,7 @@ export function InfrastructurePage() {
                             </span>
                           </span>
                         </span>
-                        <StatusBadge
-                          value={
-                            failing
-                              ? states.includes("down")
-                                ? "critical"
-                                : "warning"
-                              : device.status
-                          }
-                        />
+                        <StatusBadge value={condition} />
                       </button>
                     );
                   })}
@@ -521,11 +632,17 @@ export function InfrastructurePage() {
                           (service) => monitorsByService.get(service.id) ?? [],
                         );
                         const states = checks
+                          .filter((monitor) => monitor.enabled)
                           .map((monitor) => monitor.state)
                           .filter(Boolean);
                         const failing = states.filter((state) =>
                           ["down", "degraded"].includes(state),
                         ).length;
+                        const condition = aggregateCondition(
+                          device,
+                          checks,
+                          observationsReady,
+                        );
                         return (
                           <TableRow
                             aria-selected={device.id === selectedId}
@@ -596,15 +713,7 @@ export function InfrastructurePage() {
                               )}
                             </TableCell>
                             <TableCell className="text-right">
-                              <StatusBadge
-                                value={
-                                  failing
-                                    ? states.includes("down")
-                                      ? "critical"
-                                      : "warning"
-                                    : device.status
-                                }
-                              />
+                              <StatusBadge value={condition} />
                             </TableCell>
                           </TableRow>
                         );
@@ -642,38 +751,39 @@ export function InfrastructurePage() {
         ) : null}
       </div>
 
-      <details className="rounded-xl border bg-card">
-        <summary className="cursor-pointer list-none px-5 py-4 outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
-          <span className="flex items-center justify-between gap-3">
-            <span>
-              <span className="block font-medium">Identity review</span>
-              <span className="block text-sm text-muted-foreground">
-                Resolve ambiguous matches when you are ready.
-              </span>
+      {suggestionsQuery.isError ? (
+        <LoadError
+          error={suggestionsQuery.error}
+          retry={() => suggestionsQuery.refetch()}
+          title="Identity review unavailable"
+        />
+      ) : suggestions.length ? (
+        <details className="rounded-xl border bg-card">
+          <summary className="cursor-pointer list-none px-5 py-4 outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+            <span className="flex items-center justify-between gap-3">
+              <span className="font-medium">Identity review</span>
+              <Badge variant="outline">{suggestions.length} pending</Badge>
             </span>
-            <Badge variant={suggestions.length ? "outline" : "secondary"}>
-              {suggestions.length} pending
-            </Badge>
-          </span>
-        </summary>
-        <div className="border-t p-4 sm:p-5">
-          <ReviewQueue
-            devices={devices}
-            error={suggestionsQuery.error}
-            loading={suggestionsQuery.isLoading}
-            pendingId={
-              resolveSuggestionMutation.isPending
-                ? resolveSuggestionMutation.variables?.id
-                : null
-            }
-            mutationError={resolveSuggestionMutation.error}
-            resolve={(id, decision) =>
-              resolveSuggestionMutation.mutate({ id, decision })
-            }
-            suggestions={suggestions}
-          />
-        </div>
-      </details>
+          </summary>
+          <div className="border-t p-4 sm:p-5">
+            <ReviewQueue
+              devices={devices}
+              error={suggestionsQuery.error}
+              loading={suggestionsQuery.isLoading}
+              pendingId={
+                resolveSuggestionMutation.isPending
+                  ? resolveSuggestionMutation.variables?.id
+                  : null
+              }
+              mutationError={resolveSuggestionMutation.error}
+              resolve={(id, decision) =>
+                resolveSuggestionMutation.mutate({ id, decision })
+              }
+              suggestions={suggestions}
+            />
+          </div>
+        </details>
+      ) : null}
 
       <CreateDeviceDialog
         error={createMutation.error}
@@ -758,6 +868,38 @@ function StatusBadge({ value }: { value: string }) {
             ? "info"
             : "neutral";
   return <Badge variant={variant}>{labelize(value)}</Badge>;
+}
+
+function monitorDisplayState(monitor: Monitor): string {
+  return monitor.enabled ? monitor.state : "disabled";
+}
+
+function aggregateCondition(
+  device: Device,
+  monitors: Monitor[],
+  observationsReady: boolean,
+): string {
+  if (!observationsReady) return "unknown";
+  const enabledMonitors = monitors.filter((monitor) => monitor.enabled);
+  if (enabledMonitors.some((monitor) => monitor.state === "down")) {
+    return "critical";
+  }
+  if (
+    enabledMonitors.some((monitor) =>
+      ["degraded", "stale"].includes(monitor.state),
+    )
+  ) {
+    return "warning";
+  }
+  if (enabledMonitors.some((monitor) => monitor.state === "unknown")) {
+    return "unknown";
+  }
+  if (enabledMonitors.length) return "healthy";
+  if (device.status === "stale") return "stale";
+  if (device.status === "archived" || device.status === "merged") {
+    return device.status;
+  }
+  return "unknown";
 }
 
 function DeviceFullScan({ device }: { device: DeviceDetail }) {
@@ -856,6 +998,18 @@ function DeviceFullScan({ device }: { device: DeviceDetail }) {
   );
 }
 
+function BackToDevices({ onBack }: { onBack: () => void }) {
+  return (
+    <button
+      className="mb-2 inline-flex min-h-9 items-center rounded-lg px-2 text-sm text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 lg:hidden"
+      onClick={onBack}
+      type="button"
+    >
+      ← Devices
+    </button>
+  );
+}
+
 function DeviceDetail({
   addressError,
   addresses,
@@ -904,6 +1058,7 @@ function DeviceDetail({
     return (
       <Card>
         <CardContent className="flex flex-col gap-4">
+          <BackToDevices onBack={onBack} />
           <Skeleton className="h-8 w-2/3" />
           <Skeleton className="h-20 w-full" />
           <Skeleton className="h-40 w-full" />
@@ -914,6 +1069,7 @@ function DeviceDetail({
     return (
       <Card>
         <CardContent>
+          <BackToDevices onBack={onBack} />
           <LoadError error={error} title="Device detail unavailable" />
         </CardContent>
       </Card>
@@ -933,27 +1089,17 @@ function DeviceDetail({
         address.interface_id === networkInterface.id && address.is_current,
     ),
   );
-  const currentCondition = serviceMonitors.some(
-    (monitor) => monitor.state === "down",
-  )
-    ? "critical"
-    : serviceMonitors.some((monitor) =>
-          ["degraded", "stale"].includes(monitor.state),
-        )
-      ? "warning"
-      : detail.status;
+  const currentCondition = aggregateCondition(
+    detail,
+    serviceMonitors,
+    !servicesLoading && !servicesError && !monitorsLoading && !monitorsError,
+  );
 
   return (
     <Card className="min-w-0 overflow-hidden">
       <CardHeader className="border-b">
         <div className="min-w-0">
-          <button
-            className="mb-2 inline-flex min-h-9 items-center rounded-lg px-2 text-sm text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 lg:hidden"
-            onClick={onBack}
-            type="button"
-          >
-            ← Devices
-          </button>
+          <BackToDevices onBack={onBack} />
           <CardTitle className="truncate">
             {detail.name || "Unnamed device"}
           </CardTitle>
@@ -1011,8 +1157,10 @@ function DeviceDetail({
                 <p className="font-medium">A service needs attention</p>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {serviceMonitors
-                    .filter((monitor) =>
-                      ["down", "degraded", "stale"].includes(monitor.state),
+                    .filter(
+                      (monitor) =>
+                        monitor.enabled &&
+                        ["down", "degraded", "stale"].includes(monitor.state),
                     )
                     .map(
                       (monitor) =>
@@ -1080,7 +1228,9 @@ function DeviceDetail({
                                 href={`/monitoring?monitor=${encodeURIComponent(monitor.id)}`}
                                 key={monitor.id}
                               >
-                                <StatusBadge value={monitor.state} />
+                                <StatusBadge
+                                  value={monitorDisplayState(monitor)}
+                                />
                               </a>
                             ))
                           ) : monitorsPossiblyTruncated ? (
@@ -1150,7 +1300,7 @@ function DeviceDetail({
                       className="rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                       href={`/monitoring?monitor=${encodeURIComponent(monitor.id)}`}
                     >
-                      <StatusBadge value={monitor.state} />
+                      <StatusBadge value={monitorDisplayState(monitor)} />
                     </a>
                   </div>
                 ))}
@@ -2040,6 +2190,25 @@ function NoDevices({ onCreate }: { onCreate?: () => void }) {
           Add device
         </Button>
       ) : null}
+    </Empty>
+  );
+}
+
+function NoMatchingDevices({ clear }: { clear: () => void }) {
+  return (
+    <Empty>
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <SearchIcon />
+        </EmptyMedia>
+        <EmptyTitle>No matching devices</EmptyTitle>
+        <EmptyDescription>
+          Clear the search to see all device records.
+        </EmptyDescription>
+      </EmptyHeader>
+      <Button onClick={clear} variant="outline">
+        Clear search
+      </Button>
     </Empty>
   );
 }

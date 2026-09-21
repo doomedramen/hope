@@ -1,7 +1,13 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  RouterProvider,
+  createMemoryHistory,
+  createRouter,
+} from "@tanstack/react-router";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { routeTree } from "@/routeTree.gen";
 import {
   AddNetworkDialog,
   CreateDeviceDialog,
@@ -99,6 +105,22 @@ function renderInfrastructurePage() {
       <InfrastructurePage />
     </QueryClientProvider>,
   );
+}
+
+function renderRouterApp(initialEntries = ["/devices"]) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const router = createRouter({
+    history: createMemoryHistory({ initialEntries }),
+    routeTree,
+  });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  return router;
 }
 
 afterEach(() => {
@@ -294,6 +316,81 @@ describe("InfrastructurePage", () => {
     });
   });
 
+  it("distinguishes disabled checks from a healthy device record", async () => {
+    const device = detail("device-1", "QA VM device");
+    const web = service("service-web", device.id);
+    const disabledCheck = {
+      ...monitor("monitor-disabled", web.id, "up"),
+      enabled: false,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/devices?limit=100") {
+          return Promise.resolve(
+            jsonResponse({ items: [device], next_cursor: null }),
+          );
+        }
+        if (path === "/api/v1/services?limit=200") {
+          return Promise.resolve(
+            jsonResponse({ items: [web], next_cursor: null }),
+          );
+        }
+        if (path === "/api/v1/monitors?limit=100") {
+          return Promise.resolve(jsonResponse({ items: [disabledCheck] }));
+        }
+        if (path === "/api/v1/devices/device-1") {
+          return Promise.resolve(jsonResponse(device));
+        }
+        if (path === "/api/v1/devices/device-1/full-scan") {
+          return Promise.resolve(jsonResponse(null));
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
+    );
+
+    renderInfrastructurePage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open QA VM device" }),
+    );
+
+    expect(
+      await screen.findByRole("link", { name: "Disabled" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Unknown").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("separates an empty filter from an empty inventory", async () => {
+    const device = detail("device-1", "QA VM device");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        if (String(input) === "/api/v1/devices?limit=100") {
+          return Promise.resolve(
+            jsonResponse({ items: [device], next_cursor: null }),
+          );
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
+    );
+
+    renderInfrastructurePage();
+    fireEvent.change(
+      await screen.findByRole("textbox", { name: "Search devices" }),
+      {
+        target: { value: "does-not-exist" },
+      },
+    );
+
+    expect(await screen.findByText("No matching devices")).toBeInTheDocument();
+    expect(screen.queryByText("No devices yet")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(
+      (await screen.findAllByText("QA VM device")).length,
+    ).toBeGreaterThanOrEqual(1);
+  });
+
   it("associates every service check by canonical owner ids", async () => {
     const device = detail("device-1", "QA VM device");
     const web = service("service-web", device.id);
@@ -385,6 +482,72 @@ describe("InfrastructurePage", () => {
       await screen.findByText("Check data unavailable"),
     ).toBeInTheDocument();
     expect(screen.queryByText("No active check")).not.toBeInTheDocument();
+  });
+
+  it("uses validated URL search for selection, replace-search, and Back/Forward", async () => {
+    const device = detail("device-1", "QA VM device");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/devices?limit=100") {
+          return Promise.resolve(
+            jsonResponse({ items: [device], next_cursor: null }),
+          );
+        }
+        if (path === "/api/v1/setup") {
+          return Promise.resolve(jsonResponse({ setup_required: false }));
+        }
+        if (path === "/api/v1/devices/device-1") {
+          return Promise.resolve(jsonResponse(device));
+        }
+        if (path === "/api/v1/devices/device-1/full-scan") {
+          return Promise.resolve(jsonResponse(null));
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
+    );
+
+    vi.stubGlobal("scrollTo", vi.fn());
+    const router = renderRouterApp();
+    await screen.findByRole("heading", { name: "Devices" });
+    const search = screen.getByRole("textbox", { name: "Search devices" });
+    fireEvent.change(search, { target: { value: "QA" } });
+    await waitFor(() => {
+      expect(router.state.location.search.q).toBe("QA");
+    });
+    expect(router.history.length).toBe(1);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open QA VM device" }),
+    );
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({
+        device: "device-1",
+        q: "QA",
+      });
+    });
+    expect(
+      await screen.findByRole("heading", { name: "QA VM device" }),
+    ).toBeInTheDocument();
+
+    router.history.back();
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({ q: "QA" });
+      expect(router.state.location.search.device).toBeUndefined();
+    });
+    expect(screen.queryByRole("heading", { name: "QA VM device" })).toBeNull();
+
+    router.history.forward();
+    await waitFor(() => {
+      expect(router.state.location.search).toMatchObject({
+        device: "device-1",
+        q: "QA",
+      });
+    });
+    expect(
+      await screen.findByRole("heading", { name: "QA VM device" }),
+    ).toBeInTheDocument();
   });
 });
 

@@ -589,6 +589,12 @@ function ScopeForm({
       : scope
         ? "Draft"
         : "Not set up";
+  const exclusionCount = parseExcludedCidrs(excludedCidrs).length;
+  const optionsSummary = `${profile === "low_impact" ? "Low impact" : "Normal"} · ${
+    exclusionCount
+      ? `${exclusionCount} exclusion${exclusionCount === 1 ? "" : "s"}`
+      : "no exclusions"
+  }`;
 
   return (
     <form
@@ -609,57 +615,67 @@ function ScopeForm({
         <Badge variant={confirmed ? "secondary" : "outline"}>{status}</Badge>
       </div>
 
-      <FieldGroup>
-        <Field>
-          <FieldLabel htmlFor={`scope-exclusions-${network.id}`}>
-            Excluded addresses or ranges
-          </FieldLabel>
-          <Textarea
-            aria-invalid={Boolean(invalidExcludedCidr)}
-            disabled={stateLoading}
-            id={`scope-exclusions-${network.id}`}
-            onChange={(event) => onExcludedCidrsChange(event.target.value)}
-            placeholder="One CIDR per line, for example 192.168.1.10/32"
-            rows={3}
-            value={excludedCidrs}
-          />
-          <FieldError>
-            {invalidExcludedCidr
-              ? "CIDR must be a valid network range."
-              : undefined}
-          </FieldError>
-          <FieldDescription>
-            Leave blank to include every scannable address in this network.
-          </FieldDescription>
-        </Field>
-        <Field>
-          <FieldLabel htmlFor={`scope-profile-${network.id}`}>
-            Scan profile
-          </FieldLabel>
-          <Select
-            disabled={stateLoading}
-            onValueChange={(value) => {
-              if (value === "normal" || value === "low_impact") {
-                onProfileChange(value);
-              }
-            }}
-            value={profile}
-          >
-            <SelectTrigger id={`scope-profile-${network.id}`}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                <SelectItem value="normal">Normal</SelectItem>
-                <SelectItem value="low_impact">Low impact</SelectItem>
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-          <FieldDescription>
-            Low impact limits scan pressure for fragile devices.
-          </FieldDescription>
-        </Field>
-      </FieldGroup>
+      <details className="rounded-lg border" open={scope !== null}>
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+          <span className="font-medium">Scan options</span>
+          <span className="text-right text-sm text-muted-foreground">
+            {optionsSummary}
+          </span>
+        </summary>
+        <div className="border-t p-4">
+          <FieldGroup>
+            <Field>
+              <FieldLabel htmlFor={`scope-exclusions-${network.id}`}>
+                Excluded addresses or ranges
+              </FieldLabel>
+              <Textarea
+                aria-invalid={Boolean(invalidExcludedCidr)}
+                disabled={stateLoading}
+                id={`scope-exclusions-${network.id}`}
+                onChange={(event) => onExcludedCidrsChange(event.target.value)}
+                placeholder="One CIDR per line, for example 192.168.1.10/32"
+                rows={3}
+                value={excludedCidrs}
+              />
+              <FieldError>
+                {invalidExcludedCidr
+                  ? "CIDR must be a valid network range."
+                  : undefined}
+              </FieldError>
+              <FieldDescription>
+                Leave blank to include every scannable address in this network.
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor={`scope-profile-${network.id}`}>
+                Scan profile
+              </FieldLabel>
+              <Select
+                disabled={stateLoading}
+                onValueChange={(value) => {
+                  if (value === "normal" || value === "low_impact") {
+                    onProfileChange(value);
+                  }
+                }}
+                value={profile}
+              >
+                <SelectTrigger id={`scope-profile-${network.id}`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="normal">Normal</SelectItem>
+                    <SelectItem value="low_impact">Low impact</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldDescription>
+                Low impact limits scan pressure for fragile devices.
+              </FieldDescription>
+            </Field>
+          </FieldGroup>
+        </div>
+      </details>
 
       <div className="flex flex-wrap items-center gap-2">
         <Button
