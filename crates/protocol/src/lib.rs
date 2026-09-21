@@ -27,10 +27,13 @@ pub const MAX_CAPABILITIES: usize = 32;
 pub const MAX_PROTOCOL_VERSIONS: usize = 8;
 pub const MAX_COLLECTORS: usize = 16;
 pub const MAX_OBSERVATIONS: usize = 256;
+pub const MAX_METRIC_SAMPLES: usize = 64;
 pub const MAX_STRING_BYTES: usize = 512;
 pub const MAX_COLLECTOR_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
 pub const MAX_OBSERVATION_BATCH_BYTES: usize = 64 * 1024;
+pub const MAX_METRIC_SAMPLE_BYTES: usize = 32 * 1024;
+pub const MAX_METRIC_BATCH_BYTES: usize = 64 * 1024;
 pub const MAX_ENVELOPE_BYTES: usize = MAX_SNAPSHOT_BYTES + 16 * 1024;
 
 /// Top-level envelope sent in both directions over the agent WebSocket.
@@ -91,6 +94,10 @@ pub enum Message {
     ObservationBatch(ObservationBatch),
     /// Server acknowledgement for a bounded observation batch.
     ObservationBatchAck(ObservationBatchAck),
+    /// Bounded host resource metric samples.
+    MetricSampleBatch(MetricSampleBatch),
+    /// Server acknowledgement for a metric sample batch.
+    MetricSampleBatchAck(MetricSampleBatchAck),
 }
 
 /// Existing Rust fields stay source-compatible with the current server. The
@@ -175,6 +182,7 @@ pub enum Capability {
     Processes,
     Sockets,
     Docker,
+    ResourceMetrics,
 }
 
 impl Capability {
@@ -190,6 +198,7 @@ impl Capability {
             Self::Processes => "processes",
             Self::Sockets => "sockets",
             Self::Docker => "docker",
+            Self::ResourceMetrics => "resource_metrics",
         }
     }
 }
@@ -275,6 +284,7 @@ pub fn default_agent_capabilities() -> Vec<Capability> {
         Capability::Processes,
         Capability::Sockets,
         Capability::Docker,
+        Capability::ResourceMetrics,
     ]
 }
 
@@ -354,6 +364,31 @@ pub struct ObservationBatchAck {
     pub batch_id: Uuid,
     pub accepted: bool,
     pub observation_count: u32,
+    pub replayed: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetricSample {
+    pub sample_id: Uuid,
+    pub collected_at_unix_secs: i64,
+    pub metrics: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetricSampleBatch {
+    pub schema_version: u32,
+    /// Reuse this ID when retrying the same batch.
+    pub batch_id: Uuid,
+    pub agent_id: Uuid,
+    pub samples: Vec<MetricSample>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MetricSampleBatchAck {
+    pub batch_id: Uuid,
+    pub accepted: bool,
+    pub sample_count: u32,
     pub replayed: bool,
     pub reason: Option<String>,
 }
@@ -509,6 +544,79 @@ impl ObservationBatchAck {
     }
 }
 
+impl MetricSampleBatch {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.schema_version != M5_SCHEMA_VERSION {
+            return Err(ValidationError::new(format!(
+                "unsupported metric schema version {}",
+                self.schema_version
+            )));
+        }
+        if self.batch_id.is_nil() {
+            return Err(ValidationError::new("metric batch_id must not be nil"));
+        }
+        if self.agent_id.is_nil() {
+            return Err(ValidationError::new("metric agent_id must not be nil"));
+        }
+        if self.samples.len() > MAX_METRIC_SAMPLES {
+            return Err(ValidationError::new(format!(
+                "metric samples exceeds {MAX_METRIC_SAMPLES} entries"
+            )));
+        }
+        let mut sample_ids = BTreeSet::new();
+        for sample in &self.samples {
+            if sample.sample_id.is_nil() {
+                return Err(ValidationError::new("metric sample_id must not be nil"));
+            }
+            if !sample_ids.insert(sample.sample_id) {
+                return Err(ValidationError::new(format!(
+                    "duplicate metric sample_id `{}`",
+                    sample.sample_id
+                )));
+            }
+            if !sample.metrics.is_object() {
+                return Err(ValidationError::new(
+                    "metric sample metrics must be an object",
+                ));
+            }
+            let bytes = serde_json::to_vec(&sample.metrics)
+                .map_err(|err| ValidationError::new(format!("invalid metric payload: {err}")))?;
+            if bytes.len() > MAX_METRIC_SAMPLE_BYTES {
+                return Err(ValidationError::new(format!(
+                    "metric sample exceeds {MAX_METRIC_SAMPLE_BYTES} bytes"
+                )));
+            }
+        }
+        let bytes = serde_json::to_vec(self)
+            .map_err(|err| ValidationError::new(format!("invalid metric batch: {err}")))?;
+        if bytes.len() > MAX_METRIC_BATCH_BYTES {
+            return Err(ValidationError::new(format!(
+                "metric batch exceeds {MAX_METRIC_BATCH_BYTES} bytes"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl MetricSampleBatchAck {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.batch_id.is_nil() {
+            return Err(ValidationError::new(
+                "metric acknowledgement batch_id must not be nil",
+            ));
+        }
+        if usize::try_from(self.sample_count).unwrap_or(usize::MAX) > MAX_METRIC_SAMPLES {
+            return Err(ValidationError::new(format!(
+                "sample_count exceeds {MAX_METRIC_SAMPLES} entries"
+            )));
+        }
+        if let Some(reason) = &self.reason {
+            validate_string("reason", reason)?;
+        }
+        Ok(())
+    }
+}
+
 impl Message {
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
@@ -537,6 +645,8 @@ impl Message {
             }
             Self::ObservationBatch(batch) => batch.validate(),
             Self::ObservationBatchAck(ack) => ack.validate(),
+            Self::MetricSampleBatch(batch) => batch.validate(),
+            Self::MetricSampleBatchAck(ack) => ack.validate(),
         }
     }
 }
@@ -591,6 +701,13 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|capability| capability == "docker")
+        );
+        assert!(
+            value["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == "resource_metrics")
         );
         roundtrip(Message::Hello(hello));
     }
@@ -672,6 +789,23 @@ mod tests {
             batch_id: snapshot_id,
             accepted: true,
             observation_count: 1,
+            replayed: false,
+            reason: None,
+        }));
+        roundtrip(Message::MetricSampleBatch(MetricSampleBatch {
+            schema_version: M5_SCHEMA_VERSION,
+            batch_id: snapshot_id,
+            agent_id,
+            samples: vec![MetricSample {
+                sample_id: Uuid::new_v4(),
+                collected_at_unix_secs: 1_700_000_000,
+                metrics: serde_json::json!({"cpu": {"usage_percent": 12.5}}),
+            }],
+        }));
+        roundtrip(Message::MetricSampleBatchAck(MetricSampleBatchAck {
+            batch_id: snapshot_id,
+            accepted: true,
+            sample_count: 1,
             replayed: false,
             reason: None,
         }));
@@ -791,6 +925,36 @@ mod tests {
         batch.schema_version = M5_SCHEMA_VERSION;
         batch.observations[0].source.clear();
         assert!(batch.validate().is_err(), "empty source must be rejected");
+    }
+
+    #[test]
+    fn metric_batch_validation_rejects_duplicates_and_unbounded_payloads() {
+        let agent_id = Uuid::new_v4();
+        let sample_id = Uuid::new_v4();
+        let sample = MetricSample {
+            sample_id,
+            collected_at_unix_secs: 0,
+            metrics: serde_json::json!({"cpu": {"usage_percent": 1.0}}),
+        };
+        let duplicate = MetricSampleBatch {
+            schema_version: M5_SCHEMA_VERSION,
+            batch_id: Uuid::new_v4(),
+            agent_id,
+            samples: vec![sample.clone(), sample],
+        };
+        assert!(duplicate.validate().is_err());
+
+        let oversized = MetricSampleBatch {
+            schema_version: M5_SCHEMA_VERSION,
+            batch_id: Uuid::new_v4(),
+            agent_id,
+            samples: vec![MetricSample {
+                sample_id: Uuid::new_v4(),
+                collected_at_unix_secs: 0,
+                metrics: serde_json::json!({"blob": "x".repeat(MAX_METRIC_SAMPLE_BYTES)}),
+            }],
+        };
+        assert!(oversized.validate().is_err());
     }
 
     #[test]
