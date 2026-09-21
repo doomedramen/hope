@@ -13,7 +13,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use domain::inventory::identity::{Identifier, IdentifierType};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -1648,7 +1648,7 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
                      then 'stale' else 'online' end as status, \
                    (select ir.device_id from identity_rules ir where ir.rule_type = 'agent_id' \
                      and ir.value = a.id::text order by ir.created_at limit 1) as device_id, \
-                   a.created_at, a.updated_at \
+                   a.created_at, a.last_heartbeat_at \
               from agents a where a.id = $1 \
         ) t",
     )
@@ -1671,50 +1671,11 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
             .fetch_optional(pool)
             .await?;
     let inventory_value = inventory.map(|(value,)| value).unwrap_or_else(|| json!({}));
-    let host = inventory_value.get("host").cloned().unwrap_or_else(|| {
-        let mut host = Map::new();
-        for key in [
-            "hostname",
-            "os",
-            "arch",
-            "machine_id",
-            "hardware_uuid",
-            "boot_id",
-            "uptime_secs",
-        ] {
-            if let Some(value) = inventory_value.get(key) {
-                host.insert(key.to_string(), value.clone());
-            }
-        }
-        if let Some(system) = inventory_value.get("system") {
-            host.insert("system".to_string(), system.clone());
-        }
-        Value::Object(host)
-    });
-    let network = inventory_value.get("network").cloned().unwrap_or_else(|| {
-        json!({
-            "interfaces": inventory_value.get("interfaces").cloned().unwrap_or_else(|| json!([])),
-            "routes": inventory_value.get("routes").cloned().unwrap_or_else(|| json!([])),
-        })
-    });
-    let filesystems = inventory_value
-        .get("filesystems")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let processes = inventory_value
-        .get("processes")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let containers = inventory_value
-        .get("containers")
-        .cloned()
-        .or_else(|| {
-            inventory_value
-                .get("docker")
-                .and_then(|value| value.get("containers"))
-                .cloned()
-        })
-        .unwrap_or_else(|| json!([]));
+    let host = normalized_host(&inventory_value);
+    let network = normalized_network(&inventory_value);
+    let filesystems = normalized_filesystems(&inventory_value);
+    let processes = normalized_processes(&inventory_value);
+    let containers = normalized_containers(&inventory_value);
     let sockets = decorated_sockets(&inventory_value);
     let summary = inventory_summary(&inventory_value);
     let evidence: Vec<(Value,)> = sqlx::query_as(
@@ -1752,13 +1713,22 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
             ))
         })
         .collect::<Vec<_>>();
+    let reconciliation_time = latest_snapshot
+        .as_ref()
+        .and_then(|(value,)| value.get("received_at").cloned())
+        .or_else(|| {
+            latest_snapshot
+                .as_ref()
+                .and_then(|(value,)| value.get("collected_at").cloned())
+        })
+        .unwrap_or(Value::Null);
     let reconciliation = json!({
         "status": if device_id.is_some() { "matched" } else { "unmatched" },
         "device_id": device_id,
         "confidence": if device_id.is_some() { Some(1.0) } else { None },
         "matched_identifiers": matched_identifiers,
         "conflicts": [],
-        "last_reconciled_at": detail.get("updated_at").cloned().unwrap_or(Value::Null),
+        "last_reconciled_at": reconciliation_time,
         "explanation": if device_id.is_some() {
             "Agent identity is linked to this device."
         } else {
@@ -1776,6 +1746,13 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
         map.insert("processes".to_string(), processes);
         map.insert("sockets".to_string(), sockets);
         map.insert("containers".to_string(), containers);
+        map.insert(
+            "collector_status".to_string(),
+            inventory_value
+                .get("collector_status")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        );
         map.insert("inventory_summary".to_string(), summary);
         map.insert(
             "evidence".to_string(),
@@ -1793,7 +1770,12 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
 fn decorated_sockets(inventory: &Value) -> Value {
     let sockets = first_array(
         inventory,
-        &["sockets", "listening_sockets", "listening.services"],
+        &[
+            "sockets.sockets",
+            "sockets",
+            "listening_sockets",
+            "listening.services",
+        ],
     )
     .cloned()
     .unwrap_or_default();
@@ -1843,19 +1825,24 @@ fn inventory_summary(inventory: &Value) -> Value {
     let interfaces = first_array(inventory, &["interfaces", "network.interfaces"])
         .map(Vec::len)
         .unwrap_or_default();
-    let filesystems = first_array(inventory, &["filesystems"])
+    let filesystems = first_array(inventory, &["filesystem.filesystems", "filesystems"])
         .map(Vec::len)
         .unwrap_or_default();
-    let processes = first_array(inventory, &["processes"])
+    let processes = first_array(inventory, &["processes.processes", "processes"])
         .map(Vec::len)
         .unwrap_or_default();
     let sockets = first_array(
         inventory,
-        &["sockets", "listening_sockets", "listening.services"],
+        &[
+            "sockets.sockets",
+            "sockets",
+            "listening_sockets",
+            "listening.services",
+        ],
     )
     .map(Vec::len)
     .unwrap_or_default();
-    let containers = first_array(inventory, &["containers", "docker.containers"])
+    let containers = first_array(inventory, &["docker.containers", "containers"])
         .map(Vec::len)
         .unwrap_or_default();
     json!({
@@ -1865,6 +1852,189 @@ fn inventory_summary(inventory: &Value) -> Value {
         "sockets": sockets,
         "containers": containers,
     })
+}
+
+/// Normalize the collector wire shape into the stable detail API shape. Agent
+/// collectors are intentionally nested by capability; the UI should not need
+/// to know that transport detail or each collector's field aliases.
+fn normalized_host(inventory: &Value) -> Value {
+    let raw = inventory.get("host").unwrap_or(inventory);
+    let cpu = raw.get("cpu").unwrap_or(&Value::Null);
+    let load = raw.get("load").unwrap_or(&Value::Null);
+    let memory = raw.get("memory").unwrap_or(&Value::Null);
+    let total = value_u64(memory, &["MemTotal", "total_bytes"]);
+    let available = value_u64(memory, &["MemAvailable", "available_bytes"]);
+    let used = total
+        .zip(available)
+        .map(|(total, available)| total.saturating_sub(available));
+    json!({
+        "hostname": value_string(raw, &["hostname", "name"]),
+        "os": value_string(raw, &["os", "operating_system"]),
+        "distribution": value_string(raw, &["distribution", "distribution_name"]),
+        "kernel": value_string(raw, &["kernel", "kernel_release"]),
+        "arch": value_string(raw, &["arch", "architecture"]),
+        "boot_id": value_string(raw, &["boot_id", "boot_id_sha256"]),
+        "uptime_seconds": value_u64(raw, &["uptime_seconds", "uptime_secs"]),
+        "cpu_model": value_string(cpu, &["model", "name"]),
+        "cpu_count": value_u64(cpu, &["logical_cpus", "cpu_count"]),
+        "load_1m": value_f64(load, &["one", "load_1m"]),
+        "memory_total_bytes": total,
+        "memory_used_bytes": used,
+        "machine_id_hash": value_string(raw, &["machine_id_hash", "machine_id_sha256"]),
+    })
+}
+
+fn normalized_network(inventory: &Value) -> Value {
+    let raw = inventory.get("network").unwrap_or(inventory);
+    let interfaces = first_array(raw, &["interfaces"])
+        .or_else(|| first_array(inventory, &["interfaces"]))
+        .map(|items| {
+            items
+                .iter()
+                .take(MAX_JSON_NODES)
+                .map(|item| {
+                    json!({
+                        "name": value_string(item, &["name", "interface", "ifname"]).unwrap_or_else(|| "unknown".to_string()),
+                        "mac": value_string(item, &["mac", "mac_address", "macAddress"]),
+                        "addresses": item.get("addresses")
+                            .and_then(Value::as_array)
+                            .map(|addresses| addresses.iter().filter_map(address_value).collect::<Vec<_>>())
+                            .unwrap_or_default(),
+                        "state": value_string(item, &["state", "operstate"]),
+                        "mtu": value_u64(item, &["mtu"]),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let routes = first_array(raw, &["routes"])
+        .or_else(|| first_array(inventory, &["routes"]))
+        .map(|items| {
+            items
+                .iter()
+                .take(MAX_JSON_NODES)
+                .map(|item| {
+                    json!({
+                        "destination": value_string(item, &["destination", "dst"]).unwrap_or_else(|| "unknown".to_string()),
+                        "gateway": value_string(item, &["gateway", "gw"]),
+                        "interface_name": value_string(item, &["interface_name", "interface", "dev"]),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    json!({"interfaces": interfaces, "routes": routes})
+}
+
+fn normalized_filesystems(inventory: &Value) -> Value {
+    let items = first_array(inventory, &["filesystem.filesystems", "filesystems"])
+        .cloned()
+        .unwrap_or_default();
+    Value::Array(
+        items
+            .into_iter()
+            .take(MAX_JSON_NODES)
+            .map(|item| {
+                json!({
+                    "mount_point": value_string(&item, &["mount_point", "mount", "path"]).unwrap_or_else(|| "unknown".to_string()),
+                    "device": value_string(&item, &["device", "source"]),
+                    "filesystem": value_string(&item, &["filesystem", "fstype"]),
+                    "total_bytes": value_u64(&item, &["total_bytes", "capacity_bytes"]),
+                    "used_bytes": value_u64(&item, &["used_bytes"]),
+                    "available_bytes": value_u64(&item, &["available_bytes", "free_bytes"]),
+                    "inode_total": value_u64(&item, &["inode_total", "inodes_total"]),
+                    "inode_used": value_u64(&item, &["inode_used", "inodes_used"]),
+                    "read_only": item.get("read_only").and_then(Value::as_bool),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn normalized_processes(inventory: &Value) -> Value {
+    let items = first_array(inventory, &["processes.processes", "processes"])
+        .cloned()
+        .unwrap_or_default();
+    Value::Array(
+        items
+            .into_iter()
+            .take(MAX_JSON_NODES)
+            .map(|item| {
+                json!({
+                    "pid": value_u64(&item, &["pid"]).unwrap_or_default(),
+                    "name": value_string(&item, &["name", "process"]).unwrap_or_else(|| "unknown".to_string()),
+                    "command": value_string(&item, &["command", "cmdline"]),
+                    "user": value_string(&item, &["user", "username"]),
+                    "state": value_string(&item, &["state"]),
+                    "cpu_percent": value_f64(&item, &["cpu_percent", "cpu"]),
+                    "memory_bytes": value_u64(&item, &["memory_bytes", "rss_bytes"]),
+                    "started_at": value_string(&item, &["started_at"]),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn normalized_containers(inventory: &Value) -> Value {
+    Value::Array(
+        first_array(inventory, &["docker.containers", "containers"])
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .take(MAX_JSON_NODES)
+            .map(|item| {
+                json!({
+                    "id": value_string(&item, &["id", "container_id", "containerId"]).unwrap_or_else(|| "unknown".to_string()),
+                    "name": value_string(&item, &["name", "container_name", "Names"]).unwrap_or_else(|| "unknown".to_string()),
+                    "image": value_string(&item, &["image", "Image"]),
+                    "status": value_string(&item, &["status", "state", "Status"]),
+                    "health": value_string(&item, &["health"]),
+                    "networks": string_array(&item, &["networks", "Networks"]),
+                    "mounts": string_array(&item, &["mounts"]),
+                    "published_ports": string_array(&item, &["published_ports", "ports"]),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn value_string(value: &Value, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(Value::as_str).map(str::to_string))
+}
+
+fn value_u64(value: &Value, names: &[&str]) -> Option<u64> {
+    names.iter().find_map(|name| {
+        value.get(*name).and_then(|item| {
+            item.as_u64()
+                .or_else(|| item.as_i64().and_then(|value| u64::try_from(value).ok()))
+        })
+    })
+}
+
+fn value_f64(value: &Value, names: &[&str]) -> Option<f64> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(Value::as_f64))
+}
+
+fn string_array(value: &Value, names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .find_map(|name| {
+            value.get(*name).and_then(|item| {
+                item.as_array().map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .take(MAX_JSON_NODES)
+                        .collect()
+                })
+            })
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2211,5 +2381,45 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(current_count, 1);
+    }
+
+    #[test]
+    fn normalizes_nested_collector_payloads_and_aliases() {
+        let inventory = json!({
+            "host": {
+                "hostname": "box1",
+                "os": "linux",
+                "arch": "x86_64",
+                "boot_id_sha256": "boot-hash",
+                "uptime_secs": 42,
+                "cpu": {"model": "CPU", "logical_cpus": 8},
+                "load": {"one": 0.25},
+                "memory": {"MemTotal": 1000, "MemAvailable": 400}
+            },
+            "network": {
+                "interfaces": [{"name": "eth0", "addresses": [{"address": "192.0.2.1"}]}],
+                "routes": [{"interface": "eth0", "destination": "0.0.0.0", "gateway": "192.0.2.254"}]
+            },
+            "filesystem": {"filesystems": [{"mount_point": "/", "capacity_bytes": 100, "used_bytes": 40}]},
+            "processes": {"processes": [{"pid": 7, "name": "worker", "rss_bytes": 64}]},
+            "sockets": {"sockets": [{"protocol": "tcp", "local_address": "127.0.0.1", "local_port": 8080}]},
+            "docker": {"containers": [{"id": "abc", "name": "web", "status": "running"}]},
+            "collector_status": [{"capability": "docker", "status": "partial", "error": "permission denied"}]
+        });
+
+        assert_eq!(normalized_host(&inventory)["cpu_count"], 8);
+        assert_eq!(normalized_host(&inventory)["memory_used_bytes"], 600);
+        assert_eq!(
+            normalized_network(&inventory)["routes"][0]["interface_name"],
+            "eth0"
+        );
+        assert_eq!(normalized_filesystems(&inventory)[0]["total_bytes"], 100);
+        assert_eq!(normalized_processes(&inventory)[0]["memory_bytes"], 64);
+        assert_eq!(decorated_sockets(&inventory)[0]["local_port"], 8080);
+        assert_eq!(normalized_containers(&inventory)[0]["id"], "abc");
+        assert_eq!(inventory_summary(&inventory)["filesystems"], 1);
+        assert_eq!(inventory_summary(&inventory)["processes"], 1);
+        assert_eq!(inventory_summary(&inventory)["sockets"], 1);
+        assert_eq!(inventory_summary(&inventory)["containers"], 1);
     }
 }
