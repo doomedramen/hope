@@ -695,7 +695,7 @@ fn host_identifiers(
         ),
         (IdentifierType::Hostname, &["hostname", "host_name"]),
     ] {
-        if let Some(value) = inventory_string(&snapshot.inventory, &names) {
+        if let Some(value) = inventory_string(&snapshot.inventory, names) {
             push_identifier(&mut identifiers, kind, value);
         }
     }
@@ -714,7 +714,7 @@ fn host_identifiers(
             ),
             (IdentifierType::Hostname, &["hostname", "host_name"]),
         ] {
-            if let Some(value) = object_string(system, &names) {
+            if let Some(value) = object_string(system, names) {
                 push_identifier(&mut identifiers, kind, value);
             }
         }

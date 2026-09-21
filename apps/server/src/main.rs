@@ -615,16 +615,16 @@ async fn main() -> anyhow::Result<()> {
             // jobs (worker role), not a bespoke timer here — see
             // scheduler.rs and jobs_handlers.rs.
             let scheduler_pool = pool.clone();
-            let scheduler_task = tokio::spawn(scheduler::run(
-                scheduler_pool,
-                config.change_event_retention_days,
-                config.monitor_result_retention_days,
-                config.monitor_result_rollup_after_days,
-                config.monitor_result_rollup_retention_days,
-                config.audit_event_retention_days,
-                config.job_retention_days,
-                config.agent_metric_retention_days,
-            ));
+            let retention = scheduler::RetentionConfig {
+                change_event_retention_days: config.change_event_retention_days,
+                monitor_result_retention_days: config.monitor_result_retention_days,
+                monitor_result_rollup_after_days: config.monitor_result_rollup_after_days,
+                monitor_result_rollup_retention_days: config.monitor_result_rollup_retention_days,
+                audit_event_retention_days: config.audit_event_retention_days,
+                job_retention_days: config.job_retention_days,
+                agent_metric_retention_days: config.agent_metric_retention_days,
+            };
+            let scheduler_task = tokio::spawn(scheduler::run(scheduler_pool, retention));
 
             let api_task = axum::serve(
                 listener,

@@ -15,6 +15,17 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DISCOVERY_JOB_TYPE: &str = "discovery.full_tcp";
 use crate::discovery::ports::STANDARD_PORT_COUNT;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetentionConfig {
+    pub(crate) change_event_retention_days: i64,
+    pub(crate) monitor_result_retention_days: i64,
+    pub(crate) monitor_result_rollup_after_days: i64,
+    pub(crate) monitor_result_rollup_retention_days: i64,
+    pub(crate) audit_event_retention_days: i64,
+    pub(crate) job_retention_days: i64,
+    pub(crate) agent_metric_retention_days: i64,
+}
+
 /// Which hour-long period `now` falls in, as a stable string suitable for
 /// use as an idempotency key. Two calls within the same hour produce the
 /// same key.
@@ -35,16 +46,7 @@ fn daily_period_key(prefix: &str) -> String {
     format!("{prefix}-{day_bucket}")
 }
 
-pub(crate) async fn enqueue_periodic_jobs(
-    pool: &PgPool,
-    change_event_retention_days: i64,
-    monitor_result_retention_days: i64,
-    monitor_result_rollup_after_days: i64,
-    monitor_result_rollup_retention_days: i64,
-    audit_event_retention_days: i64,
-    job_retention_days: i64,
-    agent_metric_retention_days: i64,
-) {
+pub(crate) async fn enqueue_periodic_jobs(pool: &PgPool, retention: RetentionConfig) {
     let session_cleanup_key = hourly_period_key("hourly");
     if let Err(err) = jobs::enqueue(
         pool,
@@ -123,9 +125,9 @@ pub(crate) async fn enqueue_periodic_jobs(
         "monitor_results.retention",
         &retention_key,
         serde_json::json!({
-            "retention_days": monitor_result_retention_days,
-            "rollup_after_days": monitor_result_rollup_after_days,
-            "rollup_retention_days": monitor_result_rollup_retention_days,
+            "retention_days": retention.monitor_result_retention_days,
+            "rollup_after_days": retention.monitor_result_rollup_after_days,
+            "rollup_retention_days": retention.monitor_result_rollup_retention_days,
         }),
     )
     .await
@@ -138,7 +140,7 @@ pub(crate) async fn enqueue_periodic_jobs(
         pool,
         "change_events.retention",
         &change_event_retention_key,
-        serde_json::json!({"retention_days": change_event_retention_days}),
+        serde_json::json!({"retention_days": retention.change_event_retention_days}),
     )
     .await
     {
@@ -150,7 +152,7 @@ pub(crate) async fn enqueue_periodic_jobs(
         pool,
         "audit_events.retention",
         &audit_event_retention_key,
-        serde_json::json!({"retention_days": audit_event_retention_days}),
+        serde_json::json!({"retention_days": retention.audit_event_retention_days}),
     )
     .await
     {
@@ -162,7 +164,7 @@ pub(crate) async fn enqueue_periodic_jobs(
         pool,
         "jobs.retention",
         &job_retention_key,
-        serde_json::json!({"retention_days": job_retention_days}),
+        serde_json::json!({"retention_days": retention.job_retention_days}),
     )
     .await
     {
@@ -174,7 +176,7 @@ pub(crate) async fn enqueue_periodic_jobs(
         pool,
         "agent_metrics.retention",
         &agent_metric_retention_key,
-        serde_json::json!({"retention_days": agent_metric_retention_days}),
+        serde_json::json!({"retention_days": retention.agent_metric_retention_days}),
     )
     .await
     {
@@ -302,28 +304,9 @@ async fn enqueue_change_scan_for_scope(pool: &PgPool, network_id: Uuid) -> anyho
 /// `CHECK_INTERVAL`. Enqueuing immediately on startup means a
 /// short-lived/restarted server doesn't wait a full interval before the
 /// first check-and-enqueue.
-pub async fn run(
-    pool: PgPool,
-    change_event_retention_days: i64,
-    monitor_result_retention_days: i64,
-    monitor_result_rollup_after_days: i64,
-    monitor_result_rollup_retention_days: i64,
-    audit_event_retention_days: i64,
-    job_retention_days: i64,
-    agent_metric_retention_days: i64,
-) {
+pub async fn run(pool: PgPool, retention: RetentionConfig) {
     loop {
-        enqueue_periodic_jobs(
-            &pool,
-            change_event_retention_days,
-            monitor_result_retention_days,
-            monitor_result_rollup_after_days,
-            monitor_result_rollup_retention_days,
-            audit_event_retention_days,
-            job_retention_days,
-            agent_metric_retention_days,
-        )
-        .await;
+        enqueue_periodic_jobs(&pool, retention).await;
         tokio::time::sleep(CHECK_INTERVAL).await;
     }
 }
@@ -351,6 +334,18 @@ mod tests {
         Some(pool)
     }
 
+    fn test_retention() -> RetentionConfig {
+        RetentionConfig {
+            change_event_retention_days: 365,
+            monitor_result_retention_days: 30,
+            monitor_result_rollup_after_days: 7,
+            monitor_result_rollup_retention_days: 365,
+            audit_event_retention_days: 365,
+            job_retention_days: 30,
+            agent_metric_retention_days: 7,
+        }
+    }
+
     #[tokio::test]
     async fn enqueuing_twice_in_the_same_period_does_not_duplicate() {
         let _lock = test_lock().await;
@@ -359,14 +354,14 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30, 7).await;
+        enqueue_periodic_jobs(&pool, test_retention()).await;
         let after_first: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
 
-        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30, 7).await;
+        enqueue_periodic_jobs(&pool, test_retention()).await;
         let after_second: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")
                 .fetch_one(&pool)
@@ -385,7 +380,7 @@ mod tests {
             return;
         };
 
-        enqueue_periodic_jobs(&pool, 365, 30, 7, 365, 365, 30, 7).await;
+        enqueue_periodic_jobs(&pool, test_retention()).await;
 
         let session_cleanup: (i64,) =
             sqlx::query_as("select count(*) from jobs where job_type = 'session.cleanup'")

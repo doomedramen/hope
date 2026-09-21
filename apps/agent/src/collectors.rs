@@ -252,6 +252,9 @@ impl MetricSampler {
             .map(|value| parse_proc_net_dev(&value))
             .unwrap_or_default();
         let network_metrics = network_metrics(&network, &self.previous_network, elapsed);
+        let network_available = !network_metrics["interfaces"]
+            .as_array()
+            .is_none_or(Vec::is_empty);
         self.previous_network = network;
 
         let disk = read_bounded("/proc/diskstats", MAX_FILE_BYTES)
@@ -259,6 +262,7 @@ impl MetricSampler {
             .map(|value| parse_diskstats(&value))
             .unwrap_or_default();
         let disk_metrics = disk_metrics(&disk, &self.previous_disk, elapsed);
+        let disk_available = !disk_metrics["devices"].as_array().is_none_or(Vec::is_empty);
         self.previous_disk = disk;
 
         let pressure = [
@@ -321,10 +325,7 @@ impl MetricSampler {
             ),
             (
                 "network",
-                if !network_metrics["interfaces"]
-                    .as_array()
-                    .is_none_or(Vec::is_empty)
-                {
+                if network_available {
                     "available"
                 } else {
                     "unavailable"
@@ -332,7 +333,7 @@ impl MetricSampler {
             ),
             (
                 "disk",
-                if !disk_metrics["devices"].as_array().is_none_or(Vec::is_empty) {
+                if disk_available {
                     "available"
                 } else {
                     "unavailable"
@@ -403,14 +404,13 @@ fn bound_metric_payload(metrics: &mut Value) {
         }
         truncated = true;
     }
-    if truncated {
-        if let Some(availability) = metrics
+    if truncated
+        && let Some(availability) = metrics
             .as_object_mut()
             .and_then(|object| object.get_mut("availability"))
             .and_then(Value::as_object_mut)
-        {
-            availability.insert("status".into(), Value::String("partial".into()));
-        }
+    {
+        availability.insert("status".into(), Value::String("partial".into()));
     }
 }
 
