@@ -59,6 +59,8 @@ export function MonitorProposalQueue() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [bulkApproveOpen, setBulkApproveOpen] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
+  const [bulkFailures, setBulkFailures] = useState<string[]>([]);
+  const [bulkApprovedCount, setBulkApprovedCount] = useState(0);
   const proposalsQuery = useQuery({
     queryKey: ["monitor-proposals", "pending"],
     queryFn: () => fetchMonitorProposals("pending"),
@@ -72,22 +74,48 @@ export function MonitorProposalQueue() {
       decision: "approve" | "reject";
     }) => resolveMonitorProposal(id, decision),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: ["monitor-proposals", "pending"],
-      });
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["monitor-proposals", "pending"],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["monitors"] }),
+      ]);
       setRejectOpen(false);
     },
   });
   const bulkApproveMutation = useMutation({
     mutationFn: async () => {
-      for (const proposal of proposalsQuery.data?.items ?? []) {
-        await resolveMonitorProposal(proposal.id, "approve");
-      }
+      const proposalsToApprove = proposalsQuery.data?.items ?? [];
+      const settled = await Promise.all(
+        proposalsToApprove.map(async (proposal) => {
+          try {
+            await resolveMonitorProposal(proposal.id, "approve");
+            return { proposal, error: null };
+          } catch (error) {
+            return { proposal, error };
+          }
+        }),
+      );
+      return {
+        approvedCount: settled.filter((item) => item.error === null).length,
+        failedTargets: settled
+          .filter((item) => item.error !== null)
+          .map((item) => item.proposal.target_identity),
+      };
     },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: ["monitor-proposals", "pending"],
-      });
+    onMutate: () => {
+      setBulkFailures([]);
+      setBulkApprovedCount(0);
+    },
+    onSuccess: async ({ approvedCount, failedTargets }) => {
+      setBulkApprovedCount(approvedCount);
+      setBulkFailures(failedTargets);
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["monitor-proposals", "pending"],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["monitors"] }),
+      ]);
     },
   });
 
@@ -190,6 +218,24 @@ export function MonitorProposalQueue() {
             <AlertTitle>Decision was not saved</AlertTitle>
             <AlertDescription>
               {getUserFacingError(resolveMutation.error, "Try again.")}
+            </AlertDescription>
+          </Alert>
+        </div>
+      ) : null}
+      {bulkFailures.length ? (
+        <div className="border-t px-6 py-4">
+          <Alert variant="destructive">
+            <CircleAlertIcon />
+            <AlertTitle>
+              {bulkApprovedCount
+                ? "Some monitor proposals need attention"
+                : "Monitor proposals were not approved"}
+            </AlertTitle>
+            <AlertDescription>
+              {bulkApprovedCount} proposal
+              {bulkApprovedCount === 1 ? " was" : "s were"} approved and
+              refreshed. Failed targets remain pending:{" "}
+              {bulkFailures.join(", ")}.
             </AlertDescription>
           </Alert>
         </div>
