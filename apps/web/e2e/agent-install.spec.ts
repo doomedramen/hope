@@ -45,6 +45,7 @@ test.describe("agent deployment", () => {
     await createDialog.getByRole("button", { name: "Create device" }).click();
 
     await expect(page.getByRole("heading", { name: deviceName })).toBeVisible();
+    await page.getByText("More actions", { exact: true }).click();
     await page.getByRole("button", { name: "Deploy agent" }).click();
     const installDialog = page.getByRole("dialog");
 
