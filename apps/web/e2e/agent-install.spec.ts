@@ -54,6 +54,7 @@ test.describe("agent deployment", () => {
       ])
     ).stdout.trim();
     await dialog.getByRole("button", { name: "Done" }).click();
+    await page.reload();
     await expect(
       page.locator("tbody tr").filter({ hasText: hostname }),
     ).toContainText("Online", { timeout: 45_000 });
@@ -102,6 +103,7 @@ test.describe("agent deployment", () => {
     ).toBeVisible({ timeout: 90_000 });
 
     await page.goto("/agents");
+    await page.reload();
     await expect(
       page.getByRole("heading", { name: "Agents", exact: true }),
     ).toBeVisible();
