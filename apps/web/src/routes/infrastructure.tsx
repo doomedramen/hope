@@ -401,6 +401,7 @@ export function InfrastructurePage() {
   }
   const monitorsByService = new Map<string, Monitor[]>();
   for (const monitor of monitors) {
+    if (!monitor.service_id) continue;
     const current = monitorsByService.get(monitor.service_id) ?? [];
     current.push(monitor);
     monitorsByService.set(monitor.service_id, current);
@@ -874,6 +875,14 @@ function monitorDisplayState(monitor: Monitor): string {
   return monitor.enabled ? monitor.state : "disabled";
 }
 
+function monitorServiceLabel(monitor: Monitor): string {
+  if (monitor.service_name) return monitor.service_name;
+  if (monitor.service_product) return monitor.service_product;
+  return monitor.service_id
+    ? `Service ${shortId(monitor.service_id)}`
+    : "Unassigned service";
+}
+
 function aggregateCondition(
   device: Device,
   monitors: Monitor[],
@@ -1162,12 +1171,7 @@ function DeviceDetail({
                         monitor.enabled &&
                         ["down", "degraded", "stale"].includes(monitor.state),
                     )
-                    .map(
-                      (monitor) =>
-                        monitor.service_name ||
-                        monitor.service_product ||
-                        `Service ${shortId(monitor.service_id)}`,
-                    )
+                    .map(monitorServiceLabel)
                     .join(", ") || "The latest device condition needs review."}
                 </p>
               </section>
@@ -1287,9 +1291,7 @@ function DeviceDetail({
                   >
                     <div>
                       <p className="font-medium">
-                        {monitor.service_name ||
-                          monitor.service_product ||
-                          `Service ${shortId(monitor.service_id)}`}
+                        {monitorServiceLabel(monitor)}
                       </p>
                       <p className="text-sm text-muted-foreground">
                         Last result {formatRelative(monitor.last_result_at)} ·{" "}
