@@ -9,7 +9,7 @@ import {
   InfrastructurePage,
   MergeDialog,
 } from "./infrastructure";
-import type { Device, DeviceDetail } from "@/lib/api";
+import type { Device, DeviceDetail, Monitor, Service } from "@/lib/api";
 
 function detail(id: string, name: string): DeviceDetail {
   return {
@@ -25,6 +25,62 @@ function detail(id: string, name: string): DeviceDetail {
     interfaces: [],
     evidence: [],
     merged_member_ids: [],
+  };
+}
+
+function service(id: string, ownerId: string, name = "web"): Service {
+  return {
+    id,
+    name,
+    protocol: "https",
+    product: "nginx",
+    product_version: "1.25",
+    owner_kind: "device",
+    owner_id: ownerId,
+    version: 1,
+    created_at: "2026-09-20T10:00:00Z",
+    updated_at: "2026-09-20T10:00:00Z",
+  };
+}
+
+function monitor(
+  id: string,
+  serviceId: string,
+  state: Monitor["state"],
+): Monitor {
+  return {
+    id,
+    proposal_id: null,
+    service_id: serviceId,
+    endpoint_id: `endpoint-${id}`,
+    monitor_type: "https",
+    config: {},
+    interval_seconds: 60,
+    timeout_ms: 5000,
+    failure_threshold: 3,
+    recovery_threshold: 2,
+    enabled: true,
+    state,
+    underlying_state: state === "stale" ? "unknown" : state,
+    consecutive_failures: state === "down" ? 3 : 0,
+    consecutive_successes: state === "up" ? 2 : 0,
+    last_result_at: "2026-09-21T10:00:00Z",
+    last_success_at: state === "up" ? "2026-09-21T10:00:00Z" : null,
+    last_failure_at: state === "down" ? "2026-09-21T10:00:00Z" : null,
+    next_run_at: "2026-09-21T10:01:00Z",
+    lease_owner: null,
+    lease_expires_at: null,
+    version: 1,
+    created_by: null,
+    created_at: "2026-09-20T10:00:00Z",
+    updated_at: "2026-09-21T10:00:00Z",
+    endpoint_address: "192.168.1.10",
+    endpoint_port: 443,
+    endpoint_url: "https://demo.example.test",
+    endpoint_dns_name: null,
+    service_name: "web",
+    service_product: "nginx",
+    service_product_version: "1.25",
   };
 }
 
@@ -116,6 +172,11 @@ describe("InfrastructurePage", () => {
     renderInfrastructurePage();
 
     fireEvent.click(
+      await screen.findByRole("button", { name: "Open QA VM device" }),
+    );
+    await screen.findByRole("heading", { name: "QA VM device" });
+    fireEvent.click(await screen.findByText("More actions"));
+    fireEvent.click(
       await screen.findByRole("button", { name: "Full port scan" }),
     );
     expect(
@@ -185,7 +246,7 @@ describe("InfrastructurePage", () => {
     window.history.replaceState({}, "", "/");
   });
 
-  it("selects a visible device when search hides the current selection", async () => {
+  it("does not select a device until the operator opens one", async () => {
     const first: Device = detail("device-1", "QA VM device");
     const second: Device = detail("device-2", "QA test device");
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
@@ -215,19 +276,115 @@ describe("InfrastructurePage", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     renderInfrastructurePage();
-    expect(
-      await screen.findByRole("heading", { name: "QA VM device" }),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "QA VM device" })).toBeNull();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open QA VM device" }),
+    );
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search devices" }), {
       target: { value: "QA test" },
     });
 
-    await waitFor(() =>
+    await waitFor(() => {
       expect(
-        screen.getByRole("heading", { name: "QA test device" }),
-      ).toBeInTheDocument(),
+        screen.queryByRole("heading", { name: "QA VM device" }),
+      ).toBeNull();
+      expect(screen.getByText("1 of 2 records")).toBeInTheDocument();
+    });
+  });
+
+  it("associates every service check by canonical owner ids", async () => {
+    const device = detail("device-1", "QA VM device");
+    const web = service("service-web", device.id);
+    const healthyCheck = monitor("monitor-up", web.id, "up");
+    const failingCheck = monitor("monitor-down", web.id, "down");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/devices?limit=100") {
+          return Promise.resolve(
+            jsonResponse({ items: [device], next_cursor: null }),
+          );
+        }
+        if (path === "/api/v1/services?limit=200") {
+          return Promise.resolve(
+            jsonResponse({ items: [web], next_cursor: null }),
+          );
+        }
+        if (path === "/api/v1/monitors?limit=100") {
+          return Promise.resolve(
+            jsonResponse({ items: [healthyCheck, failingCheck] }),
+          );
+        }
+        if (path === "/api/v1/devices/device-1") {
+          return Promise.resolve(jsonResponse(device));
+        }
+        if (path === "/api/v1/devices/device-1/full-scan") {
+          return Promise.resolve(jsonResponse(null));
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
     );
+
+    renderInfrastructurePage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open QA VM device" }),
+    );
+
+    expect((await screen.findAllByText("web")).length).toBeGreaterThanOrEqual(
+      1,
+    );
+    expect(screen.getByRole("link", { name: "Up" })).toHaveAttribute(
+      "href",
+      "/monitoring?monitor=monitor-up",
+    );
+    expect(screen.getByRole("link", { name: "Down" })).toHaveAttribute(
+      "href",
+      "/monitoring?monitor=monitor-down",
+    );
+  });
+
+  it("shows unavailable check data instead of claiming there are no checks", async () => {
+    const device = detail("device-1", "QA VM device");
+    const web = service("service-web", device.id);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/devices?limit=100") {
+          return Promise.resolve(
+            jsonResponse({ items: [device], next_cursor: null }),
+          );
+        }
+        if (path === "/api/v1/services?limit=200") {
+          return Promise.resolve(
+            jsonResponse({ items: [web], next_cursor: null }),
+          );
+        }
+        if (path === "/api/v1/monitors?limit=100") {
+          return Promise.reject(new Error("monitor service unavailable"));
+        }
+        if (path === "/api/v1/devices/device-1") {
+          return Promise.resolve(jsonResponse(device));
+        }
+        if (path === "/api/v1/devices/device-1/full-scan") {
+          return Promise.resolve(jsonResponse(null));
+        }
+        return Promise.resolve(jsonResponse({ items: [] }));
+      }),
+    );
+
+    renderInfrastructurePage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open QA VM device" }),
+    );
+
+    expect(
+      await screen.findByText("Check data unavailable"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No active check")).not.toBeInTheDocument();
   });
 });
 

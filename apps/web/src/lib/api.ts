@@ -120,6 +120,19 @@ export interface Device {
   updated_at: string;
 }
 
+export interface Service {
+  id: string;
+  name: string | null;
+  protocol: string | null;
+  product: string | null;
+  product_version: string | null;
+  owner_kind: string | null;
+  owner_id: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface InventoryInterface {
   id: string;
   device_id: string;
@@ -894,6 +907,38 @@ export async function fetchHealthReady(): Promise<ReadyResponse> {
 
 export async function fetchDevices(): Promise<ApiPage<Device>> {
   return request<ApiPage<Device>>("/api/v1/devices?limit=100");
+}
+
+async function fetchAllPages<T>(
+  endpoint: string,
+  limit = 200,
+): Promise<ApiPage<T>> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  const seenCursors = new Set<string>();
+
+  while (true) {
+    const page = await request<ApiPage<T>>(
+      `${endpoint}${queryString({ cursor, limit })}`,
+    );
+    items.push(...page.items);
+    if (page.items.length < limit || !page.next_cursor) {
+      return { items, next_cursor: null };
+    }
+    if (seenCursors.has(page.next_cursor)) {
+      return { items, next_cursor: page.next_cursor };
+    }
+    seenCursors.add(page.next_cursor);
+    cursor = page.next_cursor;
+  }
+}
+
+export async function fetchServices(): Promise<ApiPage<Service>> {
+  return fetchAllPages<Service>("/api/v1/services");
+}
+
+export async function fetchInterfaces(): Promise<ApiPage<InventoryInterface>> {
+  return fetchAllPages<InventoryInterface>("/api/v1/interfaces");
 }
 
 export async function fetchNetworks(): Promise<ApiPage<Network>> {

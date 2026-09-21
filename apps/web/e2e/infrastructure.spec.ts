@@ -5,12 +5,12 @@ test("keeps device and network pages focused", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Devices", level: 1 }),
   ).toBeVisible();
-  await expect(page.getByRole("link", { name: "Manage networks" })).toHaveCount(
-    0,
-  );
-  await expect(page.getByRole("link", { name: "View networks" })).toHaveCount(
-    0,
-  );
+  await expect(
+    page.getByRole("link", { name: "Networks" }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Agents" }).first(),
+  ).toBeVisible();
 
   await page.goto("/networks");
   await expect(
@@ -78,9 +78,7 @@ test("operator can see and cancel the active discovery job", async ({
   await page
     .getByRole("button", { name: "Confirm and launch initial discovery" })
     .click();
-  await expect(
-    page.getByText(/Standard scan (queued|running)/),
-  ).toBeVisible({
+  await expect(page.getByText(/Standard scan (queued|running)/)).toBeVisible({
     timeout: 30_000,
   });
   await expect(
@@ -94,5 +92,7 @@ test("operator can see and cancel the active discovery job", async ({
   await expect(page.getByText("Cancellation requested.").first()).toBeVisible({
     timeout: 30_000,
   });
-  await expect(page.getByText(/Technical details and activity log/)).toBeVisible();
+  await expect(
+    page.getByText(/Technical details and activity log/),
+  ).toBeVisible();
 });

@@ -9,43 +9,23 @@ import {
   ActivityIcon,
   CalendarDaysIcon,
   GitCompareArrowsIcon,
-  LayoutDashboardIcon,
-  NetworkIcon,
   SearchIcon,
-  RadioTowerIcon,
   ServerIcon,
   Settings2Icon,
   ShieldCheckIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { AuthPanel } from "@/components/AuthPanel";
-import { HealthIndicator } from "@/components/HealthIndicator";
-import {
-  Sidebar,
-  SidebarContent,
-  SidebarFooter,
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarHeader,
-  SidebarInset,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
-  SidebarProvider,
-  SidebarTrigger,
-  useSidebar,
-} from "@/components/ui/sidebar";
 import { ApiError, fetchDevices, fetchSetupStatus } from "@/lib/api";
 
-const NAV_ITEMS = [
-  { to: "/", label: "Overview", icon: LayoutDashboardIcon },
+const PRIMARY_NAV = [
   { to: "/devices", label: "Devices", icon: ServerIcon },
-  { to: "/networks", label: "Networks", icon: NetworkIcon },
   { to: "/monitoring", label: "Monitoring", icon: ActivityIcon },
   { to: "/maintenance", label: "Maintenance", icon: CalendarDaysIcon },
-  { to: "/changes", label: "Changes", icon: GitCompareArrowsIcon },
-  { to: "/agents", label: "Agents", icon: RadioTowerIcon },
+] as const;
+
+const SECONDARY_NAV = [
+  { to: "/changes", label: "Activity", icon: GitCompareArrowsIcon },
   { to: "/settings", label: "Settings", icon: Settings2Icon },
 ] as const;
 
@@ -118,118 +98,92 @@ function RootLayout() {
   }
 
   return (
-    <SidebarProvider>
+    <div className="min-h-screen bg-background">
       <a
         className="fixed top-2 left-4 z-50 -translate-y-16 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground transition-transform focus:translate-y-0 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
         href="#main-content"
       >
         Skip to content
       </a>
-      <AppSidebar />
-      <SidebarInset>
-        <header className="flex h-14 items-center gap-2 border-b bg-card/70 px-4 md:px-8">
-          <SidebarTrigger />
+      <header className="sticky top-0 z-30 border-b bg-background/95 backdrop-blur supports-backdrop-filter:bg-background/85">
+        <div className="mx-auto flex min-h-16 max-w-[1440px] flex-wrap items-center gap-x-6 gap-y-2 px-4 py-2 sm:px-6 lg:px-8">
           <Link
-            aria-label="Hope overview"
-            className="rounded-lg font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50 md:hidden"
-            to="/"
+            aria-label="Hope devices"
+            className="mr-1 flex shrink-0 items-center gap-2 rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            to="/devices"
           >
-            Hope
+            <span className="grid size-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+              <ShieldCheckIcon aria-hidden="true" className="size-4" />
+            </span>
+            <span className="font-semibold tracking-tight">Hope</span>
           </Link>
-          <div className="ml-auto flex items-center gap-3">
-            <div className="md:hidden">
-              <HealthIndicator />
-            </div>
-            <Link
-              aria-label="Search devices"
-              className="hidden h-8 w-full max-w-sm items-center gap-2 rounded-lg border bg-background px-3 text-sm text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50 md:flex"
-              search={{ focus: "search" }}
-              to="/devices"
-            >
-              <SearchIcon aria-hidden="true" className="size-4" />
-              Search devices
-            </Link>
-          </div>
-        </header>
-        <div
-          className="min-w-0 flex-1 scroll-mt-4 p-4 outline-none sm:p-5 md:p-8"
-          id="main-content"
-          ref={mainContentRef}
-          tabIndex={-1}
-        >
-          <Outlet />
+
+          <nav
+            aria-label="Primary navigation"
+            className="order-3 flex basis-full min-w-0 flex-none items-center gap-1 overflow-x-auto pb-0.5 md:order-none md:w-auto md:basis-auto md:flex-none"
+          >
+            {PRIMARY_NAV.map((item) => (
+              <NavLink item={item} key={item.to} pathname={pathname} />
+            ))}
+          </nav>
+
+          <nav
+            aria-label="Secondary navigation"
+            className="ml-auto flex items-center gap-1"
+          >
+            {SECONDARY_NAV.map((item) => (
+              <NavLink item={item} key={item.to} pathname={pathname} quiet />
+            ))}
+          </nav>
+
+          <Link
+            aria-label="Search devices"
+            className="hidden size-9 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 sm:inline-flex"
+            search={{ focus: "search" }}
+            title="Search devices"
+            to="/devices"
+          >
+            <SearchIcon aria-hidden="true" className="size-4" />
+          </Link>
         </div>
-      </SidebarInset>
-    </SidebarProvider>
+      </header>
+      <main
+        className="mx-auto min-w-0 max-w-[1440px] scroll-mt-20 p-4 outline-none sm:p-6 lg:p-8"
+        id="main-content"
+        ref={mainContentRef}
+        tabIndex={-1}
+      >
+        <Outlet />
+      </main>
+    </div>
   );
 }
 
-function AppSidebar() {
-  const { isMobile, setOpenMobile } = useSidebar();
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
-  });
-
+function NavLink({
+  item,
+  pathname,
+  quiet = false,
+}: {
+  item: { to: string; label: string; icon: typeof ServerIcon };
+  pathname: string;
+  quiet?: boolean;
+}) {
+  const Icon = item.icon;
+  const active = pathname === item.to || pathname.startsWith(`${item.to}/`);
   return (
-    <Sidebar collapsible="icon">
-      <SidebarHeader>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              render={<Link aria-label="Hope overview" to="/" />}
-              size="lg"
-              tooltip="Hope overview"
-            >
-              <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                <ShieldCheckIcon aria-hidden="true" className="size-4" />
-              </span>
-              <span className="font-semibold tracking-tight group-data-[collapsible=icon]/menu-button:hidden">
-                Hope
-              </span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
-      </SidebarHeader>
-      <SidebarContent aria-label="Primary navigation" role="navigation">
-        <SidebarGroup>
-          <SidebarGroupLabel>Workspace</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {NAV_ITEMS.map((item) => {
-                const Icon = item.icon;
-                const isActive =
-                  item.to === "/"
-                    ? pathname === "/"
-                    : pathname === item.to ||
-                      pathname.startsWith(`${item.to}/`);
-                return (
-                  <SidebarMenuItem key={item.to}>
-                    <SidebarMenuButton
-                      isActive={isActive}
-                      onClick={() => {
-                        if (isMobile) setOpenMobile(false);
-                      }}
-                      render={
-                        <Link
-                          activeProps={{ "aria-current": "page" }}
-                          to={item.to}
-                        />
-                      }
-                      tooltip={item.label}
-                    >
-                      <Icon aria-hidden="true" />
-                      <span>{item.label}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                );
-              })}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-      </SidebarContent>
-      <SidebarFooter>
-        <HealthIndicator />
-      </SidebarFooter>
-    </Sidebar>
+    <Link
+      activeProps={{ "aria-current": "page" }}
+      className={`inline-flex min-h-9 shrink-0 items-center gap-2 rounded-lg px-3 text-sm outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/50 ${
+        active
+          ? "bg-accent font-medium text-accent-foreground"
+          : quiet
+            ? "text-muted-foreground hover:bg-muted hover:text-foreground"
+            : "text-foreground/75 hover:bg-muted hover:text-foreground"
+      }`}
+      to={item.to}
+    >
+      <Icon aria-hidden="true" className="size-4" />
+      <span>{item.label}</span>
+    </Link>
   );
 }

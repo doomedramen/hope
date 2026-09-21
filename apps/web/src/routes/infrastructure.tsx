@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useRouter } from "@tanstack/react-router";
 import {
   CheckIcon,
   CircleAlertIcon,
@@ -14,7 +14,7 @@ import {
   Undo2Icon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AgentDeploymentDialog } from "@/components/AgentDeploymentDialog";
 import {
   createDevice,
@@ -23,7 +23,10 @@ import {
   fetchDevice,
   fetchDeviceFullScan,
   fetchDevices,
+  fetchInterfaces,
   fetchIdentitySuggestions,
+  fetchMonitors,
+  fetchServices,
   getUserFacingError,
   launchDeviceFullScan,
   mergeDevice,
@@ -36,9 +39,17 @@ import {
   type Device,
   type DeviceDetail,
   type IdentitySuggestion,
+  type InventoryInterface,
+  type Monitor,
   type Network,
+  type Service,
 } from "@/lib/api";
-import { formatEvidenceValue, labelize, shortId } from "@/lib/format";
+import {
+  formatEvidenceValue,
+  formatRelative,
+  labelize,
+  shortId,
+} from "@/lib/format";
 import {
   validateNetworkFields,
   type NetworkField,
@@ -94,6 +105,7 @@ import {
 } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -122,9 +134,22 @@ export const Route = createFileRoute("/infrastructure")({
 const EMPTY_DEVICES: Device[] = [];
 const EMPTY_SUGGESTIONS: IdentitySuggestion[] = [];
 const EMPTY_ADDRESSES: Address[] = [];
+const EMPTY_SERVICES: Service[] = [];
+const EMPTY_MONITORS: Monitor[] = [];
+const EMPTY_INTERFACES: InventoryInterface[] = [];
+const MONITOR_PAGE_SIZE = 100;
 
 export function InfrastructurePage() {
   const queryClient = useQueryClient();
+  const router = useRouter({ warn: false });
+  type DeviceSearch = { device?: string; focus?: "search"; q?: string };
+  const navigate = router
+    ? (search: (previous: DeviceSearch) => DeviceSearch) =>
+        router.navigate({
+          to: "/devices",
+          search,
+        } as Parameters<typeof router.navigate>[0])
+    : null;
   const [requestedDeviceId, setRequestedDeviceId] = useState<string | null>(
     () =>
       typeof window === "undefined"
@@ -146,6 +171,21 @@ export function InfrastructurePage() {
   const devicesQuery = useQuery({
     queryKey: ["devices"],
     queryFn: fetchDevices,
+  });
+  const servicesQuery = useQuery({
+    queryKey: ["services"],
+    queryFn: fetchServices,
+    staleTime: 30_000,
+  });
+  const interfacesQuery = useQuery({
+    queryKey: ["interfaces"],
+    queryFn: fetchInterfaces,
+    staleTime: 30_000,
+  });
+  const monitorsQuery = useQuery({
+    queryKey: ["monitors"],
+    queryFn: () => fetchMonitors(),
+    staleTime: 15_000,
   });
   const suggestionsQuery = useQuery({
     queryKey: ["identity-suggestions"],
@@ -170,7 +210,7 @@ export function InfrastructurePage() {
     (device) => device.id === requestedDeviceId,
   )
     ? requestedDeviceId
-    : (visibleDevices[0]?.id ?? null);
+    : null;
 
   const selected = devices.find((device) => device.id === selectedId) ?? null;
   const detailQuery = useQuery({
@@ -181,8 +221,26 @@ export function InfrastructurePage() {
   const addressesQuery = useQuery({
     queryKey: ["addresses"],
     queryFn: fetchAddresses,
-    enabled: Boolean(detailQuery.data),
   });
+
+  const selectDevice = (id: string | null) => {
+    setRequestedDeviceId(id);
+    if (navigate) {
+      void navigate((previous) => ({
+        ...previous,
+        device: id ?? undefined,
+      }));
+    }
+  };
+  const updateSearch = (value: string) => {
+    setSearch(value);
+    if (navigate) {
+      void navigate((previous) => ({
+        ...previous,
+        q: value.trim() || undefined,
+      }));
+    }
+  };
 
   const invalidateInventory = () =>
     Promise.all([
@@ -195,7 +253,7 @@ export function InfrastructurePage() {
     mutationFn: createDevice,
     onSuccess: async (device) => {
       await invalidateInventory();
-      setRequestedDeviceId(device.id);
+      selectDevice(device.id);
       setDialog(null);
     },
   });
@@ -269,13 +327,37 @@ export function InfrastructurePage() {
       queryClient.invalidateQueries({ queryKey: ["identity-suggestions"] }),
   });
 
-  const currentAddresses =
-    addressesQuery.data?.items.filter((address) => address.is_current).length ??
-    0;
-  const staleDevices = devices.filter(
-    (device) => device.status === "stale",
-  ).length;
   const suggestions = suggestionsQuery.data?.items ?? EMPTY_SUGGESTIONS;
+  const services = servicesQuery.data?.items ?? EMPTY_SERVICES;
+  const monitors = monitorsQuery.data?.items ?? EMPTY_MONITORS;
+  const monitorsPossiblyTruncated = monitors.length >= MONITOR_PAGE_SIZE;
+  const interfaces = interfacesQuery.data?.items ?? EMPTY_INTERFACES;
+  const deviceServices = new Map<string, Service[]>();
+  for (const service of services) {
+    if (service.owner_kind !== "device" || !service.owner_id) continue;
+    const current = deviceServices.get(service.owner_id) ?? [];
+    current.push(service);
+    deviceServices.set(service.owner_id, current);
+  }
+  const monitorsByService = new Map<string, Monitor[]>();
+  for (const monitor of monitors) {
+    const current = monitorsByService.get(monitor.service_id) ?? [];
+    current.push(monitor);
+    monitorsByService.set(monitor.service_id, current);
+  }
+  const addressByInterface = new Map(
+    (addressesQuery.data?.items ?? [])
+      .filter((address) => address.is_current)
+      .map((address) => [address.interface_id, address.ip]),
+  );
+  const currentIpsByDevice = new Map<string, string[]>();
+  for (const networkInterface of interfaces) {
+    const ip = addressByInterface.get(networkInterface.id);
+    if (!ip) continue;
+    const current = currentIpsByDevice.get(networkInterface.device_id) ?? [];
+    current.push(ip);
+    currentIpsByDevice.set(networkInterface.device_id, current);
+  }
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
@@ -283,11 +365,25 @@ export function InfrastructurePage() {
         <div>
           <h1 className="text-3xl font-semibold tracking-tight">Devices</h1>
           <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-            Browse device identity, interfaces, address history, and review work
-            in one focused inventory view.
+            See each device, the services running on it, and the latest useful
+            condition. Select a row when you need the record behind it.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <a
+            className="inline-flex min-h-9 items-center gap-2 rounded-lg border px-3 text-sm text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+            href="/networks"
+          >
+            <NetworkIcon aria-hidden="true" className="size-4" />
+            Networks
+          </a>
+          <a
+            className="inline-flex min-h-9 items-center gap-2 rounded-lg border px-3 text-sm text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+            href="/agents"
+          >
+            <ShieldCheckIcon aria-hidden="true" className="size-4" />
+            Agents
+          </a>
           <Button onClick={() => setDialog("create")}>
             <PlusIcon data-icon="inline-start" />
             Add device
@@ -295,152 +391,289 @@ export function InfrastructurePage() {
         </div>
       </div>
 
-      <div className="order-2 grid gap-4 sm:order-none sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard
-          icon={<ServerIcon />}
-          label="Devices"
-          value={devices.length}
-          detail="Device records"
-        />
-        <MetricCard
-          icon={<NetworkIcon />}
-          label="Current IPs"
-          value={currentAddresses}
-          detail="Current IP addresses"
-        />
-        <MetricCard
-          icon={<CircleAlertIcon />}
-          label="Stale devices"
-          value={staleDevices}
-          detail={staleDevices ? "Needs review" : "No stale devices"}
-        />
-        <MetricCard
-          icon={<ShieldCheckIcon />}
-          label="Review queue"
-          value={suggestions.length}
-          detail="Ambiguous identity matches"
-        />
-      </div>
-
-      <div className="order-1 grid gap-6 sm:order-none xl:grid-cols-[minmax(0,1fr)_25rem]">
-        <Card aria-busy={devicesQuery.isLoading}>
+      <div
+        className={
+          selectedId
+            ? "grid gap-6 lg:grid-cols-[minmax(18rem,0.8fr)_minmax(0,1.5fr)]"
+            : ""
+        }
+      >
+        <Card
+          aria-busy={devicesQuery.isLoading}
+          className={selectedId ? "max-lg:hidden" : undefined}
+        >
           <CardHeader className="border-b max-sm:grid-cols-1">
-            <CardTitle>Devices</CardTitle>
-            <CardDescription>{visibleDevices.length} shown</CardDescription>
+            <div>
+              <CardTitle>Device list</CardTitle>
+              <CardDescription>
+                {visibleDevices.length} of {devices.length} records
+              </CardDescription>
+            </div>
             <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-stretch">
               <div className="relative">
                 <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   aria-label="Search devices"
                   className="w-full pl-8 sm:w-56"
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search inventory"
+                  onChange={(event) => updateSearch(event.target.value)}
+                  placeholder="Search devices"
                   ref={searchInputRef}
                   value={search}
                 />
               </div>
             </CardAction>
           </CardHeader>
-          <CardContent>
+          <CardContent className="p-0">
             {devicesQuery.isLoading ? (
-              <TableSkeleton />
+              <div className="p-6">
+                <TableSkeleton />
+              </div>
             ) : devicesQuery.isError ? (
-              <LoadError
-                error={devicesQuery.error}
-                retry={() => devicesQuery.refetch()}
-                title="Devices unavailable"
-              />
+              <div className="p-6">
+                <LoadError
+                  error={devicesQuery.error}
+                  retry={() => devicesQuery.refetch()}
+                  title="Devices unavailable"
+                />
+              </div>
             ) : visibleDevices.length === 0 ? (
-              <NoDevices onCreate={() => setDialog("create")} />
+              <div className="p-6">
+                <NoDevices onCreate={() => setDialog("create")} />
+              </div>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead>State</TableHead>
-                    <TableHead className="text-right">Record</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {visibleDevices.map((device) => (
-                    <TableRow
-                      aria-selected={device.id === selectedId}
-                      className="cursor-pointer"
-                      data-state={
-                        device.id === selectedId ? "selected" : undefined
-                      }
-                      key={device.id}
-                      onClick={() => setRequestedDeviceId(device.id)}
-                    >
-                      <TableCell>
-                        <button
-                          aria-pressed={device.id === selectedId}
-                          className="flex min-w-0 w-full items-center gap-2 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-                          onClick={() => setRequestedDeviceId(device.id)}
-                          type="button"
-                        >
-                          <span className="grid size-7 place-items-center rounded-md bg-muted">
-                            <ServerIcon
-                              aria-hidden="true"
-                              className="size-3.5"
-                            />
+              <>
+                <div className="divide-y sm:hidden">
+                  {visibleDevices.map((device) => {
+                    const deviceServiceRows =
+                      deviceServices.get(device.id) ?? [];
+                    const checks = deviceServiceRows.flatMap(
+                      (service) => monitorsByService.get(service.id) ?? [],
+                    );
+                    const states = checks
+                      .map((monitor) => monitor.state)
+                      .filter(Boolean);
+                    const failing = states.filter((state) =>
+                      ["down", "degraded"].includes(state),
+                    ).length;
+                    return (
+                      <button
+                        aria-pressed={device.id === selectedId}
+                        className="flex min-h-20 w-full items-center justify-between gap-3 p-4 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"
+                        key={device.id}
+                        onClick={() => selectDevice(device.id)}
+                        type="button"
+                      >
+                        <span className="flex min-w-0 items-center gap-3">
+                          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
+                            <ServerIcon aria-hidden="true" className="size-4" />
                           </span>
-                          <div className="min-w-0">
-                            <p className="truncate font-medium">
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium">
                               {device.name || "Unnamed device"}
-                            </p>
-                            <p className="truncate font-mono text-xs text-muted-foreground">
-                              {shortId(device.id)}
-                            </p>
-                          </div>
-                        </button>
-                      </TableCell>
-                      <TableCell>{labelize(device.device_type)}</TableCell>
-                      <TableCell>
-                        <StatusBadge value={device.status} />
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                        v{device.version}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                            </span>
+                            <span className="block truncate text-xs text-muted-foreground">
+                              {currentIpsByDevice.get(device.id)?.[0] ??
+                                `Record updated ${formatRelative(device.updated_at)}`}
+                            </span>
+                            <span className="mt-1 block text-xs text-muted-foreground">
+                              {servicesQuery.isLoading ||
+                              monitorsQuery.isLoading
+                                ? "Loading checks…"
+                                : servicesQuery.isError || monitorsQuery.isError
+                                  ? "Condition unavailable"
+                                  : deviceServiceRows.length
+                                    ? `${failing ? `${failing} needs attention · ` : ""}${deviceServiceRows.length} service${deviceServiceRows.length === 1 ? "" : "s"}` +
+                                      (monitorsPossiblyTruncated
+                                        ? " · check list limited"
+                                        : "")
+                                    : "No service observations"}
+                            </span>
+                          </span>
+                        </span>
+                        <StatusBadge
+                          value={
+                            failing
+                              ? states.includes("down")
+                                ? "critical"
+                                : "warning"
+                              : device.status
+                          }
+                        />
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="hidden overflow-x-auto sm:block">
+                  <Table className="min-w-[42rem]">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Device</TableHead>
+                        <TableHead>Address / record</TableHead>
+                        <TableHead>Services</TableHead>
+                        <TableHead className="text-right">Condition</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {visibleDevices.map((device) => {
+                        const deviceServiceRows =
+                          deviceServices.get(device.id) ?? [];
+                        const checks = deviceServiceRows.flatMap(
+                          (service) => monitorsByService.get(service.id) ?? [],
+                        );
+                        const states = checks
+                          .map((monitor) => monitor.state)
+                          .filter(Boolean);
+                        const failing = states.filter((state) =>
+                          ["down", "degraded"].includes(state),
+                        ).length;
+                        return (
+                          <TableRow
+                            aria-selected={device.id === selectedId}
+                            className="cursor-pointer"
+                            data-state={
+                              device.id === selectedId ? "selected" : undefined
+                            }
+                            key={device.id}
+                            onClick={() => selectDevice(device.id)}
+                          >
+                            <TableCell>
+                              <button
+                                aria-label={`Open ${device.name || "unnamed device"}`}
+                                aria-pressed={device.id === selectedId}
+                                className="flex min-h-11 min-w-0 w-full items-center gap-3 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                                onClick={() => selectDevice(device.id)}
+                                type="button"
+                              >
+                                <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
+                                  <ServerIcon
+                                    aria-hidden="true"
+                                    className="size-4"
+                                  />
+                                </span>
+                                <span className="min-w-0">
+                                  <span className="block truncate font-medium">
+                                    {device.name || "Unnamed device"}
+                                  </span>
+                                  <span className="block truncate text-xs text-muted-foreground">
+                                    {labelize(device.device_type)}
+                                  </span>
+                                </span>
+                              </button>
+                            </TableCell>
+                            <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+                              {interfacesQuery.isLoading ||
+                              addressesQuery.isLoading
+                                ? "Loading address…"
+                                : (currentIpsByDevice.get(device.id)?.[0] ??
+                                  `Record updated ${formatRelative(device.updated_at)}`)}
+                            </TableCell>
+                            <TableCell>
+                              {servicesQuery.isLoading ||
+                              monitorsQuery.isLoading ? (
+                                <span className="text-sm text-muted-foreground">
+                                  Loading checks…
+                                </span>
+                              ) : servicesQuery.isError ||
+                                monitorsQuery.isError ? (
+                                <span className="text-sm text-muted-foreground">
+                                  Condition unavailable
+                                </span>
+                              ) : deviceServiceRows.length ? (
+                                <span className="text-sm">
+                                  {failing
+                                    ? `${failing} needs attention · `
+                                    : ""}
+                                  {deviceServiceRows.length} service
+                                  {deviceServiceRows.length === 1 ? "" : "s"}
+                                  {monitorsPossiblyTruncated
+                                    ? " · check list limited"
+                                    : ""}
+                                </span>
+                              ) : (
+                                <span className="text-sm text-muted-foreground">
+                                  No service observations
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <StatusBadge
+                                value={
+                                  failing
+                                    ? states.includes("down")
+                                      ? "critical"
+                                      : "warning"
+                                    : device.status
+                                }
+                              />
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
 
-        <DeviceDetail
-          addressError={addressesQuery.error}
-          addresses={addressesQuery.data?.items ?? EMPTY_ADDRESSES}
-          detail={detailQuery.data}
-          error={detailQuery.error}
-          loading={detailQuery.isLoading}
-          onEdit={() => setDialog("edit")}
-          onInstall={() => setDialog("agent-install")}
-          onMerge={() => setDialog("merge")}
-          onSplit={() => setDialog("split")}
-          onUndo={(id) => undoMutation.mutate(id)}
-          undoPending={undoMutation.isPending}
-        />
+        {selectedId ? (
+          <DeviceDetail
+            addressError={addressesQuery.error}
+            addresses={addressesQuery.data?.items ?? EMPTY_ADDRESSES}
+            detail={detailQuery.data}
+            error={detailQuery.error}
+            loading={detailQuery.isLoading}
+            monitors={monitors}
+            monitorsError={monitorsQuery.error}
+            monitorsLoading={monitorsQuery.isLoading}
+            monitorsPossiblyTruncated={monitorsPossiblyTruncated}
+            services={services}
+            servicesError={servicesQuery.error}
+            servicesLoading={servicesQuery.isLoading}
+            onBack={() => selectDevice(null)}
+            onEdit={() => setDialog("edit")}
+            onInstall={() => setDialog("agent-install")}
+            onMerge={() => setDialog("merge")}
+            onSplit={() => setDialog("split")}
+            onUndo={(id) => undoMutation.mutate(id)}
+            undoPending={undoMutation.isPending}
+          />
+        ) : null}
       </div>
 
-      <ReviewQueue
-        devices={devices}
-        error={suggestionsQuery.error}
-        loading={suggestionsQuery.isLoading}
-        pendingId={
-          resolveSuggestionMutation.isPending
-            ? resolveSuggestionMutation.variables?.id
-            : null
-        }
-        mutationError={resolveSuggestionMutation.error}
-        resolve={(id, decision) =>
-          resolveSuggestionMutation.mutate({ id, decision })
-        }
-        suggestions={suggestions}
-      />
+      <details className="rounded-xl border bg-card">
+        <summary className="cursor-pointer list-none px-5 py-4 outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+          <span className="flex items-center justify-between gap-3">
+            <span>
+              <span className="block font-medium">Identity review</span>
+              <span className="block text-sm text-muted-foreground">
+                Resolve ambiguous matches when you are ready.
+              </span>
+            </span>
+            <Badge variant={suggestions.length ? "outline" : "secondary"}>
+              {suggestions.length} pending
+            </Badge>
+          </span>
+        </summary>
+        <div className="border-t p-4 sm:p-5">
+          <ReviewQueue
+            devices={devices}
+            error={suggestionsQuery.error}
+            loading={suggestionsQuery.isLoading}
+            pendingId={
+              resolveSuggestionMutation.isPending
+                ? resolveSuggestionMutation.variables?.id
+                : null
+            }
+            mutationError={resolveSuggestionMutation.error}
+            resolve={(id, decision) =>
+              resolveSuggestionMutation.mutate({ id, decision })
+            }
+            suggestions={suggestions}
+          />
+        </div>
+      </details>
 
       <CreateDeviceDialog
         error={createMutation.error}
@@ -510,40 +743,20 @@ export function InfrastructurePage() {
   );
 }
 
-function MetricCard({
-  icon,
-  label,
-  value,
-  detail,
-}: {
-  icon: ReactNode;
-  label: string;
-  value: number;
-  detail: string;
-}) {
-  return (
-    <Card size="sm">
-      <CardContent className="flex items-center gap-3">
-        <span className="grid size-9 place-items-center rounded-lg bg-muted text-muted-foreground">
-          {icon}
-        </span>
-        <div>
-          <p className="text-xs text-muted-foreground">{label}</p>
-          <p className="text-2xl font-semibold tracking-tight">{value}</p>
-          <p className="text-xs text-muted-foreground">{detail}</p>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function StatusBadge({ value }: { value: string }) {
   const variant =
-    value === "critical"
-      ? "destructive"
-      : value === "stale" || value === "warning"
-        ? "outline"
-        : "secondary";
+    value === "critical" || value === "down"
+      ? "critical"
+      : value === "stale" || value === "warning" || value === "degraded"
+        ? "attention"
+        : value === "up" ||
+            value === "active" ||
+            value === "healthy" ||
+            value === "recovered"
+          ? "healthy"
+          : value === "discovered"
+            ? "info"
+            : "neutral";
   return <Badge variant={variant}>{labelize(value)}</Badge>;
 }
 
@@ -649,6 +862,14 @@ function DeviceDetail({
   detail,
   loading,
   error,
+  monitors,
+  monitorsError,
+  monitorsLoading,
+  monitorsPossiblyTruncated,
+  services,
+  servicesError,
+  servicesLoading,
+  onBack,
   onEdit,
   onInstall,
   onMerge,
@@ -661,6 +882,14 @@ function DeviceDetail({
   detail: DeviceDetail | undefined;
   loading: boolean;
   error: unknown;
+  monitors: Monitor[];
+  monitorsError: unknown;
+  monitorsLoading: boolean;
+  monitorsPossiblyTruncated: boolean;
+  services: Service[];
+  servicesError: unknown;
+  servicesLoading: boolean;
+  onBack: () => void;
   onEdit: () => void;
   onInstall: () => void;
   onMerge: () => void;
@@ -668,6 +897,9 @@ function DeviceDetail({
   onUndo: (id: string) => void;
   undoPending: boolean;
 }) {
+  const [tab, setTab] = useState<"overview" | "activity" | "details">(
+    "overview",
+  );
   if (loading)
     return (
       <Card>
@@ -686,153 +918,361 @@ function DeviceDetail({
         </CardContent>
       </Card>
     );
-  if (!detail)
-    return (
-      <Card>
-        <CardContent>
-          <Empty>
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <ServerIcon />
-              </EmptyMedia>
-              <EmptyTitle>Select a device</EmptyTitle>
-              <EmptyDescription>
-                View identity, interfaces, addresses, and evidence.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        </CardContent>
-      </Card>
-    );
+  if (!detail) return null;
   const merged = detail.merged_member_ids.filter((id) => id !== detail.id);
+  const deviceServices = services.filter(
+    (service) =>
+      service.owner_kind === "device" && service.owner_id === detail.id,
+  );
+  const serviceMonitors = monitors.filter((monitor) =>
+    deviceServices.some((service) => service.id === monitor.service_id),
+  );
+  const currentAddresses = detail.interfaces.flatMap((networkInterface) =>
+    addresses.filter(
+      (address) =>
+        address.interface_id === networkInterface.id && address.is_current,
+    ),
+  );
+  const currentCondition = serviceMonitors.some(
+    (monitor) => monitor.state === "down",
+  )
+    ? "critical"
+    : serviceMonitors.some((monitor) =>
+          ["degraded", "stale"].includes(monitor.state),
+        )
+      ? "warning"
+      : detail.status;
+
   return (
-    <Card>
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader className="border-b">
-        <div>
-          <CardTitle>{detail.name || "Unnamed device"}</CardTitle>
-          <CardDescription>
-            {labelize(detail.device_type)} ·{" "}
-            <span className="font-mono">{shortId(detail.id)}</span>
+        <div className="min-w-0">
+          <button
+            className="mb-2 inline-flex min-h-9 items-center rounded-lg px-2 text-sm text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 lg:hidden"
+            onClick={onBack}
+            type="button"
+          >
+            ← Devices
+          </button>
+          <CardTitle className="truncate">
+            {detail.name || "Unnamed device"}
+          </CardTitle>
+          <CardDescription className="flex flex-wrap gap-x-2">
+            <span>{labelize(detail.device_type)}</span>
+            {currentAddresses[0] ? (
+              <span className="font-mono">{currentAddresses[0].ip}</span>
+            ) : null}
+            <span>Record updated {formatRelative(detail.updated_at)}</span>
           </CardDescription>
         </div>
         <CardAction>
-          <StatusBadge value={detail.status} />
+          <StatusBadge value={currentCondition} />
         </CardAction>
       </CardHeader>
-      <CardContent className="flex flex-col gap-5">
-        <div className="flex flex-wrap gap-2">
+      <CardContent className="p-0">
+        <div className="flex flex-wrap gap-2 border-b px-5 py-3">
           <Button onClick={onEdit} size="sm" variant="outline">
             <PencilIcon data-icon="inline-start" />
             Edit
           </Button>
-          <Button onClick={onInstall} size="sm" variant="outline">
-            <ShieldCheckIcon data-icon="inline-start" />
-            Deploy agent
-          </Button>
-          <Button onClick={onMerge} size="sm" variant="outline">
-            <GitMergeIcon data-icon="inline-start" />
-            Merge
-          </Button>
-          <Button onClick={onSplit} size="sm" variant="outline">
-            <GitBranchIcon data-icon="inline-start" />
-            Split
-          </Button>
-          <DeviceFullScan key={detail.id} device={detail} />
+          <details className="relative">
+            <summary className="inline-flex min-h-9 cursor-pointer list-none items-center rounded-lg border px-3 text-sm outline-none transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50">
+              More actions
+            </summary>
+            <div className="absolute top-11 left-0 z-10 grid min-w-48 gap-1 rounded-lg border bg-popover p-1 shadow-lg">
+              <Button
+                className="justify-start"
+                onClick={onInstall}
+                size="sm"
+                variant="ghost"
+              >
+                <ShieldCheckIcon data-icon="inline-start" />
+                Deploy agent
+              </Button>
+              <DeviceFullScan key={detail.id} device={detail} />
+            </div>
+          </details>
         </div>
-        <section>
-          <h3 className="text-sm font-medium">Identity confidence</h3>
-          <ConfidenceMeter value={detail.identity_confidence} />
-          <p className="mt-2 text-xs leading-5 text-muted-foreground">
-            Manual facts outrank automatic evidence. Scores are calculated when
-            this record is read.
-          </p>
-        </section>
-        <section>
-          <h3 className="mb-2 text-sm font-medium">Interfaces & IP history</h3>
-          {addressError ? (
-            <div className="mb-3">
-              <LoadError
-                error={addressError}
-                title="Address history unavailable"
-              />
-            </div>
-          ) : null}
-          {detail.interfaces.length ? (
-            <div className="flex flex-col gap-2">
-              {detail.interfaces.map((networkInterface) => (
-                <InterfaceCard
-                  addresses={addresses.filter(
-                    (address) => address.interface_id === networkInterface.id,
-                  )}
-                  description={networkInterface.description}
-                  id={networkInterface.id}
-                  key={networkInterface.id}
-                  mac={networkInterface.mac}
+        <Tabs
+          onValueChange={(value) => setTab(value as typeof tab)}
+          value={tab}
+        >
+          <div className="border-b px-5 pt-2">
+            <TabsList aria-label="Device details" variant="line">
+              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="activity">Activity</TabsTrigger>
+              <TabsTrigger value="details">Details</TabsTrigger>
+            </TabsList>
+          </div>
+          <TabsContent className="m-0 space-y-5 p-5" value="overview">
+            {currentCondition === "critical" ||
+            currentCondition === "warning" ? (
+              <section className="rounded-lg border border-status-critical-border bg-status-critical-bg/40 p-4">
+                <p className="font-medium">A service needs attention</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {serviceMonitors
+                    .filter((monitor) =>
+                      ["down", "degraded", "stale"].includes(monitor.state),
+                    )
+                    .map(
+                      (monitor) =>
+                        monitor.service_name ||
+                        monitor.service_product ||
+                        `Service ${shortId(monitor.service_id)}`,
+                    )
+                    .join(", ") || "The latest device condition needs review."}
+                </p>
+              </section>
+            ) : null}
+            <section>
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-medium">Services</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Checks and observations attached to this device.
+                  </p>
+                </div>
+                <Badge variant="secondary">{deviceServices.length}</Badge>
+              </div>
+              {servicesLoading ? (
+                <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                  Loading service inventory…
+                </p>
+              ) : servicesError ? (
+                <LoadError
+                  error={servicesError}
+                  title="Service inventory unavailable"
                 />
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              No interfaces attached.
-            </p>
-          )}
-        </section>
-        <section>
-          <h3 className="mb-2 text-sm font-medium">Evidence</h3>
-          {detail.evidence.length ? (
-            <div className="flex flex-col divide-y">
-              {detail.evidence.slice(0, 6).map((evidence) => (
-                <div
-                  className="flex items-start justify-between gap-3 py-2"
-                  key={evidence.id}
-                >
-                  <div className="min-w-0">
-                    <p className="font-medium">
-                      {labelize(evidence.attribute)}
-                    </p>
-                    <p className="break-words text-sm leading-5 text-muted-foreground">
-                      {formatEvidenceValue(evidence.value)}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-right text-xs">
-                    <p>{Math.round(evidence.confidence * 100)}%</p>
-                    <p className="text-muted-foreground">
-                      {labelize(evidence.source_type)}
-                    </p>
-                  </div>
+              ) : deviceServices.length ? (
+                <div className="divide-y rounded-lg border">
+                  {deviceServices.map((service) => {
+                    const checks = serviceMonitors.filter(
+                      (monitor) => monitor.service_id === service.id,
+                    );
+                    return (
+                      <div
+                        className="flex flex-wrap items-center justify-between gap-3 p-3"
+                        key={service.id}
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">
+                            {service.name ||
+                              service.product ||
+                              "Unnamed service"}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            {[service.protocol, service.product_version]
+                              .filter(Boolean)
+                              .join(" · ") || "Observed service"}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          {monitorsLoading ? (
+                            <Badge variant="secondary">Loading checks…</Badge>
+                          ) : monitorsError ? (
+                            <Badge variant="secondary">
+                              Check data unavailable
+                            </Badge>
+                          ) : checks.length ? (
+                            checks.map((monitor) => (
+                              <a
+                                className="rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                                href={`/monitoring?monitor=${encodeURIComponent(monitor.id)}`}
+                                key={monitor.id}
+                              >
+                                <StatusBadge value={monitor.state} />
+                              </a>
+                            ))
+                          ) : monitorsPossiblyTruncated ? (
+                            <Badge variant="secondary">
+                              Check list limited
+                            </Badge>
+                          ) : (
+                            <Badge variant="secondary">No active check</Badge>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              No evidence collected.
-            </p>
-          )}
-        </section>
-        {merged.length ? (
-          <section>
-            <h3 className="mb-2 text-sm font-medium">Merged records</h3>
-            <div className="flex flex-col gap-2">
-              {merged.map((id) => (
-                <div
-                  className="flex items-center justify-between rounded-lg border p-2"
-                  key={id}
-                >
-                  <span className="font-mono text-xs">{shortId(id)}</span>
-                  <Button
-                    disabled={undoPending}
-                    onClick={() => onUndo(id)}
-                    size="sm"
-                    variant="ghost"
+              ) : (
+                <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                  No service observations are associated with this device yet.
+                </p>
+              )}
+            </section>
+          </TabsContent>
+          <TabsContent className="m-0 space-y-4 p-5" value="activity">
+            <section>
+              <h3 className="font-medium">Recent service activity</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Results are scoped to checks Hope knows about for this device.
+              </p>
+            </section>
+            {servicesError ? (
+              <LoadError
+                error={servicesError}
+                title="Service inventory unavailable"
+              />
+            ) : monitorsLoading ? (
+              <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                Loading monitor activity…
+              </p>
+            ) : monitorsError ? (
+              <LoadError
+                error={monitorsError}
+                title="Monitor activity unavailable"
+              />
+            ) : monitorsPossiblyTruncated && !serviceMonitors.length ? (
+              <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                The check list is limited to the latest 100 checks. Open
+                Monitoring to search the wider estate.
+              </p>
+            ) : serviceMonitors.length ? (
+              <div className="divide-y rounded-lg border">
+                {serviceMonitors.map((monitor) => (
+                  <div
+                    className="flex flex-wrap items-center justify-between gap-3 p-3"
+                    key={monitor.id}
                   >
-                    <Undo2Icon data-icon="inline-start" />
-                    Restore
-                  </Button>
+                    <div>
+                      <p className="font-medium">
+                        {monitor.service_name ||
+                          monitor.service_product ||
+                          `Service ${shortId(monitor.service_id)}`}
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Last result {formatRelative(monitor.last_result_at)} ·{" "}
+                        {labelize(monitor.monitor_type)}
+                      </p>
+                    </div>
+                    <a
+                      className="rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                      href={`/monitoring?monitor=${encodeURIComponent(monitor.id)}`}
+                    >
+                      <StatusBadge value={monitor.state} />
+                    </a>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                No monitor results are available for this device.
+              </p>
+            )}
+          </TabsContent>
+          <TabsContent className="m-0 space-y-5 p-5" value="details">
+            <section>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-medium">Identity history</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Evidence explains why this record represents this device.
+                  </p>
                 </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
+                <Badge variant="outline">
+                  {Math.round(detail.identity_confidence * 100)}% confidence
+                </Badge>
+              </div>
+              <div className="mt-3">
+                <ConfidenceMeter value={detail.identity_confidence} />
+              </div>
+              {detail.evidence.length ? (
+                <div className="mt-3 divide-y rounded-lg border">
+                  {detail.evidence.slice(0, 8).map((evidence) => (
+                    <div
+                      className="flex items-start justify-between gap-3 p-3"
+                      key={evidence.id}
+                    >
+                      <div className="min-w-0">
+                        <p className="font-medium">
+                          {labelize(evidence.attribute)}
+                        </p>
+                        <p className="break-words text-sm text-muted-foreground">
+                          {formatEvidenceValue(evidence.value)}
+                        </p>
+                      </div>
+                      <span className="shrink-0 text-right text-xs text-muted-foreground">
+                        {Math.round(evidence.confidence * 100)}% ·{" "}
+                        {labelize(evidence.source_type)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                  No evidence collected.
+                </p>
+              )}
+            </section>
+            <section>
+              <h3 className="mb-3 font-medium">Network interfaces</h3>
+              {addressError ? (
+                <LoadError
+                  error={addressError}
+                  title="Address history unavailable"
+                />
+              ) : null}
+              {detail.interfaces.length ? (
+                <div className="flex flex-col gap-2">
+                  {detail.interfaces.map((networkInterface) => (
+                    <InterfaceCard
+                      addresses={addresses.filter(
+                        (address) =>
+                          address.interface_id === networkInterface.id,
+                      )}
+                      description={networkInterface.description}
+                      id={networkInterface.id}
+                      key={networkInterface.id}
+                      mac={networkInterface.mac}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                  No interfaces attached.
+                </p>
+              )}
+            </section>
+            <section>
+              <h3 className="mb-3 font-medium">Record actions</h3>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={onMerge} size="sm" variant="outline">
+                  <GitMergeIcon data-icon="inline-start" />
+                  Merge record
+                </Button>
+                <Button onClick={onSplit} size="sm" variant="outline">
+                  <GitBranchIcon data-icon="inline-start" />
+                  Split interfaces
+                </Button>
+              </div>
+              {merged.length ? (
+                <div className="mt-3 divide-y rounded-lg border">
+                  {merged.map((id) => (
+                    <div
+                      className="flex items-center justify-between gap-3 p-3"
+                      key={id}
+                    >
+                      <span className="text-sm">
+                        Merged record{" "}
+                        <span className="font-mono">{shortId(id)}</span>
+                      </span>
+                      <Button
+                        disabled={undoPending}
+                        onClick={() => onUndo(id)}
+                        size="sm"
+                        variant="ghost"
+                      >
+                        <Undo2Icon data-icon="inline-start" />
+                        Restore
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+          </TabsContent>
+        </Tabs>
       </CardContent>
     </Card>
   );
