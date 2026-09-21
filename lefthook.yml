@@ -9,6 +9,8 @@ pre-commit:
       run: cargo clippy --workspace --all-targets -- -D warnings
     web-lint:
       run: pnpm -C apps/web lint
+    proxmox-helper:
+      run: bash scripts/test-proxmox-helper.sh
 
 pre-push:
   parallel: false
