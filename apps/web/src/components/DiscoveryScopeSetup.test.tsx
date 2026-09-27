@@ -171,6 +171,78 @@ describe("ScanLaunch", () => {
 });
 
 describe("DiscoveryScopeSetup", () => {
+  it("shows a newly launched scan instead of cached failed history", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+    const failed = makeRun("failed");
+    const pending = makeRun("pending", { id: "run-2", job_id: "job-2" });
+    const scope = {
+      network_id: network.id,
+      excluded_cidrs: [],
+      scan_profile: "normal",
+      target_count: 2,
+      confirmed_target_count: 2,
+      confirmed_at: "2026-09-19T10:00:00Z",
+      enabled: true,
+      version: 1,
+    };
+    let launched = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        if (path.endsWith("/discovery-state")) {
+          return Promise.resolve(jsonResponse({ scope, scan_run: failed }));
+        }
+        if (path.endsWith("/networks/network-1/scans")) {
+          if (init?.method === "POST") {
+            launched = true;
+            return Promise.resolve(jsonResponse(pending));
+          }
+          // Hold the refresh so the launch response must update the visible job.
+          if (launched) return new Promise<Response>(() => {});
+          return Promise.resolve(
+            jsonResponse({ items: [failed], active_scan: null }),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(path.endsWith("/run-2") ? pending : failed),
+        );
+      }),
+    );
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DiscoveryScopeSetup
+          error={null}
+          loading={false}
+          networks={[network]}
+        />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Standard scan failed")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Scan standard ports" }),
+    );
+
+    expect(await screen.findByText("Standard scan queued")).toBeInTheDocument();
+    expect(screen.queryByText("Standard scan failed")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Scan standard ports" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Cancel scan" }),
+    ).toBeInTheDocument();
+    expect(
+      queryClient.getQueryState(["network-scans", network.id])?.fetchStatus,
+    ).toBe("fetching");
+    queryClient.clear();
+  });
+
   it("restores a confirmed scope and active scan from the server", async () => {
     const queryClient = new QueryClient({
       defaultOptions: {
@@ -225,6 +297,8 @@ describe("DiscoveryScopeSetup", () => {
     const optionsSummary = screen.getByText("Scan options").parentElement;
     expect(optionsSummary).toHaveTextContent("Low impact");
     expect(optionsSummary).toHaveTextContent("1 exclusion");
+    expect(optionsSummary?.closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(optionsSummary!);
     expect(screen.getByRole("combobox")).toHaveTextContent("low_impact");
     expect(
       screen.queryByRole("button", { name: "Scan standard ports" }),

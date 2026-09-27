@@ -21,6 +21,7 @@ import {
   launchNetworkScan,
   type DiscoveryScope,
   type Network,
+  type NetworkScansResponse,
   type ScanRun,
 } from "@/lib/api";
 import { isValidCidr } from "@/lib/network-validation";
@@ -98,6 +99,7 @@ export function DiscoveryScopeSetup({
   onDeleteNetwork?: (network: Network) => void;
   onEditNetwork?: (network: Network) => void;
 }) {
+  const queryClient = useQueryClient();
   const [selectedNetworkId, setSelectedNetworkId] = useState<string | null>(
     null,
   );
@@ -199,6 +201,16 @@ export function DiscoveryScopeSetup({
       }),
     onSuccess: (scanRun, variables) => {
       launchKeysByNetwork.current.delete(variables.networkId);
+      const scansKey = ["network-scans", variables.networkId];
+      queryClient.setQueryData<NetworkScansResponse>(scansKey, (current) => ({
+        ...current,
+        active_scan: isActiveScanRun(scanRun.status) ? scanRun : null,
+        items: [
+          scanRun,
+          ...(current?.items ?? []).filter((run) => run.id !== scanRun.id),
+        ],
+      }));
+      void queryClient.invalidateQueries({ queryKey: scansKey });
       setScopeStates((current) => {
         return {
           ...current,
@@ -347,7 +359,7 @@ export function DiscoveryScopeSetup({
           <ScopeError error={actionError} />
         </CardContent>
       ) : null}
-      <CardContent className="grid gap-6 pt-5 lg:grid-cols-[minmax(13rem,0.8fr)_minmax(0,1.2fr)]">
+      <CardContent className="grid grid-cols-1 gap-6 pt-5 lg:grid-cols-[minmax(13rem,0.8fr)_minmax(0,1.2fr)]">
         {networks.length === 0 ? (
           <div className="lg:col-span-2">
             <Empty>
@@ -589,7 +601,18 @@ function ScopeForm({
         <Badge variant={confirmed ? "secondary" : "outline"}>{status}</Badge>
       </div>
 
-      <details className="rounded-lg border" open={scope !== null}>
+      {confirmed ? (
+        <ScanLaunch
+          error={scanError}
+          network={network}
+          onLaunch={onLaunch}
+          pending={scanPending}
+          run={scanRun}
+          history={scanHistory}
+        />
+      ) : null}
+
+      <details className="rounded-lg border" open={!confirmed}>
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
           <span className="font-medium">Scan options</span>
           <span className="text-right text-sm text-muted-foreground">
@@ -689,22 +712,6 @@ function ScopeForm({
           </Button>
         </div>
       ) : null}
-      {confirmed ? (
-        <>
-          <p className="flex items-center gap-2 text-sm text-muted-foreground">
-            <CheckIcon className="text-primary" />
-            Discovery scope confirmed.
-          </p>
-          <ScanLaunch
-            error={scanError}
-            network={network}
-            onLaunch={onLaunch}
-            pending={scanPending}
-            run={scanRun}
-            history={scanHistory}
-          />
-        </>
-      ) : null}
     </form>
   );
 }
@@ -777,8 +784,6 @@ export function ScanLaunch({
       ) : null}
       {error ? <ScanLaunchError error={error} /> : null}
       {currentRun ? <ScanRunStatus run={currentRun} /> : null}
-      {currentRun?.job ? <ScanJobDetails run={currentRun} /> : null}
-      {history.length > 1 ? <ScanHistory history={history} /> : null}
       {canCancel ? (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-muted-foreground">
@@ -807,6 +812,8 @@ export function ScanLaunch({
           </Button>
         </div>
       ) : null}
+      {currentRun?.job ? <ScanJobDetails run={currentRun} /> : null}
+      {history.length > 1 ? <ScanHistory history={history} /> : null}
       {cancelMutation.error ? (
         <Alert variant="destructive">
           <CircleAlertIcon />

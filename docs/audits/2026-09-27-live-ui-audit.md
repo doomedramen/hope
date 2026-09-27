@@ -86,3 +86,13 @@ The empty journal output did not mean the agent was absent: subsequent process/s
 A local HTTP probe demonstrated that M2 stores an empty `Server` header, but M3 rejects it with `header_value is invalid: must not be empty`. M3 now ignores empty header values when adapting stored M2 evidence, preserving other signals and the existing input bounds. This also handles previously persisted evidence without rewriting it. Scanner-to-fingerprinting and domain tests cover the case.
 
 The fingerprinting error now includes the specific validation failure instead of only the outer context. The production scan's exact rejected field remains unverified; the empty-header mismatch is a reproduced defect, not proof that every observed scan failure has this cause. Run a fresh standard scan after deployment and inspect the more specific error if it still fails. Historical failed runs will remain failed.
+
+## Verification after the server update
+
+Both previously missing host inventories were accepted after deployment. Each host now has an associated device and service records; the inspected host also shows interfaces, filesystems, processes, sockets, and a confirmed identity link. The initially replayed snapshots were approximately two hours old, so the delayed-inventory warning correctly remains visible. Fresh collection and Proxmox guest discovery are separate checks and were not established by replay alone.
+
+A standard scan was launched against the existing confirmed network scope. The new job is progressing, but completion has not yet been verified. Launching it exposed another client defect: cached failed scan history took precedence over the successful launch response, leaving the old failure visible and the launch button enabled until a page refresh. The launch handler now updates and refreshes the network scan cache immediately. A regression test reproduces the stale failure before the fix and verifies the queued state, disabled launch action, cancellation action, and history refresh afterward.
+
+The scan component now puts current progress and cancellation before options and history, collapses options for confirmed scope, and constrains the mobile grid so long network names do not clip its contents. Synthetic desktop and mobile component previews were inspected at 1440 × 1000 and 390 × 844. The full production page still has repeated headings and introductory content that should be reduced in a broader layout pass.
+
+Additional live observations remain open: one recovered device chooses a Docker bridge address as its primary address, and a former address-only record remains without an address. No identity merges or record deletions were performed.
