@@ -98,3 +98,9 @@ A standard scan was launched against the existing confirmed network scope. The n
 The scan component now puts current progress and cancellation before options and history, collapses options for confirmed scope, and constrains the mobile grid so long network names do not clip its contents. Synthetic desktop and mobile component previews were inspected at 1440 × 1000 and 390 × 844. The full production page still has repeated headings and introductory content that should be reduced in a broader layout pass.
 
 Additional live observations remain open: one recovered device chooses a Docker bridge address as its primary address, and a former address-only record remains without an address. No identity merges or record deletions were performed.
+
+### Primary LAN address correction
+
+After host installation was repaired, fresh network inventory exposed IPv6 loopback as the device detail header's primary address. The device list already ranked LAN interfaces before container bridges, but the detail header simply used the first current address in interface order. Both views now use the same ranking and exclude loopback and unspecified addresses from the primary-address candidates. Proxmox `vmbr` interfaces remain eligible as LAN interfaces; IPv4 is preferred within each interface category, while IPv6-only hosts retain their usable IPv6 address. Interface details retain the complete inventory.
+
+Regression tests reproduced the header choosing `::1` over LAN IPv4 and IPv6. They now pass, including a loopback-only host, expanded IPv6 and IPv4-mapped loopback, Docker bridge competition, and historical addresses. The header also shows explicit loading, unavailable, and missing-address states. Synthetic device-page checks at 1440 × 1000 and 390 × 844 verified the address in the first viewport, long hostnames, and error/empty states. Production verification requires deploying this client change; the unrelated address-only orphan record remains open.

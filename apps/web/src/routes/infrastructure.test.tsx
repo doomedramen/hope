@@ -128,6 +128,102 @@ afterEach(() => {
   window.history.replaceState({}, "", "/");
 });
 
+describe("Device primary address", () => {
+  it.each([
+    { lan: "192.168.1.20/24", expected: "192.168.1.20", name: "vmbr0" },
+    { lan: "fd12:3456::20/64", expected: "fd12:3456::20", name: "eth0" },
+    { lan: null, expected: "No address reported", name: "eth0" },
+  ])(
+    "uses $expected consistently in list and detail",
+    async ({ lan, expected, name }) => {
+      const device = detail(
+        "device-1",
+        "Proxmox host with a long descriptive name",
+      );
+      device.interfaces = ["lo", "docker0", name].map((description, index) => ({
+        id: `interface-${index}`,
+        device_id: device.id,
+        description,
+        mac: null,
+        first_seen: device.created_at,
+        last_seen: device.updated_at,
+        version: 1,
+        created_at: device.created_at,
+        updated_at: device.updated_at,
+      }));
+      const addresses = [
+        { interface_id: "interface-0", ip: "::1/128", is_current: true },
+        {
+          interface_id: "interface-0",
+          ip: "0:0:0:0:0:0:0:1/128",
+          is_current: true,
+        },
+        {
+          interface_id: "interface-0",
+          ip: "::ffff:127.0.0.1",
+          is_current: true,
+        },
+        { interface_id: "interface-0", ip: "::/128", is_current: true },
+        { interface_id: "interface-0", ip: "0.0.0.0", is_current: true },
+        { interface_id: "interface-0", ip: "127.0.0.1/8", is_current: true },
+        {
+          interface_id: "interface-2",
+          ip: "192.168.1.10/24",
+          is_current: false,
+        },
+        ...(lan
+          ? [
+              {
+                interface_id: "interface-1",
+                ip: "172.17.0.1/16",
+                is_current: true,
+              },
+              {
+                interface_id: "interface-2",
+                ip: "fe80::20/64",
+                is_current: true,
+              },
+              { interface_id: "interface-2", ip: lan, is_current: true },
+            ]
+          : []),
+      ];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((input: RequestInfo | URL) => {
+          const path = String(input);
+          if (path.endsWith("/full-scan"))
+            return Promise.resolve(jsonResponse(null));
+          if (path === "/api/v1/devices/device-1")
+            return Promise.resolve(jsonResponse(device));
+          const items = path.startsWith("/api/v1/devices?")
+            ? [device]
+            : path.startsWith("/api/v1/interfaces?")
+              ? device.interfaces
+              : path.startsWith("/api/v1/addresses?")
+                ? addresses
+                : [];
+          return Promise.resolve(jsonResponse({ items, next_cursor: null }));
+        }),
+      );
+      renderInfrastructurePage();
+      await waitFor(() =>
+        expect(screen.getAllByText(expected)).toHaveLength(2),
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: `Open ${device.name}` }),
+      );
+      const heading = await screen.findByRole("heading", {
+        name: device.name!,
+      });
+      const header = heading.closest('[data-slot="card-header"]');
+      await waitFor(() => expect(header).toHaveTextContent(expected));
+      expect(header).not.toHaveTextContent("::1");
+      expect(header).not.toHaveTextContent("127.0.0.1");
+      expect(header).not.toHaveTextContent("172.17.0.1");
+    },
+  );
+});
+
 describe("EditDeviceDialog", () => {
   it("refreshes fields when selected device changes", () => {
     const first = detail("device-1", "QA VM device");

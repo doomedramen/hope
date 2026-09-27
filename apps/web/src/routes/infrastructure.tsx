@@ -414,14 +414,10 @@ export function InfrastructurePage() {
   }
   const interfacesById = new Map(interfaces.map((item) => [item.id, item]));
   const currentIpsByDevice = new Map<string, string[]>();
-  const currentAddresses = (addressesQuery.data?.items ?? [])
-    .filter((address) => address.is_current)
-    .toSorted(
-      (a, b) =>
-        addressPriority(a, interfacesById) -
-          addressPriority(b, interfacesById) ||
-        a.ip.localeCompare(b.ip, undefined, { numeric: true }),
-    );
+  const currentAddresses = primaryAddressCandidates(
+    addressesQuery.data?.items ?? [],
+    interfacesById,
+  );
   for (const address of currentAddresses) {
     const networkInterface = interfacesById.get(address.interface_id);
     if (!networkInterface) continue;
@@ -755,6 +751,7 @@ export function InfrastructurePage() {
         {selectedId ? (
           <DeviceDetail
             addressError={addressesQuery.error}
+            addressesLoading={addressesQuery.isLoading}
             addresses={addressesQuery.data?.items ?? EMPTY_ADDRESSES}
             detail={detailQuery.data}
             error={detailQuery.error}
@@ -908,14 +905,43 @@ function deviceDisplayName(device: Device): string {
   );
 }
 
-// Prefer a host's LAN address over container bridges, link-local addresses,
-// and loopback. Keep every current address available for the detail view.
+// Both the list and detail header use the same candidates. Loopback and
+// unspecified addresses remain in interface inventory, never as host addresses.
+function primaryAddressCandidates(
+  addresses: Address[],
+  interfaces: Map<string, InventoryInterface>,
+): Address[] {
+  return addresses
+    .filter(
+      (address) =>
+        address.is_current &&
+        interfaces.has(address.interface_id) &&
+        addressPriority(address, interfaces) < 100,
+    )
+    .toSorted(
+      (a, b) =>
+        addressPriority(a, interfaces) - addressPriority(b, interfaces) ||
+        a.ip.localeCompare(b.ip, undefined, { numeric: true }),
+    );
+}
+
+// Prefer LAN interfaces (including Proxmox vmbr bridges) over container
+// bridges, then link-local addresses. Prefer IPv4 within each category.
 function addressPriority(
   address: Address,
   interfaces: Map<string, InventoryInterface>,
 ): number {
-  const ip = address.ip.split("/")[0].toLowerCase();
+  let ip = address.ip.split("/")[0].toLowerCase();
+  // Canonicalize expanded IPv6 loopback/unspecified and mapped IPv4 forms.
+  if (ip.includes(":")) {
+    try {
+      ip = new URL(`http://[${ip}]/`).hostname.slice(1, -1);
+    } catch {
+      return 100;
+    }
+  }
   if (/^(127\.|0\.|::1$|::$)/.test(ip)) return 100;
+  if (/^::ffff:(7f[0-9a-f]{2}:|0:)/.test(ip)) return 100;
   if (/^(169\.254\.|fe[89ab])/.test(ip)) return 90;
   const name = interfaces.get(address.interface_id)?.description ?? "";
   const virtual = /^(docker|veth|br-|virbr|cni|flannel|podman)/i.test(name);
@@ -1189,6 +1215,7 @@ function BackToDevices({ onBack }: { onBack: () => void }) {
 
 function DeviceDetail({
   addressError,
+  addressesLoading,
   addresses,
   detail,
   loading,
@@ -1209,6 +1236,7 @@ function DeviceDetail({
   undoPending,
 }: {
   addressError: unknown;
+  addressesLoading: boolean;
   addresses: Address[];
   detail: DeviceDetail | undefined;
   loading: boolean;
@@ -1260,11 +1288,9 @@ function DeviceDetail({
   const serviceMonitors = monitors.filter((monitor) =>
     deviceServices.some((service) => service.id === monitor.service_id),
   );
-  const currentAddresses = detail.interfaces.flatMap((networkInterface) =>
-    addresses.filter(
-      (address) =>
-        address.interface_id === networkInterface.id && address.is_current,
-    ),
+  const currentAddresses = primaryAddressCandidates(
+    addresses,
+    new Map(detail.interfaces.map((item) => [item.id, item])),
   );
   const currentCondition = aggregateCondition(
     detail,
@@ -1282,9 +1308,14 @@ function DeviceDetail({
           </CardTitle>
           <CardDescription className="flex flex-wrap gap-x-2">
             <span>{labelize(detail.device_type)}</span>
-            {currentAddresses[0] ? (
-              <span className="font-mono">{currentAddresses[0].ip}</span>
-            ) : null}
+            <span className="font-mono">
+              {addressesLoading
+                ? "Loading address…"
+                : addressError
+                  ? "Address unavailable"
+                  : (currentAddresses[0]?.ip.split("/")[0] ??
+                    "No address reported")}
+            </span>
             <span>Record updated {formatRelative(detail.updated_at)}</span>
           </CardDescription>
           <DeviceAgentLinks device={detail} />
