@@ -45,7 +45,11 @@ beforeEach(() => {
     operations: [],
   });
 });
-function setup(stale = false, limited = false) {
+function setup(
+  stale = false,
+  limited = false,
+  inventory: Partial<AgentDetail> = {},
+) {
   const at = new Date(Date.now() - (stale ? 300_000 : 1000));
   const agent = {
     id: "a",
@@ -53,6 +57,7 @@ function setup(stale = false, limited = false) {
     agent_version: "1.0.0",
     last_seen: at.toISOString(),
     collector_status: [],
+    ...inventory,
   } as unknown as AgentDetail;
   const metrics = {
     latest: {
@@ -124,5 +129,49 @@ it("puts recent source budget loss and its action in the initial summary", async
     await screen.findByRole("heading", { name: "Log source limit reached" }),
   ).toBeVisible();
   expect(screen.getByRole("button", { name: "Review log gaps" })).toBeVisible();
+  cache.clear();
+});
+
+it("does not describe metrics-only delivery as complete inventory health", async () => {
+  const cache = setup(false, false, { inventory_snapshot: null });
+  expect(
+    await screen.findByRole("heading", { name: "Inventory has not arrived" }),
+  ).toBeVisible();
+  expect(screen.queryByText("Data arriving normally")).not.toBeInTheDocument();
+  cache.clear();
+});
+it("puts stale inventory ahead of a healthy metrics message", async () => {
+  const cache = setup(false, false, {
+    inventory_snapshot: {
+      collected_at: new Date(Date.now() - 3_600_000).toISOString(),
+      received_at: new Date().toISOString(),
+      complete: true,
+    },
+  });
+  expect(
+    await screen.findByRole("heading", { name: "Inventory is delayed" }),
+  ).toBeVisible();
+  cache.clear();
+});
+it("shows limited inventory reasons beside the warning", async () => {
+  const cache = setup(false, false, {
+    collector_status: [
+      {
+        capability: "network",
+        status: "partial",
+        error: "Address collection unavailable",
+      },
+    ],
+  });
+  expect(
+    await screen.findByRole("heading", {
+      name: "Inventory coverage is limited",
+    }),
+  ).toBeVisible();
+  expect(
+    screen
+      .getByText("View reasons", { selector: "summary" })
+      .closest("details"),
+  ).toHaveTextContent("Address collection unavailable");
   cache.clear();
 });

@@ -170,6 +170,38 @@ describe("fetchHealthReady", () => {
     );
   });
 
+  it("maps persisted evidence and absent socket ownership into agent detail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            sockets: [
+              { local_address: "0.0.0.0", local_port: 80, protocol: "tcp" },
+            ],
+            evidence: [
+              {
+                id: "e1",
+                source_type: "agent",
+                last_seen: "2026-09-27T12:00:00Z",
+                confirmed_by: "operator",
+                confidence: 1,
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+    const result = await fetchAgent("agent-1");
+    expect(result.evidence[0]).toMatchObject({
+      source: "agent",
+      observed_at: "2026-09-27T12:00:00Z",
+      confirmed: true,
+    });
+    expect(result.sockets[0].process_id).toBeNull();
+  });
+
   it("fetches agent metrics with an explicit range", async () => {
     const fetchMock = vi
       .fn()

@@ -116,6 +116,11 @@ export function AgentAtGlance({
     agent.collector_status?.filter(
       (collector) => collector.status !== "available",
     ) ?? [];
+  const snapshot = agent.inventory_snapshot;
+  const inventoryDelayed =
+    snapshot != null &&
+    (!Number.isFinite(Date.parse(snapshot.collected_at)) ||
+      Date.now() - Date.parse(snapshot.collected_at) > 45 * 60_000);
   let condition = "Data arriving normally";
   let message = "Metrics are current. No delivery backlog reported.";
   let action: { label: string; tab: string; source?: string } | undefined;
@@ -176,6 +181,20 @@ export function AgentAtGlance({
     condition = "Recorded data gaps";
     message = `${lost} records lost within the local delivery history. Current readings are arriving.`;
     action = { label: "Inspect delivery details", tab: "settings" };
+  } else if (snapshot === null) {
+    attention = true;
+    condition = "Inventory has not arrived";
+    message = "Metrics are current, but no host inventory has been received.";
+    action = { label: "Inspect agent events", tab: "logs", source: "agent" };
+  } else if (inventoryDelayed) {
+    attention = true;
+    condition = "Inventory is delayed";
+    message = `Metrics are current. Inventory was collected ${formatRelative(snapshot!.collected_at)}; host details may be out of date.`;
+    action = { label: "Inspect agent events", tab: "logs", source: "agent" };
+  } else if (missing.length > 0 || snapshot?.complete === false) {
+    attention = true;
+    condition = "Inventory coverage is limited";
+    message = "Metrics are current. Some host details could not be collected.";
   } else if (queued > 2) {
     condition = "Catching up on buffered data";
     message = `${queued} records waiting to send at the last sample.`;
@@ -289,16 +308,25 @@ export function AgentAtGlance({
         </p>
       )}
       {missing.length > 0 && (
-        <p className="text-xs text-muted-foreground">
-          Inventory coverage limited:{" "}
-          {missing.map((item) => item.capability).join(", ")}.{" "}
-          <button
-            className="underline"
-            onClick={() => navigate({ tab: "settings" })}
-          >
-            View reasons
-          </button>
-        </p>
+        <div className="text-sm text-muted-foreground">
+          <p>
+            Inventory coverage limited:{" "}
+            {missing.map((item) => item.capability).join(", ")}.
+          </p>
+          <details className="mt-1">
+            <summary className="cursor-pointer underline underline-offset-4 focus-visible:outline focus-visible:outline-ring">
+              View reasons
+            </summary>
+            <ul className="mt-2 space-y-1">
+              {missing.map((item) => (
+                <li key={item.capability}>
+                  <span className="font-medium">{item.capability}</span>:{" "}
+                  {item.error || `${item.status}. No reason reported.`}
+                </li>
+              ))}
+            </ul>
+          </details>
+        </div>
       )}
       {(Boolean(error) ||
         collection.isError ||

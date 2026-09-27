@@ -1182,10 +1182,14 @@ function AgentMetricsView({
   const [gpuSelection, setGpuSelection] = useState("");
   const selectedInterface = networkInterfaces.includes(interfaceSelection)
     ? interfaceSelection
-    : (networkInterfaces[0] ?? "");
+    : (networkInterfaces.find((name) => name !== "lo") ??
+      networkInterfaces[0] ??
+      "");
   const selectedDisk = diskDevices.includes(diskSelection)
     ? diskSelection
-    : (diskDevices[0] ?? "");
+    : (diskDevices.find((name) => !/^(loop|ram|zram)\d/.test(name)) ??
+      diskDevices[0] ??
+      "");
   const selectedGpu = gpuDevices.some((device) => device.id === gpuSelection)
     ? gpuSelection
     : (gpuDevices[0]?.id ?? "");
@@ -2153,12 +2157,16 @@ function FilesystemInventory({
                 {formatBytes(filesystem.total_bytes)}
               </TableCell>
               <TableCell>
-                {formatNumber(filesystem.inode_used)} /{" "}
-                {formatNumber(filesystem.inode_total)}
+                {formatNumber(filesystem.inode_used) ?? "—"} /{" "}
+                {formatNumber(filesystem.inode_total) ?? "—"}
               </TableCell>
               <TableCell>
                 <Badge variant={filesystem.read_only ? "outline" : "secondary"}>
-                  {filesystem.read_only ? "Read only" : "Writable"}
+                  {filesystem.read_only == null
+                    ? "Unknown"
+                    : filesystem.read_only
+                      ? "Read only"
+                      : "Writable"}
                 </Badge>
               </TableCell>
             </TableRow>
@@ -2209,7 +2217,7 @@ function ProcessInventory({
               <TableCell className="font-medium">{process.name}</TableCell>
               <TableCell>{process.user ?? "—"}</TableCell>
               <TableCell>{process.state ?? "—"}</TableCell>
-              <TableCell>{formatPercent(process.cpu_percent)}</TableCell>
+              <TableCell>{formatPercent(process.cpu_percent) ?? "—"}</TableCell>
               <TableCell>{formatBytes(process.memory_bytes)}</TableCell>
               <TableCell className="max-w-56 truncate font-mono text-xs">
                 {process.command ?? "—"}
@@ -2281,7 +2289,7 @@ function SocketInventory({ sockets }: { sockets: AgentSocketInventory[] }) {
                 <div className="flex flex-col gap-0.5">
                   <span>{socket.process_name ?? "—"}</span>
                   <span className="font-mono text-xs text-muted-foreground">
-                    {socket.process_id === null
+                    {socket.process_id == null
                       ? "—"
                       : `pid ${socket.process_id}`}
                   </span>

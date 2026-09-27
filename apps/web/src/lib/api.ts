@@ -376,6 +376,11 @@ export interface AgentReconciliation {
 }
 
 export interface AgentDetail extends Agent {
+  inventory_snapshot?: {
+    collected_at: string;
+    received_at: string;
+    complete: boolean;
+  } | null;
   host: AgentHostInventory | null;
   network: AgentNetworkInventory | null;
   filesystems: AgentFilesystemInventory[];
@@ -1186,7 +1191,27 @@ export async function createAgentEnrollment(): Promise<AgentEnrollmentBootstrap>
 }
 
 export async function fetchAgent(id: string): Promise<AgentDetail> {
-  return request<AgentDetail>(`/api/v1/agents/${id}`);
+  const detail = await request<AgentDetail>(`/api/v1/agents/${id}`);
+  return {
+    ...detail,
+    // The detail endpoint includes persisted evidence rows, while the agent UI
+    // uses observation names. Keep the conversion at the HTTP boundary.
+    evidence: (detail.evidence ?? []).map((item) => {
+      const stored = item as AgentEvidenceItem & Partial<Evidence>;
+      return {
+        ...item,
+        source: stored.source ?? stored.source_type ?? "unknown",
+        observed_at:
+          stored.observed_at ?? stored.last_seen ?? stored.first_seen,
+        confirmed: stored.confirmed ?? Boolean(stored.confirmed_by),
+      };
+    }),
+    sockets: (detail.sockets ?? []).map((socket) => ({
+      ...socket,
+      process_id: socket.process_id ?? null,
+      process_name: socket.process_name ?? null,
+    })),
+  };
 }
 
 export async function fetchAgentMetrics(

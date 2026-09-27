@@ -234,6 +234,74 @@ describe("AgentsPage", () => {
     expect(await screen.findByText("Reachable")).toBeInTheDocument();
   });
 
+  it("renders unknown inventory fields honestly and skips idle virtual chart defaults", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((path: string) =>
+        Promise.resolve(
+          path === "/api/v1/agents?limit=100"
+            ? jsonResponse({ items: [agent], next_cursor: null })
+            : path.includes("/metrics")
+              ? jsonResponse({
+                  ...metrics,
+                  dimensions: {
+                    ...metrics.dimensions,
+                    network_interfaces: ["lo", "eth0"],
+                    disk_devices: ["loop0", "sda"],
+                  },
+                })
+              : jsonResponse({
+                  ...detail,
+                  sockets: [
+                    {
+                      ...detail.sockets[0],
+                      process_id: undefined,
+                      process_name: null,
+                    },
+                  ],
+                  filesystems: [
+                    {
+                      mount_point: "/",
+                      device: "/dev/sda",
+                      total_bytes: null,
+                      used_bytes: null,
+                      available_bytes: null,
+                      filesystem: null,
+                      inode_used: null,
+                      inode_total: null,
+                      read_only: null,
+                    },
+                  ],
+                }),
+        ),
+      ),
+    );
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select edge-01" }),
+    );
+    fireEvent.click(await screen.findByRole("tab", { name: "Metrics" }));
+    expect(
+      await screen.findByRole("combobox", { name: "Network interface" }),
+    ).toHaveValue("eth0");
+    expect(screen.getByRole("combobox", { name: "Disk device" })).toHaveValue(
+      "sda",
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+    fireEvent.click(
+      await screen.findByText("Agent identity and delivery details", {
+        selector: "summary",
+      }),
+    );
+    fireEvent.click(screen.getByText("Sockets", { selector: "summary" }));
+    expect(screen.queryByText("pid undefined")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Filesystems", { selector: "summary" }));
+    const row = screen.getByText("/dev/sda").closest("tr")!;
+    expect(within(row).getAllByRole("cell")[3]).toHaveTextContent("— / —");
+    expect(within(row).getByText("Unknown")).toBeVisible();
+    expect(within(row).queryByText("Writable")).not.toBeInTheDocument();
+  });
+
   it("loads Metrics and renders charts plus unavailable GPU state", async () => {
     const fetchMock = vi
       .fn()
