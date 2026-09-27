@@ -60,3 +60,43 @@ it("preserves configured labels for categorical charts", () => {
   );
   expect(screen.getByText("Online hosts")).toBeVisible();
 });
+
+it("formats values and ranges without losing tooltip labels or indicators", () => {
+  render(
+    <ChartContainer
+      config={{
+        value: { label: "Average", color: "var(--chart-1)" },
+        range: { label: "Min–max", color: "var(--chart-1)" },
+      }}
+    >
+      <ChartTooltipContent
+        active
+        label="12:30"
+        payload={[
+          {
+            graphicalItemId: "value",
+            dataKey: "value",
+            name: "value",
+            value: 0,
+          },
+          {
+            graphicalItemId: "range",
+            dataKey: "range",
+            name: "range",
+            value: [0, 12.5],
+          },
+        ]}
+        valueFormatter={(value) =>
+          Array.isArray(value)
+            ? value.map((entry) => `${entry}%`).join(" – ")
+            : `${value}%`
+        }
+      />
+    </ChartContainer>,
+  );
+  expect(screen.getByText("12:30")).toBeVisible();
+  expect(screen.getByText("Average")).toBeVisible();
+  expect(screen.getByText("Min–max")).toBeVisible();
+  expect(screen.getByText("0%")).toBeVisible();
+  expect(screen.getByText("0% – 12.5%")).toBeVisible();
+});

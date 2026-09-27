@@ -210,7 +210,8 @@ describe("AgentsPage", () => {
       within(overview).getByRole("region", { name: "Agent at a glance" }),
     ).toBeVisible();
     expect(
-      screen.getByRole("tablist", { name: "Agent views" })
+      screen
+        .getByRole("tablist", { name: "Agent views" })
         .compareDocumentPosition(overview) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
@@ -266,6 +267,45 @@ describe("AgentsPage", () => {
       "/api/v1/agents/agent-1/metrics?range=6h",
       expect.anything(),
     );
+  });
+
+  it("keeps an isolated reading visible and identifies an empty final bucket", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((path: string) =>
+        Promise.resolve(
+          path === "/api/v1/agents?limit=100"
+            ? jsonResponse({ items: [agent], next_cursor: null })
+            : path.startsWith("/api/v1/agents/agent-1/metrics")
+              ? jsonResponse({
+                  ...metrics,
+                  series: [
+                    metrics.series[0],
+                    {
+                      timestamp: "2026-09-19T10:01:00Z",
+                      sample_count: 0,
+                      values: {},
+                    },
+                  ],
+                })
+              : jsonResponse(detail),
+        ),
+      ),
+    );
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select edge-01" }),
+    );
+    fireEvent.click(await screen.findByRole("tab", { name: "Metrics" }));
+    const chart = await screen.findByRole("img", { name: "CPU chart" });
+    const card = chart.closest('[data-slot="card"]')! as HTMLElement;
+    expect(within(card).getByText(/No reading in last bucket/)).toBeVisible();
+    expect(within(card).getByText("—")).toBeVisible();
+    expect(within(card).getByText(/1 reading/)).toBeVisible();
+    expect(chart.querySelector('circle[r="3"]')).toBeInTheDocument();
+    expect(
+      within(card).getByText(/last populated bucket average 42%/),
+    ).toBeInTheDocument();
   });
 
   it("makes stale and empty metric history explicit", async () => {

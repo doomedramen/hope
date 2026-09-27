@@ -24,7 +24,7 @@ import {
   ShieldCheckIcon,
   XIcon,
 } from "lucide-react";
-import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   createAgentEnrollment,
@@ -62,6 +62,7 @@ import {
   CardAction,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -1253,8 +1254,7 @@ function AgentMetricsView({
         <div>
           <h2 className="text-sm font-medium">Resource telemetry</h2>
           <p className="text-xs text-muted-foreground">
-            Host and device samples. No per-process or container series in this
-            view.
+            CPU, memory and device activity.
           </p>
         </div>
         <div
@@ -1295,7 +1295,7 @@ function AgentMetricsView({
             : (data.resolution_seconds ?? 15) < 3600
               ? `${(data.resolution_seconds ?? 15) / 60}-minute`
               : `${(data.resolution_seconds ?? 15) / 3600}-hour`}{" "}
-          buckets · Average with minimum/maximum · Latest sample{" "}
+          buckets · Latest sample{" "}
           {data.latest
             ? formatRelative(data.latest.collected_at)
             : "not received"}
@@ -1338,108 +1338,115 @@ function AgentMetricsView({
         )}
       </div>
 
-      <MetricChart
-        color="var(--chart-1)"
-        data={seriesFor(data, "cpu.usage_percent")}
-        description="CPU busy percentage over the selected range."
-        id="agent-cpu-metrics"
-        title="CPU"
-        unit="percent"
-      />
-      <MetricChart
-        color="var(--chart-2)"
-        data={seriesFor(data, "memory.used_percent")}
-        description="Memory utilization over the selected range."
-        id="agent-memory-metrics"
-        title="Memory"
-        unit="percent"
-      />
-      <MetricChart
-        color="var(--chart-3)"
-        data={
-          selectedInterface
-            ? seriesFor(
-                data,
-                `network.interfaces.${selectedInterface}.rx_bytes_per_sec`,
-              )
-            : []
-        }
-        description="Receive throughput for the selected interface."
-        id="agent-network-metrics"
-        selector={
-          networkInterfaces.length > 1 ? (
-            <MetricSelector
-              ariaLabel="Network interface"
-              onChange={setInterfaceSelection}
-              options={networkInterfaces}
-              value={selectedInterface}
-            />
-          ) : null
-        }
-        title="Network receive"
-        unit="bytes"
-      />
-      <MetricChart
-        color="var(--chart-4)"
-        data={
-          selectedDisk
-            ? seriesFor(
-                data,
-                `disk.devices.${selectedDisk}.utilization_percent`,
-              )
-            : []
-        }
-        description="Disk utilization for the selected block device."
-        id="agent-disk-metrics"
-        selector={
-          diskDevices.length > 1 ? (
-            <MetricSelector
-              ariaLabel="Disk device"
-              onChange={setDiskSelection}
-              options={diskDevices}
-              value={selectedDisk}
-            />
-          ) : null
-        }
-        title="Disk I/O"
-        unit="percent"
-      />
-      <MetricChart
-        color="var(--chart-5)"
-        data={seriesFor(data, "pressure.io.some_avg10")}
-        description="Linux I/O pressure some average over ten seconds."
-        id="agent-pressure-metrics"
-        title="I/O pressure"
-        unit="percent"
-      />
-      <MetricChart
-        color="var(--chart-1)"
-        data={
-          selectedGpu
-            ? seriesFor(data, `gpu.devices.${selectedGpu}.utilization_percent`)
-            : []
-        }
-        description="GPU utilization for the selected device."
-        emptyLabel={
-          gpuDevices.length ? undefined : "No supported GPU telemetry reported."
-        }
-        id="agent-gpu-metrics"
-        selector={
-          gpuDevices.length > 1 ? (
-            <MetricSelector
-              ariaLabel="GPU device"
-              labelForOption={(id) =>
-                gpuDevices.find((device) => device.id === id)?.name ?? id
-              }
-              onChange={setGpuSelection}
-              options={gpuDevices.map((device) => device.id)}
-              value={selectedGpu}
-            />
-          ) : null
-        }
-        title="GPU"
-        unit="percent"
-      />
+      <div className="grid min-w-0 gap-4 xl:grid-cols-2">
+        <MetricChart
+          color="var(--chart-1)"
+          data={seriesFor(data, "cpu.usage_percent")}
+          description="CPU busy percentage over the selected range."
+          id="agent-cpu-metrics"
+          title="CPU"
+          unit="percent"
+        />
+        <MetricChart
+          color="var(--chart-2)"
+          data={seriesFor(data, "memory.used_percent")}
+          description="Memory utilization over the selected range."
+          id="agent-memory-metrics"
+          title="Memory"
+          unit="percent"
+        />
+        <MetricChart
+          color="var(--chart-3)"
+          data={
+            selectedInterface
+              ? seriesFor(
+                  data,
+                  `network.interfaces.${selectedInterface}.rx_bytes_per_sec`,
+                )
+              : []
+          }
+          description="Receive throughput for the selected interface."
+          id="agent-network-metrics"
+          selector={
+            networkInterfaces.length > 1 ? (
+              <MetricSelector
+                ariaLabel="Network interface"
+                onChange={setInterfaceSelection}
+                options={networkInterfaces}
+                value={selectedInterface}
+              />
+            ) : null
+          }
+          title="Network receive"
+          unit="bytes"
+        />
+        <MetricChart
+          color="var(--chart-4)"
+          data={
+            selectedDisk
+              ? seriesFor(
+                  data,
+                  `disk.devices.${selectedDisk}.utilization_percent`,
+                )
+              : []
+          }
+          description="Disk utilization for the selected block device."
+          id="agent-disk-metrics"
+          selector={
+            diskDevices.length > 1 ? (
+              <MetricSelector
+                ariaLabel="Disk device"
+                onChange={setDiskSelection}
+                options={diskDevices}
+                value={selectedDisk}
+              />
+            ) : null
+          }
+          title="Disk I/O"
+          unit="percent"
+        />
+        <MetricChart
+          color="var(--chart-5)"
+          data={seriesFor(data, "pressure.io.some_avg10")}
+          description="Linux I/O pressure some average over ten seconds."
+          id="agent-pressure-metrics"
+          title="I/O pressure"
+          unit="percent"
+        />
+        <MetricChart
+          color="var(--chart-1)"
+          data={
+            selectedGpu
+              ? seriesFor(
+                  data,
+                  `gpu.devices.${selectedGpu}.utilization_percent`,
+                )
+              : []
+          }
+          description="GPU utilization for the selected device."
+          emptyLabel={
+            gpuDevices.length
+              ? undefined
+              : "No supported GPU telemetry reported."
+          }
+          id="agent-gpu-metrics"
+          selector={
+            gpuDevices.length > 1 ? (
+              <MetricSelector
+                ariaLabel="GPU device"
+                labelForOption={(id) =>
+                  gpuDevices.find((device) => device.id === id)?.name ?? id
+                }
+                onChange={setGpuSelection}
+                options={gpuDevices.map((device) => device.id)}
+                value={selectedGpu}
+              />
+            ) : null
+          }
+          title="GPU"
+          unit="percent"
+        />
+      </div>
 
       <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
         <span>Collectors:</span>
@@ -1460,7 +1467,7 @@ function AgentMetricsView({
 
 function MetricValueCard({ label, value }: { label: string; value: string }) {
   return (
-    <Card className="gap-2 py-4">
+    <Card className="gap-2 py-3">
       <CardContent>
         <p className="text-xs text-muted-foreground">{label}</p>
         <p className="mt-1 text-xl font-semibold tabular-nums">{value}</p>
@@ -1493,105 +1500,225 @@ function MetricChart({
   title: string;
   unit: "bytes" | "percent";
 }) {
+  const populated = data.filter((point) => point.value !== null);
+  const lastBucket = data.at(-1);
+  const minimum = populated.length
+    ? Math.min(...populated.map((point) => point.minimum ?? point.value!))
+    : null;
+  const maximum = populated.length
+    ? Math.max(...populated.map((point) => point.maximum ?? point.value!))
+    : null;
+  const chartData = data.map((point) => ({
+    ...point,
+    range:
+      point.value !== null &&
+      Number.isFinite(point.minimum) &&
+      Number.isFinite(point.maximum)
+        ? [point.minimum!, point.maximum!]
+        : null,
+  }));
+  const formatValue = (value: number) =>
+    unit === "percent" ? formatMetricPercent(value) : formatRate(value);
+  const showDate =
+    data.length > 1 && data[data.length - 1].time - data[0].time >= 86400000;
+
   return (
-    <section className="rounded-lg border p-4">
-      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-medium">{title}</h3>
-          <p className="text-xs text-muted-foreground">{description}</p>
+    <Card className="min-w-0" aria-labelledby={`${id}-title`}>
+      <CardHeader className="flex flex-col gap-2">
+        <div className="flex w-full flex-wrap items-start justify-between gap-2">
+          <CardTitle id={`${id}-title`}>{title}</CardTitle>
+          {selector && (
+            <CardAction className="min-w-0 max-w-full">{selector}</CardAction>
+          )}
         </div>
-        {selector}
-      </div>
-      {data.some((point) => point.value !== null) ? (
-        <>
-          <ChartContainer
-            aria-describedby={`${id}-summary`}
-            aria-label={`${title} chart`}
-            className="h-52 w-full"
-            config={{ value: { label: title, color } }}
-            role="img"
-          >
-            <LineChart
-              accessibilityLayer
-              data={data}
-              margin={{ left: -18, right: 8, top: 8 }}
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent className="flex min-w-0 flex-col gap-4">
+        {populated.length ? (
+          <>
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <p className="text-2xl font-semibold tracking-tight tabular-nums">
+                  {lastBucket?.value == null
+                    ? "—"
+                    : formatValue(lastBucket.value)}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {lastBucket?.value == null
+                    ? "No reading in last bucket"
+                    : "Last bucket average"}{" "}
+                  ·{" "}
+                  {lastBucket &&
+                    formatMetricTime(
+                      new Date(lastBucket.time).toISOString(),
+                      showDate,
+                    )}
+                </p>
+              </div>
+              <dl className="flex gap-4 text-xs">
+                <div>
+                  <dt className="text-muted-foreground">Low</dt>
+                  <dd className="mt-1 font-medium tabular-nums">
+                    {formatValue(minimum!)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">High</dt>
+                  <dd className="mt-1 font-medium tabular-nums">
+                    {formatValue(maximum!)}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+            <ChartContainer
+              aria-describedby={`${id}-summary`}
+              aria-label={`${title} chart`}
+              className="aspect-auto h-48 w-full"
+              config={{
+                value: { label: "Average", color },
+                range: { label: "Min–max", color },
+              }}
+              role="img"
             >
-              <CartesianGrid vertical={false} />
-              <XAxis
-                axisLine={false}
-                dataKey="time"
-                type="number"
-                domain={["dataMin", "dataMax"]}
-                tickFormatter={(value) =>
-                  formatMetricTime(
-                    new Date(value).toISOString(),
-                    data.length > 1 &&
-                      data[data.length - 1].time - data[0].time >= 86400000,
-                  )
-                }
-                minTickGap={28}
-                tickLine={false}
-                tickMargin={8}
+              <AreaChart
+                accessibilityLayer
+                data={chartData}
+                margin={{ left: 0, right: 12, top: 8, bottom: 0 }}
+              >
+                <defs>
+                  <linearGradient id={`${id}-fill`} x1="0" y1="0" x2="0" y2="1">
+                    <stop
+                      offset="0%"
+                      stopColor="var(--color-value)"
+                      stopOpacity={0.22}
+                    />
+                    <stop
+                      offset="100%"
+                      stopColor="var(--color-value)"
+                      stopOpacity={0.02}
+                    />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid vertical={false} strokeDasharray="3 3" />
+                <XAxis
+                  axisLine={false}
+                  dataKey="time"
+                  type="number"
+                  domain={["dataMin", "dataMax"]}
+                  tickFormatter={(value) =>
+                    formatMetricTime(new Date(value).toISOString(), showDate)
+                  }
+                  minTickGap={40}
+                  tickLine={false}
+                  tickMargin={10}
+                />
+                <YAxis
+                  axisLine={false}
+                  domain={unit === "percent" ? [0, 100] : [0, "auto"]}
+                  ticks={unit === "percent" ? [0, 25, 50, 75, 100] : undefined}
+                  tickCount={4}
+                  tickFormatter={(value) => formatMetricAxis(value, unit)}
+                  tickLine={false}
+                  tickMargin={8}
+                  width={unit === "bytes" ? 76 : 44}
+                />
+                <ChartTooltip
+                  content={
+                    <ChartTooltipContent
+                      valueFormatter={(value) =>
+                        Array.isArray(value)
+                          ? value
+                              .map((entry) => formatValue(Number(entry)))
+                              .join(" – ")
+                          : formatValue(Number(value))
+                      }
+                      labelFormatter={(value) =>
+                        new Date(Number(value)).toLocaleString()
+                      }
+                    />
+                  }
+                  cursor={{
+                    stroke: "var(--color-value)",
+                    strokeOpacity: 0.35,
+                    strokeDasharray: "4 4",
+                  }}
+                />
+                <Area
+                  dataKey="range"
+                  fill="var(--color-range)"
+                  fillOpacity={0.16}
+                  stroke="none"
+                  activeDot={false}
+                  type="linear"
+                  connectNulls={false}
+                  isAnimationActive={false}
+                />
+                <Area
+                  dataKey="value"
+                  fill={`url(#${id}-fill)`}
+                  stroke="var(--color-value)"
+                  strokeWidth={2}
+                  dot={({ cx, cy, index }) => {
+                    const isolated =
+                      data[index]?.value !== null &&
+                      data[index - 1]?.value == null &&
+                      data[index + 1]?.value == null;
+                    return (
+                      <circle
+                        key={index}
+                        cx={cx}
+                        cy={cy}
+                        r={isolated ? 3 : 0}
+                        fill="var(--color-value)"
+                      />
+                    );
+                  }}
+                  activeDot={{
+                    r: 4,
+                    stroke: "var(--background)",
+                    strokeWidth: 2,
+                  }}
+                  type="linear"
+                  connectNulls={false}
+                  isAnimationActive={false}
+                />
+              </AreaChart>
+            </ChartContainer>
+            <p className="sr-only" id={`${id}-summary`}>
+              {summarizeMetricChart(data, title, unit)}
+            </p>
+          </>
+        ) : (
+          <MetricEmpty description={emptyLabel} title="No chart data" />
+        )}
+      </CardContent>
+      {populated.length > 0 && (
+        <CardFooter className="flex flex-wrap justify-between gap-2 text-xs text-muted-foreground">
+          <div className="flex items-center gap-4">
+            <span className="flex items-center gap-1.5">
+              <span
+                aria-hidden="true"
+                className="h-0.5 w-3"
+                style={{ backgroundColor: color }}
               />
-              <YAxis
-                axisLine={false}
-                tickFormatter={(value) => formatMetricAxis(value, unit)}
-                tickLine={false}
-                width={52}
+              Average
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span
+                aria-hidden="true"
+                className="size-3 rounded-sm opacity-30"
+                style={{ backgroundColor: color }}
               />
-              <ChartTooltip
-                content={
-                  <ChartTooltipContent
-                    formatter={(value) => formatMetricAxis(Number(value), unit)}
-                    indicator="line"
-                    labelFormatter={(value) =>
-                      new Date(Number(value)).toLocaleString()
-                    }
-                  />
-                }
-                cursor={false}
-              />
-              <Line
-                dataKey="minimum"
-                name="Minimum"
-                dot={false}
-                stroke="var(--color-value)"
-                strokeOpacity={0.4}
-                strokeDasharray="3 3"
-                type="linear"
-                connectNulls={false}
-              />
-              <Line
-                dataKey="maximum"
-                name="Maximum"
-                dot={false}
-                stroke="var(--color-value)"
-                strokeOpacity={0.4}
-                strokeDasharray="3 3"
-                type="linear"
-                connectNulls={false}
-              />
-              <Line
-                dataKey="value"
-                dot={false}
-                stroke="var(--color-value)"
-                strokeWidth={2}
-                type="linear"
-                connectNulls={false}
-              />
-            </LineChart>
-          </ChartContainer>
-          <p
-            className="mt-2 text-xs text-muted-foreground"
-            id={`${id}-summary`}
-          >
-            {summarizeMetricChart(data, title, unit)}
-          </p>
-        </>
-      ) : (
-        <MetricEmpty description={emptyLabel} title="No chart data" />
+              Min–max
+            </span>
+          </div>
+          <span>
+            {populated.length} {populated.length === 1 ? "reading" : "readings"}{" "}
+            · Gaps = no data
+          </span>
+        </CardFooter>
       )}
-    </section>
+    </Card>
   );
 }
 
@@ -1611,7 +1738,7 @@ function MetricSelector({
   return (
     <select
       aria-label={ariaLabel}
-      className="h-8 rounded-md border bg-background px-2 text-xs"
+      className="h-11 min-w-0 max-w-full rounded-md border bg-background px-2 text-sm sm:h-8 sm:text-xs"
       onChange={(event) => onChange(event.target.value)}
       value={value}
     >
@@ -1781,7 +1908,7 @@ function summarizeMetricChart(
       .filter((value): value is number => value !== null),
   );
   const latest = values.at(-1) ?? minimum;
-  return `${title}: ${values.length} populated buckets; minimum ${formatMetricAxis(minimum, unit)}, maximum ${formatMetricAxis(maximum, unit)}, last bucket average ${formatMetricAxis(latest, unit)}.`;
+  return `${title}: ${values.length} populated buckets; minimum ${formatMetricAxis(minimum, unit)}, maximum ${formatMetricAxis(maximum, unit)}, last populated bucket average ${formatMetricAxis(latest, unit)}.`;
 }
 
 function ReachabilityExplanation() {
