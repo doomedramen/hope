@@ -8,6 +8,7 @@ import {
   fetchAgent,
   fetchAgentMetrics,
   fetchAgents,
+  fetchAddresses,
   fetchCredentials,
   createCredential,
   installAgent,
@@ -59,6 +60,36 @@ describe("getUserFacingError", () => {
 describe("fetchHealthReady", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("loads addresses beyond the first page, including later agent inventory", async () => {
+    const firstPage = Array.from({ length: 200 }, (_, index) => ({
+      id: `address-${index}`,
+    }));
+    const agentAddress = { id: "agent-address", ip: "192.168.1.132" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ items: firstPage, next_cursor: "page-2" }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ items: [agentAddress], next_cursor: null }),
+          { headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchAddresses();
+
+    expect(result.items).toHaveLength(201);
+    expect(result.items.at(-1)).toEqual(agentAddress);
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      "/api/v1/addresses?cursor=page-2&limit=200",
+    );
   });
 
   it("fetches enrolled agents with bounded pagination", async () => {

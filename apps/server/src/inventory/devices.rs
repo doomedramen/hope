@@ -704,6 +704,74 @@ mod gate_tests {
     }
 
     #[tokio::test]
+    async fn existing_agent_device_names_backfill_without_overwriting_operator_data() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.unwrap();
+        let mut ids = Vec::new();
+        for name in [None, Some("Media server"), Some(""), None, None] {
+            let id: Uuid = sqlx::query_scalar(
+                "insert into devices(device_type,name) values ('vm',$1) returning id",
+            )
+            .bind(name)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        sqlx::query("update devices set canonical_of=$1,status='merged' where id=$2")
+            .bind(ids[2])
+            .bind(ids[0])
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        // Include an offline agent, a custom-named device, a revoked agent,
+        // and an unlinked agent whose hostname must not imply ownership.
+        for (device, revoked) in [
+            (Some(ids[0]), false),
+            (Some(ids[1]), false),
+            (Some(ids[3]), true),
+            (None, false),
+        ] {
+            let agent = Uuid::new_v4();
+            sqlx::query("insert into agents(id,cert_fingerprint,cert_serial,hostname,device_id,last_seen,revoked_at) values ($1,$2,$2,'plex',$3,now()-interval '1 day',case when $4 then now() else null end)")
+                .bind(agent).bind(agent.to_string()).bind(device).bind(revoked)
+                .execute(&mut *tx).await.unwrap();
+        }
+        for _ in 0..2 {
+            sqlx::raw_sql(include_str!(
+                "../../../../migrations/0043_agent_device_names.sql"
+            ))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+        for (index, expected) in [Some("plex"), Some("Media server"), Some("plex"), None, None]
+            .into_iter()
+            .enumerate()
+        {
+            let (name, kind, version): (Option<String>, String, i32) =
+                sqlx::query_as("select name,device_type,version from devices where id=$1")
+                    .bind(ids[index])
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert_eq!(name.as_deref(), expected);
+            assert_eq!(kind, "vm");
+            assert_eq!(version, if index == 0 || index == 2 { 2 } else { 1 });
+        }
+        let link: Option<Uuid> =
+            sqlx::query_scalar("select device_id from agents where device_id=$1")
+                .bind(ids[0])
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        assert_eq!(link, Some(ids[0]));
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn agent_links_backfill_only_unambiguous_identity_rules() {
         let Some(pool) = pool_or_skip().await else {
             return;

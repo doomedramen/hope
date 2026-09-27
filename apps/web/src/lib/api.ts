@@ -1301,7 +1301,7 @@ export async function trustSshHostKey(id: string): Promise<SshHostKey> {
 }
 
 export async function fetchAddresses(): Promise<ApiPage<Address>> {
-  return request<ApiPage<Address>>("/api/v1/addresses?limit=200");
+  return fetchAllPages<Address>("/api/v1/addresses");
 }
 
 export async function fetchIdentitySuggestions(): Promise<

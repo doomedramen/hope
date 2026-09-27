@@ -412,19 +412,29 @@ export function InfrastructurePage() {
     current.push(monitor);
     monitorsByService.set(monitor.service_id, current);
   }
-  const addressByInterface = new Map(
-    (addressesQuery.data?.items ?? [])
-      .filter((address) => address.is_current)
-      .map((address) => [address.interface_id, address.ip]),
-  );
+  const interfacesById = new Map(interfaces.map((item) => [item.id, item]));
   const currentIpsByDevice = new Map<string, string[]>();
-  for (const networkInterface of interfaces) {
-    const ip = addressByInterface.get(networkInterface.id);
-    if (!ip) continue;
+  const currentAddresses = (addressesQuery.data?.items ?? [])
+    .filter((address) => address.is_current)
+    .toSorted(
+      (a, b) =>
+        addressPriority(a, interfacesById) -
+          addressPriority(b, interfacesById) ||
+        a.ip.localeCompare(b.ip, undefined, { numeric: true }),
+    );
+  for (const address of currentAddresses) {
+    const networkInterface = interfacesById.get(address.interface_id);
+    if (!networkInterface) continue;
     const current = currentIpsByDevice.get(networkInterface.device_id) ?? [];
-    current.push(ip);
+    current.push(address.ip.split("/")[0]);
     currentIpsByDevice.set(networkInterface.device_id, current);
   }
+  const deviceAddress = (device: Device) =>
+    interfacesQuery.isLoading || addressesQuery.isLoading
+      ? "Loading address…"
+      : interfacesQuery.isError || addressesQuery.isError
+        ? "Address unavailable"
+        : (currentIpsByDevice.get(device.id)?.[0] ?? "No address reported");
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
@@ -535,8 +545,7 @@ export function InfrastructurePage() {
                             {deviceDisplayName(device)}
                           </span>
                           <span className="block truncate text-xs text-muted-foreground">
-                            {currentIpsByDevice.get(device.id)?.[0] ??
-                              `Record updated ${formatRelative(device.updated_at)}`}
+                            {deviceAddress(device)}
                           </span>
                           <span className="mt-1 block text-xs text-muted-foreground">
                             {!observationsReady
@@ -605,8 +614,7 @@ export function InfrastructurePage() {
                                 {deviceDisplayName(device)}
                               </span>
                               <span className="block truncate text-xs text-muted-foreground">
-                                {currentIpsByDevice.get(device.id)?.[0] ??
-                                  `Record updated ${formatRelative(device.updated_at)}`}
+                                {deviceAddress(device)}
                               </span>
                               <span className="mt-1 block text-xs text-muted-foreground">
                                 {servicesQuery.isLoading ||
@@ -638,7 +646,7 @@ export function InfrastructurePage() {
                     <TableHeader>
                       <TableRow>
                         <TableHead>Device</TableHead>
-                        <TableHead>Address / record</TableHead>
+                        <TableHead>Address</TableHead>
                         <TableHead>Services</TableHead>
                         <TableHead className="text-right">Condition</TableHead>
                       </TableRow>
@@ -673,36 +681,34 @@ export function InfrastructurePage() {
                             onClick={() => selectDevice(device.id)}
                           >
                             <TableCell>
-                              <button
-                                aria-label={`Open ${deviceDisplayName(device)}`}
-                                aria-pressed={device.id === selectedId}
-                                className="flex min-h-11 min-w-0 w-full items-center gap-3 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-                                onClick={() => selectDevice(device.id)}
-                                type="button"
-                              >
-                                <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
-                                  <ServerIcon
-                                    aria-hidden="true"
-                                    className="size-4"
-                                  />
-                                </span>
-                                <span className="min-w-0">
-                                  <span className="block break-words font-medium">
-                                    {deviceDisplayName(device)}
+                              <div className="flex items-center justify-between gap-3">
+                                <button
+                                  aria-label={`Open ${deviceDisplayName(device)}`}
+                                  aria-pressed={device.id === selectedId}
+                                  className="flex min-h-11 min-w-0 flex-1 items-center gap-3 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                                  onClick={() => selectDevice(device.id)}
+                                  type="button"
+                                >
+                                  <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
+                                    <ServerIcon
+                                      aria-hidden="true"
+                                      className="size-4"
+                                    />
                                   </span>
-                                  <span className="block truncate text-xs text-muted-foreground">
-                                    {labelize(device.device_type)}
+                                  <span className="min-w-0">
+                                    <span className="block break-words font-medium">
+                                      {deviceDisplayName(device)}
+                                    </span>
+                                    <span className="block truncate text-xs text-muted-foreground">
+                                      {labelize(device.device_type)}
+                                    </span>
                                   </span>
-                                </span>
-                              </button>
-                              <DeviceAgentLinks device={device} />
+                                </button>
+                                <DeviceAgentLinks device={device} />
+                              </div>
                             </TableCell>
                             <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
-                              {interfacesQuery.isLoading ||
-                              addressesQuery.isLoading
-                                ? "Loading address…"
-                                : (currentIpsByDevice.get(device.id)?.[0] ??
-                                  `Record updated ${formatRelative(device.updated_at)}`)}
+                              {deviceAddress(device)}
                             </TableCell>
                             <TableCell>
                               {servicesQuery.isLoading ||
@@ -902,6 +908,20 @@ function deviceDisplayName(device: Device): string {
   );
 }
 
+// Prefer a host's LAN address over container bridges, link-local addresses,
+// and loopback. Keep every current address available for the detail view.
+function addressPriority(
+  address: Address,
+  interfaces: Map<string, InventoryInterface>,
+): number {
+  const ip = address.ip.split("/")[0].toLowerCase();
+  if (/^(127\.|0\.|::1$|::$)/.test(ip)) return 100;
+  if (/^(169\.254\.|fe[89ab])/.test(ip)) return 90;
+  const name = interfaces.get(address.interface_id)?.description ?? "";
+  const virtual = /^(docker|veth|br-|virbr|cni|flannel|podman)/i.test(name);
+  return (virtual ? 20 : 0) + (ip.includes(":") ? 1 : 0);
+}
+
 function DeviceAgentLinks({ device }: { device: Device }) {
   if (!device.agents?.length && !device.proxmox) return null;
   return (
@@ -912,22 +932,24 @@ function DeviceAgentLinks({ device }: { device: Device }) {
           key={agent.id}
           className="flex min-w-0 flex-wrap items-center gap-x-3 text-xs"
         >
-          <span className="min-w-0 break-words text-muted-foreground">
-            {agent.hostname && agent.hostname !== deviceDisplayName(device)
-              ? `${agent.hostname} · `
-              : ""}
-            Agent {agent.status}
-            {agent.status !== "online"
-              ? ` · Last contact ${formatRelative(agent.last_seen)}`
-              : ""}
-          </span>
           <a
-            className="inline-flex min-h-11 items-center rounded-sm text-sm underline underline-offset-4 outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="inline-flex min-h-11 min-w-0 flex-col justify-center rounded-sm text-xs outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
             href={`/agents?agent=${encodeURIComponent(agent.id)}&tab=metrics`}
             aria-label={`Agent metrics for ${agent.hostname || deviceDisplayName(device)}`}
             onClick={(event) => event.stopPropagation()}
           >
-            Metrics
+            <span className="text-sm underline underline-offset-4">
+              Metrics
+            </span>
+            <span className="min-w-0 break-words text-muted-foreground">
+              {agent.hostname && agent.hostname !== deviceDisplayName(device)
+                ? `${agent.hostname} · `
+                : ""}
+              Agent {agent.status}
+              {agent.status !== "online"
+                ? ` · Last contact ${formatRelative(agent.last_seen)}`
+                : ""}
+            </span>
           </a>
         </div>
       ))}

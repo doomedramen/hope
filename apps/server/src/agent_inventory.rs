@@ -804,7 +804,7 @@ async fn project_inventory(
     let source_instance = format!("agent:{agent_id}:snapshot:{}", snapshot.sequence);
     let hostname = host_inventory_string(&snapshot.inventory, &["hostname", "host_name"]);
     sqlx::query(
-        "update devices set device_type = 'physical_host', name = coalesce(nullif(name, ''), $2), \
+        "update devices set name = coalesce(nullif(name, ''), $2), \
          updated_at = now(), version = version + 1 where id = $1",
     )
     .bind(device_id)
@@ -2486,7 +2486,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(os, "linux");
-        sqlx::query("update devices set name='Operator name' where id=$1")
+        sqlx::query("update devices set name='Operator name',device_type='vm' where id=$1")
             .bind(device_id)
             .execute(&pool)
             .await
@@ -2506,6 +2506,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(name, "Operator name");
+        let device_type: String = sqlx::query_scalar("select device_type from devices where id=$1")
+            .bind(device_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(device_type, "vm");
         let survivor: Uuid =
             sqlx::query_scalar("insert into devices(device_type) values ('unknown') returning id")
                 .fetch_one(&pool)

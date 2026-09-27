@@ -249,6 +249,42 @@ describe("InfrastructurePage", () => {
           );
         if (path === "/api/v1/devices/device-1")
           return Promise.resolve(jsonResponse(device));
+        if (path === "/api/v1/interfaces?limit=200")
+          return Promise.resolve(
+            jsonResponse({
+              items: [
+                { id: "eth0", device_id: device.id, description: "eth0" },
+                { id: "lo", device_id: device.id, description: "lo" },
+                { id: "bridge", device_id: device.id, description: "docker0" },
+              ],
+              next_cursor: null,
+            }),
+          );
+        if (path === "/api/v1/addresses?limit=200")
+          return Promise.resolve(
+            jsonResponse({
+              items: [
+                { interface_id: "lo", ip: "127.0.0.1/8", is_current: true },
+                {
+                  interface_id: "bridge",
+                  ip: "172.17.0.1/16",
+                  is_current: true,
+                },
+                {
+                  interface_id: "eth0",
+                  ip: "192.168.1.132/24",
+                  is_current: true,
+                },
+                { interface_id: "eth0", ip: "fe80::1234/64", is_current: true },
+                {
+                  interface_id: "eth0",
+                  ip: "192.168.1.120",
+                  is_current: false,
+                },
+              ],
+              next_cursor: null,
+            }),
+          );
         return Promise.resolve(jsonResponse({ items: [], next_cursor: null }));
       }),
     );
@@ -262,6 +298,8 @@ describe("InfrastructurePage", () => {
       expect(link.closest("button")).toBeNull();
     }
     expect(screen.getAllByText("Agent online")).toHaveLength(2);
+    expect(await screen.findAllByText("192.168.1.132")).toHaveLength(2);
+    expect(screen.queryByText(/Record updated/)).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox", { name: "Search devices" }), {
       target: { value: "worker-london" },
     });
@@ -275,6 +313,28 @@ describe("InfrastructurePage", () => {
         }),
       ).toHaveLength(2),
     );
+  });
+
+  it("shows address failures instead of record timestamps", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/devices?limit=100")
+          return Promise.resolve(
+            jsonResponse({
+              items: [detail("host", "Media server")],
+              next_cursor: null,
+            }),
+          );
+        if (path === "/api/v1/addresses?limit=200")
+          return Promise.resolve(new Response("Unavailable", { status: 503 }));
+        return Promise.resolve(jsonResponse({ items: [], next_cursor: null }));
+      }),
+    );
+    renderInfrastructurePage();
+    expect(await screen.findAllByText("Address unavailable")).toHaveLength(2);
+    expect(screen.queryByText(/Record updated/)).not.toBeInTheDocument();
   });
 
   it("keeps custom names searchable by agent hostname and shows offline state", async () => {
