@@ -39,6 +39,14 @@ Hope's connection address.
 
 ## Troubleshooting
 
+- If network inventory reports `ip address data unavailable` but
+  `sudo -u hope-agent ip -j address show` succeeds, check
+  `systemctl show hope-agent -p RestrictAddressFamilies`. Older installer units
+  omitted `AF_NETLINK`, which `ip` needs even for read-only interface queries.
+  Run the updated installer again, or add a systemd drop-in containing
+  `[Service]` and `RestrictAddressFamilies=AF_NETLINK` on separate lines.
+  This extends the existing allowlist. Run `systemctl daemon-reload` and
+  `systemctl restart hope-agent` after adding the drop-in.
 - A 503 from `/agent/v1/releases/latest/linux/amd64` means the
   running image does not contain a verified matching release. Use an official
   published Hope image; production publishing is blocked without signing.

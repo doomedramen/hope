@@ -607,7 +607,8 @@ AmbientCapabilities=
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# The network collector invokes ip, which queries interfaces over Netlink.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 UMask=0077
 TimeoutStopSec=30s
