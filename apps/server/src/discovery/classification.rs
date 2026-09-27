@@ -1141,6 +1141,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_http_headers_remain_valid_fingerprint_input() {
+        let address = spawn_plain_server(
+            b"HTTP/1.1 200 OK\r\nServer: \r\nContent-Type: text/html\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        let result = Classifier::new(test_config())
+            .unwrap()
+            .classify(address.ip(), address.port())
+            .await;
+        assert_eq!(result.protocol, ServiceProtocol::Http);
+        domain::fingerprinting::FingerprintInput::from_m2_evidence(
+            domain::fingerprinting::FingerprintProtocol::Http,
+            0.98,
+            &result.evidence,
+        )
+        .expect("M2 must not emit evidence rejected by M3");
+    }
+
+    #[tokio::test]
     async fn follows_bounded_same_endpoint_redirects() {
         let address = spawn_redirect_server().await;
         let classifier = Classifier::new(test_config()).expect("classifier config");

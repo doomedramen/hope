@@ -75,7 +75,7 @@ pub async fn reconcile_service_fingerprint_tx(
         classification.confidence,
         &classification.value,
     )
-    .context("invalid persisted M2 protocol classification")?;
+    .map_err(|error| anyhow!("invalid persisted M2 protocol classification: {error}"))?;
     let report = FingerprintEngine::default().fingerprint(&input);
     let candidate = report
         .best()

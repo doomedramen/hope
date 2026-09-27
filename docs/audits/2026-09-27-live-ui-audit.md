@@ -16,7 +16,7 @@ Impact: discovery cannot establish a complete current inventory. Repeated retrie
 
 Next investigation: obtain the full server error chain and a sanitized failing classification, then replay it through `FingerprintInput::from_m2_evidence`. The current UI exposes only the outer error context. The exact rejected field and a safe persistence/retry strategy remain unproven; no speculative parser change was made.
 
-### 2. Both Proxmox agents have metrics but no inventory or device link — P1
+### 2. Two host agents have metrics but no inventory or device link — P1
 
 Both hosts are online, have current CPU/memory readings, and advertise inventory capabilities. Their detail pages show zero interfaces, filesystems, processes, sockets, containers, and evidence; reconciliation is unmatched. Neither has an agent-linked entry in Devices. Guest discovery therefore cannot be assessed through these host records.
 
@@ -68,3 +68,21 @@ Next investigation: capture the effective running service sandbox/PATH and curre
 The evidence mapping and overview health regressions were first reproduced by failing tests. Targeted tests cover persisted evidence field names, omitted socket ownership, missing/stale/partial inventory, chart defaults, unknown inode counts, and unknown filesystem permissions. The local overview was inspected at desktop and mobile widths with synthetic data. Missing-inventory status and its diagnostic action fit in the first viewport without horizontal overflow.
 
 These changes improve presentation and diagnosis. They do not demonstrate recovery of production discovery, inventory ingestion, device reconciliation, or Proxmox guest discovery. Those remain the first operational follow-ups.
+
+## Follow-up diagnosis after deployment
+
+The updated UI correctly exposes delayed inventory and the inline collector reasons. The missing-inventory warning was also verified on an affected host after the new client loaded.
+
+### Confirmed inventory validation failure
+
+An operator inspected the queued snapshot on an affected Debian host and found 127 empty process command fields. The Linux collector can legitimately emit an empty command string, including for kernel threads. Server inventory validation incorrectly required every JSON string value to be nonempty, rejecting the complete snapshot before ingestion. This explains a concrete blocker on that host while independent metric delivery continues.
+
+The server now permits empty JSON string values while retaining nonempty keys, envelope identity validation, maximum string length, node count, and depth limits. A regression reproduced rejection before the fix and passes after it. This server change allows existing queued snapshots to pass this validation; agents already retry pending inventory automatically. Production recovery still needs verification after deploying this follow-up server change. Do not delete pending snapshots or reenroll agents.
+
+The empty journal output did not mean the agent was absent: subsequent process/service inspection confirmed the host service was running. Guest agent processes can also be visible from the host. Inventory protocol rejection details are not currently surfaced by the agent's diagnostic handler, which explains the limited information available in the UI; broader diagnostic reporting remains open.
+
+### Reproduced discovery input mismatch
+
+A local HTTP probe demonstrated that M2 stores an empty `Server` header, but M3 rejects it with `header_value is invalid: must not be empty`. M3 now ignores empty header values when adapting stored M2 evidence, preserving other signals and the existing input bounds. This also handles previously persisted evidence without rewriting it. Scanner-to-fingerprinting and domain tests cover the case.
+
+The fingerprinting error now includes the specific validation failure instead of only the outer context. The production scan's exact rejected field remains unverified; the empty-header mismatch is a reproduced defect, not proof that every observed scan failure has this cause. Run a fresh standard scan after deployment and inspect the more specific error if it still fails. Historical failed runs will remain failed.

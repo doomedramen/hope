@@ -276,6 +276,9 @@ fn validate_json_tree(
         ));
     }
     match value {
+        // Empty values are valid collector metadata (for example a kernel
+        // thread's command line). Keys and envelope identifiers stay nonempty.
+        Value::String(text) if text.is_empty() => Ok(()),
         Value::String(text) => validate_text("inventory string", text, MAX_STRING_BYTES),
         Value::Array(values) => {
             if values.len() > MAX_JSON_NODES {
@@ -2194,6 +2197,23 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn accepts_empty_inventory_values_without_relaxing_keys_or_bounds() {
+        let mut input = snapshot(Uuid::new_v4(), 1);
+        input.inventory["processes"] = json!({"processes": [
+            {"pid": 2, "name": "kthreadd", "command": "", "state": "S"}
+        ]});
+        input.inventory["host"] = json!({"os_release": {"VARIANT": ""}});
+        assert!(
+            parse_snapshot_value(serde_json::to_value(&input).unwrap()).is_ok(),
+            "empty metadata must not reject the host snapshot"
+        );
+        input.inventory["host"] = json!({"": "invalid key"});
+        assert!(validate_snapshot(&input).is_err());
+        input.inventory["host"] = json!({"value": "x".repeat(MAX_STRING_BYTES + 1)});
+        assert!(validate_snapshot(&input).is_err());
     }
 
     #[test]

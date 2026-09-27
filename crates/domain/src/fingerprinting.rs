@@ -553,7 +553,14 @@ impl RawFingerprintInput {
         FingerprintInput::builder(protocol)
             .protocol_confidence(protocol_confidence)
             .status_option(self.status)
-            .headers(self.headers)
+            // M2 can persist empty HTTP fields. They carry no fingerprint
+            // signal, but must not make an otherwise usable response invalid.
+            .headers(
+                self.headers
+                    .into_iter()
+                    .filter(|(_, value)| !value.trim().is_empty())
+                    .collect(),
+            )
             .title_option(self.title)
             .body_sample_option(self.body_sample)
             .banner_option(self.banner)
@@ -1397,6 +1404,30 @@ mod tests {
                 .evidence_fields
                 .iter()
                 .any(|field| field.path == "title")
+        );
+    }
+
+    #[test]
+    fn m2_empty_headers_do_not_discard_other_fingerprint_signals() {
+        let evidence = json!({
+            "headers": {"server": "  ", "content-length": "0"},
+            "title": "Proxmox VE", "body_sample": "proxmox web shell"
+        });
+        let input = FingerprintInput::from_m2_evidence(FingerprintProtocol::Https, 0.95, &evidence)
+            .unwrap();
+        assert!(!input.headers().contains_key("server"));
+        assert_eq!(
+            input.headers().get("content-length").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            FingerprintEngine::default()
+                .fingerprint(&input)
+                .best()
+                .unwrap()
+                .product
+                .as_deref(),
+            Some("Proxmox VE")
         );
     }
 
