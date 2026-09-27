@@ -8,7 +8,7 @@ For an existing installation, run the signed installer again using the existing 
 
 Publish verified bundles under `HOPE_AGENT_RELEASE_DIR`, using the release-signing procedure. Linux amd64 and arm64 are supported when the corresponding artifact is present. The running agent and updater helper must trust the signing key; follow the dual-key rotation procedure in ADR-0017.
 
-In Agents, open an agent's Overview to update now. Inventory & settings contains notify/manual/automatic policy, release channel, optional version pin, rollout percentage, and UTC update window. Equal start/end hours permit updates all day. Notify is the default. An offline update remains pending. Automatic expansion needs a healthy canary and ten-minute observation period; a small fleet may need an explicit first update.
+In Agents, open an agent's Overview to update now. Settings contains notify/manual/automatic policy, release channel, optional version pin, rollout percentage, and UTC update window. Equal start/end hours permit updates all day. Notify is the default. An offline update remains pending. Automatic expansion needs a healthy canary and ten-minute observation period; a small fleet may need an explicit first update.
 
 The helper keeps its previous executable and status under `/var/lib/hope-updater`. Staged downloads are under `/var/lib/hope/update`. Inspect these services when an operation stops progressing:
 
@@ -21,7 +21,7 @@ An `awaiting_health` operation means local collection resumed but server verific
 
 ## Enable selected logs
 
-In Inventory & settings, enter exact systemd unit or Docker container names, one per line. Empty lists disable host/container log collection. Agent diagnostics remain available. Literal redaction strings are applied before writing messages to disk. Settings show the revision acknowledged by the agent.
+In Settings, enter exact systemd unit or Docker container names, one per line. Empty lists disable host/container log collection. Agent diagnostics remain available. Literal redaction strings are applied before writing messages to disk. Settings show the revision acknowledged by the agent.
 
 The service account must already have permission to read each selected source. For journal access, an administrator can add `hope-agent` to `systemd-journal`, then restart `hope-agent`. Docker socket access is powerful: add the account to the Docker socket's group only if that access is appropriate for the host. The installer does not grant either permission automatically. Permission failures are visible in Agent diagnostics and do not stop metrics.
 

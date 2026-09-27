@@ -1508,9 +1508,9 @@ pub async fn list_agents(
     {
         return api_error(StatusCode::BAD_REQUEST, "Invalid agent status");
     }
-    let base = "with fleet as (select a.*, case when a.revoked_at is not null then 'revoked' when coalesce(a.last_heartbeat_at,a.last_seen,a.created_at) < now()-make_interval(secs=>a.heartbeat_timeout_seconds::double precision) then 'offline' when coalesce(a.last_heartbeat_at,a.last_seen,a.created_at) < now()-make_interval(secs=>(a.heartbeat_timeout_seconds/2)::double precision) then 'stale' else 'online' end as status from agents a), searched as (select * from fleet where $1::text is null or strpos(lower(concat_ws(' ',hostname,id::text,agent_version,os,arch,capabilities::text)),lower($1))>0) ";
+    let base = "with fleet as (select a.*, case when a.revoked_at is not null then 'revoked' when coalesce(a.last_heartbeat_at,a.last_seen) is null then 'offline' when coalesce(a.last_heartbeat_at,a.last_seen,a.created_at) < now()-make_interval(secs=>a.heartbeat_timeout_seconds::double precision) then 'offline' when coalesce(a.last_heartbeat_at,a.last_seen,a.created_at) < now()-make_interval(secs=>(a.heartbeat_timeout_seconds/2)::double precision) then 'stale' else 'online' end as status from agents a), searched as (select * from fleet where $1::text is null or strpos(lower(concat_ws(' ',hostname,id::text,agent_version,os,arch,capabilities::text)),lower($1))>0) ";
     let sql = format!(
-        "{base} select row_to_json(t) from (select a.id,a.hostname,a.agent_version,a.os,a.arch,a.capabilities,a.last_seen,a.last_heartbeat_at,a.protocol_version,a.revoked_at,a.status,a.created_at,(select c.inventory from agent_inventory_current c where c.agent_id=a.id) as inventory,(select ir.device_id from identity_rules ir where ir.rule_type='agent_id' and ir.value=a.id::text order by ir.created_at limit 1) as device_id from searched a where ($2::text is null or a.status=$2) and ($3::timestamptz is null or (a.created_at,a.id)>($3::timestamptz,$4::uuid)) order by a.created_at,a.id limit $5) t"
+        "{base} select row_to_json(t) from (select a.id,a.hostname,a.agent_version,a.os,a.arch,a.capabilities,a.last_seen,a.last_heartbeat_at,a.protocol_version,a.revoked_at,a.status,a.created_at,(select json_build_object('collected_at',m.collected_at,'cpu_percent',m.metrics #> '{{cpu,usage_percent}}','memory_percent',m.metrics #> '{{memory,used_percent}}','delivery',m.metrics->'delivery') from agent_metric_samples m where m.agent_id=a.id and m.collected_at<=now() order by m.collected_at desc,m.sample_id desc limit 1) as telemetry,(select c.inventory from agent_inventory_current c where c.agent_id=a.id) as inventory,(select ir.device_id from identity_rules ir where ir.rule_type='agent_id' and ir.value=a.id::text order by ir.created_at limit 1) as device_id from searched a where ($2::text is null or a.status=$2) and ($3::timestamptz is null or (a.created_at,a.id)>($3::timestamptz,$4::uuid)) order by a.created_at,a.id limit $5) t"
     );
     let rows: Result<Vec<(Value,)>, _> = sqlx::query_as(&sql)
         .bind(&query.q)
@@ -1631,10 +1631,10 @@ pub async fn get_agent_health(
         "select row_to_json(t) from ( \
             select a.id, a.last_seen, a.last_heartbeat_at, a.heartbeat_timeout_seconds, \
                    a.revoked_at, case when a.revoked_at is not null then 'revoked' \
-                     when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
+                     when coalesce(a.last_heartbeat_at, a.last_seen) is null or coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
                        now() - make_interval(secs => a.heartbeat_timeout_seconds::double precision) \
                      then 'offline' \
-                     when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
+                     when coalesce(a.last_heartbeat_at, a.last_seen) is null or coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
                        now() - make_interval(secs => (a.heartbeat_timeout_seconds / 2)::double precision) \
                      then 'stale' else 'online' end as status, \
                    (select row_to_json(i) from (select * from agent_health_incidents \
@@ -1676,10 +1676,10 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
             select a.id, a.hostname, a.agent_version, a.os, a.arch, a.capabilities, \
                    a.last_seen, a.protocol_version, a.revoked_at, \
                    case when a.revoked_at is not null then 'revoked' \
-                     when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
+                     when coalesce(a.last_heartbeat_at, a.last_seen) is null or coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
                        now() - make_interval(secs => a.heartbeat_timeout_seconds::double precision) \
                      then 'offline' \
-                     when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
+                     when coalesce(a.last_heartbeat_at, a.last_seen) is null or coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
                        now() - make_interval(secs => (a.heartbeat_timeout_seconds / 2)::double precision) \
                      then 'stale' else 'online' end as status, \
                    (select ir.device_id from identity_rules ir where ir.rule_type = 'agent_id' \
@@ -2473,5 +2473,47 @@ mod tests {
             .expect("agent detail");
         assert!(detail.get("last_heartbeat_at").is_some());
         assert!(detail.get("updated_at").is_none());
+    }
+    #[tokio::test]
+    async fn fleet_search_counts_and_pages_cover_more_than_one_hundred_agents() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let prefix = format!("fleet-test-{}", Uuid::new_v4());
+        sqlx::query("insert into agents(id,cert_fingerprint,cert_serial,hostname,last_seen) select gen_random_uuid(),$1||i::text,$1||i::text,$1||i::text,case when i=101 then now() else null end from generate_series(1,101) i").bind(&prefix).execute(&pool).await.unwrap();
+        let make_query = |cursor| {
+            Query(AgentListQuery {
+                q: Some(prefix.clone()),
+                status: None,
+                limit: Some(100),
+                cursor,
+            })
+        };
+        let (status, Json(first)) =
+            list_agents(State(AppState { pool: pool.clone() }), make_query(None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["items"].as_array().unwrap().len(), 100);
+        assert_eq!(first["total"], 101);
+        assert_eq!(first["counts"]["online"], 1);
+        assert_eq!(first["counts"]["offline"], 100);
+        let (_, Json(second)) = list_agents(
+            State(AppState { pool: pool.clone() }),
+            make_query(Some(first["next_cursor"].as_str().unwrap().into())),
+        )
+        .await;
+        assert_eq!(second["items"].as_array().unwrap().len(), 1);
+        assert!(second["next_cursor"].is_null());
+        let ids: std::collections::HashSet<_> = first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert!(!ids.contains(second["items"][0]["id"].as_str().unwrap()));
+        sqlx::query("delete from agents where hostname like $1")
+            .bind(format!("{prefix}%"))
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

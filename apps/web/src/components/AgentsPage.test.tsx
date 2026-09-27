@@ -202,13 +202,25 @@ describe("AgentsPage", () => {
     renderPage();
 
     expect((await screen.findAllByText("edge-01")).length).toBeGreaterThan(0);
-    fireEvent.click(await screen.findByRole("button", { name: "Select edge-01" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select edge-01" }),
+    );
+    expect(
+      await screen.findByRole("region", { name: "Agent at a glance" }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+    fireEvent.click(
+      await screen.findByText("Agent identity and delivery details", {
+        selector: "summary",
+      }),
+    );
     expect(
       await screen.findByText("Internal listener vs worker reachability"),
     ).toBeInTheDocument();
     expect(screen.getByText("Evidence reconciliation")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("tab", { name: "Inventory & settings" }));
-    fireEvent.click(await screen.findByText("Sockets", { selector: "summary" }));
+    fireEvent.click(
+      await screen.findByText("Sockets", { selector: "summary" }),
+    );
     expect(await screen.findByText("Listening")).toBeInTheDocument();
     expect(await screen.findByText("Reachable")).toBeInTheDocument();
   });
@@ -229,7 +241,9 @@ describe("AgentsPage", () => {
 
     renderPage();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Select edge-01" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select edge-01" }),
+    );
     fireEvent.click(await screen.findByRole("tab", { name: "Metrics" }));
     expect(await screen.findByText("Resource telemetry")).toBeInTheDocument();
     expect(screen.getByText("GPU utilization")).toBeInTheDocument();
@@ -268,7 +282,9 @@ describe("AgentsPage", () => {
     );
 
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: "Select edge-01" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select edge-01" }),
+    );
     fireEvent.click(await screen.findByRole("tab", { name: "Metrics" }));
 
     expect(await screen.findByText("Samples are stale")).toBeInTheDocument();

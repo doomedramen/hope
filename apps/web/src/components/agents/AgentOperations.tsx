@@ -688,3 +688,87 @@ export function AgentLogs({
     </section>
   );
 }
+
+export function AgentBulkUpdates({
+  selected,
+  clear,
+}: {
+  selected: string[];
+  clear: () => void;
+}) {
+  const [results, setResults] = useState<
+    Array<{ id: string; message: string }>
+  >([]);
+  const run = useMutation({
+    mutationFn: async () => {
+      setResults([]);
+      // Each request has its own durable operation and result; one failure cannot hide others.
+      for (const id of selected) {
+        let message: string;
+        try {
+          const release = await fetchAgentUpdates(id);
+          if (!release.target_version)
+            message = release.blocked_reason ?? "No compatible release";
+          else if (release.target_version === release.current_version)
+            message = "Already up to date";
+          else {
+            await updateAgent(id, release.target_version);
+            message = `Queued ${release.target_version}`;
+          }
+        } catch (error) {
+          message = getUserFacingError(error, "Update request failed");
+        }
+        setResults((old) => [...old, { id, message }]);
+      }
+    },
+  });
+  if (!selected.length && !results.length) return null;
+  return (
+    <section
+      aria-label="Selected agent updates"
+      className="space-y-3 rounded-lg border p-4"
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <p className="text-sm">{selected.length} selected</p>
+        <Button
+          disabled={!selected.length || run.isPending}
+          onClick={() => run.mutate()}
+        >
+          Update selected agents
+        </Button>
+        <Button
+          variant="outline"
+          disabled={run.isPending}
+          onClick={() => {
+            clear();
+            setResults([]);
+          }}
+        >
+          Clear selection
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Each agent uses its compatible release channel and version pin. Offline
+        agents remain queued.
+      </p>
+      {run.isPending && (
+        <p role="status" className="text-sm">
+          Requesting updates… {results.length} of {selected.length}
+        </p>
+      )}
+      <ul className="space-y-1 text-sm">
+        {results.map((result) => (
+          <li key={result.id}>
+            <a
+              className="underline"
+              href={`/agents?agent=${encodeURIComponent(result.id)}`}
+            >
+              {result.id.slice(0, 8)}
+            </a>
+            : {result.message}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}

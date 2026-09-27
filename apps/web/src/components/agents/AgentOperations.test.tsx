@@ -9,10 +9,12 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { AgentLogs } from "./AgentOperations";
-import { fetchAgentLogs } from "@/lib/api";
+import { AgentLogs, AgentBulkUpdates } from "./AgentOperations";
+import { fetchAgentLogs, fetchAgentUpdates, updateAgent } from "@/lib/api";
 vi.mock("@/lib/api", () => ({
   fetchAgentLogs: vi.fn(),
+  fetchAgentUpdates: vi.fn(),
+  updateAgent: vi.fn(),
   getUserFacingError: () => "Unavailable",
 }));
 afterEach(() => {
@@ -97,5 +99,39 @@ it("carries filters to search and keeps source identity visible", async () => {
   );
   fireEvent.click(screen.getByRole("button", { name: "Agent diagnostics" }));
   expect(navigate).toHaveBeenCalledWith({ source: "agent" });
+  cache.clear();
+});
+it("reports each selected agent independently when one update cannot proceed", async () => {
+  vi.mocked(fetchAgentUpdates)
+    .mockResolvedValueOnce({
+      policy: {
+        mode: "notify",
+        channel: "stable",
+        pinned_version: null,
+        rollout_percent: 5,
+        window_start_utc: 0,
+        window_end_utc: 0,
+      },
+      current_version: "1.0.0",
+      target_version: "1.1.0",
+      blocked_reason: null,
+      operations: [],
+    })
+    .mockRejectedValueOnce(new Error("unavailable"));
+  vi.mocked(updateAgent).mockResolvedValue({ operation_id: "operation" });
+  const cache = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={cache}>
+      <AgentBulkUpdates selected={["a", "b"]} clear={vi.fn()} />
+    </QueryClientProvider>,
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Update selected agents" }),
+  );
+  expect(await screen.findByText(/Queued 1.1.0/)).toBeVisible();
+  expect(await screen.findByText(/Unavailable/)).toBeVisible();
+  expect(updateAgent).toHaveBeenCalledExactlyOnceWith("a", "1.1.0");
   cache.clear();
 });

@@ -193,6 +193,15 @@ export interface AgentInventorySummary {
 }
 
 export interface Agent {
+  telemetry?: {
+    collected_at: string;
+    cpu_percent?: number;
+    memory_percent?: number;
+    delivery?: {
+      metrics?: { queued_records?: number };
+      logs?: { queued_records?: number };
+    };
+  } | null;
   id: string;
   hostname: string | null;
   status: AgentStatus;

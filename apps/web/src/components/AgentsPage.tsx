@@ -1,11 +1,13 @@
+import { AgentAtGlance } from "@/components/agents/AgentAtGlance";
 import {
   AgentUpdatePanel,
+  AgentBulkUpdates,
   AgentSettings,
   AgentLogs,
   type AgentLocation,
   type NavigateAgent,
 } from "@/components/agents/AgentOperations";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckIcon,
   CircleAlertIcon,
@@ -113,6 +115,7 @@ export function AgentsPage({
   location: externalLocation,
   onNavigate,
 }: { location?: AgentLocation; onNavigate?: NavigateAgent } = {}) {
+  const queryClient = useQueryClient();
   const [localLocation, setLocalLocation] = useState<AgentLocation>({});
   const location = externalLocation ?? localLocation;
   const navigate: NavigateAgent = (patch) => {
@@ -123,6 +126,11 @@ export function AgentsPage({
   const setRequestedAgentId = (id: string | null) =>
     navigate({ agent: id ?? undefined, tab: undefined });
   const [enrollmentOpen, setEnrollmentOpen] = useState(false);
+  const [bulkSelected, setBulkSelected] = useState<string[]>([]);
+  const toggleBulk = (id: string) =>
+    setBulkSelected((old) =>
+      old.includes(id) ? old.filter((item) => item !== id) : [...old, id],
+    );
   const search = location.q ?? "";
   const setSearch = (q: string) =>
     navigate({ q: q || undefined, cursor: undefined });
@@ -156,16 +164,43 @@ export function AgentsPage({
   const counts = agentsQuery.data?.counts;
 
   return (
-    <div className="mx-auto flex max-w-7xl flex-col gap-6">
-      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
+    <div className="mx-auto flex max-w-7xl flex-col gap-4">
+      <div
+        className={
+          selectedAgentId
+            ? "flex items-center justify-between gap-3"
+            : "flex flex-col justify-between gap-4 md:flex-row md:items-end"
+        }
+      >
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Agents</h1>
+          {selectedAgentId ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setRequestedAgentId(null)}
+            >
+              ← Agents
+            </Button>
+          ) : (
+            <h1 className="text-3xl font-semibold tracking-tight">Agents</h1>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button
             onClick={() => {
               void agentsQuery.refetch();
-              if (selectedAgentId) void detailQuery.refetch();
+              if (selectedAgentId) {
+                void detailQuery.refetch();
+                for (const key of [
+                  "agent-metrics",
+                  "agent-collection",
+                  "agent-updates",
+                  "agent-logs",
+                ])
+                  void queryClient.invalidateQueries({
+                    queryKey: [key, selectedAgentId],
+                  });
+              }
             }}
             size="sm"
             variant="outline"
@@ -173,7 +208,7 @@ export function AgentsPage({
             <RefreshCwIcon data-icon="inline-start" />
             Refresh
           </Button>
-          {!isEmptyState ? (
+          {!isEmptyState && !selectedAgentId ? (
             <Button onClick={() => setEnrollmentOpen(true)} size="sm">
               <DownloadIcon data-icon="inline-start" />
               Enroll agent
@@ -208,16 +243,12 @@ export function AgentsPage({
           ))}
         </div>
       )}
-      {selectedAgentId && (
-        <Button
-          variant="outline"
-          className="self-start"
-          onClick={() => setRequestedAgentId(null)}
-        >
-          Back to agents
-        </Button>
+      {!selectedAgentId && (
+        <AgentBulkUpdates
+          selected={bulkSelected}
+          clear={() => setBulkSelected([])}
+        />
       )}
-
       <div className="grid gap-6">
         {!selectedAgentId && (
           <Card aria-busy={agentsQuery.isLoading} className="min-w-0">
@@ -284,6 +315,8 @@ export function AgentsPage({
                 agents={visibleAgents}
                 selectedAgentId={selectedAgentId}
                 selectAgent={setRequestedAgentId}
+                bulkSelected={bulkSelected}
+                toggleBulk={toggleBulk}
               />
             )}
             {agentsQuery.data?.next_cursor && (
@@ -505,82 +538,155 @@ function AgentTable({
   agents,
   selectedAgentId,
   selectAgent,
+  bulkSelected,
+  toggleBulk,
 }: {
   agents: Agent[];
+  bulkSelected: string[];
+  toggleBulk: (id: string) => void;
   selectedAgentId: string | null;
   selectAgent: (id: string) => void;
 }) {
+  const percent = (value: number | undefined) =>
+    typeof value === "number" && Number.isFinite(value)
+      ? `${value.toFixed(0)}%`
+      : "—";
+  const dataAge = (agent: Agent) =>
+    agent.telemetry
+      ? formatRelative(agent.telemetry.collected_at)
+      : "No metrics yet";
+  const stale = (agent: Agent) =>
+    !agent.telemetry ||
+    Date.now() - Date.parse(agent.telemetry.collected_at) > 45_000;
+  const backlog = (agent: Agent) =>
+    (agent.telemetry?.delivery?.metrics?.queued_records ?? 0) +
+    (agent.telemetry?.delivery?.logs?.queued_records ?? 0);
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Agent</TableHead>
-          <TableHead>State</TableHead>
-          <TableHead>Version</TableHead>
-          <TableHead>Platform</TableHead>
-          <TableHead>Capabilities</TableHead>
-          <TableHead>Last seen</TableHead>
-          <TableHead>Inventory</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
+    <>
+      <div className="divide-y sm:hidden" aria-label="Agents on this page">
         {agents.map((agent) => (
-          <TableRow
-            aria-selected={agent.id === selectedAgentId}
-            data-state={agent.id === selectedAgentId ? "selected" : undefined}
-            key={agent.id}
-          >
-            <TableCell className="min-w-48">
-              <button
-                aria-label={`Select ${agent.hostname || "agent"}`}
-                aria-pressed={agent.id === selectedAgentId}
-                className="flex min-w-0 w-full items-center gap-2 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-                onClick={() => selectAgent(agent.id)}
-                type="button"
-              >
-                <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted">
-                  <ServerIcon aria-hidden="true" className="size-3.5" />
-                </span>
-                <div className="min-w-0">
-                  <p className="truncate font-medium">
-                    {agent.hostname || "Unnamed agent"}
-                  </p>
-                  <p className="truncate font-mono text-xs text-muted-foreground">
-                    {shortId(agent.id)}
-                  </p>
-                </div>
-              </button>
-            </TableCell>
-            <TableCell>
-              <AgentStatusBadge status={agent.status} />
-            </TableCell>
-            <TableCell className="font-mono text-xs">
-              {agent.agent_version ?? "—"}
-            </TableCell>
-            <TableCell>
-              <div className="flex flex-col gap-0.5">
-                <span>{agent.os ?? "—"}</span>
-                <span className="text-xs text-muted-foreground">
-                  {agent.arch ?? "—"}
-                </span>
-              </div>
-            </TableCell>
-            <TableCell className="min-w-48">
-              <CapabilityBadges capabilities={agent.capabilities} />
-            </TableCell>
-            <TableCell title={formatDate(agent.last_seen)}>
-              {formatRelative(agent.last_seen)}
-            </TableCell>
-            <TableCell>
-              <InventorySummary
-                summary={agent.inventory_summary ?? EMPTY_INVENTORY_SUMMARY}
-                compact
+          <article key={agent.id} className="space-y-2 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                className="size-4 shrink-0 accent-primary"
+                aria-label={`Include ${agent.hostname || agent.id} in update`}
+                checked={bulkSelected.includes(agent.id)}
+                disabled={agent.status === "revoked"}
+                onChange={() => toggleBulk(agent.id)}
               />
-            </TableCell>
-          </TableRow>
+              <button
+                className="min-w-0 flex-1 truncate text-left font-medium focus-visible:outline focus-visible:outline-ring"
+                onClick={() => selectAgent(agent.id)}
+                aria-label={`Open ${agent.hostname || "agent"}`}
+              >
+                {agent.hostname || "Unnamed agent"}
+              </button>
+              <AgentStatusBadge status={agent.status} />
+            </div>
+            <div className="flex justify-between gap-2 text-sm">
+              <span>CPU {percent(agent.telemetry?.cpu_percent)}</span>
+              <span>Memory {percent(agent.telemetry?.memory_percent)}</span>
+              <span className="text-muted-foreground">
+                v{agent.agent_version ?? "?"}
+              </span>
+            </div>
+            <p
+              className={`text-xs ${stale(agent) ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}
+            >
+              {agent.telemetry ? `Metrics ${dataAge(agent)}` : dataAge(agent)}
+              {backlog(agent) > 2 ? ` · ${backlog(agent)} queued` : ""}
+            </p>
+          </article>
         ))}
-      </TableBody>
-    </Table>
+      </div>
+      <div className="hidden sm:block">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>
+                <span className="sr-only">Select for updates</span>
+              </TableHead>
+              <TableHead>Agent</TableHead>
+              <TableHead>Connection</TableHead>
+              <TableHead>CPU / memory</TableHead>
+              <TableHead>Data delivery</TableHead>
+              <TableHead>Version</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {agents.map((agent) => (
+              <TableRow
+                key={agent.id}
+                aria-selected={agent.id === selectedAgentId}
+              >
+                <TableCell>
+                  <input
+                    type="checkbox"
+                    className="size-4 accent-primary"
+                    aria-label={`Include ${agent.hostname || agent.id} in update`}
+                    checked={bulkSelected.includes(agent.id)}
+                    disabled={agent.status === "revoked"}
+                    onChange={() => toggleBulk(agent.id)}
+                  />
+                </TableCell>
+                <TableCell className="min-w-40">
+                  <button
+                    aria-label={`Select ${agent.hostname || "agent"}`}
+                    className="block max-w-64 truncate rounded text-left font-medium focus-visible:outline focus-visible:outline-ring"
+                    onClick={() => selectAgent(agent.id)}
+                  >
+                    {agent.hostname || "Unnamed agent"}
+                  </button>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {agent.os ? labelize(agent.os) : "Platform not reported"}
+                  </p>
+                </TableCell>
+                <TableCell>
+                  <AgentStatusBadge status={agent.status} />
+                  <p
+                    className="mt-1 text-xs text-muted-foreground"
+                    title={formatDate(agent.last_seen)}
+                  >
+                    {formatRelative(agent.last_seen)}
+                  </p>
+                </TableCell>
+                <TableCell className="tabular-nums">
+                  <span>
+                    {percent(agent.telemetry?.cpu_percent)} /{" "}
+                    {percent(agent.telemetry?.memory_percent)}
+                  </span>
+                  {stale(agent) && agent.telemetry && (
+                    <p className="text-xs text-muted-foreground">
+                      Last readings
+                    </p>
+                  )}
+                </TableCell>
+                <TableCell>
+                  <p
+                    className={
+                      stale(agent) ? "text-amber-700 dark:text-amber-400" : ""
+                    }
+                  >
+                    {agent.telemetry
+                      ? `Metrics ${dataAge(agent)}`
+                      : dataAge(agent)}
+                  </p>
+                  {backlog(agent) > 2 && (
+                    <p className="text-xs text-muted-foreground">
+                      {backlog(agent)} records queued
+                    </p>
+                  )}
+                </TableCell>
+                <TableCell className="text-sm">
+                  {agent.agent_version ?? "Not reported"}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   );
 }
 
@@ -612,7 +718,7 @@ function AgentDetailPanel({
   const metricsQuery = useQuery({
     queryKey: ["agent-metrics", detail?.id, metricRange],
     queryFn: () => fetchAgentMetrics(detail!.id, metricRange),
-    enabled: ["overview", "metrics"].includes(activeTab) && Boolean(detail?.id),
+    enabled: Boolean(detail?.id),
     refetchInterval: 15_000,
   });
 
@@ -667,13 +773,15 @@ function AgentDetailPanel({
     <Card className="min-w-0">
       <CardHeader className="border-b">
         <div className="min-w-0">
-          <CardTitle className="truncate">
+          <h1
+            className="truncate text-2xl font-semibold tracking-tight"
+            title={detail.hostname ?? undefined}
+          >
             {detail.hostname || "Unnamed agent"}
-          </CardTitle>
+          </h1>
           <CardDescription className="flex flex-wrap gap-x-2 gap-y-1">
-            <span className="font-mono">{shortId(detail.id)}</span>
-            <span>{detail.os ?? "unknown OS"}</span>
-            <span>{detail.arch ?? "unknown arch"}</span>
+            <span>{detail.os ? labelize(detail.os) : "Unknown platform"}</span>
+            <span>Last contact {formatRelative(detail.last_seen)}</span>
           </CardDescription>
         </div>
         <CardAction>
@@ -681,34 +789,13 @@ function AgentDetailPanel({
         </CardAction>
       </CardHeader>
       <CardContent className="flex min-w-0 flex-col gap-5">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <InfoPair label="Version" value={detail.agent_version} mono />
-          <InfoPair
-            label="Last seen"
-            value={formatRelative(detail.last_seen)}
-            title={formatDate(detail.last_seen)}
-          />
-          <InfoPair
-            label="Last heartbeat"
-            value={formatRelative(detail.last_heartbeat_at)}
-            title={formatDate(detail.last_heartbeat_at)}
-          />
-          <InfoPair
-            label="Device"
-            value={detail.device_id ? shortId(detail.device_id) : "Unlinked"}
-            mono={Boolean(detail.device_id)}
-          />
-          <InfoPair
-            label="Protocol"
-            value={
-              detail.protocol_version === null
-                ? null
-                : `v${detail.protocol_version}`
-            }
-            mono
-          />
-        </div>
-
+        <AgentAtGlance
+          agent={detail}
+          metrics={metricsQuery.data}
+          loading={metricsQuery.isLoading}
+          error={error || metricsQuery.error}
+          navigate={navigate}
+        />
         <Tabs
           className="min-w-0"
           onValueChange={setActiveTab}
@@ -716,134 +803,169 @@ function AgentDetailPanel({
         >
           <TabsList
             aria-label="Agent views"
-            className="h-auto w-full flex-wrap justify-start"
+            className="grid w-full grid-cols-4 gap-1 group-data-horizontal/tabs:h-auto"
             variant="line"
           >
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="metrics">Metrics</TabsTrigger>
-            <TabsTrigger value="logs">Logs & activity</TabsTrigger>
-            <TabsTrigger value="settings">Inventory & settings</TabsTrigger>
+            <TabsTrigger className="min-h-10" value="overview">
+              Overview
+            </TabsTrigger>
+            <TabsTrigger className="min-h-10" value="metrics">
+              Metrics
+            </TabsTrigger>
+            <TabsTrigger className="min-h-10" value="logs">
+              Logs
+            </TabsTrigger>
+            <TabsTrigger className="min-h-10" value="settings">
+              Settings
+            </TabsTrigger>
           </TabsList>
 
-          <TabsContent className="flex flex-col gap-5 pt-4" value="overview">
-            <AgentUpdatePanel agentId={detail.id} />
-            <section
-              className="space-y-3 rounded-lg border p-4"
-              aria-label="Data delivery"
-            >
-              <h2 className="font-medium">Data delivery</h2>
-              {metricsQuery.error && (
-                <p role="status" className="text-sm text-destructive">
-                  Could not refresh delivery status. Cached values remain
-                  visible.
-                </p>
-              )}
-              <p className="text-sm">
-                Last sample:{" "}
-                {metricsQuery.data?.latest
-                  ? formatRelative(metricsQuery.data.latest.collected_at)
-                  : "Waiting for first metrics"}{" "}
-                · {metricsQuery.data?.freshness.state ?? "unknown"}
-              </p>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {["metrics", "logs"].map((stream) => {
-                  const delivery = metricsQuery.data?.latest?.metrics
-                    .delivery as
-                    | Record<
-                        string,
-                        {
-                          queued_records?: number;
-                          queued_bytes?: number;
-                          oldest_at?: number;
-                          loss?: { records?: number; reason?: string };
-                        }
-                      >
-                    | undefined;
-                  const status = delivery?.[stream];
-                  return (
-                    <div key={stream} className="rounded border p-3 text-sm">
-                      <h3 className="font-medium">{labelize(stream)}</h3>
-                      {status ? (
-                        <>
-                          <p>
-                            {status.queued_records ?? 0} queued ·{" "}
-                            {formatBytes(status.queued_bytes ?? 0)}
-                          </p>
-                          {status.oldest_at && (
-                            <p className="text-muted-foreground">
-                              Oldest queued:{" "}
-                              {new Date(
-                                status.oldest_at * 1000,
-                              ).toLocaleString()}
-                            </p>
-                          )}
-                          {Boolean(status.loss?.records) && (
-                            <p className="text-destructive">
-                              {status.loss?.records} records lost:{" "}
-                              {status.loss?.reason}
-                            </p>
-                          )}
-                        </>
-                      ) : (
-                        <p className="text-muted-foreground">
-                          Delivery counters unavailable for this agent.
-                        </p>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Queue counts reflect the last received sample. Metrics and logs
-                each retain up to 64 MiB or 24 hours locally.
-              </p>
-            </section>
-            {Boolean(error) && (
-              <p role="status" className="text-sm text-destructive">
-                Refresh failed. Showing the last loaded agent data.
-              </p>
-            )}
-            {detail.device_id && (
-              <a
-                href={`/devices?device=${encodeURIComponent(detail.device_id)}`}
-                className="text-sm underline"
-              >
-                Open associated device
-              </a>
-            )}
-            {detail.collector_status
-              ?.filter((collector) => collector.status !== "available")
-              .map((collector) => (
-                <p key={collector.capability} className="text-sm">
-                  {labelize(collector.capability)}: {collector.status} —{" "}
-                  {collector.error || "No diagnostic provided"}
-                </p>
-              ))}
-            <section className="flex flex-col gap-2">
-              <h2 className="text-sm font-medium">Inventory summary</h2>
-              <InventorySummary
-                summary={detail.inventory_summary ?? EMPTY_INVENTORY_SUMMARY}
-              />
-            </section>
-            <ReconciliationSummary detail={detail} />
-            <section className="flex flex-col gap-2">
-              <div className="flex items-end justify-between gap-3">
-                <div>
-                  <h2 className="text-sm font-medium">Capabilities</h2>
-                  <p className="text-xs text-muted-foreground">
-                    Collectors reported by agent.
-                  </p>
-                </div>
-                <Badge variant="secondary">{detail.capabilities.length}</Badge>
-              </div>
-              <CapabilityBadges capabilities={detail.capabilities} expanded />
-            </section>
-            <ReachabilityExplanation />
-            <EvidenceList evidence={detail.evidence} />
+          <TabsContent className="pt-4" value="overview">
+            <p className="text-sm text-muted-foreground">
+              Open Metrics for trends or Logs for recent activity. Collection
+              and update controls are in Settings.
+            </p>
           </TabsContent>
 
           <TabsContent className="space-y-6 pt-4" value="settings">
+            <AgentUpdatePanel agentId={detail.id} />
             <AgentSettings agentId={detail.id} />
+            <details className="space-y-4 rounded-lg border p-4">
+              <summary className="cursor-pointer font-medium">
+                Agent identity and delivery details
+              </summary>
+              <div className="grid gap-3 pt-4 sm:grid-cols-2">
+                <InfoPair label="Agent ID" value={detail.id} mono />
+                <InfoPair
+                  label="Platform"
+                  value={`${detail.os ?? "unknown"} ${detail.arch ?? ""}`}
+                />
+                <InfoPair
+                  label="Protocol"
+                  value={`v${detail.protocol_version ?? "unknown"}`}
+                />
+                <InfoPair
+                  label="Last heartbeat"
+                  value={formatDate(detail.last_heartbeat_at)}
+                />
+              </div>
+
+              <section
+                className="space-y-3 rounded-lg border p-4"
+                aria-label="Data delivery"
+              >
+                <h2 className="font-medium">Data delivery</h2>
+                {metricsQuery.error && (
+                  <p role="status" className="text-sm text-destructive">
+                    Could not refresh delivery status. Cached values remain
+                    visible.
+                  </p>
+                )}
+                <p className="text-sm">
+                  Last sample:{" "}
+                  {metricsQuery.data?.latest
+                    ? formatRelative(metricsQuery.data.latest.collected_at)
+                    : "Waiting for first metrics"}{" "}
+                  · {metricsQuery.data?.freshness.state ?? "unknown"}
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {["metrics", "logs"].map((stream) => {
+                    const delivery = metricsQuery.data?.latest?.metrics
+                      .delivery as
+                      | Record<
+                          string,
+                          {
+                            queued_records?: number;
+                            queued_bytes?: number;
+                            oldest_at?: number;
+                            loss?: { records?: number; reason?: string };
+                          }
+                        >
+                      | undefined;
+                    const status = delivery?.[stream];
+                    return (
+                      <div key={stream} className="rounded border p-3 text-sm">
+                        <h3 className="font-medium">{labelize(stream)}</h3>
+                        {status ? (
+                          <>
+                            <p>
+                              {status.queued_records ?? 0} queued ·{" "}
+                              {formatBytes(status.queued_bytes ?? 0)}
+                            </p>
+                            {status.oldest_at && (
+                              <p className="text-muted-foreground">
+                                Oldest queued:{" "}
+                                {new Date(
+                                  status.oldest_at * 1000,
+                                ).toLocaleString()}
+                              </p>
+                            )}
+                            {Boolean(status.loss?.records) && (
+                              <p className="text-destructive">
+                                {status.loss?.records} records lost:{" "}
+                                {status.loss?.reason}
+                              </p>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-muted-foreground">
+                            Delivery counters unavailable for this agent.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Queue counts reflect the last received sample. Metrics and
+                  logs each retain up to 64 MiB or 24 hours locally.
+                </p>
+              </section>
+              {Boolean(error) && (
+                <p role="status" className="text-sm text-destructive">
+                  Refresh failed. Showing the last loaded agent data.
+                </p>
+              )}
+              {detail.device_id && (
+                <a
+                  href={`/devices?device=${encodeURIComponent(detail.device_id)}`}
+                  className="text-sm underline"
+                >
+                  Open associated device
+                </a>
+              )}
+              {detail.collector_status
+                ?.filter((collector) => collector.status !== "available")
+                .map((collector) => (
+                  <p key={collector.capability} className="text-sm">
+                    {labelize(collector.capability)}: {collector.status} —{" "}
+                    {collector.error || "No diagnostic provided"}
+                  </p>
+                ))}
+              <section className="flex flex-col gap-2">
+                <h2 className="text-sm font-medium">Inventory summary</h2>
+                <InventorySummary
+                  summary={detail.inventory_summary ?? EMPTY_INVENTORY_SUMMARY}
+                />
+              </section>
+              <ReconciliationSummary detail={detail} />
+              <section className="flex flex-col gap-2">
+                <div className="flex items-end justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-medium">Capabilities</h2>
+                    <p className="text-xs text-muted-foreground">
+                      Collectors reported by agent.
+                    </p>
+                  </div>
+                  <Badge variant="secondary">
+                    {detail.capabilities.length}
+                  </Badge>
+                </div>
+                <CapabilityBadges capabilities={detail.capabilities} expanded />
+              </section>
+              <ReachabilityExplanation />
+              <EvidenceList evidence={detail.evidence} />
+            </details>
             <section
               aria-label="Host inventory"
               className="space-y-3 border-t pt-4"
