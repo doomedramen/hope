@@ -163,6 +163,8 @@ pub async fn ingest_metric_sample_batch(
         }
         accepted_count += usize::try_from(result.rows_affected()).unwrap_or_default();
     }
+    sqlx::query("update agent_enrollment_attempts set metrics_at=now() where agent_id=$1 and metrics_at is null")
+        .bind(authenticated_agent_id).execute(&mut *tx).await?;
     tx.commit().await?;
 
     Ok(MetricIngestOutcome {
@@ -179,6 +181,8 @@ pub enum MetricRange {
     SixHours,
     OneDay,
     SevenDays,
+    ThirtyDays,
+    SixMonths,
 }
 
 impl MetricRange {
@@ -188,8 +192,10 @@ impl MetricRange {
             "6h" => Ok(Self::SixHours),
             "24h" => Ok(Self::OneDay),
             "7d" => Ok(Self::SevenDays),
+            "30d" => Ok(Self::ThirtyDays),
+            "180d" => Ok(Self::SixMonths),
             other => Err(format!(
-                "unsupported metric range `{other}`; use 1h, 6h, 24h, or 7d"
+                "unsupported metric range `{other}`; use 1h, 6h, 24h, 7d, 30d, or 180d"
             )),
         }
     }
@@ -200,6 +206,8 @@ impl MetricRange {
             Self::SixHours => "6h",
             Self::OneDay => "24h",
             Self::SevenDays => "7d",
+            Self::ThirtyDays => "30d",
+            Self::SixMonths => "180d",
         }
     }
 
@@ -209,6 +217,8 @@ impl MetricRange {
             Self::SixHours => time::Duration::hours(6),
             Self::OneDay => time::Duration::hours(24),
             Self::SevenDays => time::Duration::days(7),
+            Self::ThirtyDays => time::Duration::days(30),
+            Self::SixMonths => time::Duration::days(180),
         }
     }
 }
@@ -286,10 +296,32 @@ async fn build_metrics_response(
     let resolution = match range {
         MetricRange::OneHour => 15,
         MetricRange::SixHours | MetricRange::OneDay => 300,
-        MetricRange::SevenDays => 3600,
+        MetricRange::SevenDays | MetricRange::ThirtyDays => 3600,
+        MetricRange::SixMonths => 43200,
     };
     let series = if range == MetricRange::OneHour {
         build_series(&rows, range)
+    } else if range == MetricRange::SixMonths {
+        // Merge hourly buckets in PostgreSQL. Weight by each metric's count, preserve gaps and extrema.
+        let series: Vec<(Value,)> = sqlx::query_as(
+            "with buckets as materialized (
+                select to_timestamp(floor(extract(epoch from bucket_start)/43200)*43200) as bucket, sample_count, stats
+                from agent_metric_rollups where agent_id=$1 and resolution=3600 and bucket_start >= $2 and bucket_start <= $3
+            ), counts as (select bucket,sum(sample_count) as sample_count from buckets group by bucket),
+            values as (select bucket,key,jsonb_build_object(
+                'count',sum((value->>'count')::bigint),
+                'sum',sum((value->>'sum')::double precision),
+                'average',sum((value->>'sum')::double precision)/nullif(sum((value->>'count')::bigint),0),
+                'minimum',min((value->>'minimum')::double precision),
+                'maximum',max((value->>'maximum')::double precision),
+                'latest',(array_agg(value->'latest' order by (value->>'last_at')::bigint desc))[1],
+                'last_at',max((value->>'last_at')::bigint)) as stats
+                from buckets cross join lateral jsonb_each(stats) group by bucket,key),
+            merged as (select bucket,jsonb_object_agg(key,stats) as stats from values group by bucket)
+            select json_build_object('timestamp',c.bucket,'sample_count',c.sample_count,'values',coalesce(m.stats,'{}'))
+            from counts c left join merged m using(bucket) order by c.bucket limit 362")
+            .bind(agent_id).bind(from).bind(now).fetch_all(pool).await?;
+        series.into_iter().map(|(value,)| value).collect()
     } else {
         let series: Vec<(Value,)> = sqlx::query_as("select json_build_object('timestamp',bucket_start,'sample_count',sample_count,'values',stats) from agent_metric_rollups where agent_id=$1 and resolution=$2 and bucket_start >= $3 and bucket_start <= $4 order by bucket_start limit 720")
             .bind(agent_id).bind(resolution).bind(from).bind(now).fetch_all(pool).await?;
@@ -352,7 +384,8 @@ fn build_series(rows: &[(Value,)], range: MetricRange) -> Vec<Value> {
     let seconds = match range {
         MetricRange::OneHour => 15,
         MetricRange::SixHours | MetricRange::OneDay => 300,
-        MetricRange::SevenDays => 3600,
+        MetricRange::SevenDays | MetricRange::ThirtyDays => 3600,
+        MetricRange::SixMonths => 43200,
     };
     let mut groups = BTreeMap::<i64, SeriesGroup>::new();
     for (row,) in rows {
@@ -584,6 +617,54 @@ mod tests {
         let parsed = parse_metric_sample_batch_value(value).unwrap();
         assert_eq!(parsed.batch.batch_id, batch_id);
         assert!(parse_metric_sample_batch_value(json!({"type": "observation_batch"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn long_history_merges_weighted_values_and_preserves_spikes() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+        let id = Uuid::new_v4();
+        sqlx::query("insert into agents(id,cert_fingerprint,cert_serial) values($1,$2,$2)")
+            .bind(id)
+            .bind(id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let at = OffsetDateTime::now_utc().unix_timestamp().div_euclid(43200) * 43200 - 86400;
+        for (offset, values) in [(0, vec![0.0, 30.0]), (3600, vec![90.0])] {
+            for value in values {
+                let mut tx = pool.begin().await.unwrap();
+                crate::metric_rollups::accumulate(
+                    &mut tx,
+                    id,
+                    OffsetDateTime::from_unix_timestamp(at + offset).unwrap(),
+                    &json!({"cpu":{"usage_percent":value}}),
+                )
+                .await
+                .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+        let result = build_metrics_response(&pool, id, MetricRange::SixMonths)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["resolution_seconds"], 43200);
+        assert_eq!(result["series"].as_array().unwrap().len(), 1);
+        let stats = &result["series"][0]["values"]["cpu.usage_percent"];
+        assert_eq!(stats["average"], 40.0);
+        assert_eq!(stats["minimum"], 0.0);
+        assert_eq!(stats["maximum"], 90.0);
+        assert_eq!(stats["latest"], 90.0);
+        assert_eq!(result["series"][0]["sample_count"], 3);
+        sqlx::query("delete from agents where id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[test]

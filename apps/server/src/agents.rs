@@ -32,8 +32,12 @@ pub async fn create_enrollment_token(pool: &PgPool, ttl_minutes: i64) -> sqlx::R
 
     sqlx::query(
         r#"
-        insert into enrollment_tokens (token_hash, expires_at)
-        values ($1, now() + make_interval(mins => $2))
+        with attempt as (
+            insert into agent_enrollment_attempts(expires_at)
+            values (now() + make_interval(mins => $2)) returning id, expires_at
+        )
+        insert into enrollment_tokens (token_hash, expires_at, attempt_id)
+        select $1, expires_at, id from attempt
         "#,
     )
     .bind(&hash)
@@ -84,6 +88,11 @@ pub async fn purge_expired_tokens(pool: &PgPool) -> sqlx::Result<u64> {
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        "delete from agent_enrollment_attempts where created_at < now() - interval '30 days'",
+    )
+    .execute(pool)
+    .await?;
     Ok(result.rows_affected() + challenges.rows_affected())
 }
 
@@ -124,6 +133,8 @@ pub async fn update_hello(
     .bind(metadata.capabilities)
     .execute(&mut *tx)
     .await?;
+    sqlx::query("update agent_enrollment_attempts set authenticated_at=now() where agent_id=$1 and authenticated_at is null")
+        .bind(agent_id).execute(&mut *tx).await?;
     recover_health_incident(&mut tx, agent_id).await?;
     tx.commit().await
 }

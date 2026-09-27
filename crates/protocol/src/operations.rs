@@ -36,6 +36,37 @@ pub struct CollectionConfig {
     pub docker_containers: Vec<String>,
     /// Literal strings to redact before writing a log to disk.
     pub redact: Vec<String>,
+    /// Overrides keyed by the exact journal:unit or docker:container source name.
+    pub source_policies: std::collections::BTreeMap<String, LogSourcePolicy>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LogSourcePolicy {
+    pub minimum_severity: String,
+    pub max_events_per_minute: u32,
+    pub max_bytes_per_minute: u32,
+}
+impl Default for LogSourcePolicy {
+    fn default() -> Self {
+        Self {
+            minimum_severity: "debug".into(),
+            max_events_per_minute: 1000,
+            max_bytes_per_minute: 1024 * 1024,
+        }
+    }
+}
+impl LogSourcePolicy {
+    pub fn includes(&self, severity: &str) -> bool {
+        let levels = ["debug", "info", "notice", "warning", "error", "critical"];
+        // Unclassified Docker and journal messages remain unknown, never guessed or silently filtered.
+        match (
+            levels.iter().position(|s| *s == severity),
+            levels.iter().position(|s| *s == self.minimum_severity),
+        ) {
+            (Some(actual), Some(minimum)) => actual >= minimum,
+            _ => true,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CollectionConfigAck {
@@ -97,6 +128,24 @@ impl LogBatch {
 }
 impl CollectionConfig {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        for (source, policy) in &self.source_policies {
+            let selected = self
+                .journal_units
+                .iter()
+                .any(|name| source == &format!("journal:{name}"))
+                || self
+                    .docker_containers
+                    .iter()
+                    .any(|name| source == &format!("docker:{name}"));
+            if !selected
+                || !(1..=6000).contains(&policy.max_events_per_minute)
+                || !(1024..=4 * 1024 * 1024).contains(&policy.max_bytes_per_minute)
+                || !["debug", "info", "notice", "warning", "error", "critical"]
+                    .contains(&policy.minimum_severity.as_str())
+            {
+                return Err(ValidationError::new("invalid source policy"));
+            }
+        }
         if self.revision < 0
             || self.journal_units.len() + self.docker_containers.len() > 16
             || self.redact.len() > 32
@@ -143,6 +192,35 @@ impl UpdateCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_policy_is_bounded_and_preserves_unknown_severity() {
+        let policy = LogSourcePolicy {
+            minimum_severity: "warning".into(),
+            ..Default::default()
+        };
+        assert!(!policy.includes("info"));
+        assert!(policy.includes("warning"));
+        assert!(policy.includes("critical"));
+        assert!(policy.includes("unknown"));
+        let mut config = CollectionConfig::default();
+        config
+            .source_policies
+            .insert("journal:app.service".into(), policy);
+        assert!(config.validate().is_err());
+        config.journal_units.push("app.service".into());
+        assert!(config.validate().is_ok());
+        config
+            .source_policies
+            .get_mut("journal:app.service")
+            .unwrap()
+            .max_events_per_minute = 0;
+        assert!(config.validate().is_err());
+        let old: CollectionConfig = serde_json::from_str(
+            r#"{"revision":1,"journal_units":[],"docker_containers":[],"redact":[]}"#,
+        )
+        .unwrap();
+        assert!(old.source_policies.is_empty());
+    }
     #[test]
     fn rejects_source_options_and_unbounded_configuration() {
         let mut config = CollectionConfig {

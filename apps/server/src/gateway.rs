@@ -395,10 +395,14 @@ where
                     .is_some_and(|n| n.capabilities.contains(&Capability::LogStreaming))
                 {
                     let config = crate::agent_logs::effective_config(&pool, agent.id).await?;
-                    let response = Envelope::new(Message::CollectionConfig(config));
-                    write
-                        .send(WsMessage::Text(protocol::serialize_envelope(&response)?))
-                        .await?;
+                    let supports_controls: bool = sqlx::query_scalar("select coalesce(capabilities ? 'log_source_controls',false) from agents where id=$1")
+                        .bind(agent.id).fetch_one(&pool).await?;
+                    if config.source_policies.is_empty() || supports_controls {
+                        let response = Envelope::new(Message::CollectionConfig(config));
+                        write
+                            .send(WsMessage::Text(protocol::serialize_envelope(&response)?))
+                            .await?;
+                    }
                 }
             }
             "log_batch" => {

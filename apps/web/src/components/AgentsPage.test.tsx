@@ -130,7 +130,7 @@ const detail: AgentDetail = {
         state: "reachable",
         checked_at: "2026-09-19T10:00:00Z",
         worker_id: "worker-1",
-        endpoint: "192.0.2.10:8080",
+        endpoint: { address: "192.0.2.10", port: 8080, protocol: "tcp" },
       },
     },
   ],
@@ -246,7 +246,7 @@ describe("AgentsPage", () => {
     );
     fireEvent.click(await screen.findByRole("tab", { name: "Metrics" }));
     expect(await screen.findByText("Resource telemetry")).toBeInTheDocument();
-    expect(screen.getByText("GPU utilization")).toBeInTheDocument();
+    expect(screen.queryByText("GPU utilization")).not.toBeInTheDocument();
     expect(
       screen.getByText("No supported GPU telemetry reported."),
     ).toBeInTheDocument();
@@ -287,7 +287,7 @@ describe("AgentsPage", () => {
     );
     fireEvent.click(await screen.findByRole("tab", { name: "Metrics" }));
 
-    expect(await screen.findByText("Samples are stale")).toBeInTheDocument();
+    expect(await screen.findByText(/Samples are stale/)).toBeInTheDocument();
     expect(screen.getAllByText("No chart data").length).toBeGreaterThan(0);
   });
 
@@ -341,6 +341,54 @@ describe("AgentsPage", () => {
     expect(
       screen.getByRole("button", { name: "Copy agent install command" }),
     ).toBeInTheDocument();
+  });
+
+  it("verifies only the agent linked to the enrollment attempt", async () => {
+    const fetchMock = vi.fn().mockImplementation((path: string) =>
+      Promise.resolve(
+        path === "/api/v1/agent-enrollment"
+          ? jsonResponse(
+              {
+                code: "secret.pin",
+                attempt_id: "attempt-42",
+                tls_pin: "pin",
+                expires_in_minutes: 15,
+              },
+              201,
+            )
+          : path === "/api/v1/agent-enrollment/attempt-42"
+            ? jsonResponse({
+                id: "attempt-42",
+                agent_id: "new-agent",
+                hostname: "new-host",
+                authenticated_at: "2026-09-27",
+                inventory_at: "2026-09-27",
+                metrics_at: "2026-09-27",
+                complete: true,
+                expired: false,
+                revoked_at: null,
+                log_sources: [],
+              })
+            : jsonResponse({ items: [], next_cursor: null }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Enroll agent" }),
+    );
+    expect(await screen.findByText("new-host is sending data")).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: "Open this agent" }),
+    ).toHaveAttribute("href", "/agents?agent=new-agent");
+    expect(
+      screen.queryByRole("button", { name: "Copy agent install command" }),
+    ).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(
+        ([path]) => path === "/api/v1/agent-enrollment/attempt-42",
+      ),
+    ).toBe(true);
   });
 
   it("shows an actionable error state when the list cannot load", async () => {

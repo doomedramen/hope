@@ -134,8 +134,10 @@ pub async fn get_settings(State(state): State<AppState>, Path(agent): Path<Uuid>
         .await
         .map_err(database)?;
     let row: Option<(Option<i64>, i32)> = sqlx::query_as("select applied_revision,log_retention_days from agent_collection_settings where agent_id=$1").bind(agent).fetch_optional(&state.pool).await.map_err(database)?;
+    let supports_controls: bool = sqlx::query_scalar("select coalesce((select capabilities ? 'log_source_controls' from agents where id=$1), false)")
+        .bind(agent).fetch_one(&state.pool).await.map_err(database)?;
     Ok(Json(
-        json!({"config": settings, "applied_revision": row.as_ref().and_then(|r| r.0), "log_retention_days": row.map_or(7, |r| r.1)}),
+        json!({"supports_source_controls":supports_controls,"config": settings, "applied_revision": row.as_ref().and_then(|r| r.0), "log_retention_days": row.map_or(7, |r| r.1)}),
     ))
 }
 #[derive(Deserialize)]
@@ -160,6 +162,16 @@ pub async fn put_settings(
             StatusCode::BAD_REQUEST,
             "Retention must be between 1 and 90 days",
         ));
+    }
+    if !request.config.source_policies.is_empty() {
+        let supported: bool = sqlx::query_scalar("select coalesce((select capabilities ? 'log_source_controls' from agents where id=$1),false)")
+            .bind(agent).fetch_one(&state.pool).await.map_err(database)?;
+        if !supported {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "Update the agent before setting source budgets or severity controls",
+            ));
+        }
     }
     let mut tx = state.pool.begin().await.map_err(database)?;
     let active: bool = sqlx::query_scalar(
@@ -189,7 +201,7 @@ pub async fn put_settings(
     };
     // Audit source names/counts only. Redaction values can themselves be secrets.
     sqlx::query("insert into audit_events(actor_user_id,actor_kind,action,target_kind,target_id,result,detail) values ($1,'operator','agent.collection.updated','agents',$2,'success',$3)")
-        .bind(actor).bind(agent).bind(json!({"revision":revision,"journal_units":request.config.journal_units,"docker_containers":request.config.docker_containers,"redaction_count":request.config.redact.len()})).execute(&mut *tx).await.map_err(database)?;
+        .bind(actor).bind(agent).bind(json!({"revision":revision,"journal_units":request.config.journal_units,"docker_containers":request.config.docker_containers,"redaction_count":request.config.redact.len(),"source_policies":request.config.source_policies})).execute(&mut *tx).await.map_err(database)?;
     tx.commit().await.map_err(database)?;
     Ok(Json(json!({"revision": revision})))
 }
@@ -199,7 +211,7 @@ pub async fn acknowledge_config(
     ack: &protocol::CollectionConfigAck,
 ) -> Result<(), sqlx::Error> {
     if ack.accepted {
-        sqlx::query("update agent_collection_settings set applied_revision=$2, applied_at=now() where agent_id=$1 and revision=$2").bind(agent).bind(ack.revision).execute(pool).await?;
+        sqlx::query("update agent_collection_settings set applied_revision=$2, applied_at=now() where agent_id=$1 and revision=$2 and (coalesce(config->'source_policies','{}')='{}'::jsonb or exists(select 1 from agents where id=$1 and capabilities ? 'log_source_controls'))").bind(agent).bind(ack.revision).execute(pool).await?;
     }
     Ok(())
 }

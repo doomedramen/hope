@@ -9,10 +9,19 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { AgentLogs, AgentBulkUpdates } from "./AgentOperations";
-import { fetchAgentLogs, fetchAgentUpdates, updateAgent } from "@/lib/api";
+import { AgentLogs, AgentBulkUpdates, AgentSettings } from "./AgentOperations";
+import {
+  fetchAgentLogs,
+  fetchAgentUpdates,
+  updateAgent,
+  fetchAgentCollection,
+  saveAgentCollection,
+} from "@/lib/api";
 vi.mock("@/lib/api", () => ({
   fetchAgentLogs: vi.fn(),
+  fetchAgentCollection: vi.fn(),
+  saveAgentCollection: vi.fn(),
+  fetchAgentUsage: vi.fn().mockResolvedValue({}),
   fetchAgentUpdates: vi.fn(),
   updateAgent: vi.fn(),
   getUserFacingError: () => "Unavailable",
@@ -133,5 +142,58 @@ it("reports each selected agent independently when one update cannot proceed", a
   expect(await screen.findByText(/Queued 1.1.0/)).toBeVisible();
   expect(await screen.findByText(/Unavailable/)).toBeVisible();
   expect(updateAgent).toHaveBeenCalledExactlyOnceWith("a", "1.1.0");
+  cache.clear();
+});
+
+it("saves per-source bounds and removes policies for deselected sources", async () => {
+  vi.mocked(fetchAgentUpdates).mockResolvedValue({} as never);
+  vi.mocked(fetchAgentCollection).mockResolvedValue({
+    supports_source_controls: true,
+    applied_revision: 1,
+    log_retention_days: 7,
+    config: {
+      revision: 1,
+      journal_units: ["app.service"],
+      docker_containers: ["old-container"],
+      redact: [],
+      source_policies: {
+        "docker:old-container": {
+          minimum_severity: "debug",
+          max_events_per_minute: 10,
+          max_bytes_per_minute: 1024,
+        },
+      },
+    },
+  });
+  vi.mocked(saveAgentCollection).mockResolvedValue({ revision: 2 });
+  const cache = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={cache}>
+      <AgentSettings agentId="a" />
+    </QueryClientProvider>,
+  );
+  fireEvent.change(
+    await screen.findByLabelText("journal:app.service minimum severity"),
+    { target: { value: "warning" } },
+  );
+  fireEvent.change(
+    screen.getByLabelText("journal:app.service records per minute"),
+    { target: { value: "50" } },
+  );
+  fireEvent.change(screen.getByLabelText("Docker containers, one per line"), {
+    target: { value: "" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save log sources" }));
+  await waitFor(() => expect(saveAgentCollection).toHaveBeenCalled());
+  const saved = vi.mocked(saveAgentCollection).mock.calls[0][1];
+  expect(saved.config.source_policies).toEqual({
+    "journal:app.service": {
+      minimum_severity: "warning",
+      max_events_per_minute: 50,
+      max_bytes_per_minute: 1048576,
+    },
+  });
   cache.clear();
 });

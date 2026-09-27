@@ -1,0 +1,361 @@
+{
+  "schema_version": 1,
+  "dimension_limit": 32,
+  "dimension_identifiers": {
+    "network.interfaces": "name",
+    "disk.devices": "name",
+    "gpu.devices": "id"
+  },
+  "metrics": [
+    {
+      "path": "cpu.usage_percent",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "cpu.user_percent",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "cpu.system_percent",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "cpu.iowait_percent",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "cpu.steal_percent",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "memory.total_bytes",
+      "unit": "bytes",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "memory.used_bytes",
+      "unit": "bytes",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "memory.available_bytes",
+      "unit": "bytes",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "memory.swap_total_bytes",
+      "unit": "bytes",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "memory.swap_used_bytes",
+      "unit": "bytes",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "memory.used_percent",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "memory.swap_used_percent",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "load.one",
+      "unit": "runnable_or_uninterruptible_tasks",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "load.five",
+      "unit": "runnable_or_uninterruptible_tasks",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "load.fifteen",
+      "unit": "runnable_or_uninterruptible_tasks",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "network.interfaces.*.rx_bytes_per_sec",
+      "unit": "bytes_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "network.interfaces.*.rx_packets_per_sec",
+      "unit": "packets_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "network.interfaces.*.rx_errors_per_sec",
+      "unit": "errors_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "network.interfaces.*.rx_drops_per_sec",
+      "unit": "drops_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "network.interfaces.*.tx_bytes_per_sec",
+      "unit": "bytes_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "network.interfaces.*.tx_packets_per_sec",
+      "unit": "packets_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "network.interfaces.*.tx_errors_per_sec",
+      "unit": "errors_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "network.interfaces.*.tx_drops_per_sec",
+      "unit": "drops_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "disk.devices.*.read_bytes_per_sec",
+      "unit": "bytes_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "disk.devices.*.write_bytes_per_sec",
+      "unit": "bytes_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "disk.devices.*.read_iops",
+      "unit": "operations_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "disk.devices.*.write_iops",
+      "unit": "operations_per_second",
+      "kind": "rate",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "disk.devices.*.utilization_percent",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.cpu.some_avg10",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.cpu.some_avg60",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.cpu.some_avg300",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.cpu.full_avg10",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.cpu.full_avg60",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.cpu.full_avg300",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.memory.some_avg10",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.memory.some_avg60",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.memory.some_avg300",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.memory.full_avg10",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.memory.full_avg60",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.memory.full_avg300",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.io.some_avg10",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.io.some_avg60",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.io.some_avg300",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.io.full_avg10",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.io.full_avg60",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "pressure.io.full_avg300",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "gpu.devices.*.utilization_percent",
+      "unit": "percent",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "path": "gpu.devices.*.memory_used_bytes",
+      "unit": "bytes",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "gpu.devices.*.memory_total_bytes",
+      "unit": "bytes",
+      "kind": "gauge",
+      "minimum": 0,
+      "maximum": null
+    },
+    {
+      "path": "gpu.devices.*.temperature_celsius",
+      "unit": "celsius",
+      "kind": "gauge",
+      "minimum": -273.15,
+      "maximum": null
+    }
+  ]
+}

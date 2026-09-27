@@ -45,6 +45,7 @@ export interface DiscoveryState {
 }
 
 export interface AgentEnrollmentBootstrap {
+  attempt_id: string;
   code: string;
   expires_in_minutes: number;
   tls_pin: string;
@@ -290,7 +291,7 @@ export interface AgentSocketReachability {
   state: AgentReachabilityState;
   checked_at: string | null;
   worker_id: string | null;
-  endpoint: string | null;
+  endpoint: string | { address: string | null; port: number | null; protocol: string } | null;
 }
 
 export interface AgentSocketInventory {
@@ -349,7 +350,7 @@ export interface AgentDetail extends Agent {
   reconciliation: AgentReconciliation;
 }
 
-export type AgentMetricRange = "1h" | "6h" | "24h" | "7d";
+export type AgentMetricRange = "1h" | "6h" | "24h" | "7d" | "30d" | "180d";
 
 export interface AgentMetricStats {
   average: number;
@@ -1620,13 +1621,20 @@ export interface AgentLogEntry {
   message: string;
   attributes: Record<string, unknown>;
 }
+export interface LogSourcePolicy {
+  minimum_severity: string;
+  max_events_per_minute: number;
+  max_bytes_per_minute: number;
+}
 export interface AgentCollectionConfig {
   revision: number;
   journal_units: string[];
   docker_containers: string[];
   redact: string[];
+  source_policies?: Record<string, LogSourcePolicy>;
 }
 export interface AgentCollectionSettings {
+  supports_source_controls?: boolean;
   config: AgentCollectionConfig;
   applied_revision: number | null;
   log_retention_days: number;
@@ -1696,4 +1704,46 @@ export function updateAgent(id: string, version: string) {
       body: JSON.stringify({ version }),
     },
   );
+}
+
+export interface AgentEnrollmentProgress {
+  id: string;
+  agent_id: string | null;
+  hostname: string | null;
+  authenticated_at: string | null;
+  inventory_at: string | null;
+  metrics_at: string | null;
+  expired: boolean;
+  complete: boolean;
+  revoked_at: string | null;
+  log_sources: Array<{ source: string; receiving: boolean }>;
+}
+export function fetchAgentEnrollment(id: string) {
+  return request<AgentEnrollmentProgress>(`/api/v1/agent-enrollment/${id}`);
+}
+
+export interface AgentUsage {
+  metrics: {
+    sample_count: number;
+    daily_payload_bytes: number | null;
+    retained_payload_bytes: number | null;
+  };
+  logs: Array<{
+    stream: string;
+    sample_count: number;
+    daily_payload_bytes: number | null;
+    retained_payload_bytes: number | null;
+    retention_days: number;
+  }>;
+  retention: {
+    raw_metric_days: number;
+    five_minute_days: number;
+    hourly_days: number;
+    host_log_days: number;
+    diagnostic_days: number;
+  };
+  basis: string;
+}
+export function fetchAgentUsage(id: string) {
+  return request<AgentUsage>(`/api/v1/agents/${id}/usage`);
 }

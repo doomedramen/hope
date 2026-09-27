@@ -21,6 +21,40 @@ struct Cursor {
     since: String,
     #[serde(default)]
     counts: BTreeMap<String, usize>,
+    #[serde(default)]
+    budget: SourceBudget,
+}
+#[derive(Default, Clone, Serialize, Deserialize)]
+struct SourceBudget {
+    started_at: u64,
+    events: u32,
+    bytes: u32,
+    #[serde(default)]
+    dropped_records: u64,
+    #[serde(default)]
+    last_dropped_at: u64,
+}
+impl SourceBudget {
+    fn admit(&mut self, policy: &protocol::LogSourcePolicy, bytes: u32, at: u64) -> bool {
+        if at >= self.started_at.saturating_add(60) || at < self.started_at {
+            *self = Self {
+                started_at: at,
+                dropped_records: self.dropped_records,
+                last_dropped_at: self.last_dropped_at,
+                ..Default::default()
+            };
+        }
+        if self.events >= policy.max_events_per_minute
+            || self.bytes.saturating_add(bytes) > policy.max_bytes_per_minute
+        {
+            self.dropped_records = self.dropped_records.saturating_add(1);
+            self.last_dropped_at = at;
+            return false;
+        }
+        self.events += 1;
+        self.bytes += bytes;
+        true
+    }
 }
 fn hash(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
@@ -73,6 +107,7 @@ pub async fn collect(
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut failures = BTreeMap::<String, String>::new();
     let mut health = BTreeMap::<String, u64>::new();
+    let mut budgets = BTreeMap::<String, SourceBudget>::new();
     loop {
         ticks.tick().await;
         let settings = config.lock().unwrap().clone();
@@ -87,12 +122,13 @@ pub async fn collect(
                     agent_id,
                     kind,
                     name,
-                    &settings.redact,
+                    &settings,
                     &queue,
                 )
                 .await
                 {
-                    Ok(()) => {
+                    Ok(budget) => {
+                        budgets.insert(source.clone(), budget);
                         health.insert(source.clone(), now());
                         if failures.remove(&source).is_some() {
                             diagnostic(
@@ -128,6 +164,13 @@ pub async fn collect(
                     .iter()
                     .any(|name| source == &format!("docker:{name}"))
         });
+        budgets.retain(|source, _| health.contains_key(source));
+        if let Err(error) = atomic_write(
+            &Path::new(&state_dir).join("log-budgets.json"),
+            &serde_json::to_vec(&budgets).unwrap(),
+        ) {
+            tracing::warn!(%error, "cannot persist log budget status");
+        }
         if let Err(error) = atomic_write(
             &Path::new(&state_dir).join("log-health.json"),
             &serde_json::to_vec(&health).unwrap(),
@@ -169,10 +212,16 @@ async fn collect_source(
     agent_id: Uuid,
     kind: &str,
     name: &str,
-    rules: &[String],
+    settings: &CollectionConfig,
     queue: &Arc<Mutex<Outbox>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SourceBudget> {
     let source = format!("{kind}:{name}");
+    let rules = &settings.redact;
+    let policy = settings
+        .source_policies
+        .get(&source)
+        .cloned()
+        .unwrap_or_default();
     let checkpoint: PathBuf = root
         .join("log-cursors")
         .join(format!("{}.json", hash(&source)));
@@ -232,6 +281,7 @@ async fn collect_source(
             );
             cursor = Cursor {
                 since: timestamp(),
+                budget: cursor.budget.clone(),
                 ..Default::default()
             };
             atomic_write(&checkpoint, &serde_json::to_vec(&cursor)?)?;
@@ -264,6 +314,8 @@ async fn collect_source(
     let mut latest_counts = cursor.counts.clone();
     let original_since = cursor.since.clone();
     let mut changed = false;
+    let mut dropped = Vec::new();
+    let mut dropped_bytes = 0u64;
     for (stream, bytes) in [("stdout", &stdout), ("stderr", &stderr)] {
         if kind == "journal" && stream == "stderr" {
             continue;
@@ -345,9 +397,27 @@ async fn collect_source(
                     attributes: json!({"container": name, "stream": stream, "truncated": message.len() > 2048}),
                 }
             };
-            entries.push(entry);
             changed = true;
+            if !policy.includes(&entry.severity) {
+                continue;
+            }
+            let bytes = serde_json::to_vec(&entry)?.len() as u32;
+            if cursor.budget.admit(&policy, bytes, now()) {
+                entries.push(entry);
+            } else {
+                dropped_bytes += u64::from(bytes);
+                dropped.push(entry.event_id);
+            }
         }
+    }
+    if !dropped.is_empty() {
+        entries.push(LogEntry {
+            event_id: hash(&format!("{source}:budget:{}:{}", dropped[0], dropped.last().unwrap())),
+            observed_at_unix_ms: (now() * 1000) as i64,
+            source: "agent".into(), severity: "warning".into(),
+            message: format!("{source}: source budget exceeded; {} log records intentionally dropped ({dropped_bytes} bytes)", dropped.len()),
+            attributes: json!({"source":source,"reason":"source_budget","dropped_records":dropped.len(),"dropped_bytes":dropped_bytes}),
+        });
     }
     // Each batch is committed before moving the source checkpoint. Replays use event IDs.
     for chunk in entries.chunks(8) {
@@ -369,16 +439,35 @@ async fn collect_source(
         );
         cursor = Cursor {
             since: timestamp(),
+            budget: cursor.budget.clone(),
             ..Default::default()
         };
     }
     atomic_write(&checkpoint, &serde_json::to_vec(&cursor)?)?;
-    Ok(())
+    Ok(cursor.budget)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_budget_survives_restart_and_resets_only_after_window() {
+        let policy = protocol::LogSourcePolicy {
+            max_events_per_minute: 2,
+            max_bytes_per_minute: 1024,
+            ..Default::default()
+        };
+        let mut budget = SourceBudget::default();
+        assert!(budget.admit(&policy, 512, 100));
+        let mut resumed: SourceBudget =
+            serde_json::from_slice(&serde_json::to_vec(&budget).unwrap()).unwrap();
+        assert!(!resumed.admit(&policy, 513, 101));
+        assert!(resumed.admit(&policy, 512, 102));
+        assert!(!resumed.admit(&policy, 1, 159));
+        assert!(resumed.admit(&policy, 1024, 160));
+        let mut other = SourceBudget::default();
+        assert!(other.admit(&policy, 1024, 159));
+    }
     #[test]
     fn redaction_happens_before_utf8_safe_truncation() {
         let result = redact(

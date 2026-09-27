@@ -536,6 +536,8 @@ pub async fn ingest_snapshot(
         Some("agent"),
     )
     .await?;
+    sqlx::query("update agent_enrollment_attempts set inventory_at=now() where agent_id=$1 and inventory_at is null")
+        .bind(authenticated_agent_id).execute(&mut *tx).await?;
     tx.commit().await?;
 
     Ok(IngestOutcome {

@@ -59,6 +59,20 @@ pub async fn create_enrollment(
             );
         }
     };
+    let attempt_id: Option<uuid::Uuid> =
+        match sqlx::query_scalar("select attempt_id from enrollment_tokens where token_hash=$1")
+            .bind(agents::hash_token(&token))
+            .fetch_one(&state.pool)
+            .await
+        {
+            Ok(id) => id,
+            Err(_) => {
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "could not track enrollment",
+                );
+            }
+        };
     let cert_bytes = match std::fs::read(&config.server_cert_path) {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -90,6 +104,7 @@ pub async fn create_enrollment(
         StatusCode::CREATED,
         Json(json!({
             "code": code,
+            "attempt_id": attempt_id,
             "expires_in_minutes": ENROLLMENT_TTL_MINUTES,
             "tls_pin": tls_pin,
         })),
@@ -247,6 +262,24 @@ fn repository_error_response(error: RepositoryError) -> Response {
         ),
     };
     error_response(status, message)
+}
+
+/// Authenticated operator view; no token or key material is returned.
+pub async fn enrollment_progress(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    let row: Result<Option<(serde_json::Value,)>, _> = sqlx::query_as(
+        "select row_to_json(t) from (select e.*, a.hostname, a.revoked_at,          (e.agent_id is null and e.expires_at < now()) as expired,          (e.authenticated_at is not null and e.inventory_at is not null and e.metrics_at is not null) as complete,          coalesce((select jsonb_agg(jsonb_build_object('source',source,'receiving',exists(              select 1 from agent_log_entries l where l.agent_id=e.agent_id and l.source=sources.source              and l.received_at >= e.created_at))) from (              select 'journal:'||jsonb_array_elements_text(coalesce(s.config->'journal_units','[]')) as source              union all select 'docker:'||jsonb_array_elements_text(coalesce(s.config->'docker_containers','[]'))          ) sources), '[]') as log_sources          from agent_enrollment_attempts e left join agents a on a.id=e.agent_id          left join agent_collection_settings s on s.agent_id=e.agent_id where e.id=$1) t")
+        .bind(id).fetch_optional(&state.pool).await;
+    match row {
+        Ok(Some((value,))) => Json(value).into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "Enrollment attempt not found"),
+        Err(_) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Enrollment progress unavailable",
+        ),
+    }
 }
 
 #[cfg(test)]

@@ -113,6 +113,11 @@ pub async fn run(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                         .ok()
                         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
                         .unwrap_or(serde_json::json!({}));
+                logs["budgets"] =
+                    std::fs::read(Path::new(&metrics_state_dir).join("log-budgets.json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or(serde_json::json!({}));
                 object.insert("delivery".into(), serde_json::json!({"metrics":collection_outbox.lock().unwrap().status(),"logs":logs}));
             }
             let batch = MetricSampleBatch {
@@ -300,6 +305,11 @@ async fn run_session(
         })
         .collect();
     hello_value["capabilities"] = serde_json::to_value(&capabilities)?;
+    // Additive Hello feature flag; keep the older typed capability negotiation compatible.
+    hello_value["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("log_source_controls"));
     write
         .send(WsMessage::Text(serde_json::to_string(&hello_value)?))
         .await?;

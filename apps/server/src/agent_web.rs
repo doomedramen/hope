@@ -51,16 +51,16 @@ pub async fn enroll(
     };
     let consumed = sqlx::query(
         "update enrollment_tokens set used_at = now() where token_hash = $1 \
-         and used_at is null and expires_at > now() returning token_hash",
+         and used_at is null and expires_at > now() returning attempt_id",
     )
     .bind(agents::hash_token(&request.token))
     .fetch_optional(&mut *transaction)
     .await;
-    match consumed {
-        Ok(Some(_)) => {}
+    let attempt_id: Option<Uuid> = match consumed {
+        Ok(Some(row)) => row.get("attempt_id"),
         Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
+    };
     let fingerprint = hex::encode(Sha256::digest(key.to_bytes()));
     let inserted = sqlx::query(
         "insert into agents (cert_fingerprint, cert_serial, public_key_hex, hostname) \
@@ -73,6 +73,16 @@ pub async fn enroll(
     .await;
     match inserted {
         Ok(row) => {
+            let agent_id: Uuid = row.get("id");
+            if sqlx::query("update agent_enrollment_attempts set agent_id=$2 where id=$1")
+                .bind(attempt_id)
+                .bind(agent_id)
+                .execute(&mut *transaction)
+                .await
+                .is_err()
+            {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
             if transaction.commit().await.is_err() {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
             }
@@ -250,6 +260,76 @@ mod tests {
         headers.insert("x-hope-challenge", nonce.parse().unwrap());
         headers.insert("x-hope-signature", signature.parse().unwrap());
         authenticate_connection(pool, &headers).await
+    }
+
+    #[tokio::test]
+    async fn enrollment_progress_is_correlated_and_survives_token_cleanup() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
+        let app = app(pool.clone());
+        let first = agents::create_enrollment_token(&pool, 15).await.unwrap();
+        let second = agents::create_enrollment_token(&pool, 15).await.unwrap();
+        let first_attempt: Uuid =
+            sqlx::query_scalar("select attempt_id from enrollment_tokens where token_hash=$1")
+                .bind(agents::hash_token(&first))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let second_attempt: Uuid =
+            sqlx::query_scalar("select attempt_id from enrollment_tokens where token_hash=$1")
+                .bind(agents::hash_token(&second))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let response =
+            enroll_with_token(&app, &first, &SigningKey::generate(&mut rand::rngs::OsRng)).await;
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        let id: Uuid = body["agent_id"].as_str().unwrap().parse().unwrap();
+        agents::update_hello(
+            &pool,
+            id,
+            &agents::HelloMetadata {
+                agent_version: "test",
+                hostname: "tracked",
+                os: "linux",
+                arch: "arm64",
+                protocol_version: 2,
+                capabilities: &serde_json::json!([]),
+            },
+        )
+        .await
+        .unwrap();
+        agents::purge_expired_tokens(&pool).await.unwrap();
+        let state = AppState { pool: pool.clone() };
+        let progress =
+            crate::agent_install::enrollment_progress(State(state.clone()), Path(first_attempt))
+                .await;
+        assert_eq!(progress.status(), StatusCode::OK);
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(progress.into_body(), 16384).await.unwrap()).unwrap();
+        assert_eq!(value["agent_id"], id.to_string());
+        assert!(!value["authenticated_at"].is_null());
+        assert_eq!(value["complete"], false);
+        let progress =
+            crate::agent_install::enrollment_progress(State(state), Path(second_attempt)).await;
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(progress.into_body(), 16384).await.unwrap()).unwrap();
+        assert!(value["agent_id"].is_null());
+        assert!(value["authenticated_at"].is_null());
+        sqlx::query("delete from agents where id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("delete from agent_enrollment_attempts where id=any($1)")
+            .bind(vec![first_attempt, second_attempt])
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -28,6 +28,7 @@ import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   createAgentEnrollment,
+  fetchAgentEnrollment,
   fetchAgent,
   fetchAgentMetrics,
   fetchAgents,
@@ -393,6 +394,13 @@ function EnrollmentDialog({
   const shellQuote = (value: string | null | undefined) =>
     "'" + String(value ?? "").replaceAll("'", "'\\''") + "'";
   const enrollment = enrollmentMutation.data;
+  const progress = useQuery({
+    queryKey: ["agent-enrollment", enrollment?.attempt_id],
+    queryFn: () => fetchAgentEnrollment(enrollment!.attempt_id),
+    enabled: open && Boolean(enrollment?.attempt_id),
+    refetchInterval: 3000,
+  });
+  const setup = progress.data;
   const installCommand = enrollment
     ? "curl -fsSL " +
       (baseUrl.startsWith("http:")
@@ -427,36 +435,92 @@ function EnrollmentDialog({
             enrollment and gateway endpoints from the Hope server origin.
           </DialogDescription>
         </DialogHeader>
-        <div className="grid gap-2">
-          <label
-            className="text-sm font-medium"
-            htmlFor="agent-connection-address"
+        {enrollment && (
+          <section
+            aria-label="Enrollment progress"
+            className="space-y-2 rounded-md border p-3"
+            aria-live="polite"
           >
-            Agent connection address
-          </label>
-          <Input
-            id="agent-connection-address"
-            value={baseUrl}
-            onChange={(event) => {
-              setBaseUrl(event.target.value);
-              try {
-                saveAgentConnectionAddress(event.target.value);
-                setAddressError(null);
-              } catch {
-                setAddressError(
-                  "Enter the HTTP LAN address or HTTPS proxy address agents can reach.",
-                );
-              }
-            }}
-          />
-          <p className="text-xs text-muted-foreground">
-            Use the address reachable from your devices. An HTTP LAN address
-            uses Hope’s pinned HTTPS on port 443.
-          </p>
-          {addressError ? (
-            <p className="text-xs text-destructive">{addressError}</p>
-          ) : null}
-        </div>
+            <p className="font-medium">
+              {setup?.revoked_at
+                ? "Agent access revoked"
+                : setup?.expired
+                  ? "Command expired — create another"
+                  : setup?.complete
+                    ? `${setup.hostname || "Agent"} is sending data`
+                    : "Waiting for this command’s agent"}
+            </p>
+            <ol className="grid gap-1 text-sm sm:grid-cols-2">
+              {[
+                ["Command created", true],
+                ["Agent authenticated", setup?.authenticated_at],
+                ["First inventory accepted", setup?.inventory_at],
+                ["First metrics accepted", setup?.metrics_at],
+              ].map(([label, done]) => (
+                <li key={String(label)}>
+                  {done ? "✓" : "○"} {label}
+                </li>
+              ))}
+            </ol>
+            {setup?.log_sources.length ? (
+              <p className="text-xs">
+                Selected log sources:{" "}
+                {setup.log_sources.filter((source) => source.receiving).length}/
+                {setup.log_sources.length} receiving. Logs do not block setup.
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Host and container logs are optional. Choose sources in agent
+                Settings.
+              </p>
+            )}
+            {progress.error && (
+              <p role="alert" className="text-sm text-destructive">
+                Progress unavailable. Retrying; setup is not yet verified.
+              </p>
+            )}
+            {setup?.agent_id && (
+              <a
+                className="inline-block text-sm underline"
+                href={`/agents?agent=${encodeURIComponent(setup.agent_id)}`}
+              >
+                Open this agent
+              </a>
+            )}
+          </section>
+        )}
+        {!setup?.complete && (
+          <div className="grid gap-2">
+            <label
+              className="text-sm font-medium"
+              htmlFor="agent-connection-address"
+            >
+              Agent connection address
+            </label>
+            <Input
+              id="agent-connection-address"
+              value={baseUrl}
+              onChange={(event) => {
+                setBaseUrl(event.target.value);
+                try {
+                  saveAgentConnectionAddress(event.target.value);
+                  setAddressError(null);
+                } catch {
+                  setAddressError(
+                    "Enter the HTTP LAN address or HTTPS proxy address agents can reach.",
+                  );
+                }
+              }}
+            />
+            <p className="text-xs text-muted-foreground">
+              Use the address reachable from your devices. An HTTP LAN address
+              uses Hope’s pinned HTTPS on port 443.
+            </p>
+            {addressError ? (
+              <p className="text-xs text-destructive">{addressError}</p>
+            ) : null}
+          </div>
+        )}
         {enrollmentMutation.isPending ? (
           <p aria-live="polite" className="text-sm text-muted-foreground">
             Preparing a one-time installer command…
@@ -472,7 +536,11 @@ function EnrollmentDialog({
               )}
             </AlertDescription>
           </Alert>
-        ) : installCommand && enrollment && !addressError ? (
+        ) : installCommand &&
+          enrollment &&
+          !addressError &&
+          !setup?.complete &&
+          !setup?.expired ? (
           <div className="grid gap-3">
             <p className="text-sm font-medium">Run this on the target host</p>
             <CommandBlock
@@ -490,7 +558,7 @@ function EnrollmentDialog({
           </div>
         ) : null}
         <DialogFooter>
-          {enrollmentMutation.error ? (
+          {enrollmentMutation.error || setup?.expired ? (
             <Button
               onClick={() => enrollmentMutation.mutate()}
               variant="outline"
@@ -709,9 +777,14 @@ function AgentDetailPanel({
 }) {
   const activeTab = location.tab ?? "overview";
   const setActiveTab = (tab: string) => navigate({ tab });
-  const metricRange: AgentMetricRange = ["1h", "6h", "24h", "7d"].includes(
-    location.range ?? "",
-  )
+  const metricRange: AgentMetricRange = [
+    "1h",
+    "6h",
+    "24h",
+    "7d",
+    "30d",
+    "180d",
+  ].includes(location.range ?? "")
     ? (location.range as AgentMetricRange)
     : "1h";
   const setMetricRange = (range: AgentMetricRange) => navigate({ range });
@@ -789,13 +862,15 @@ function AgentDetailPanel({
         </CardAction>
       </CardHeader>
       <CardContent className="flex min-w-0 flex-col gap-5">
-        <AgentAtGlance
-          agent={detail}
-          metrics={metricsQuery.data}
-          loading={metricsQuery.isLoading}
-          error={error || metricsQuery.error}
-          navigate={navigate}
-        />
+        {activeTab === "overview" && (
+          <AgentAtGlance
+            agent={detail}
+            metrics={metricsQuery.data}
+            loading={metricsQuery.isLoading}
+            error={error || metricsQuery.error}
+            navigate={navigate}
+          />
+        )}
         <Tabs
           className="min-w-0"
           onValueChange={setActiveTab}
@@ -828,8 +903,8 @@ function AgentDetailPanel({
           </TabsContent>
 
           <TabsContent className="space-y-6 pt-4" value="settings">
-            <AgentUpdatePanel agentId={detail.id} />
             <AgentSettings agentId={detail.id} />
+            <AgentUpdatePanel agentId={detail.id} />
             <details className="space-y-4 rounded-lg border p-4">
               <summary className="cursor-pointer font-medium">
                 Agent identity and delivery details
@@ -1015,6 +1090,8 @@ function AgentDetailPanel({
                   "6h": 21600,
                   "24h": 86400,
                   "7d": 604800,
+                  "30d": 2592000,
+                  "180d": 15552000,
                 }[metricRange];
                 navigate({
                   tab: "logs",
@@ -1132,7 +1209,7 @@ function AgentMetricsView({
     );
   }
 
-  if (error) {
+  if (error && !data) {
     return (
       <LoadError error={error} retry={retry} title="Metrics unavailable" />
     );
@@ -1186,13 +1263,19 @@ function AgentMetricsView({
             view.
           </p>
         </div>
-        <div aria-label="Metric range" className="flex gap-1" role="group">
+        <div
+          aria-label="Metric range"
+          className="flex flex-wrap gap-1"
+          role="group"
+        >
           {(
             [
               ["1h", "1 hour"],
               ["6h", "6 hours"],
               ["24h", "24 hours"],
               ["7d", "7 days"],
+              ["30d", "30 days"],
+              ["180d", "180 days"],
             ] as const
           ).map(([value, label]) => (
             <Button
@@ -1208,28 +1291,36 @@ function AgentMetricsView({
         </div>
       </div>
 
-      {stale ? (
-        <Alert>
-          <Clock3Icon />
-          <AlertTitle>Samples are stale</AlertTitle>
-          <AlertDescription>
-            Latest sample is {formatAge(data.freshness.age_seconds)} old.
-            Heartbeat liveness is tracked separately.
-          </AlertDescription>
-        </Alert>
-      ) : null}
-      {partial ? (
-        <Alert>
-          <CircleHelpIcon />
-          <AlertTitle>Partial telemetry</AlertTitle>
-          <AlertDescription>
-            Some collectors are unavailable or returned partial data. Missing
-            values are left blank.
-          </AlertDescription>
-        </Alert>
-      ) : null}
+      <div
+        className="space-y-1 text-xs text-muted-foreground"
+        aria-live="polite"
+      >
+        <p>
+          {data.resolution_seconds ?? 15}-second buckets · Average with
+          minimum/maximum · Latest sample{" "}
+          {data.latest
+            ? formatRelative(data.latest.collected_at)
+            : "not received"}
+        </p>
+        {stale && (
+          <p className="text-amber-700 dark:text-amber-400">
+            Samples are stale. Readings below are historical.
+          </p>
+        )}
+        {partial && (
+          <p>Partial telemetry. Unavailable readings remain blank.</p>
+        )}
+        {Boolean(error) && (
+          <p className="text-destructive">
+            Refresh failed. Showing previously loaded readings.{" "}
+            <button type="button" onClick={retry} className="underline">
+              Retry
+            </button>
+          </p>
+        )}
+      </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-3">
         <MetricValueCard label="CPU used" value={formatMetricPercent(cpu)} />
         <MetricValueCard
           label="Memory used"
@@ -1241,10 +1332,12 @@ function AgentMetricsView({
           label="I/O pressure (some)"
           value={formatMetricPercent(pressure)}
         />
-        <MetricValueCard
-          label="GPU utilization"
-          value={gpuDevices.length ? formatMetricPercent(gpu) : "Unavailable"}
-        />
+        {gpuDevices.length > 0 && (
+          <MetricValueCard
+            label="GPU utilization"
+            value={formatMetricPercent(gpu)}
+          />
+        )}
       </div>
 
       <MetricChart
@@ -1432,7 +1525,11 @@ function MetricChart({
                 type="number"
                 domain={["dataMin", "dataMax"]}
                 tickFormatter={(value) =>
-                  formatMetricTime(new Date(value).toISOString())
+                  formatMetricTime(
+                    new Date(value).toISOString(),
+                    data.length > 1 &&
+                      data[data.length - 1].time - data[0].time >= 86400000,
+                  )
                 }
                 minTickGap={28}
                 tickLine={false}
@@ -1449,6 +1546,9 @@ function MetricChart({
                   <ChartTooltipContent
                     formatter={(value) => formatMetricAxis(Number(value), unit)}
                     indicator="line"
+                    labelFormatter={(value) =>
+                      new Date(Number(value)).toLocaleString()
+                    }
                   />
                 }
                 cursor={false}
@@ -1644,17 +1744,13 @@ function formatRate(value: number | null): string {
   return `${formatBytes(value)}/s`;
 }
 
-function formatAge(seconds: number | null): string {
-  if (seconds === null) return "unknown";
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m`;
-}
-
-function formatMetricTime(value: string): string {
+function formatMetricTime(value: string, showDate = false): string {
   const date = new Date(value);
   return Number.isNaN(date.valueOf())
     ? value
-    : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    : showDate
+      ? date.toLocaleDateString([], { month: "short", day: "numeric" })
+      : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function formatMetricAxis(value: number, unit: "bytes" | "percent"): string {
@@ -1687,7 +1783,7 @@ function summarizeMetricChart(
       .filter((value): value is number => value !== null),
   );
   const latest = values.at(-1) ?? minimum;
-  return `${title}: ${data.length} samples; minimum ${formatMetricAxis(minimum, unit)}, maximum ${formatMetricAxis(maximum, unit)}, latest ${formatMetricAxis(latest, unit)}.`;
+  return `${title}: ${values.length} populated buckets; minimum ${formatMetricAxis(minimum, unit)}, maximum ${formatMetricAxis(maximum, unit)}, last bucket average ${formatMetricAxis(latest, unit)}.`;
 }
 
 function ReachabilityExplanation() {
@@ -2071,7 +2167,15 @@ function SocketInventory({ sockets }: { sockets: AgentSocketInventory[] }) {
                   <ReachabilityBadge state={socket.reachability.state} />
                   {socket.reachability.endpoint ? (
                     <span className="font-mono text-xs text-muted-foreground">
-                      {socket.reachability.endpoint}
+                      {typeof socket.reachability.endpoint === "string"
+                        ? socket.reachability.endpoint
+                        : socket.reachability.endpoint.address &&
+                            socket.reachability.endpoint.port !== null
+                          ? formatSocketAddress(
+                              socket.reachability.endpoint.address,
+                              socket.reachability.endpoint.port,
+                            )
+                          : "No worker endpoint"}
                     </span>
                   ) : null}
                 </div>

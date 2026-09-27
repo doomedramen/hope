@@ -1,8 +1,11 @@
+#[cfg(test)]
+mod agent_capacity;
 mod agent_install;
 mod agent_inventory;
 mod agent_logs;
 mod agent_metrics;
 mod agent_updates;
+mod agent_usage;
 mod agent_web;
 mod agents;
 mod auth_mw;
@@ -215,6 +218,11 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
             "/api/v1/agent-enrollment",
             post(agent_install::create_enrollment),
         )
+        .route(
+            "/api/v1/agent-enrollment/{id}",
+            get(agent_install::enrollment_progress),
+        )
+        .route("/api/v1/agents/{id}/usage", get(agent_usage::get_usage))
         .route(
             "/api/v1/agents/{id}/health",
             get(agent_inventory::get_agent_health),

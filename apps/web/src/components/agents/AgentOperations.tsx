@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
   fetchAgentLogs,
+  fetchAgentUsage,
   fetchAgentCollection,
   saveAgentCollection,
   fetchAgentUpdates,
@@ -12,6 +13,7 @@ import {
   updateAgent,
   getUserFacingError,
   type AgentCollectionSettings,
+  type LogSourcePolicy,
   type AgentUpdatePolicy,
   type AgentLogEntry,
 } from "@/lib/api";
@@ -174,6 +176,7 @@ export function AgentSettings({ agentId }: { agentId: string }) {
           settings={collection.data}
         />
       )}
+      <AgentUsagePanel agentId={agentId} />
       {updates.data?.policy && (
         <PolicyForm
           key={agentId + "-policy"}
@@ -182,6 +185,58 @@ export function AgentSettings({ agentId }: { agentId: string }) {
         />
       )}
     </div>
+  );
+}
+function AgentUsagePanel({ agentId }: { agentId: string }) {
+  const query = useQuery({
+    queryKey: ["agent-usage", agentId],
+    queryFn: () => fetchAgentUsage(agentId),
+  });
+  const data = query.data;
+  function bytes(value: number | null) {
+    if (value === null) return "Not enough recent data";
+    return `${(value / 1048576).toLocaleString(undefined, { maximumFractionDigits: 1 })} MiB`;
+  }
+  return (
+    <section
+      aria-label="Data retention and usage"
+      className="space-y-3 border-t pt-4"
+    >
+      <h2 className="font-medium">Data retention and estimated usage</h2>
+      <ErrorMessage error={query.error} />
+      {query.isLoading && (
+        <p role="status" className="text-sm">
+          Estimating recent usage…
+        </p>
+      )}
+      {data?.retention && (
+        <>
+          <p className="text-sm">
+            Raw metrics {data.retention.raw_metric_days} days · Five-minute
+            history {data.retention.five_minute_days} days · Hourly history{" "}
+            {data.retention.hourly_days} days
+          </p>
+          <p className="text-sm">
+            Host logs {data.retention.host_log_days} days · Agent diagnostics{" "}
+            {data.retention.diagnostic_days} days
+          </p>
+          <ul className="space-y-1 text-sm">
+            <li>
+              Metrics: {bytes(data.metrics.daily_payload_bytes)} per day;{" "}
+              {bytes(data.metrics.retained_payload_bytes)} at full raw
+              retention.
+            </li>
+            {data.logs.map((stream) => (
+              <li key={stream.stream}>
+                {stream.stream}: {bytes(stream.daily_payload_bytes)} per day;{" "}
+                {bytes(stream.retained_payload_bytes)} at full retention.
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-muted-foreground">{data.basis}</p>
+        </>
+      )}
+    </section>
   );
 }
 function CollectionForm({
@@ -206,6 +261,31 @@ function CollectionForm({
         .filter(Boolean),
     ),
   ];
+  const sourceNames = [
+    ...lines(units).map((name) => `journal:${name}`),
+    ...lines(containers).map((name) => `docker:${name}`),
+  ];
+  const defaultPolicy: LogSourcePolicy = {
+    minimum_severity: "debug",
+    max_events_per_minute: 1000,
+    max_bytes_per_minute: 1048576,
+  };
+  function setPolicy(source: string, patch: Partial<LogSourcePolicy>) {
+    setDraft((old) => ({
+      ...old,
+      config: {
+        ...old.config,
+        source_policies: {
+          ...old.config.source_policies,
+          [source]: {
+            ...defaultPolicy,
+            ...old.config.source_policies?.[source],
+            ...patch,
+          },
+        },
+      },
+    }));
+  }
   const save = useMutation({
     mutationFn: () =>
       saveAgentCollection(agentId, {
@@ -215,6 +295,11 @@ function CollectionForm({
           journal_units: lines(units),
           docker_containers: lines(containers),
           redact: lines(redact),
+          source_policies: Object.fromEntries(
+            Object.entries(draft.config.source_policies ?? {}).filter(
+              ([source]) => sourceNames.includes(source),
+            ),
+          ),
         },
       }),
     onSuccess: async (result) => {
@@ -242,6 +327,12 @@ function CollectionForm({
           Agent diagnostics remain available.
         </p>
       </div>
+      <p className="text-sm">
+        Configuration {settings.config.revision}:{" "}
+        {settings.applied_revision === settings.config.revision
+          ? "Applied by agent"
+          : "Waiting for agent acknowledgement"}
+      </p>
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="space-y-2 text-sm">
           Journal units, one per line
@@ -266,6 +357,89 @@ function CollectionForm({
         The service account needs permission to read each source. Unavailable
         sources report a diagnostic; other collectors continue.
       </p>
+      {sourceNames.length > 0 && (
+        <fieldset
+          disabled={!settings.supports_source_controls}
+          className="space-y-3"
+        >
+          <legend className="text-sm font-medium">
+            Source budgets and severity
+          </legend>
+          <p className="text-xs text-muted-foreground">
+            {settings.supports_source_controls
+              ? "Budgets apply per source in 60-second windows, before persistence. Excess records produce a gap diagnostic. Unknown severity is always retained."
+              : "Update this agent to enable source budgets and severity controls."}
+          </p>
+          {sourceNames.map((source) => {
+            const policy =
+              draft.config.source_policies?.[source] ?? defaultPolicy;
+            return (
+              <div key={source} className="space-y-2 rounded-md border p-3">
+                <p className="break-all text-sm font-medium">{source}</p>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {source.startsWith("journal:") && (
+                    <label className="grid gap-1 text-xs">
+                      Minimum severity
+                      <select
+                        aria-label={`${source} minimum severity`}
+                        className={selectClass}
+                        value={policy.minimum_severity}
+                        onChange={(event) =>
+                          setPolicy(source, {
+                            minimum_severity: event.target.value,
+                          })
+                        }
+                      >
+                        {[
+                          "debug",
+                          "info",
+                          "notice",
+                          "warning",
+                          "error",
+                          "critical",
+                        ].map((level) => (
+                          <option key={level}>{level}</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <label className="grid gap-1 text-xs">
+                    Records per minute
+                    <Input
+                      aria-label={`${source} records per minute`}
+                      type="number"
+                      min={1}
+                      max={6000}
+                      value={policy.max_events_per_minute}
+                      onChange={(event) =>
+                        setPolicy(source, {
+                          max_events_per_minute: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="grid gap-1 text-xs">
+                    KiB per minute
+                    <Input
+                      aria-label={`${source} KiB per minute`}
+                      type="number"
+                      min={1}
+                      max={4096}
+                      value={policy.max_bytes_per_minute / 1024}
+                      onChange={(event) =>
+                        setPolicy(source, {
+                          max_bytes_per_minute:
+                            Number(event.target.value) * 1024,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
+            );
+          })}
+        </fieldset>
+      )}
       <label className="block space-y-2 text-sm">
         Redact exact strings, one per line
         <textarea
@@ -291,12 +465,7 @@ function CollectionForm({
           className="max-w-32"
         />
       </label>
-      <p className="text-sm">
-        Configuration {settings.config.revision}:{" "}
-        {settings.applied_revision === settings.config.revision
-          ? "Applied by agent"
-          : "Waiting for agent acknowledgement"}
-      </p>
+
       <ErrorMessage error={save.error} />
       <Button type="submit" disabled={save.isPending}>
         Save log sources

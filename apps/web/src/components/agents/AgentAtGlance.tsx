@@ -16,6 +16,10 @@ type Delivery = {
   queued_bytes?: number;
   oldest_at?: number;
   loss?: { records?: number; reason?: string };
+  budgets?: Record<
+    string,
+    { dropped_records: number; last_dropped_at: number }
+  >;
   sources?: Record<string, number>;
 };
 const activeStates = new Set([
@@ -87,6 +91,9 @@ export function AgentAtGlance({
   const queued =
     (delivery?.metrics?.queued_records ?? 0) +
     (delivery?.logs?.queued_records ?? 0);
+  const throttled = Object.values(delivery?.logs?.budgets ?? {}).some(
+    (budget) => budget.last_dropped_at * 1000 > Date.now() - 60000,
+  );
   const lost =
     (delivery?.metrics?.loss?.records ?? 0) +
     (delivery?.logs?.loss?.records ?? 0);
@@ -158,6 +165,12 @@ export function AgentAtGlance({
     condition = "High resource use";
     message = `${(cpu ?? 0) >= 90 ? "CPU" : "Memory"} usage is above 90%. Open metrics to check the trend.`;
     action = { label: "Inspect resource history", tab: "metrics" };
+  } else if (throttled) {
+    attention = true;
+    condition = "Log source limit reached";
+    message =
+      "Some log records exceeded a configured source budget. Review the gap diagnostic or increase the limit.";
+    action = { label: "Review log gaps", tab: "logs" };
   } else if (lost > 0) {
     attention = true;
     condition = "Recorded data gaps";

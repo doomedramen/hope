@@ -1,0 +1,15 @@
+# Agent metric catalog
+
+The [machine-readable catalog](agent-metric-catalog.json) defines every resource measurement currently emitted by the Linux collector. `*` is a device dimension, identified by interface name, disk name, or GPU ID. Labels and IDs are metadata, not numeric measurements. Future unknown measurements remain forward-compatible; the catalog describes the current collector contract rather than rejecting unknown fields.
+
+CPU, memory, pressure, load and GPU values are gauges. Network and disk throughput are rates computed from counter differences over the actual monotonic sampling interval, not cumulative counters. Counter decreases are treated as a reset; the new counter value is the delta. The first sample after a process restart has no previous counters, so derived rates and CPU percentages are null. Consumers must not interpret null as zero or differentiate these rates again.
+
+CPU utilization excludes idle and I/O wait. CPU percentage fields and device utilization range from 0 to 100. Load averages count runnable or uninterruptible tasks and are not bounded by CPU count. Memory used is total minus available; swap used is total minus free. Pressure averages describe percentage stall time over 10, 60, and 300 seconds. Disk sectors convert to bytes using the Linux diskstats unit of 512 bytes. GPU temperatures are degrees Celsius; supported sensor fields depend on driver access.
+
+Each sample retains collection and receipt timestamps. Samples more than five minutes in the future are rejected. Samples up to that tolerance are stored but excluded from current readings until their collection time. Late samples update historical rollups without replacing a newer last value. A fresh reading requires a collection timestamp within 45 seconds; delivery receipt alone does not make old data fresh.
+
+Each dimension array is capped at 32 entries, reduced to eight if needed for the 32 KiB sample payload bound. Payload truncation marks availability partial. Unsupported platforms, unreadable proc/sysfs files, missing GPU utilities, missing devices, and first-sample counter warmup yield null or unavailable values. The current resource collector reports broad availability, not a precise permission diagnosis; do not infer permission failure from unavailable alone. Inventory collector diagnostics provide their own error reasons.
+
+Operational delivery fields are separate from resource charts: per-stream queued record/byte gauges, oldest queued age in seconds, durable cumulative loss counts and reasons, and log-source successful-poll Unix timestamps. They are excluded from resource rollups. A successful poll does not mean a quiet log source emitted an entry.
+
+Raw metrics retain the configured `agent_metric_retention_days` (default seven). Five-minute rollups retain 30 days; hourly rollups retain 180 days. Every rollup keeps per-metric count, sum, average, minimum, maximum, latest and latest timestamp. The 180-day view merges hourly rollups into 12-hour buckets using weighted averages and preserved extrema. Missing buckets remain chart gaps. Neither gauges nor rate averages are presented as integrated totals.
