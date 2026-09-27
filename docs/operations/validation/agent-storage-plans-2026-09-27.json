@@ -1,0 +1,219 @@
+{
+  "date": "2026-09-27",
+  "application_budget_gib": 36,
+  "rationale": "Planning allocation from approximately 44 GiB of host free disk before calibration, leaving about 8 GiB for other host growth. The 36 GiB includes an 8 GiB active WAL reserve and 30% data/index headroom. These allowances require operational validation.",
+  "scenarios": [
+    {
+      "name": "500 agents, normal logs, default retention",
+      "kind": "planning_estimate_not_capacity_certification",
+      "inputs": {
+        "agents": 500,
+        "logs_per_agent_second": 1.0,
+        "raw_metric_days": 7,
+        "host_log_days": 7,
+        "diagnostics_per_agent_day": 24.0,
+        "budget_gib": 36.0,
+        "headroom_percent": 30.0,
+        "wal_reserve_gib": 8.0
+      },
+      "fixed_policy": {
+        "sample_interval_seconds": 15,
+        "five_minute_days": 30,
+        "hourly_days": 180,
+        "diagnostic_days": 30
+      },
+      "bytes_per_row_including_indexes": {
+        "agent_metric_samples": 1136.2304,
+        "agent_log_entries": 784.204350877193,
+        "storage_rollup_varied": 2924.1344
+      },
+      "retained_rows": {
+        "raw_metrics": 20160000.0,
+        "five_minute_rollups": 4320000.0,
+        "hourly_rollups": 2160000.0,
+        "host_logs": 302400000.0,
+        "diagnostics": 360000.0
+      },
+      "retained_gib_by_stream": {
+        "raw_metrics": 21.333251953125,
+        "five_minute_rollups": 11.76470947265625,
+        "hourly_rollups": 5.882354736328125,
+        "host_logs": 220.85699784128286,
+        "diagnostics": 0.2629249974300987
+      },
+      "retained_gib": 260.10023900082234,
+      "headroom_gib": 78.0300717002467,
+      "planned_gib": 346.13031070106905,
+      "fits_planning_budget": false,
+      "maximum_agents_with_same_rates_and_policies": 41,
+      "limitations": [
+        "Synthetic compact tables are calibration inputs, not full-retention measurements.",
+        "Varied rollups model lower compression; different metric dimensions can cost more.",
+        "Diagnostics use the measured host-log row cost and the explicitly assumed daily rate.",
+        "Headroom and WAL reserve are planning allowances, not measured worst-case bounds.",
+        "Budget must exclude other application data, backups, archives and host free-space reserve.",
+        "WAL generation rate is not retained WAL size; archives and replication backlog need separate budgets.",
+        "No collection or retention settings have been changed."
+      ]
+    },
+    {
+      "name": "500 agents, recurring bursts, default retention",
+      "kind": "planning_estimate_not_capacity_certification",
+      "inputs": {
+        "agents": 500,
+        "logs_per_agent_second": 1.9,
+        "raw_metric_days": 7,
+        "host_log_days": 7,
+        "diagnostics_per_agent_day": 24.0,
+        "budget_gib": 36.0,
+        "headroom_percent": 30.0,
+        "wal_reserve_gib": 8.0
+      },
+      "fixed_policy": {
+        "sample_interval_seconds": 15,
+        "five_minute_days": 30,
+        "hourly_days": 180,
+        "diagnostic_days": 30
+      },
+      "bytes_per_row_including_indexes": {
+        "agent_metric_samples": 1136.2304,
+        "agent_log_entries": 784.204350877193,
+        "storage_rollup_varied": 2924.1344
+      },
+      "retained_rows": {
+        "raw_metrics": 20160000.0,
+        "five_minute_rollups": 4320000.0,
+        "hourly_rollups": 2160000.0,
+        "host_logs": 574560000.0,
+        "diagnostics": 360000.0
+      },
+      "retained_gib_by_stream": {
+        "raw_metrics": 21.333251953125,
+        "five_minute_rollups": 11.76470947265625,
+        "hourly_rollups": 5.882354736328125,
+        "host_logs": 419.6282958984375,
+        "diagnostics": 0.2629249974300987
+      },
+      "retained_gib": 458.871537057977,
+      "headroom_gib": 137.6614611173931,
+      "planned_gib": 604.53299817537,
+      "fits_planning_budget": false,
+      "maximum_agents_with_same_rates_and_policies": 23,
+      "limitations": [
+        "Synthetic compact tables are calibration inputs, not full-retention measurements.",
+        "Varied rollups model lower compression; different metric dimensions can cost more.",
+        "Diagnostics use the measured host-log row cost and the explicitly assumed daily rate.",
+        "Headroom and WAL reserve are planning allowances, not measured worst-case bounds.",
+        "Budget must exclude other application data, backups, archives and host free-space reserve.",
+        "WAL generation rate is not retained WAL size; archives and replication backlog need separate budgets.",
+        "No collection or retention settings have been changed."
+      ]
+    },
+    {
+      "name": "500 agents, quiet sources, one-day raw and host logs",
+      "kind": "planning_estimate_not_capacity_certification",
+      "inputs": {
+        "agents": 500,
+        "logs_per_agent_second": 0.016666666666666666,
+        "raw_metric_days": 1,
+        "host_log_days": 1,
+        "diagnostics_per_agent_day": 24.0,
+        "budget_gib": 36.0,
+        "headroom_percent": 30.0,
+        "wal_reserve_gib": 8.0
+      },
+      "fixed_policy": {
+        "sample_interval_seconds": 15,
+        "five_minute_days": 30,
+        "hourly_days": 180,
+        "diagnostic_days": 30
+      },
+      "bytes_per_row_including_indexes": {
+        "agent_metric_samples": 1136.2304,
+        "agent_log_entries": 784.204350877193,
+        "storage_rollup_varied": 2924.1344
+      },
+      "retained_rows": {
+        "raw_metrics": 2880000.0,
+        "five_minute_rollups": 4320000.0,
+        "hourly_rollups": 2160000.0,
+        "host_logs": 720000.0,
+        "diagnostics": 360000.0
+      },
+      "retained_gib_by_stream": {
+        "raw_metrics": 3.0476074218749996,
+        "five_minute_rollups": 11.76470947265625,
+        "hourly_rollups": 5.882354736328125,
+        "host_logs": 0.5258499948601973,
+        "diagnostics": 0.2629249974300987
+      },
+      "retained_gib": 21.48344662314967,
+      "headroom_gib": 6.445033986944901,
+      "planned_gib": 35.928480610094574,
+      "fits_planning_budget": true,
+      "maximum_agents_with_same_rates_and_policies": 501,
+      "limitations": [
+        "Synthetic compact tables are calibration inputs, not full-retention measurements.",
+        "Varied rollups model lower compression; different metric dimensions can cost more.",
+        "Diagnostics use the measured host-log row cost and the explicitly assumed daily rate.",
+        "Headroom and WAL reserve are planning allowances, not measured worst-case bounds.",
+        "Budget must exclude other application data, backups, archives and host free-space reserve.",
+        "WAL generation rate is not retained WAL size; archives and replication backlog need separate budgets.",
+        "No collection or retention settings have been changed."
+      ]
+    },
+    {
+      "name": "40 agents, normal logs, default retention",
+      "kind": "planning_estimate_not_capacity_certification",
+      "inputs": {
+        "agents": 40,
+        "logs_per_agent_second": 1.0,
+        "raw_metric_days": 7,
+        "host_log_days": 7,
+        "diagnostics_per_agent_day": 24.0,
+        "budget_gib": 36.0,
+        "headroom_percent": 30.0,
+        "wal_reserve_gib": 8.0
+      },
+      "fixed_policy": {
+        "sample_interval_seconds": 15,
+        "five_minute_days": 30,
+        "hourly_days": 180,
+        "diagnostic_days": 30
+      },
+      "bytes_per_row_including_indexes": {
+        "agent_metric_samples": 1136.2304,
+        "agent_log_entries": 784.204350877193,
+        "storage_rollup_varied": 2924.1344
+      },
+      "retained_rows": {
+        "raw_metrics": 1612800.0,
+        "five_minute_rollups": 345600.0,
+        "hourly_rollups": 172800.0,
+        "host_logs": 24192000.0,
+        "diagnostics": 28800.0
+      },
+      "retained_gib_by_stream": {
+        "raw_metrics": 1.70666015625,
+        "five_minute_rollups": 0.9411767578124999,
+        "hourly_rollups": 0.47058837890624994,
+        "host_logs": 17.66855982730263,
+        "diagnostics": 0.021033999794407895
+      },
+      "retained_gib": 20.808019120065786,
+      "headroom_gib": 6.242405736019736,
+      "planned_gib": 35.05042485608552,
+      "fits_planning_budget": true,
+      "maximum_agents_with_same_rates_and_policies": 41,
+      "limitations": [
+        "Synthetic compact tables are calibration inputs, not full-retention measurements.",
+        "Varied rollups model lower compression; different metric dimensions can cost more.",
+        "Diagnostics use the measured host-log row cost and the explicitly assumed daily rate.",
+        "Headroom and WAL reserve are planning allowances, not measured worst-case bounds.",
+        "Budget must exclude other application data, backups, archives and host free-space reserve.",
+        "WAL generation rate is not retained WAL size; archives and replication backlog need separate budgets.",
+        "No collection or retention settings have been changed."
+      ]
+    }
+  ]
+}

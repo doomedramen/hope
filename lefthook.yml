@@ -11,6 +11,8 @@ pre-commit:
       run: pnpm -C apps/web lint
     proxmox-helper:
       run: bash scripts/test-proxmox-helper.sh
+    storage-plan:
+      run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-agent-storage-plan.py
 
 pre-push:
   parallel: false

@@ -2,6 +2,8 @@
 
 Status: ready to run; no human participants or results have been recorded.
 
+The [self-guided study pack](agent-study-pack/START-HERE.md) includes participant tasks, a session sheet, individual response forms, facilitator setup and success criteria, 25 empty result rows for five participants, and a findings template. The owner must prepare isolated fixtures and supply temporary access before sessions can start. Share only the participant folder with participants.
+
 Recruit five representative operators with a mix of Linux and Hope experience. Use a disposable environment containing a healthy agent, a stale agent, a source with denied access, and a known resource spike with matching journal entries. Include a 375-pixel mobile viewport and keyboard-only navigation. Do not use production credentials or ask participants to share secrets.
 
 Give each participant these tasks without describing navigation steps:

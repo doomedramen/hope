@@ -1,0 +1,34 @@
+{
+    "scope": "Compact PostgreSQL 17 table and index measurements from an isolated copy of the synthetic 500-agent TLS soak; varied rollups are a compression sensitivity fixture.",
+    "relations": {
+        "agent_log_entries": {
+            "rows": 570000,
+            "heap_bytes": 333537280,
+            "index_bytes": 113451008,
+            "total_bytes": 446996480,
+            "bytes_per_row": 784.204350877193
+        },
+        "agent_metric_samples": {
+            "rows": 20000,
+            "heap_bytes": 18210816,
+            "index_bytes": 4505600,
+            "total_bytes": 22724608,
+            "bytes_per_row": 1136.2304
+        },
+        "storage_rollup_sample": {
+            "rows": 20000,
+            "heap_bytes": 27312128,
+            "index_bytes": 1007616,
+            "total_bytes": 28360704,
+            "bytes_per_row": 1418.0352
+        },
+        "storage_rollup_varied": {
+            "rows": 20000,
+            "heap_bytes": 1867776,
+            "index_bytes": 1007616,
+            "total_bytes": 58482688,
+            "bytes_per_row": 2924.1344
+        }
+    },
+    "schema_version": 1
+}

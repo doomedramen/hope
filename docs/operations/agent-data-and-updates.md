@@ -35,7 +35,7 @@ Metrics and logs each retain up to 64 MiB or 24 hours in local outboxes. Collect
 
 The server limits log ingestion to 4 MiB per connection per minute; excess batches receive retryable acknowledgements. Host/container logs default to seven-day retention, configurable from one to 90 days per agent. Agent diagnostics retain 30 days. Search windows are limited to 90 days and pages to 500 entries.
 
-Raw metric retention keeps the existing setting (default seven days). Five-minute rollups retain 30 days; hourly rollups retain 180 days. Retention waits for required rollups. One-hour raw queries read at most 4,096 rows; longer UI ranges use at most 720 rollup buckets. Charts use fixed time buckets, show gaps, averages, and min/max context. Current UI ranges stop at seven days. The background worker must run for retention and legacy backfill.
+Raw metric retention keeps the existing setting (default seven days). Five-minute rollups retain 30 days; hourly rollups retain 180 days. Retention waits for required rollups. One-hour raw queries read at most 4,096 rows; longer UI ranges use at most 720 rollup buckets. Charts use fixed time buckets, show gaps, averages, and min/max context. Current UI ranges extend to 180 days. The background worker must run for retention and legacy backfill.
 
 ## Validation boundaries
 
@@ -54,3 +54,5 @@ A source budget uses a persisted 60-second window. Excess entries advance the du
 Acknowledged outbox batches can advance every 100 milliseconds. Unacknowledged records retry after five seconds; retryable log rejections back off for a minute. Metrics and log delivery remain independent. Collection cadence is unchanged.
 
 Metric ranges include 30 days and 180 days. Hourly rollups serve 30-day history; 180-day history uses 12-hour weighted aggregates with extrema and gaps preserved. Settings show effective retention and payload estimates based on bounded recent samples. These estimates exclude indexes, row overhead, rollups, WAL, backups and compression; replay bursts can distort estimated log rate. Use measured database sizes for capacity planning. See the [metric catalog](agent-metric-catalog.md) for units, semantics and unavailable values.
+
+The [storage sizing report and calculator](agent-storage-sizing.md) add physical table/index measurements and the full fixed rollup windows. At the measured normal log rate, default retention for 500 agents needs approximately 346 GiB of planning capacity with the report's stated allowances. The current machine does not have that free disk. Treat changes to retained history or source coverage as operator decisions; the calculator never applies them.

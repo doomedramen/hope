@@ -43,6 +43,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Check storage planning boundaries
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-agent-storage-plan.py
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace -- --test-threads=1
