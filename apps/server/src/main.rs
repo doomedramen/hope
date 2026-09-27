@@ -4,6 +4,8 @@ mod agent_install;
 mod agent_inventory;
 mod agent_logs;
 mod agent_metrics;
+#[cfg(test)]
+mod agent_soak;
 mod agent_updates;
 mod agent_usage;
 mod agent_web;

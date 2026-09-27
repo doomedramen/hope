@@ -1,0 +1,67 @@
+{
+  "agents": 500,
+  "burst_logs_per_agent": 150,
+  "database_growth_bytes": 541409280,
+  "elapsed_seconds": 600.6378675,
+  "log_rows": 570000,
+  "maintenance": {
+    "backfill_retention_checkpoint": {
+      "count": 10,
+      "max_ms": 5973.393625,
+      "p50_ms": 2868.5812090000004,
+      "p95_ms": 5973.393625,
+      "p99_ms": 5973.393625
+    },
+    "cycles": 10,
+    "expired_logs_seeded": 10000,
+    "expired_metrics_deleted": 10000
+  },
+  "metric_payload_bytes": 1476,
+  "metric_rows": 20000,
+  "normal_ack": {
+    "count": 18500,
+    "max_ms": 4396.936417,
+    "p50_ms": 865.6437500000001,
+    "p95_ms": 942.977666,
+    "p99_ms": 4291.8802080000005
+  },
+  "normal_logs_per_agent_per_second": 1,
+  "pid": 91426,
+  "queries": {
+    "fleet": {
+      "count": 548,
+      "max_ms": 2022.3784170000001,
+      "p50_ms": 17.075375,
+      "p95_ms": 399.951834,
+      "p99_ms": 519.744833
+    },
+    "history": {
+      "count": 548,
+      "max_ms": 2662.749792,
+      "p50_ms": 8.985791,
+      "p95_ms": 85.75616699999999,
+      "p99_ms": 441.334375
+    },
+    "log_search": {
+      "count": 548,
+      "max_ms": 880.357709,
+      "p50_ms": 11.245,
+      "p95_ms": 19.784583,
+      "p99_ms": 42.6
+    }
+  },
+  "reconnect_replay_ack": {
+    "count": 1500,
+    "max_ms": 4903.183291,
+    "p50_ms": 4447.821667,
+    "p95_ms": 4840.300375,
+    "p99_ms": 4895.313375
+  },
+  "reconnections": 1500,
+  "rounds": 40,
+  "sampling_seconds": 15,
+  "scope": "500 simulated clients and server in one native process; PostgreSQL in Docker Desktop; verified loopback TLS. Bounded historical fixture, not full retained history. Includes tenfold log bursts, lost-ACK reconnect replay, slow readers, retention/backfill and checkpoints.",
+  "seeded_hourly_history_rows": 15000,
+  "tls_certificate_verification": true,
+  "wal_bytes": 1799151296
+}

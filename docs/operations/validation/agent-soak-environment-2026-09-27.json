@@ -1,0 +1,25 @@
+{
+  "date": "2026-09-27",
+  "base_commit": "cba0c69c89f85f38803419da2504c4833839865b",
+  "harness_sha256": "4b5397599451ba7b5861b8aba2563984d6e06de57d1ab58e371b367e8c40125f",
+  "profile": "Rust debug test, four Tokio worker threads",
+  "cpu": "Apple M4 Pro",
+  "logical_cpus": 12,
+  "host_memory_bytes": 25769803776,
+  "macos": "26.6.2",
+  "docker": {
+    "cpus": 12,
+    "memory_bytes": 8319238144
+  },
+  "postgres": "PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+  "postgres_shared_buffers": "128MB",
+  "postgres_max_connections": 100,
+  "other_workload": "Local preview server and two disposable agent containers remained running. One Clippy build overlapped initial startup. Manual count queries were used for progress.",
+  "allocated_relations": {
+    "agent_log_entries": 506789888,
+    "agent_metric_rollups": 11280384,
+    "agent_metric_samples": 26861568
+  },
+  "mean_log_message_attributes_bytes": 421.53,
+  "host_free_disk_bytes_after": 47055491072
+}

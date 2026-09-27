@@ -44,14 +44,15 @@ Additional implementation and checks completed in the same disposable environmen
 
 | Check | Result |
 | --- | --- |
-| Automated suite | 305 Rust tests passed with real PostgreSQL; four opt-in tests are ignored in the normal suite. The two new capacity tests also passed when run explicitly. 85 UI tests passed; build, formatting and Clippy passed. |
+| Automated suite | 305 Rust tests passed with real PostgreSQL; five opt-in tests are ignored in the normal suite. All three agent capacity tests passed when run explicitly, including the ten-minute TLS workload. 85 UI tests passed; build, formatting and Clippy passed. |
 | Enrollment correlation | A native Linux test agent completed authenticated Hello, inventory and metrics milestones in about five seconds. A database test proves a second attempt remains incomplete and milestones survive token cleanup. |
 | Thirty-minute outage | Network disconnected for 1,805.22 seconds, with the agent restarted after one minute. All 121 captured metric sample IDs and 2,704 captured log event IDs arrived exactly once. |
 | Update during catch-up | Signed test release 0.1.2 → 0.1.5 installed after reconnection, preserving identity and outboxes; server health verification succeeded. Acknowledged backlog now advances every 100 ms while pending acknowledgements retain retry backoff. |
 | Long history | Database tests verify 180-day aggregation uses weighted counts, preserves extrema and the latest value. The UI offers 30- and 180-day ranges and labels aggregation resolution. |
 | Initial Settings viewport | At 375 × 812, source selection, applied revision and Save are visible; Save spans pixels 312–356. Document width equals viewport width. Secondary tabs prioritize their own task rather than repeating Overview. |
+| Overview tab layout | Health and current readings now belong to the Overview tab panel, below the stable tab bar. The former instruction-only panel is removed. A regression assertion verifies the panel contains the summary and follows the tab list; desktop and mobile initial views were checked. |
 | Real inventory shape | Structured socket reachability endpoints render correctly; the previous Settings crash is covered by the UI fixture. |
-| Capacity and restore | Two local 500-agent workloads and a full-row restore comparison passed. See the dedicated report for timings, storage allocation and scope limitations. |
+| Capacity and restore | Three local 500-agent workloads and a full-row restore comparison passed. The ten-minute TLS workload preserved 20,000 metrics and 570,000 logs through 1,500 reconnects and ten retention/checkpoint cycles. See the dedicated report for timings, storage allocation and scope limitations. |
 
 Native journal source controls passed: with minimum severity warning and a five-record/minute budget, 20 warning and 20 info messages produced exactly five stored warnings, zero stored info messages, and a durable diagnostic accounting for the other 15 warnings. The agent acknowledged the revision; the original test source selection was restored afterwards. [Source-policy evidence](validation/agent-source-controls-2026-09-27.json).
 
@@ -61,4 +62,4 @@ During a 60-second disconnected-collection sample, the native agent cgroup used 
 
 ## Remaining operational gates
 
-Five real operator usability sessions and sustained production capacity/storage sizing remain open. The local workload does not include production TLS/network overhead, months of retained data, concurrent retention/checkpoint pressure or a multi-hour soak. A reproducible [usability study protocol](agent-usability-study.md) is prepared; no human results have been invented. Per-source and per-connection log bounds are not a fleet-wide quota.
+Five real operator usability sessions and retained-history storage sizing remain open. The agreed local 500-agent ten-minute TLS throughput/recovery check passed, including retention/checkpoint pressure. It does not include production network latency, full retained history or a multi-hour soak. At the tested normal rate, seven days of serialized metric and log payload alone project to about 147 GiB, beyond the host's approximately 46 GiB of available disk; physical database sizing still needs a measured budget. A reproducible [usability study protocol](agent-usability-study.md) is prepared; no human results have been invented. Per-source and per-connection log bounds are not a fleet-wide quota.
