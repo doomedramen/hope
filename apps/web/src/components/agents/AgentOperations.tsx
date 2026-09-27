@@ -321,7 +321,12 @@ function CollectionForm({
       }}
     >
       <div>
-        <h2 className="font-medium">Log collection</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-medium">Log collection</h2>
+          <Button type="submit" disabled={save.isPending}>
+            Save log sources
+          </Button>
+        </div>
         <p className="text-sm text-muted-foreground">
           Choose exact sources. Empty lists disable host and container logs.
           Agent diagnostics remain available.
@@ -467,9 +472,6 @@ function CollectionForm({
       </label>
 
       <ErrorMessage error={save.error} />
-      <Button type="submit" disabled={save.isPending}>
-        Save log sources
-      </Button>
       {save.isSuccess && (
         <p role="status" className="text-sm">
           Saved. The agent applies this configuration on its next heartbeat.

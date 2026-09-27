@@ -40,3 +40,17 @@ Raw metric retention keeps the existing setting (default seven days). Five-minut
 ## Validation boundaries
 
 Automated checks cover database migrations, replay/deduplication, revocation, configuration conflicts, rollups with late samples, update health checks, and log pause/search behavior. The design plan tracks further operational acceptance. Production 500-agent mixed-load capacity, a real 30-minute network outage, and five-operator usability sessions are not implied by unit-test success. No production capacity guarantee is made by this implementation.
+
+## Enrollment verification
+
+The enrollment dialog follows the attempt returned with its one-time command. It records authenticated Hello, first accepted inventory, and first accepted metrics for that exact agent. Another agent connecting does not complete setup. Optional selected log sources show whether they have received entries but never block basic enrollment. Expired unused commands offer regeneration. Milestones remain available for 30 days independently of token cleanup and telemetry retention.
+
+## Per-source controls and history
+
+Agents advertising `log_source_controls` accept a `source_policies` map keyed by the exact `journal:unit` or `docker:container` source. Each policy sets `minimum_severity`, `max_events_per_minute` (1–6,000), and `max_bytes_per_minute` (1 KiB–4 MiB). Defaults are debug, 1,000 records and 1 MiB per minute. Byte accounting covers the serialized, redacted entry. Unknown severity remains unknown and is retained. Journal entries below the chosen severity are intentionally filtered; Docker output has no inferred severity.
+
+A source budget uses a persisted 60-second window. Excess entries advance the durable cursor only after a gap diagnostic is persisted, including dropped record and byte counts. Budget state survives agent restarts and cursor recovery. Recent budget loss appears in Overview. Older agents cannot acknowledge these settings as applied; update them first. Per-source and per-connection bounds are not a fleet-wide quota.
+
+Acknowledged outbox batches can advance every 100 milliseconds. Unacknowledged records retry after five seconds; retryable log rejections back off for a minute. Metrics and log delivery remain independent. Collection cadence is unchanged.
+
+Metric ranges include 30 days and 180 days. Hourly rollups serve 30-day history; 180-day history uses 12-hour weighted aggregates with extrema and gaps preserved. Settings show effective retention and payload estimates based on bounded recent samples. These estimates exclude indexes, row overhead, rollups, WAL, backups and compression; replay bursts can distort estimated log rate. Use measured database sizes for capacity planning. See the [metric catalog](agent-metric-catalog.md) for units, semantics and unavailable values.

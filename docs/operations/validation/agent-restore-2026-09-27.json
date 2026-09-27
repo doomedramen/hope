@@ -1,0 +1,18 @@
+{
+  "agents": {
+    "rows": 500,
+    "sha256": "460897ec408fdbb0ce619e6ef822b51e12f398e19b5a3b5a884a543524b082b7"
+  },
+  "agent_metric_samples": {
+    "rows": 17000,
+    "sha256": "90c179d3045b23e4b832b7973ea354cfd3938463dbeb9c5e5bdc3ec17737b8db"
+  },
+  "agent_log_entries": {
+    "rows": 45000,
+    "sha256": "950295e6d44cfbbb6f707950a2527d1d53ad6866c278198c788ea99064535889"
+  },
+  "agent_metric_rollups": {
+    "rows": 2000,
+    "sha256": "64960d42604e6e1d7562c76b8f93fa5eabd6272175e841d99be9ba100565191e"
+  }
+}

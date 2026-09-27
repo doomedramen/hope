@@ -45,7 +45,7 @@ beforeEach(() => {
     operations: [],
   });
 });
-function setup(stale = false) {
+function setup(stale = false, limited = false) {
   const at = new Date(Date.now() - (stale ? 300_000 : 1000));
   const agent = {
     id: "a",
@@ -61,7 +61,17 @@ function setup(stale = false) {
         cpu: { usage_percent: 18 },
         memory: { used_percent: 42 },
         delivery: {
-          logs: { sources: { "journal:app.service": at.getTime() / 1000 } },
+          logs: {
+            sources: { "journal:app.service": at.getTime() / 1000 },
+            budgets: limited
+              ? {
+                  "journal:app.service": {
+                    dropped_records: 12,
+                    last_dropped_at: at.getTime() / 1000,
+                  },
+                }
+              : {},
+          },
         },
       },
     },
@@ -105,5 +115,14 @@ it("labels old readings and log state as historical when disconnected", async ()
   expect(await screen.findByText("1/1 at last sample")).toBeVisible();
   expect(screen.getByText("CPU · last reading")).toBeVisible();
   expect(screen.queryByText("Data arriving normally")).not.toBeInTheDocument();
+  cache.clear();
+});
+
+it("puts recent source budget loss and its action in the initial summary", async () => {
+  const cache = setup(false, true);
+  expect(
+    await screen.findByRole("heading", { name: "Log source limit reached" }),
+  ).toBeVisible();
+  expect(screen.getByRole("button", { name: "Review log gaps" })).toBeVisible();
   cache.clear();
 });

@@ -361,8 +361,71 @@ mod tests {
         )
         .await
         .unwrap();
-        let value = get_settings(State(state), Path(agent)).await.unwrap().0;
+        let value = get_settings(State(state.clone()), Path(agent))
+            .await
+            .unwrap()
+            .0;
         assert_eq!(value["applied_revision"], 1);
+        let bounded = || {
+            let mut request = settings();
+            request.config.revision = 1;
+            request.config.source_policies.insert(
+                "journal:app.service".into(),
+                protocol::LogSourcePolicy::default(),
+            );
+            request
+        };
+        assert_eq!(
+            put_settings(
+                State(state.clone()),
+                Path(agent),
+                Extension(CurrentUser(user)),
+                Json(bounded())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        sqlx::query(
+            "update agents set capabilities='[\"log_source_controls\"]'::jsonb where id=$1",
+        )
+        .bind(agent)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            put_settings(
+                State(state.clone()),
+                Path(agent),
+                Extension(CurrentUser(user)),
+                Json(bounded())
+            )
+            .await
+            .unwrap()
+            .0["revision"],
+            2
+        );
+        // A rollback to an older agent must not falsely acknowledge ignored controls.
+        sqlx::query("update agents set capabilities='[]'::jsonb where id=$1")
+            .bind(agent)
+            .execute(&pool)
+            .await
+            .unwrap();
+        acknowledge_config(
+            &pool,
+            agent,
+            &protocol::CollectionConfigAck {
+                revision: 2,
+                accepted: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_settings(State(state), Path(agent)).await.unwrap().0["applied_revision"],
+            1
+        );
         let audits: Vec<Value> =
             sqlx::query_scalar("select detail from audit_events where target_id=$1")
                 .bind(agent)

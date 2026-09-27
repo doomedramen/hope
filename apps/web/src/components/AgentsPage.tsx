@@ -1296,8 +1296,12 @@ function AgentMetricsView({
         aria-live="polite"
       >
         <p>
-          {data.resolution_seconds ?? 15}-second buckets · Average with
-          minimum/maximum · Latest sample{" "}
+          {(data.resolution_seconds ?? 15) < 60
+            ? `${data.resolution_seconds ?? 15}-second`
+            : (data.resolution_seconds ?? 15) < 3600
+              ? `${(data.resolution_seconds ?? 15) / 60}-minute`
+              : `${(data.resolution_seconds ?? 15) / 3600}-hour`}{" "}
+          buckets · Average with minimum/maximum · Latest sample{" "}
           {data.latest
             ? formatRelative(data.latest.collected_at)
             : "not received"}

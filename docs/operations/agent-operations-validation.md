@@ -38,6 +38,27 @@ Exercise rollback only on a disposable target, with a deliberately failing but c
 
 For replay checks, disconnect only the disposable target's Docker network, restart its agent, capture the queued metric sample IDs and log event IDs, reconnect, and query for those exact IDs. Require one stored record per retained identity after the backlog drains.
 
+## Follow-up acceptance
+
+Additional implementation and checks completed in the same disposable environment:
+
+| Check | Result |
+| --- | --- |
+| Automated suite | 305 Rust tests passed with real PostgreSQL; four opt-in tests are ignored in the normal suite. The two new capacity tests also passed when run explicitly. 85 UI tests passed; build, formatting and Clippy passed. |
+| Enrollment correlation | A native Linux test agent completed authenticated Hello, inventory and metrics milestones in about five seconds. A database test proves a second attempt remains incomplete and milestones survive token cleanup. |
+| Thirty-minute outage | Network disconnected for 1,805.22 seconds, with the agent restarted after one minute. All 121 captured metric sample IDs and 2,704 captured log event IDs arrived exactly once. |
+| Update during catch-up | Signed test release 0.1.2 → 0.1.5 installed after reconnection, preserving identity and outboxes; server health verification succeeded. Acknowledged backlog now advances every 100 ms while pending acknowledgements retain retry backoff. |
+| Long history | Database tests verify 180-day aggregation uses weighted counts, preserves extrema and the latest value. The UI offers 30- and 180-day ranges and labels aggregation resolution. |
+| Initial Settings viewport | At 375 × 812, source selection, applied revision and Save are visible; Save spans pixels 312–356. Document width equals viewport width. Secondary tabs prioritize their own task rather than repeating Overview. |
+| Real inventory shape | Structured socket reachability endpoints render correctly; the previous Settings crash is covered by the UI fixture. |
+| Capacity and restore | Two local 500-agent workloads and a full-row restore comparison passed. See the dedicated report for timings, storage allocation and scope limitations. |
+
+Native journal source controls passed: with minimum severity warning and a five-record/minute budget, 20 warning and 20 info messages produced exactly five stored warnings, zero stored info messages, and a durable diagnostic accounting for the other 15 warnings. The agent acknowledged the revision; the original test source selection was restored afterwards. [Source-policy evidence](validation/agent-source-controls-2026-09-27.json).
+
+[Outage evidence](validation/agent-outage-2026-09-27.json), [capacity and restore report](agent-capacity-validation.md), and [resource sample](validation/agent-resource-sample-2026-09-27.json).
+
+During a 60-second disconnected-collection sample, the native agent cgroup used 0.34% of one CPU and peaked at 32,247,808 bytes (30.75 MiB). These systemd counters include supervised child processes and represent one fixture, not a regression budget or universal baseline.
+
 ## Remaining operational gates
 
-The live outage was short, not the planned 30 minutes. Production-size mixed telemetry/log load, reconnect storms, storage sizing, restore drills, and five-operator usability sessions remain unverified. The implementation plan lists additional controls and longer history views separately. These checks do not establish a 500-agent production capacity guarantee.
+Five real operator usability sessions and sustained production capacity/storage sizing remain open. The local workload does not include production TLS/network overhead, months of retained data, concurrent retention/checkpoint pressure or a multi-hour soak. A reproducible [usability study protocol](agent-usability-study.md) is prepared; no human results have been invented. Per-source and per-connection log bounds are not a fleet-wide quota.

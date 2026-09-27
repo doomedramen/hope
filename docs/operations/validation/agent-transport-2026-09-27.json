@@ -1,0 +1,10 @@
+{
+  "all_three_acknowledgements_p95_ms": 1463.949709,
+  "connections": 500,
+  "log_rows": 30000,
+  "logs_per_agent_per_second": 1,
+  "metric_rows": 2000,
+  "rounds": 4,
+  "sampling_seconds": 15,
+  "scope": "Real concurrent authenticated WebSockets and production handlers on loopback. TLS termination, production network latency, long retention and browser rendering excluded."
+}

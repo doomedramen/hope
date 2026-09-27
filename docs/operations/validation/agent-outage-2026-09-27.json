@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-09-27T11:37:33.082778+00:00",
+  "restarted_at": "2026-09-27T11:38:33.215353+00:00",
+  "outage_seconds": 1805.2205994999968,
+  "reconnected_at": "2026-09-27T12:07:38.311143+00:00",
+  "replay": {
+    "metrics-outbox": {
+      "retained": 121,
+      "received": 121,
+      "unique": 121
+    },
+    "logs-outbox": {
+      "retained": 2704,
+      "received": 2704,
+      "unique": 2704
+    }
+  },
+  "update": "0.1.2 to test release 0.1.5 during catch-up; server-verified succeeded"
+}

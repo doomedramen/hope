@@ -339,7 +339,11 @@ async fn run_session(
     let mut snapshot_acknowledged = false;
     let mut observations_acknowledged = false;
     let mut negotiated_capabilities: Option<protocol::NegotiatedCapabilities> = None;
-    let mut metric_refresh = tokio::time::interval(Duration::from_secs(1));
+    // Drain acknowledged backlog promptly without repeatedly sending an unacknowledged batch.
+    let mut metric_refresh = tokio::time::interval(Duration::from_millis(100));
+    metric_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut next_metric_attempt = None;
+    let mut next_log_attempt = None;
     let mut pending_metric_batch: Option<Record> = None;
     let mut pending_log_batch: Option<Record> = None;
 
@@ -388,7 +392,7 @@ async fn run_session(
                     continue;
                 };
                 if negotiated.capabilities.contains(&Capability::LogStreaming) {
-                    send_pending_metrics(&mut write, &mut pending_log_batch, &logs, negotiated.protocol_version).await?;
+                    send_pending_metrics(&mut write, &mut pending_log_batch, &logs, negotiated.protocol_version, &mut next_log_attempt).await?;
                 }
                 if !negotiated.capabilities.contains(&Capability::ResourceMetrics) { continue; }
                 send_pending_metrics(
@@ -396,6 +400,7 @@ async fn run_session(
                     &mut pending_metric_batch,
                     &outbox,
                     negotiated.protocol_version,
+                    &mut next_metric_attempt,
                 )
                 .await?;
             }
@@ -430,6 +435,7 @@ async fn run_session(
                                             &mut pending_metric_batch,
                                             &outbox,
                                             negotiated.protocol_version,
+                                            &mut next_metric_attempt,
                                         )
                                         .await?;
                                     }
@@ -513,6 +519,7 @@ async fn run_session(
                                     && matches!(&record.message, Message::LogBatch(batch) if batch.batch_id == ack.batch_id) {
                                     if ack.accepted { logs.lock().unwrap().acknowledge(record.id)?; pending_log_batch = None; }
                                     else if !ack.retryable { logs.lock().unwrap().reject(record.id)?; pending_log_batch = None; }
+                                    else { next_log_attempt = Some((record.id, Instant::now() + Duration::from_secs(60))); }
                                 }
                             }
                             Message::ProtocolError(error) => {
@@ -592,6 +599,7 @@ async fn send_pending_metrics<S>(
     pending: &mut Option<Record>,
     outbox: &Arc<Mutex<Outbox>>,
     protocol_version: u32,
+    next_attempt: &mut Option<(Uuid, Instant)>,
 ) -> anyhow::Result<()>
 where
     S: Sink<WsMessage> + Unpin,
@@ -601,6 +609,9 @@ where
         *pending = outbox.lock().unwrap().front()?;
     }
     if let Some(record) = pending.as_ref() {
+        if next_attempt.is_some_and(|(id, deadline)| id == record.id && Instant::now() < deadline) {
+            return Ok(());
+        }
         let envelope = Envelope {
             message_id: record.id,
             protocol_version,
@@ -612,6 +623,7 @@ where
         )
         .await?
         .map_err(|error| anyhow::anyhow!("send metric batch: {error}"))?;
+        *next_attempt = Some((record.id, Instant::now() + Duration::from_secs(5)));
     }
     Ok(())
 }
@@ -829,6 +841,69 @@ fn hostname_or_unknown() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn replay_drains_after_ack_without_flooding_pending_records() {
+        let root = std::env::temp_dir().join(format!("hope-replay-{}", Uuid::new_v4()));
+        let queue = Arc::new(Mutex::new(
+            Outbox::open(root.join("queue"), 1024 * 1024, 86400).unwrap(),
+        ));
+        for _ in 0..2 {
+            queue
+                .lock()
+                .unwrap()
+                .enqueue(Message::LogBatch(protocol::LogBatch {
+                    batch_id: Uuid::new_v4(),
+                    agent_id: Uuid::new_v4(),
+                    entries: vec![protocol::LogEntry {
+                        event_id: Uuid::new_v4().to_string(),
+                        observed_at_unix_ms: 1,
+                        source: "agent".into(),
+                        severity: "info".into(),
+                        message: "replay".into(),
+                        attributes: serde_json::json!({}),
+                    }],
+                }))
+                .unwrap();
+        }
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let captured = frames.clone();
+        let mut sink = futures_util::sink::unfold((), move |(), frame| {
+            captured.lock().unwrap().push(frame);
+            std::future::ready(Ok::<(), std::io::Error>(()))
+        });
+        let mut pending = None;
+        let mut next = None;
+        send_pending_metrics(&mut sink, &mut pending, &queue, 2, &mut next)
+            .await
+            .unwrap();
+        send_pending_metrics(&mut sink, &mut pending, &queue, 2, &mut next)
+            .await
+            .unwrap();
+        assert_eq!(frames.lock().unwrap().len(), 1);
+        next = Some((
+            pending.as_ref().unwrap().id,
+            Instant::now() - Duration::from_secs(1),
+        ));
+        send_pending_metrics(&mut sink, &mut pending, &queue, 2, &mut next)
+            .await
+            .unwrap();
+        assert_eq!(frames.lock().unwrap().len(), 2);
+        queue
+            .lock()
+            .unwrap()
+            .acknowledge(pending.take().unwrap().id)
+            .unwrap();
+        send_pending_metrics(&mut sink, &mut pending, &queue, 2, &mut next)
+            .await
+            .unwrap();
+        assert_eq!(
+            frames.lock().unwrap().len(),
+            3,
+            "next identity must not inherit the old retry deadline"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn backoff_base_grows_exponentially_then_caps() {

@@ -1,0 +1,19 @@
+{
+  "agents": 500,
+  "database_growth_bytes": 103473152,
+  "elapsed_seconds": 63.724575833,
+  "log_rows": 45000,
+  "metric_rows": 17000,
+  "mixed_ingest_p95_ms_including_queue_and_replay": 10010.742957999999,
+  "normal_log_events_per_agent_per_second": 1,
+  "normal_metric_interval_seconds": 15,
+  "normal_rounds": 4,
+  "queries": {
+    "fleet_p95_ms": 21.829625,
+    "history_p95_ms": 10.739624999999998,
+    "logs_p95_ms": 4.6465
+  },
+  "reconnect_samples_per_agent": 30,
+  "scope": "In-process production ingest and API handlers, PostgreSQL on Docker Desktop. Excludes TLS/WebSocket connections and browser rendering. Short workload, not sustained production capacity.",
+  "wal_bytes": 151170840
+}

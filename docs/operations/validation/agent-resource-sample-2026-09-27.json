@@ -1,0 +1,49 @@
+{
+  "samples": [
+    {
+      "at_seconds": 0.044180250028148293,
+      "MainPID": 6037,
+      "MemoryCurrent": 30818304,
+      "CPUUsageNSec": 6941050000
+    },
+    {
+      "at_seconds": 10.093179834075272,
+      "MainPID": 6037,
+      "MemoryCurrent": 31526912,
+      "CPUUsageNSec": 6971574000
+    },
+    {
+      "at_seconds": 20.14277408400085,
+      "MainPID": 6037,
+      "MemoryCurrent": 31350784,
+      "CPUUsageNSec": 7003596000
+    },
+    {
+      "at_seconds": 30.188717458979227,
+      "MainPID": 6037,
+      "MemoryCurrent": 30920704,
+      "CPUUsageNSec": 7031706000
+    },
+    {
+      "at_seconds": 40.23026199999731,
+      "MainPID": 6037,
+      "MemoryCurrent": 32133120,
+      "CPUUsageNSec": 7065856000
+    },
+    {
+      "at_seconds": 50.276441624970175,
+      "MainPID": 6037,
+      "MemoryCurrent": 32247808,
+      "CPUUsageNSec": 7102693000
+    },
+    {
+      "at_seconds": 60.33952829206828,
+      "MainPID": 6037,
+      "MemoryCurrent": 31744000,
+      "CPUUsageNSec": 7143850000
+    }
+  ],
+  "scope": "systemd cgroup counters, includes supervised child processes; disposable native arm64 Linux target",
+  "one_cpu_percent": 0.33634435588397366,
+  "peak_cgroup_memory_bytes": 32247808
+}
