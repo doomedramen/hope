@@ -13,6 +13,7 @@ pub mod generic;
 pub mod identity_service;
 pub mod monitor_proposals;
 pub mod pagination;
+pub mod proxmox;
 pub mod retention;
 pub mod service_collector_evidence;
 pub mod service_reviews;

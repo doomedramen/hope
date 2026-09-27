@@ -827,6 +827,19 @@ pub async fn collect_snapshot(agent_id: Uuid) -> InventorySnapshot {
         schema_version: M5_SCHEMA_VERSION,
     };
 
+    // Additive inventory extension: older servers can still accept this
+    // snapshot without negotiating a new protocol enum variant.
+    if let Some(proxmox) = crate::proxmox::collect() {
+        snapshot.complete &= proxmox["complete"] == true;
+        snapshot.inventory["collector_status"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "capability":"proxmox", "status":proxmox["status"], "error":proxmox["error"]
+            }));
+        snapshot.inventory["proxmox"] = proxmox;
+    }
+
     // Keep all section names and statuses if aggregate size reaches the
     // envelope bound. Collector-level data is still available on the host.
     if serde_json::to_vec(&snapshot)
@@ -862,6 +875,12 @@ pub async fn collect_snapshot(agent_id: Uuid) -> InventorySnapshot {
             .unwrap_or(true)
             && let Some(object) = snapshot.inventory.as_object_mut()
         {
+            if object.contains_key("proxmox") {
+                object.insert(
+                    "proxmox".into(),
+                    json!({"status":"partial", "complete":false, "error":"snapshot size bound"}),
+                );
+            }
             for capability in [
                 Capability::Host,
                 Capability::Network,

@@ -161,6 +161,71 @@ describe("EditDeviceDialog", () => {
 });
 
 describe("InfrastructurePage", () => {
+  it("shows Proxmox guest counts and host inventory with honest stale states", async () => {
+    const device = detail("pve-host", "Proxmox host");
+    device.proxmox = {
+      node: "pve-01",
+      status: "stale",
+      collected_at: "2026-09-20T10:00:00Z",
+      vm_count: 1,
+      lxc_count: 1,
+      guests: [
+        {
+          id: "vm-101",
+          host_device_id: device.id,
+          vmid: "101",
+          kind: "vm",
+          name: "Application VM",
+          status: "running",
+          last_seen: "2026-09-20T10:00:00Z",
+          is_current: true,
+          template: false,
+        },
+        {
+          id: "ct-102",
+          host_device_id: device.id,
+          vmid: "102",
+          kind: "lxc",
+          name: "DNS container",
+          status: "stopped",
+          last_seen: "2026-09-20T10:00:00Z",
+          is_current: true,
+          template: false,
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/devices?limit=100")
+          return Promise.resolve(
+            jsonResponse({ items: [device], next_cursor: null }),
+          );
+        if (path === "/api/v1/devices/pve-host")
+          return Promise.resolve(jsonResponse(device));
+        if (path.endsWith("/full-scan"))
+          return Promise.resolve(jsonResponse(null));
+        return Promise.resolve(jsonResponse({ items: [], next_cursor: null }));
+      }),
+    );
+    renderInfrastructurePage();
+    expect(
+      await screen.findAllByText(
+        "Proxmox · pve-01 · 1 VM · 1 LXC · last known",
+      ),
+    ).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Open Proxmox host" }));
+    expect(await screen.findByText("Application VM")).toBeInTheDocument();
+    expect(screen.getByText("DNS container")).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Proxmox guests" }),
+    ).not.toHaveTextContent("Running");
+    expect(
+      screen.getByRole("region", { name: "Proxmox guests" }),
+    ).toHaveTextContent("current power state is unknown");
+  });
+
   it("shows linked agent hostnames and metric links in the list and detail", async () => {
     const device = detail("device-1", "");
     device.agents = [

@@ -166,6 +166,11 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<Uuid>) -> (Status
     if let Err(e) = attach_agents(&state.pool, std::slice::from_mut(&mut device)).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
+    if let Err(e) =
+        super::proxmox::attach(&state.pool, std::slice::from_mut(&mut device), true).await
+    {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
     (StatusCode::OK, Json(device))
 }
 
@@ -287,6 +292,9 @@ pub async fn list(
 
     let mut items: Vec<Value> = rows.into_iter().map(|(v,)| v).collect();
     if let Err(e) = attach_agents(&state.pool, &mut items).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    if let Err(e) = super::proxmox::attach(&state.pool, &mut items, false).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
     let next_cursor = items.last().and_then(|last| {

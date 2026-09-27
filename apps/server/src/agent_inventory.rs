@@ -542,6 +542,15 @@ pub async fn ingest_snapshot(
     )
     .await?;
 
+    crate::inventory::proxmox::project(
+        &mut tx,
+        authenticated_agent_id,
+        linked_device_id,
+        &snapshot.inventory,
+        collected_at,
+    )
+    .await?;
+
     sqlx::query(
         "delete from agent_inventory_snapshots s \
          where s.agent_id = $1 \
@@ -2321,6 +2330,130 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(device_count, 1);
+    }
+
+    #[tokio::test]
+    async fn proxmox_guests_are_host_scoped_and_partial_inventory_preserves_history() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let agent_id = Uuid::new_v4();
+        let other_agent = Uuid::new_v4();
+        insert_test_agent(&pool, agent_id, false).await;
+        insert_test_agent(&pool, other_agent, false).await;
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let make_report = |agent, sequence, complete, guests: Value| {
+            let mut report = snapshot(agent, sequence);
+            report.collected_at_unix_secs = now;
+            report.inventory = json!({"host":{"hostname":agent.to_string()}, "proxmox":{
+                "node":"pve-01","status":if complete {"available"} else {"partial"},
+                "complete":complete,"collected_at_unix_secs":now,"guests":guests}});
+            report
+        };
+        let guests = json!([
+            {"vmid":101,"kind":"vm","name":"web-server","status":"running"},
+            {"vmid":102,"kind":"lxc","name":"dns-server","status":"stopped"}
+        ]);
+        let report = make_report(agent_id, 1, true, guests.clone());
+        let host = ingest_snapshot(&pool, agent_id, &report)
+            .await
+            .unwrap()
+            .device_id
+            .unwrap();
+        ingest_snapshot(&pool, agent_id, &report).await.unwrap();
+        let other_host = ingest_snapshot(
+            &pool,
+            other_agent,
+            &make_report(other_agent, 1, true, guests.clone()),
+        )
+        .await
+        .unwrap()
+        .device_id
+        .unwrap();
+        assert_ne!(host, other_host);
+        let count: i64 = sqlx::query_scalar(
+            "select count(*) from workloads where host_device_id=$1 and source_type='proxmox'",
+        )
+        .bind(host)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2, "replay must not duplicate guests");
+        let (status, Json(detail)) =
+            crate::inventory::devices::get(State(AppState { pool: pool.clone() }), Path(host))
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["proxmox"]["status"], "available");
+        assert_eq!(detail["proxmox"]["vm_count"], 1);
+        assert_eq!(detail["proxmox"]["lxc_count"], 1);
+        assert_eq!(
+            detail["proxmox"]["guests"][0]["host_device_id"],
+            json!(host)
+        );
+        assert_eq!(detail["proxmox"]["guests"][0]["status"], "running");
+        assert_eq!(detail["proxmox"]["states"]["running"], 1);
+        let edges: i64 = sqlx::query_scalar("select count(*) from containment_edges where parent_id=$1 and relation in ('hosts_vm','hosts_container')")
+            .bind(host).fetch_one(&pool).await.unwrap();
+        assert_eq!(edges, 2);
+        ingest_snapshot(&pool, agent_id, &make_report(agent_id, 2, false, json!([])))
+            .await
+            .unwrap();
+        let (_, Json(partial)) =
+            crate::inventory::devices::get(State(AppState { pool: pool.clone() }), Path(host))
+                .await;
+        assert_eq!(partial["proxmox"]["status"], "partial");
+        assert_eq!(partial["proxmox"]["guests"].as_array().unwrap().len(), 2);
+        assert_eq!(partial["proxmox"]["guests"][0]["is_current"], true);
+        assert_eq!(partial["proxmox"]["guests"][0]["status"], "unknown");
+        let mut stale = make_report(agent_id, 3, true, json!([]));
+        stale.inventory["proxmox"]["collected_at_unix_secs"] = json!(now - 3600);
+        ingest_snapshot(&pool, agent_id, &stale).await.unwrap();
+        let (_, Json(stale)) =
+            crate::inventory::devices::get(State(AppState { pool: pool.clone() }), Path(host))
+                .await;
+        assert_eq!(stale["proxmox"]["status"], "stale");
+        assert_eq!(stale["proxmox"]["guests"][0]["is_current"], true);
+        ingest_snapshot(&pool, agent_id, &make_report(agent_id, 4, true, json!([])))
+            .await
+            .unwrap();
+        let (_, Json(empty)) =
+            crate::inventory::devices::get(State(AppState { pool: pool.clone() }), Path(host))
+                .await;
+        assert_eq!(empty["proxmox"]["vm_count"], 0);
+        assert_eq!(empty["proxmox"]["guests"][0]["is_current"], false);
+        let edges: i64 = sqlx::query_scalar("select count(*) from containment_edges where parent_id=$1 and relation in ('hosts_vm','hosts_container')")
+            .bind(host).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            edges, 0,
+            "departed guests must not retain active containment"
+        );
+        let unaffected: i64 = sqlx::query_scalar(
+            "select count(*) from workloads where host_device_id=$1 and is_current",
+        )
+        .bind(other_host)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unaffected, 2);
+        sqlx::query("update devices set canonical_of=$1,status='merged' where id=$2")
+            .bind(other_host)
+            .bind(host)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_, Json(merged)) =
+            crate::inventory::devices::get(State(AppState { pool: pool.clone() }), Path(host))
+                .await;
+        assert_eq!(merged["proxmox"]["guests"].as_array().unwrap().len(), 4);
+        sqlx::query("update devices set canonical_of=null,status='active' where id=$1")
+            .bind(host)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_, Json(restored)) =
+            crate::inventory::devices::get(State(AppState { pool: pool.clone() }), Path(host))
+                .await;
+        assert_eq!(restored["proxmox"]["guests"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]

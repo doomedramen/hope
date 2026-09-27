@@ -5,6 +5,7 @@ mod identity;
 mod logs;
 mod outbox;
 mod pinning;
+mod proxmox;
 mod release_verify;
 mod run;
 mod updater;
@@ -29,6 +30,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Export bounded, read-only local Proxmox inventory for the agent service.
+    ExportProxmox,
     /// Apply a staged signed update; invoked by the separate systemd updater service.
     ApplyUpdate,
     /// Register an agent-generated identity key using a single-use token.
@@ -93,6 +96,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Command::ExportProxmox) => proxmox::export().await?,
         Some(Command::ApplyUpdate) => updater::apply().await?,
         Some(Command::Enroll {
             server,

@@ -656,8 +656,57 @@ UNIT
     chown root:root /etc/systemd/system/hope-agent-update.service /etc/systemd/system/hope-agent-update.timer
 }
 
+install_proxmox_collector() {
+    [[ -x /usr/bin/pvesh && -d /etc/pve ]] || return 0
+    if ! "$AGENT_PATH" export-proxmox --help >/dev/null 2>&1; then
+        log "Proxmox detected; this agent release does not yet support guest inventory"
+        return 0
+    fi
+    check_path_not_symlink /run/hope-proxmox "Proxmox inventory directory"
+    install -d -o root -g root -m 0755 /run/hope-proxmox
+    check_path_not_symlink /etc/systemd/system/hope-agent-proxmox.service "Proxmox service"
+    check_path_not_symlink /etc/systemd/system/hope-agent-proxmox.timer "Proxmox timer"
+    cat > /etc/systemd/system/hope-agent-proxmox.service <<UNIT
+[Unit]
+Description=Read local Proxmox guest inventory for Hope
+After=pve-cluster.service
+ConditionPathExists=/usr/bin/pvesh
+[Service]
+Type=oneshot
+User=root
+ExecStart=$AGENT_PATH export-proxmox
+RuntimeDirectory=hope-proxmox
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+UMask=0022
+TimeoutStartSec=30s
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run/hope-proxmox
+PrivateTmp=true
+RestrictSUIDSGID=true
+UNIT
+    cat > /etc/systemd/system/hope-agent-proxmox.timer <<'UNIT'
+[Unit]
+Description=Refresh Hope Proxmox guest inventory
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=60s
+Unit=hope-agent-proxmox.service
+[Install]
+WantedBy=timers.target
+UNIT
+    chmod 0644 /etc/systemd/system/hope-agent-proxmox.service /etc/systemd/system/hope-agent-proxmox.timer
+    chown root:root /etc/systemd/system/hope-agent-proxmox.service /etc/systemd/system/hope-agent-proxmox.timer
+}
+
 start_service() {
     systemctl daemon-reload || die "systemd daemon-reload failed"
+    if [[ -f /etc/systemd/system/hope-agent-proxmox.timer ]]; then
+        systemctl enable --now hope-agent-proxmox.timer >/dev/null || die "could not enable Proxmox collector timer"
+        systemctl start hope-agent-proxmox.service || log "Proxmox inventory unavailable; inspect hope-agent-proxmox.service"
+    fi
     systemctl enable --now hope-agent-update.timer >/dev/null || die "could not enable updater timer"
     systemctl enable "$SERVICE_NAME" >/dev/null || die "could not enable $SERVICE_NAME"
     if ! systemctl restart "$SERVICE_NAME"; then
@@ -691,6 +740,9 @@ uninstall() {
         log "$SERVICE_NAME already inactive"
     fi
 
+    systemctl stop hope-agent-proxmox.timer hope-agent-proxmox.service >/dev/null 2>&1 || true
+    systemctl disable hope-agent-proxmox.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/hope-agent-proxmox.timer /etc/systemd/system/hope-agent-proxmox.service
     systemctl stop hope-agent-update.timer hope-agent-update.service >/dev/null 2>&1 || true
     systemctl disable hope-agent-update.timer >/dev/null 2>&1 || true
     rm -f /etc/systemd/system/hope-agent-update.timer /etc/systemd/system/hope-agent-update.service /usr/local/libexec/hope-agent-updater
@@ -801,6 +853,7 @@ install_agent_binary
 enroll_agent
 write_service_unit
 install_updater
+install_proxmox_collector
 start_service
 
 log "installed Hope agent $VERSION for Linux/$ARCH"

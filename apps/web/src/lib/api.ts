@@ -119,6 +119,27 @@ export interface DeviceAgent {
   last_seen: string | null;
 }
 
+export interface ProxmoxInventory {
+  node?: string | null;
+  status: "available" | "partial" | "stale" | "unavailable";
+  error?: string | null;
+  collected_at?: string | null;
+  vm_count: number;
+  lxc_count: number;
+  states?: Record<string, number>;
+  guests: {
+    id: string;
+    host_device_id: string;
+    vmid: string;
+    kind: "vm" | "lxc";
+    name: string | null;
+    status: string;
+    last_seen: string;
+    is_current: boolean;
+    template: boolean | null;
+  }[];
+}
+
 export interface Device {
   id: string;
   device_type: string;
@@ -130,6 +151,7 @@ export interface Device {
   created_at: string;
   updated_at: string;
   agents?: DeviceAgent[];
+  proxmox?: ProxmoxInventory;
 }
 
 export interface Service {

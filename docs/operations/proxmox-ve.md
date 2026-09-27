@@ -88,3 +88,55 @@ your public HTTPS Proxy Host. See [Manual agent installation](../manual-agent-in
 
 Never use `docker compose down -v` unless intentionally discarding the Hope
 database and server PKI.
+
+## Discover VMs and LXCs from a Proxmox host
+
+Install a current Hope agent directly on each Proxmox VE host using the
+[manual agent installer](../manual-agent-install.md). An agent inside the Hope
+LXC sees that container, not its parent Proxmox host. Deploy the server/web
+update and migration 0042 before updating the host agents.
+
+On a Proxmox host, the installer adds `hope-agent-proxmox.service` and
+`hope-agent-proxmox.timer`. Existing installations must rerun the installer
+once after updating to an agent that supports `export-proxmox`; replacing the
+binary alone does not create these units. Enrollment is reused.
+
+The root oneshot runs two fixed, read-only `pvesh get` requests against the
+local node's QEMU and LXC inventories. It exports only VMID, name, type,
+reported power state, template flag, and basic resource metadata into
+`/run/hope-proxmox/inventory.json`. It does not export guest configurations,
+passwords, tokens, or other nodes' inventory. The network-facing agent stays
+unprivileged and receives no additional groups or sudo rights. Proxmox's
+[local API shell](https://pve.proxmox.com/pve-docs/pvesh.1.html) requires root;
+the separate service keeps that permission outside the network-facing process.
+
+The helper refreshes every minute. The agent sends this inventory on connect
+and with its normal 15-minute inventory snapshots. Devices shows VM/LXC
+counts and observation freshness; opening the host shows its guest list.
+Guest power states are observations, not live availability checks. Host
+metrics remain available through the agent's Metrics link.
+
+Each guest is a workload with a `host_device_id` foreign key and containment
+edge. VMIDs are scoped to the reporting host, so identical IDs on independent
+nodes do not collide. Repeated snapshots update the same record. Host
+merge/undo keeps these relationships. A complete report can mark a missing
+guest as no longer present; partial, stale, or failed reports retain previous
+records and show unknown current state. At most 128 guests are exported; a
+larger inventory is explicitly partial.
+
+This first phase does not correlate guest-installed agents, preserve a guest's
+identity across live migration, or provide cluster/storage management. A
+migrated guest appears on its new host while its old host retains history.
+No guest start/stop or configuration actions are exposed.
+
+Troubleshoot missing inventory on the **Proxmox host**:
+
+```sh
+systemctl status hope-agent-proxmox.timer hope-agent-proxmox.service --no-pager
+journalctl -u hope-agent-proxmox.service --since '30 minutes ago' --no-pager
+sudo -u hope-agent cat /run/hope-proxmox/inventory.json
+```
+
+After correcting a helper failure, `systemctl start hope-agent-proxmox.service`
+refreshes the local cache. Restart `hope-agent` to send a new snapshot
+immediately, or wait for its next inventory interval.

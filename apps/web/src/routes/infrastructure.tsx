@@ -903,10 +903,11 @@ function deviceDisplayName(device: Device): string {
 }
 
 function DeviceAgentLinks({ device }: { device: Device }) {
-  if (!device.agents?.length) return null;
+  if (!device.agents?.length && !device.proxmox) return null;
   return (
     <div className="min-w-0 space-y-1" aria-label="Installed agents">
-      {device.agents.map((agent) => (
+      {device.proxmox ? <ProxmoxSummary device={device} /> : null}
+      {device.agents?.map((agent) => (
         <div
           key={agent.id}
           className="flex min-w-0 flex-wrap items-center gap-x-3 text-xs"
@@ -931,6 +932,92 @@ function DeviceAgentLinks({ device }: { device: Device }) {
         </div>
       ))}
     </div>
+  );
+}
+
+function ProxmoxSummary({ device }: { device: Device }) {
+  const inventory = device.proxmox;
+  if (!inventory) return null;
+  return (
+    <div className="space-y-1 py-1 text-xs">
+      <p className="break-words font-medium">
+        Proxmox{inventory.node ? ` · ${inventory.node}` : ""} ·{" "}
+        {inventory.status === "available" ||
+        inventory.vm_count + inventory.lxc_count > 0
+          ? `${inventory.vm_count} ${inventory.vm_count === 1 ? "VM" : "VMs"} · ${inventory.lxc_count} ${inventory.lxc_count === 1 ? "LXC" : "LXCs"}${inventory.status !== "available" ? " · last known" : ""}`
+          : "Guest counts unavailable"}
+      </p>
+      {inventory.status === "available" && inventory.states ? (
+        <p>
+          {Object.entries(inventory.states)
+            .map(([state, count]) => `${count} ${state}`)
+            .join(" · ")}
+        </p>
+      ) : null}
+      <p className="text-muted-foreground">
+        {inventory.status === "available"
+          ? `Observed ${formatRelative(inventory.collected_at ?? null)}`
+          : `Guest inventory ${inventory.status} · current state unknown`}
+      </p>
+    </div>
+  );
+}
+
+function ProxmoxGuests({ device }: { device: Device }) {
+  const inventory = device.proxmox;
+  if (!inventory) return null;
+  return (
+    <section aria-label="Proxmox guests" className="space-y-3">
+      <div>
+        <h3 className="font-medium">Virtual machines & containers</h3>
+        <p className="text-sm text-muted-foreground">
+          Hosted on {deviceDisplayName(device)}. Inventory refreshes every 15
+          minutes.
+        </p>
+      </div>
+      {inventory.status !== "available" ? (
+        <p role="status" className="rounded-lg border p-3 text-sm">
+          Guest inventory {inventory.status}.{" "}
+          {inventory.error ||
+            "Last known guests are retained; current power state is unknown."}
+        </p>
+      ) : null}
+      {inventory.guests.length ? (
+        <ul className="divide-y rounded-lg border">
+          {inventory.guests.map((guest) => (
+            <li
+              key={guest.id}
+              className="flex flex-wrap items-center justify-between gap-2 p-3"
+            >
+              <div className="min-w-0 flex-1">
+                <p className="break-words font-medium">
+                  {guest.name ||
+                    `${guest.kind === "vm" ? "VM" : "LXC"} ${guest.vmid}`}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {guest.kind === "vm" ? "VM" : "LXC"} {guest.vmid}
+                  {guest.template ? " · Template" : ""} · Last observed{" "}
+                  {formatRelative(guest.last_seen)}
+                </p>
+              </div>
+              <span className="rounded-md bg-muted px-2 py-1 text-xs">
+                {!guest.is_current
+                  ? "No longer on this host"
+                  : inventory.status !== "available"
+                    ? "Unknown"
+                    : labelize(guest.status)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+          {inventory.status === "available"
+            ? "No VMs or LXCs reported on this host."
+            : "Guest inventory is not available yet."}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -1220,6 +1307,7 @@ function DeviceDetail({
             </TabsList>
           </div>
           <TabsContent className="m-0 space-y-5 p-5" value="overview">
+            <ProxmoxGuests device={detail} />
             {currentCondition === "critical" ||
             currentCondition === "warning" ? (
               <section className="rounded-lg border border-status-critical-border bg-status-critical-bg/40 p-4">
