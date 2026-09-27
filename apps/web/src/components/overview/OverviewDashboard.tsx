@@ -88,7 +88,7 @@ function OverviewDashboard() {
     queryKey: ["networks"],
     queryFn: fetchNetworks,
   });
-  const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: fetchAgents });
+  const agentsQuery = useQuery({ queryKey: ["agents"], queryFn: () => fetchAgents() });
   const monitorsQuery = useQuery({
     queryKey: ["monitors"],
     queryFn: () => fetchMonitors(),

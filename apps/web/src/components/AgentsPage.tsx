@@ -1,17 +1,20 @@
+import {
+  AgentUpdatePanel,
+  AgentSettings,
+  AgentLogs,
+  type AgentLocation,
+  type NavigateAgent,
+} from "@/components/agents/AgentOperations";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  ActivityIcon,
   CheckIcon,
   CircleAlertIcon,
   CircleHelpIcon,
   Clock3Icon,
   CopyIcon,
-  ContainerIcon,
-  CpuIcon,
   DatabaseIcon,
   DownloadIcon,
   FileTextIcon,
-  HardDriveIcon,
   NetworkIcon,
   RefreshCwIcon,
   SearchIcon,
@@ -20,7 +23,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   createAgentEnrollment,
   fetchAgent,
@@ -106,23 +109,42 @@ const EMPTY_INVENTORY_SUMMARY: AgentInventorySummary = {
   containers: 0,
 };
 
-export function AgentsPage() {
-  const [requestedAgentId, setRequestedAgentId] = useState<string | null>(null);
+export function AgentsPage({
+  location: externalLocation,
+  onNavigate,
+}: { location?: AgentLocation; onNavigate?: NavigateAgent } = {}) {
+  const [localLocation, setLocalLocation] = useState<AgentLocation>({});
+  const location = externalLocation ?? localLocation;
+  const navigate: NavigateAgent = (patch) => {
+    if (onNavigate) onNavigate(patch);
+    else setLocalLocation((old) => ({ ...old, ...patch }));
+  };
+  const requestedAgentId = location.agent ?? null;
+  const setRequestedAgentId = (id: string | null) =>
+    navigate({ agent: id ?? undefined, tab: undefined });
   const [enrollmentOpen, setEnrollmentOpen] = useState(false);
-  const [search, setSearch] = useState("");
+  const search = location.q ?? "";
+  const setSearch = (q: string) =>
+    navigate({ q: q || undefined, cursor: undefined });
   const agentsQuery = useQuery({
-    queryKey: ["agents"],
-    queryFn: fetchAgents,
+    queryKey: ["agents", search, location.status, location.cursor],
+    queryFn: () =>
+      fetchAgents({
+        q: search,
+        status: location.status,
+        cursor: location.cursor,
+      }),
     refetchInterval: 15_000,
   });
   const agents = agentsQuery.data?.items ?? EMPTY_AGENTS;
   const isEmptyState =
-    !agentsQuery.isLoading && !agentsQuery.isError && agents.length === 0;
-  const selectedAgentId = agents.some((agent) => agent.id === requestedAgentId)
-    ? requestedAgentId
-    : (agents[0]?.id ?? null);
-  const selectedAgent =
-    agents.find((agent) => agent.id === selectedAgentId) ?? null;
+    !agentsQuery.isLoading &&
+    !agentsQuery.isError &&
+    agents.length === 0 &&
+    !search &&
+    !location.status &&
+    !location.cursor;
+  const selectedAgentId = requestedAgentId;
   const detailQuery = useQuery({
     queryKey: ["agent", selectedAgentId],
     queryFn: () => fetchAgent(selectedAgentId!),
@@ -130,28 +152,8 @@ export function AgentsPage() {
     refetchInterval: 15_000,
   });
 
-  const visibleAgents = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    if (!needle) return agents;
-    return agents.filter((agent) =>
-      [
-        agent.hostname,
-        agent.id,
-        agent.agent_version,
-        agent.os,
-        agent.arch,
-        ...agent.capabilities,
-      ].some((value) => value?.toLowerCase().includes(needle)),
-    );
-  }, [agents, search]);
-
-  const onlineCount = agents.filter(
-    (agent) => agent.status === "online",
-  ).length;
-  const staleCount = agents.filter((agent) => agent.status === "stale").length;
-  const offlineCount = agents.filter(
-    (agent) => agent.status === "offline",
-  ).length;
+  const visibleAgents = agents;
+  const counts = agentsQuery.data?.counts;
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
@@ -180,110 +182,143 @@ export function AgentsPage() {
         </div>
       </div>
 
-      {!isEmptyState ? (
-        <div className="order-2 grid gap-4 sm:order-none sm:grid-cols-2 xl:grid-cols-4">
-          <MetricCard
-            detail="Enrolled agents"
-            icon={<ServerIcon />}
-            label="Enrolled"
-            value={agents.length}
-          />
-          <MetricCard
-            detail="Heartbeat within threshold"
-            icon={<ActivityIcon />}
-            label="Online"
-            value={onlineCount}
-          />
-          <MetricCard
-            detail="Heartbeat is delayed"
-            icon={<Clock3Icon />}
-            label="Stale"
-            value={staleCount}
-          />
-          <MetricCard
-            detail="No current connection"
-            icon={<CircleAlertIcon />}
-            label="Offline"
-            value={offlineCount}
-          />
+      {!isEmptyState && !selectedAgentId && (
+        <div
+          className="flex flex-wrap gap-2"
+          aria-label="Filter agents by status"
+        >
+          {["all", "online", "stale", "offline", "revoked"].map((status) => (
+            <Button
+              key={status}
+              variant={
+                (location.status ?? "all") === status ? "secondary" : "outline"
+              }
+              size="sm"
+              aria-pressed={(location.status ?? "all") === status}
+              onClick={() =>
+                navigate({
+                  status: status === "all" ? undefined : status,
+                  cursor: undefined,
+                })
+              }
+            >
+              {labelize(status)}
+              {counts?.[status] !== undefined ? ` (${counts[status]})` : ""}
+            </Button>
+          ))}
         </div>
-      ) : null}
+      )}
+      {selectedAgentId && (
+        <Button
+          variant="outline"
+          className="self-start"
+          onClick={() => setRequestedAgentId(null)}
+        >
+          Back to agents
+        </Button>
+      )}
 
-      <div className="order-1 grid gap-6 sm:order-none xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.8fr)]">
-        <Card aria-busy={agentsQuery.isLoading} className="min-w-0">
-          <CardHeader className="border-b max-sm:grid-cols-1">
-            <CardTitle>Enrolled agents</CardTitle>
-            <CardDescription>
-              {isEmptyState
-                ? "Enroll your first Linux agent to collect host inventory."
-                : `${visibleAgents.length} shown of ${agents.length}`}
-            </CardDescription>
-            {!isEmptyState ? (
-              <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-stretch">
-                <div className="relative">
-                  <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    aria-label="Search agents"
-                    className="w-full pl-8 sm:w-56"
-                    onChange={(event) => setSearch(event.target.value)}
-                    placeholder="Search agents"
-                    value={search}
-                  />
-                </div>
-              </CardAction>
-            ) : null}
-          </CardHeader>
-          {agentsQuery.isLoading ? (
-            <AgentListLoading />
-          ) : agentsQuery.isError ? (
-            <CardContent className="pt-6">
-              <LoadError
-                error={agentsQuery.error}
-                retry={() => agentsQuery.refetch()}
-                title="Agents unavailable"
+      <div className="grid gap-6">
+        {!selectedAgentId && (
+          <Card aria-busy={agentsQuery.isLoading} className="min-w-0">
+            <CardHeader className="border-b max-sm:grid-cols-1">
+              <CardTitle>Enrolled agents</CardTitle>
+              <CardDescription>
+                {isEmptyState
+                  ? "Enroll your first Linux agent to collect host inventory."
+                  : `${visibleAgents.length} shown${agentsQuery.data?.total !== undefined ? ` of ${agentsQuery.data.total}` : ""}`}
+              </CardDescription>
+              {!isEmptyState ? (
+                <CardAction className="max-sm:col-start-1 max-sm:row-start-2 max-sm:justify-self-stretch">
+                  <div className="relative">
+                    <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      aria-label="Search agents"
+                      className="w-full pl-8 sm:w-56"
+                      onChange={(event) => setSearch(event.target.value)}
+                      placeholder="Search agents"
+                      value={search}
+                    />
+                  </div>
+                </CardAction>
+              ) : null}
+            </CardHeader>
+            {agentsQuery.isLoading ? (
+              <AgentListLoading />
+            ) : agentsQuery.isError && !agentsQuery.data ? (
+              <CardContent className="pt-6">
+                <LoadError
+                  error={agentsQuery.error}
+                  retry={() => agentsQuery.refetch()}
+                  title="Agents unavailable"
+                />
+              </CardContent>
+            ) : visibleAgents.length === 0 ? (
+              <CardContent className="pt-6">
+                <Empty>
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <ServerIcon />
+                    </EmptyMedia>
+                    <EmptyTitle>
+                      {search.trim()
+                        ? "No matching agents"
+                        : "No enrolled agents"}
+                    </EmptyTitle>
+                    <EmptyDescription>
+                      {search.trim()
+                        ? "Clear search to view all enrolled agents."
+                        : "Enroll a Linux agent to collect host inventory."}
+                    </EmptyDescription>
+                    {!search.trim() ? (
+                      <Button onClick={() => setEnrollmentOpen(true)}>
+                        <DownloadIcon data-icon="inline-start" />
+                        Enroll agent
+                      </Button>
+                    ) : null}
+                  </EmptyHeader>
+                </Empty>
+              </CardContent>
+            ) : (
+              <AgentTable
+                agents={visibleAgents}
+                selectedAgentId={selectedAgentId}
+                selectAgent={setRequestedAgentId}
               />
-            </CardContent>
-          ) : visibleAgents.length === 0 ? (
-            <CardContent className="pt-6">
-              <Empty>
-                <EmptyHeader>
-                  <EmptyMedia variant="icon">
-                    <ServerIcon />
-                  </EmptyMedia>
-                  <EmptyTitle>
-                    {search.trim()
-                      ? "No matching agents"
-                      : "No enrolled agents"}
-                  </EmptyTitle>
-                  <EmptyDescription>
-                    {search.trim()
-                      ? "Clear search to view all enrolled agents."
-                      : "Enroll a Linux agent to collect host inventory."}
-                  </EmptyDescription>
-                  {!search.trim() ? (
-                    <Button onClick={() => setEnrollmentOpen(true)}>
-                      <DownloadIcon data-icon="inline-start" />
-                      Enroll agent
-                    </Button>
-                  ) : null}
-                </EmptyHeader>
-              </Empty>
-            </CardContent>
-          ) : (
-            <AgentTable
-              agents={visibleAgents}
-              selectedAgentId={selectedAgentId}
-              selectAgent={setRequestedAgentId}
-            />
-          )}
-        </Card>
+            )}
+            {agentsQuery.data?.next_cursor && (
+              <CardContent>
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    navigate({ cursor: agentsQuery.data!.next_cursor! })
+                  }
+                >
+                  Next page
+                </Button>
+              </CardContent>
+            )}
+            {location.cursor && (
+              <CardContent>
+                <Button
+                  variant="outline"
+                  onClick={() => navigate({ cursor: undefined })}
+                >
+                  First page
+                </Button>
+              </CardContent>
+            )}
+          </Card>
+        )}
 
         <AgentDetailPanel
           detail={detailQuery.data}
           error={detailQuery.error}
           loading={detailQuery.isLoading}
           onRetry={() => detailQuery.refetch()}
-          selectedAgent={selectedAgent}
+          selectedAgent={detailQuery.data ?? null}
+          location={location}
+          navigate={navigate}
         />
       </div>
       <EnrollmentDialog
@@ -466,33 +501,6 @@ function CommandBlock({
   );
 }
 
-function MetricCard({
-  detail,
-  icon,
-  label,
-  value,
-}: {
-  detail: string;
-  icon: ReactNode;
-  label: string;
-  value: number;
-}) {
-  return (
-    <Card size="sm">
-      <CardContent className="flex items-center gap-3">
-        <span className="grid size-9 place-items-center rounded-lg bg-muted text-muted-foreground">
-          {icon}
-        </span>
-        <div>
-          <p className="text-xs text-muted-foreground">{label}</p>
-          <p className="text-2xl font-semibold tracking-tight">{value}</p>
-          <p className="text-xs text-muted-foreground">{detail}</p>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function AgentTable({
   agents,
   selectedAgentId,
@@ -582,19 +590,29 @@ function AgentDetailPanel({
   loading,
   onRetry,
   selectedAgent,
+  location,
+  navigate,
 }: {
   detail: AgentDetail | undefined;
   error: unknown;
   loading: boolean;
   onRetry: () => void;
   selectedAgent: Agent | null;
+  location: AgentLocation;
+  navigate: NavigateAgent;
 }) {
-  const [activeTab, setActiveTab] = useState("overview");
-  const [metricRange, setMetricRange] = useState<AgentMetricRange>("1h");
+  const activeTab = location.tab ?? "overview";
+  const setActiveTab = (tab: string) => navigate({ tab });
+  const metricRange: AgentMetricRange = ["1h", "6h", "24h", "7d"].includes(
+    location.range ?? "",
+  )
+    ? (location.range as AgentMetricRange)
+    : "1h";
+  const setMetricRange = (range: AgentMetricRange) => navigate({ range });
   const metricsQuery = useQuery({
     queryKey: ["agent-metrics", detail?.id, metricRange],
     queryFn: () => fetchAgentMetrics(detail!.id, metricRange),
-    enabled: activeTab === "metrics" && Boolean(detail?.id),
+    enabled: ["overview", "metrics"].includes(activeTab) && Boolean(detail?.id),
     refetchInterval: 15_000,
   });
 
@@ -610,7 +628,7 @@ function AgentDetailPanel({
     );
   }
 
-  if (error) {
+  if (error && !detail) {
     return (
       <Card>
         <CardContent className="pt-6">
@@ -697,45 +715,110 @@ function AgentDetailPanel({
           value={activeTab}
         >
           <TabsList
-            aria-label="Agent inventory views"
-            className="w-full flex-wrap justify-start"
+            aria-label="Agent views"
+            className="h-auto w-full flex-wrap justify-start"
             variant="line"
           >
-            <TabsTrigger value="overview">
-              <ShieldCheckIcon data-icon="inline-start" />
-              Evidence
-            </TabsTrigger>
-            <TabsTrigger value="host">
-              <ServerIcon data-icon="inline-start" />
-              Host
-            </TabsTrigger>
-            <TabsTrigger value="network">
-              <NetworkIcon data-icon="inline-start" />
-              Network
-            </TabsTrigger>
-            <TabsTrigger value="filesystems">
-              <HardDriveIcon data-icon="inline-start" />
-              Filesystems
-            </TabsTrigger>
-            <TabsTrigger value="processes">
-              <CpuIcon data-icon="inline-start" />
-              Processes
-            </TabsTrigger>
-            <TabsTrigger value="sockets">
-              <ActivityIcon data-icon="inline-start" />
-              Sockets
-            </TabsTrigger>
-            <TabsTrigger value="containers">
-              <ContainerIcon data-icon="inline-start" />
-              Containers
-            </TabsTrigger>
-            <TabsTrigger value="metrics">
-              <ActivityIcon data-icon="inline-start" />
-              Metrics
-            </TabsTrigger>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="metrics">Metrics</TabsTrigger>
+            <TabsTrigger value="logs">Logs & activity</TabsTrigger>
+            <TabsTrigger value="settings">Inventory & settings</TabsTrigger>
           </TabsList>
 
           <TabsContent className="flex flex-col gap-5 pt-4" value="overview">
+            <AgentUpdatePanel agentId={detail.id} />
+            <section
+              className="space-y-3 rounded-lg border p-4"
+              aria-label="Data delivery"
+            >
+              <h2 className="font-medium">Data delivery</h2>
+              {metricsQuery.error && (
+                <p role="status" className="text-sm text-destructive">
+                  Could not refresh delivery status. Cached values remain
+                  visible.
+                </p>
+              )}
+              <p className="text-sm">
+                Last sample:{" "}
+                {metricsQuery.data?.latest
+                  ? formatRelative(metricsQuery.data.latest.collected_at)
+                  : "Waiting for first metrics"}{" "}
+                · {metricsQuery.data?.freshness.state ?? "unknown"}
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {["metrics", "logs"].map((stream) => {
+                  const delivery = metricsQuery.data?.latest?.metrics
+                    .delivery as
+                    | Record<
+                        string,
+                        {
+                          queued_records?: number;
+                          queued_bytes?: number;
+                          oldest_at?: number;
+                          loss?: { records?: number; reason?: string };
+                        }
+                      >
+                    | undefined;
+                  const status = delivery?.[stream];
+                  return (
+                    <div key={stream} className="rounded border p-3 text-sm">
+                      <h3 className="font-medium">{labelize(stream)}</h3>
+                      {status ? (
+                        <>
+                          <p>
+                            {status.queued_records ?? 0} queued ·{" "}
+                            {formatBytes(status.queued_bytes ?? 0)}
+                          </p>
+                          {status.oldest_at && (
+                            <p className="text-muted-foreground">
+                              Oldest queued:{" "}
+                              {new Date(
+                                status.oldest_at * 1000,
+                              ).toLocaleString()}
+                            </p>
+                          )}
+                          {Boolean(status.loss?.records) && (
+                            <p className="text-destructive">
+                              {status.loss?.records} records lost:{" "}
+                              {status.loss?.reason}
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-muted-foreground">
+                          Delivery counters unavailable for this agent.
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Queue counts reflect the last received sample. Metrics and logs
+                each retain up to 64 MiB or 24 hours locally.
+              </p>
+            </section>
+            {Boolean(error) && (
+              <p role="status" className="text-sm text-destructive">
+                Refresh failed. Showing the last loaded agent data.
+              </p>
+            )}
+            {detail.device_id && (
+              <a
+                href={`/devices?device=${encodeURIComponent(detail.device_id)}`}
+                className="text-sm underline"
+              >
+                Open associated device
+              </a>
+            )}
+            {detail.collector_status
+              ?.filter((collector) => collector.status !== "available")
+              .map((collector) => (
+                <p key={collector.capability} className="text-sm">
+                  {labelize(collector.capability)}: {collector.status} —{" "}
+                  {collector.error || "No diagnostic provided"}
+                </p>
+              ))}
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-medium">Inventory summary</h2>
               <InventorySummary
@@ -759,25 +842,67 @@ function AgentDetailPanel({
             <EvidenceList evidence={detail.evidence} />
           </TabsContent>
 
-          <TabsContent className="pt-4" value="host">
-            <HostInventory host={detail.host} />
+          <TabsContent className="space-y-6 pt-4" value="settings">
+            <AgentSettings agentId={detail.id} />
+            <section
+              aria-label="Host inventory"
+              className="space-y-3 border-t pt-4"
+            >
+              <h2 className="font-medium">Inventory</h2>
+              {[
+                ["Host", <HostInventory host={detail.host} />],
+                ["Network", <NetworkInventory network={detail.network} />],
+                [
+                  "Filesystems",
+                  <FilesystemInventory filesystems={detail.filesystems} />,
+                ],
+                [
+                  "Processes",
+                  <ProcessInventory processes={detail.processes} />,
+                ],
+                ["Sockets", <SocketInventory sockets={detail.sockets} />],
+                [
+                  "Containers",
+                  <ContainerInventory containers={detail.containers} />,
+                ],
+              ].map(([title, content]) => (
+                <details key={String(title)} className="rounded-lg border p-4">
+                  <summary className="cursor-pointer font-medium">
+                    {title}
+                  </summary>
+                  <div className="pt-4">{content}</div>
+                </details>
+              ))}
+            </section>
           </TabsContent>
-          <TabsContent className="pt-4" value="network">
-            <NetworkInventory network={detail.network} />
+          <TabsContent className="pt-4" value="logs">
+            <AgentLogs
+              key={`${detail.id}-${location.from}-${location.to}-${location.logq}-${location.source}-${location.severity}`}
+              agentId={detail.id}
+              location={location}
+              navigate={navigate}
+            />
           </TabsContent>
-          <TabsContent className="pt-4" value="filesystems">
-            <FilesystemInventory filesystems={detail.filesystems} />
-          </TabsContent>
-          <TabsContent className="pt-4" value="processes">
-            <ProcessInventory processes={detail.processes} />
-          </TabsContent>
-          <TabsContent className="pt-4" value="sockets">
-            <SocketInventory sockets={detail.sockets} />
-          </TabsContent>
-          <TabsContent className="pt-4" value="containers">
-            <ContainerInventory containers={detail.containers} />
-          </TabsContent>
-          <TabsContent className="pt-4" value="metrics">
+          <TabsContent className="space-y-4 pt-4" value="metrics">
+            <Button
+              variant="outline"
+              onClick={() => {
+                const end = Math.floor(Date.now() / 1000);
+                const seconds = {
+                  "1h": 3600,
+                  "6h": 21600,
+                  "24h": 86400,
+                  "7d": 604800,
+                }[metricRange];
+                navigate({
+                  tab: "logs",
+                  from: String(end - seconds),
+                  to: String(end),
+                });
+              }}
+            >
+              View logs for this time range
+            </Button>
             <AgentMetricsView
               data={metricsQuery.data}
               error={metricsQuery.error}
@@ -1142,7 +1267,12 @@ function MetricChart({
   unit,
 }: {
   color: string;
-  data: Array<{ time: string; value: number }>;
+  data: Array<{
+    time: number;
+    value: number | null;
+    minimum?: number;
+    maximum?: number;
+  }>;
   description: string;
   emptyLabel?: string;
   id: string;
@@ -1159,7 +1289,7 @@ function MetricChart({
         </div>
         {selector}
       </div>
-      {data.length ? (
+      {data.some((point) => point.value !== null) ? (
         <>
           <ChartContainer
             aria-describedby={`${id}-summary`}
@@ -1177,6 +1307,11 @@ function MetricChart({
               <XAxis
                 axisLine={false}
                 dataKey="time"
+                type="number"
+                domain={["dataMin", "dataMax"]}
+                tickFormatter={(value) =>
+                  formatMetricTime(new Date(value).toISOString())
+                }
                 minTickGap={28}
                 tickLine={false}
                 tickMargin={8}
@@ -1197,15 +1332,39 @@ function MetricChart({
                 cursor={false}
               />
               <Line
+                dataKey="minimum"
+                name="Minimum"
+                dot={false}
+                stroke="var(--color-value)"
+                strokeOpacity={0.4}
+                strokeDasharray="3 3"
+                type="linear"
+                connectNulls={false}
+              />
+              <Line
+                dataKey="maximum"
+                name="Maximum"
+                dot={false}
+                stroke="var(--color-value)"
+                strokeOpacity={0.4}
+                strokeDasharray="3 3"
+                type="linear"
+                connectNulls={false}
+              />
+              <Line
                 dataKey="value"
                 dot={false}
                 stroke="var(--color-value)"
                 strokeWidth={2}
-                type="monotone"
+                type="linear"
+                connectNulls={false}
               />
             </LineChart>
           </ChartContainer>
-          <p className="sr-only" id={`${id}-summary`}>
+          <p
+            className="mt-2 text-xs text-muted-foreground"
+            id={`${id}-summary`}
+          >
             {summarizeMetricChart(data, title, unit)}
           </p>
         </>
@@ -1261,12 +1420,28 @@ function MetricEmpty({
 }
 
 function seriesFor(data: AgentMetricsResponse, key: string) {
-  return data.series.flatMap((point) => {
-    const value = point.values[key]?.latest;
-    return typeof value === "number" && Number.isFinite(value)
-      ? [{ time: formatMetricTime(point.timestamp), value }]
-      : [];
-  });
+  const result: Array<{
+    time: number;
+    value: number | null;
+    minimum?: number;
+    maximum?: number;
+  }> = [];
+  const cadence = (data.resolution_seconds ?? 15) * 1000;
+  for (const point of data.series) {
+    const time = Date.parse(point.timestamp);
+    if (!Number.isFinite(time)) continue;
+    const previous = result.at(-1);
+    if (previous && time - previous.time > cadence * 1.5)
+      result.push({ time: previous.time + cadence, value: null });
+    const stats = point.values[key];
+    result.push({
+      time,
+      value: stats && Number.isFinite(stats.average) ? stats.average : null,
+      minimum: stats?.minimum,
+      maximum: stats?.maximum,
+    });
+  }
+  return result;
 }
 
 function latestSeriesValue(
@@ -1366,13 +1541,29 @@ function formatMetricAxis(value: number, unit: "bytes" | "percent"): string {
 }
 
 function summarizeMetricChart(
-  data: Array<{ time: string; value: number }>,
+  data: Array<{
+    time: number;
+    value: number | null;
+    minimum?: number;
+    maximum?: number;
+  }>,
   title: string,
   unit: "bytes" | "percent",
 ): string {
-  const values = data.map((point) => point.value);
-  const minimum = Math.min(...values);
-  const maximum = Math.max(...values);
+  const values = data
+    .map((point) => point.value)
+    .filter((value): value is number => value !== null);
+  if (!values.length) return `${title}: no numeric samples.`;
+  const minimum = Math.min(
+    ...data
+      .map((point) => point.minimum ?? point.value)
+      .filter((value): value is number => value !== null),
+  );
+  const maximum = Math.max(
+    ...data
+      .map((point) => point.maximum ?? point.value)
+      .filter((value): value is number => value !== null),
+  );
   const latest = values.at(-1) ?? minimum;
   return `${title}: ${data.length} samples; minimum ${formatMetricAxis(minimum, unit)}, maximum ${formatMetricAxis(maximum, unit)}, latest ${formatMetricAxis(latest, unit)}.`;
 }

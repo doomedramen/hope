@@ -61,7 +61,7 @@ pub async fn purge_old_agent_metric_samples(
         let result = sqlx::query(
             "delete from agent_metric_samples as sample where sample.ctid in ( \
                 select candidate.ctid from agent_metric_samples as candidate \
-                where candidate.collected_at < now() - ($1 || ' days')::interval \
+                where candidate.rolled_up_at is not null and candidate.collected_at < now() - ($1 || ' days')::interval \
                 order by candidate.collected_at, candidate.id \
                 for update skip locked \
                 limit $2 \
@@ -445,6 +445,10 @@ mod tests {
         .await
         .unwrap();
 
+        assert_eq!(purge_old_agent_metric_samples(&pool, 7).await.unwrap(), 0);
+        crate::metric_rollups::backfill_and_retain(&pool)
+            .await
+            .unwrap();
         assert!(purge_old_agent_metric_samples(&pool, 7).await.unwrap() >= 1);
         let remaining: (i64,) = sqlx::query_as(
             "select count(*) from agent_metric_samples where agent_id = $1 and collected_at > now() - interval '1 day'",

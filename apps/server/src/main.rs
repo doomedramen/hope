@@ -1,5 +1,6 @@
 mod agent_install;
 mod agent_inventory;
+mod agent_logs;
 mod agent_metrics;
 mod agent_updates;
 mod agent_web;
@@ -16,6 +17,8 @@ mod gateway;
 mod inventory;
 mod jobs_handlers;
 pub mod maintenance;
+mod managed_updates;
+mod metric_rollups;
 mod monitor_checks;
 mod monitor_scheduler;
 mod monitoring;
@@ -163,6 +166,17 @@ fn app_router(state: AppState, web_dist_dir: &str, config: &Config) -> Router {
     // mutating `/api/v1` route (see csrf.rs doc comment).
     let inventory_router = Router::new()
         .route("/api/v1/agents", get(agent_inventory::list_agents))
+        .route("/api/v1/agents/{id}/logs", get(agent_logs::list))
+        .route(
+            "/api/v1/agents/{id}/managed-update",
+            get(managed_updates::get)
+                .put(managed_updates::put)
+                .post(managed_updates::start),
+        )
+        .route(
+            "/api/v1/agents/{id}/collection",
+            get(agent_logs::get_settings).put(agent_logs::put_settings),
+        )
         .route("/api/v1/agents/{id}", get(agent_inventory::get_agent))
         .route(
             "/api/v1/agents/{id}/metrics",

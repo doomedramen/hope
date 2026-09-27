@@ -3,8 +3,10 @@
 //! with exponential backoff + jitter on any error or disconnect; the backoff
 //! counter resets after a session is successfully established.
 
+use crate::outbox::{Outbox, Record};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signer, SigningKey};
@@ -20,13 +22,14 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use uuid::Uuid;
 
 use crate::collectors;
-use crate::identity::{Paths, write_private};
+use crate::identity::Paths;
+#[cfg(test)]
+use crate::identity::write_private;
 use crate::pinning::PinnedFingerprintVerifier;
 use protocol::{
     Capability, CapabilityAck, CapabilityOffer, Envelope, Heartbeat, Hello, InventorySnapshot,
-    InventorySnapshotAck, MAX_METRIC_BATCH_BYTES, MAX_OBSERVATION_BATCH_BYTES, MAX_SNAPSHOT_BYTES,
-    Message, MetricSampleBatch, ObservationBatch, SUPPORTED_PROTOCOL_VERSIONS,
-    negotiate_capabilities,
+    InventorySnapshotAck, MAX_OBSERVATION_BATCH_BYTES, MAX_SNAPSHOT_BYTES, Message,
+    MetricSampleBatch, ObservationBatch, SUPPORTED_PROTOCOL_VERSIONS, negotiate_capabilities,
 };
 
 const MAX_BACKOFF_SECS: u64 = 60;
@@ -60,44 +63,125 @@ fn backoff_delay(attempt: u32) -> Duration {
     Duration::from_secs(jittered)
 }
 
-fn inventory_refresh_interval() -> tokio::time::Interval {
-    let connected_at = tokio::time::Instant::now();
-    let mut interval = tokio::time::interval_at(
-        inventory_refresh_deadline(connected_at),
-        INVENTORY_REFRESH_INTERVAL,
-    );
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    interval
-}
-
+#[cfg(test)]
 fn inventory_refresh_deadline(connected_at: tokio::time::Instant) -> tokio::time::Instant {
     connected_at + INVENTORY_REFRESH_INTERVAL
 }
 
-fn metric_refresh_interval() -> tokio::time::Interval {
-    let connected_at = tokio::time::Instant::now();
-    let mut interval = tokio::time::interval_at(
-        connected_at + collectors::METRIC_SAMPLE_INTERVAL,
-        collectors::METRIC_SAMPLE_INTERVAL,
-    );
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    interval
-}
-
 pub async fn run(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
+    let paths = Paths::new(state_dir);
+    anyhow::ensure!(paths.exist(), "agent is not enrolled");
+    let agent_id = Uuid::parse_str(std::fs::read_to_string(&paths.agent_id)?.trim())?;
+    let outbox = Arc::new(Mutex::new(Outbox::open(
+        Path::new(state_dir).join("metrics-outbox"),
+        64 * 1024 * 1024,
+        24 * 3600,
+    )?));
+    let logs = Arc::new(Mutex::new(Outbox::open(
+        Path::new(state_dir).join("logs-outbox"),
+        64 * 1024 * 1024,
+        24 * 3600,
+    )?));
+    let config_path = Path::new(state_dir).join("collection.json");
+    let config: protocol::CollectionConfig = match std::fs::read(config_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) => return Err(error.into()),
+    };
+    config.validate()?;
+    let config = Arc::new(Mutex::new(config));
+    let log_task = tokio::spawn(crate::logs::collect(
+        state_dir.into(),
+        agent_id,
+        logs.clone(),
+        config.clone(),
+    ));
+    let collection_outbox = outbox.clone();
+    let metrics_state_dir = state_dir.to_owned();
+    let log_status = logs.clone();
+    let metrics = tokio::spawn(async move {
+        let mut sampler = collectors::MetricSampler::new();
+        let mut ticks = tokio::time::interval(collectors::METRIC_SAMPLE_INTERVAL);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            let mut sample = sampler.collect().await;
+            if let Some(object) = sample.metrics.as_object_mut() {
+                let mut logs = log_status.lock().unwrap().status();
+                logs["sources"] =
+                    std::fs::read(Path::new(&metrics_state_dir).join("log-health.json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or(serde_json::json!({}));
+                object.insert("delivery".into(), serde_json::json!({"metrics":collection_outbox.lock().unwrap().status(),"logs":logs}));
+            }
+            let batch = MetricSampleBatch {
+                schema_version: protocol::M5_SCHEMA_VERSION,
+                batch_id: Uuid::new_v4(),
+                agent_id,
+                samples: vec![sample],
+            };
+            if let Err(error) = collection_outbox
+                .lock()
+                .unwrap()
+                .enqueue(Message::MetricSampleBatch(batch))
+            {
+                tracing::error!(%error, "cannot persist metric sample; collection data lost");
+            } else if let Err(error) = crate::updater::mark_healthy(&metrics_state_dir) {
+                tracing::warn!(%error, "cannot record local update health");
+            }
+        }
+    });
+    let collection_dir = state_dir.to_owned();
+    let inventory = tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(INVENTORY_REFRESH_INTERVAL);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            if let Err(error) = load_or_collect_pending_snapshot(&collection_dir, agent_id).await {
+                tracing::error!(%error, "inventory collection failed");
+            }
+        }
+    });
+    let started = Instant::now();
+    let healthy = Arc::new(AtomicBool::new(false));
     let mut attempt: u32 = 0;
-
     loop {
-        match run_session(gateway_url, state_dir).await {
+        anyhow::ensure!(
+            !metrics.is_finished() && !inventory.is_finished() && !log_task.is_finished(),
+            "collection task stopped"
+        );
+        match run_session(
+            gateway_url,
+            state_dir,
+            outbox.clone(),
+            logs.clone(),
+            config.clone(),
+            started,
+            healthy.clone(),
+        )
+        .await
+        {
             Ok(()) => {
                 tracing::info!("gateway session ended cleanly; reconnecting");
                 attempt = 0;
             }
             Err(err) => {
                 tracing::warn!(error = %err, attempt, "gateway session failed; reconnecting");
+                if attempt == 0 {
+                    crate::logs::diagnostic(
+                        &logs,
+                        agent_id,
+                        "Gateway connection lost; data remains queued locally",
+                        "warning",
+                    );
+                }
             }
         }
 
+        if healthy.swap(false, Ordering::Relaxed) {
+            attempt = 0;
+        }
         let delay = backoff_delay(attempt);
         tracing::debug!(delay_secs = delay.as_secs(), "waiting before reconnect");
         tokio::time::sleep(delay).await;
@@ -105,7 +189,15 @@ pub async fn run(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     }
 }
 
-async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
+async fn run_session(
+    gateway_url: &str,
+    state_dir: &str,
+    outbox: Arc<Mutex<Outbox>>,
+    logs: Arc<Mutex<Outbox>>,
+    config: Arc<Mutex<protocol::CollectionConfig>>,
+    started: Instant,
+    healthy: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     let paths = Paths::new(state_dir);
     if !paths.exist() {
         anyhow::bail!(
@@ -119,7 +211,7 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("invalid agent identity key"))?;
     let signing_key = SigningKey::from_bytes(&identity);
     let trust = std::fs::read_to_string(&paths.tls_trust)?;
-    let pending_snapshot = load_or_collect_pending_snapshot(state_dir, agent_id).await?;
+    let pending_snapshot = load_pending_snapshot(state_dir)?;
     let pinned_config = if let Some(fingerprint) = trust.trim().strip_prefix("pinned:") {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -146,9 +238,12 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
     let challenge_client = if let Some(config) = pinned_config.as_ref() {
         reqwest::Client::builder()
             .use_preconfigured_tls((**config).clone())
+            .timeout(Duration::from_secs(15))
             .build()?
     } else {
-        reqwest::Client::new()
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()?
     };
     let response = challenge_client.get(challenge_url).send().await?;
     if !response.status().is_success() {
@@ -172,17 +267,21 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
         .headers_mut()
         .insert("x-hope-signature", HeaderValue::from_str(&signature)?);
 
-    let (ws_stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
-        request,
-        None,
-        false,
-        pinned_config.map(Connector::Rustls),
+    let (ws_stream, _response) = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            None,
+            false,
+            pinned_config.map(Connector::Rustls),
+        ),
     )
-    .await?;
+    .await??;
 
     tracing::info!(gateway_url, "connected to agent gateway");
 
     let (mut write, mut read) = ws_stream.split();
+    let mut update_task: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
 
     let hello = Envelope::new(Message::Hello(Hello {
         agent_id,
@@ -193,13 +292,26 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
     }));
+    let mut hello_value = serde_json::to_value(&hello)?;
+    let capabilities: Vec<_> = collectors::capabilities()
+        .into_iter()
+        .filter(|capability| {
+            *capability != Capability::ManagedUpdates || crate::updater::available(state_dir)
+        })
+        .collect();
+    hello_value["capabilities"] = serde_json::to_value(&capabilities)?;
     write
-        .send(WsMessage::Text(protocol::serialize_envelope(&hello)?))
+        .send(WsMessage::Text(serde_json::to_string(&hello_value)?))
         .await?;
 
     let offer = CapabilityOffer {
         supported_protocol_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
-        capabilities: collectors::capabilities(),
+        capabilities: collectors::capabilities()
+            .into_iter()
+            .filter(|capability| {
+                *capability != Capability::ManagedUpdates || crate::updater::available(state_dir)
+            })
+            .collect(),
     };
     let offer_envelope = Envelope::new(Message::CapabilityOffer(offer.clone()));
     write
@@ -208,27 +320,32 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
         )?))
         .await?;
 
-    let start = Instant::now();
+    let mut last_ack = Instant::now();
     let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat_interval.tick().await; // first tick fires immediately
-    let mut inventory_refresh = inventory_refresh_interval();
+    let mut inventory_refresh = tokio::time::interval(Duration::from_secs(5));
     let mut snapshot_sent = false;
-    let mut pending_snapshot = Some(pending_snapshot);
+    let mut pending_snapshot = pending_snapshot;
     let mut snapshot_acknowledged = false;
     let mut observations_acknowledged = false;
     let mut negotiated_capabilities: Option<protocol::NegotiatedCapabilities> = None;
-    let mut metric_sampler = collectors::MetricSampler::new();
-    let mut metric_refresh = metric_refresh_interval();
-    let mut pending_metric_batch: Option<MetricSampleBatch> = None;
+    let mut metric_refresh = tokio::time::interval(Duration::from_secs(1));
+    let mut pending_metric_batch: Option<Record> = None;
+    let mut pending_log_batch: Option<Record> = None;
 
     loop {
         tokio::select! {
             _ = heartbeat_interval.tick() => {
+                anyhow::ensure!(last_ack.elapsed() < Duration::from_secs(90), "heartbeat acknowledgement deadline exceeded");
                 let hb = Envelope::new(Message::Heartbeat(Heartbeat {
                     agent_id,
-                    uptime_secs: start.elapsed().as_secs(),
+                    uptime_secs: started.elapsed().as_secs(),
                 }));
                 write.send(WsMessage::Text(protocol::serialize_envelope(&hb)?)).await?;
+                if let Some(report) = crate::updater::report(state_dir) {
+                    let report = Envelope::new(Message::UpdateReport(report));
+                    write.send(WsMessage::Text(protocol::serialize_envelope(&report)?)).await?;
+                }
             }
             _ = inventory_refresh.tick() => {
                 let Some(negotiated) = negotiated_capabilities.as_ref() else {
@@ -239,16 +356,14 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                 }
 
                 if pending_snapshot.is_none() {
-                    pending_snapshot = Some(load_or_collect_pending_snapshot(state_dir, agent_id).await?);
+                    pending_snapshot = load_pending_snapshot(state_dir)?;
                     snapshot_acknowledged = false;
                     observations_acknowledged = !negotiated
                         .capabilities
                         .contains(&Capability::BoundedObservations);
                 }
 
-                let pending = pending_snapshot
-                    .as_ref()
-                    .expect("pending snapshot exists after refresh collection");
+                let Some(pending) = pending_snapshot.as_ref() else { continue; };
                 send_pending_snapshot(
                     &mut write,
                     pending,
@@ -262,15 +377,15 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                 let Some(negotiated) = negotiated_capabilities.as_ref() else {
                     continue;
                 };
-                if !negotiated.capabilities.contains(&Capability::ResourceMetrics) {
-                    continue;
+                if negotiated.capabilities.contains(&Capability::LogStreaming) {
+                    send_pending_metrics(&mut write, &mut pending_log_batch, &logs, negotiated.protocol_version).await?;
                 }
+                if !negotiated.capabilities.contains(&Capability::ResourceMetrics) { continue; }
                 send_pending_metrics(
                     &mut write,
                     &mut pending_metric_batch,
-                    &mut metric_sampler,
+                    &outbox,
                     negotiated.protocol_version,
-                    agent_id,
                 )
                 .await?;
             }
@@ -303,9 +418,8 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                                         send_pending_metrics(
                                             &mut write,
                                             &mut pending_metric_batch,
-                                            &mut metric_sampler,
+                                            &outbox,
                                             negotiated.protocol_version,
-                                            agent_id,
                                         )
                                         .await?;
                                     }
@@ -370,12 +484,45 @@ async fn run_session(gateway_url: &str, state_dir: &str) -> anyhow::Result<()> {
                                     observations_acknowledged = false;
                                 }
                             }
+                            Message::UpdateCommand(command) => {
+                                if command.validate().is_ok() && update_task.as_ref().is_none_or(|task| task.is_finished()) {
+                                    update_task = Some(tokio::spawn(crate::updater::stage(challenge_client.clone(),gateway_url.into(),state_dir.into(),command)));
+                                }
+                            }
+                            Message::CollectionConfig(settings) => {
+                                let accepted = settings.validate().is_ok();
+                                if accepted && settings.revision >= config.lock().unwrap().revision {
+                                    crate::outbox::atomic_write(&Path::new(state_dir).join("collection.json"), &serde_json::to_vec(&settings)?)?;
+                                    *config.lock().unwrap() = settings.clone();
+                                }
+                                let response = Envelope::new(Message::CollectionConfigAck(protocol::CollectionConfigAck { revision: settings.revision, accepted }));
+                                write.send(WsMessage::Text(protocol::serialize_envelope(&response)?)).await?;
+                            }
+                            Message::LogBatchAck(ack) => {
+                                if let Some(record) = pending_log_batch.as_ref()
+                                    && matches!(&record.message, Message::LogBatch(batch) if batch.batch_id == ack.batch_id) {
+                                    if ack.accepted { logs.lock().unwrap().acknowledge(record.id)?; pending_log_batch = None; }
+                                    else if !ack.retryable { logs.lock().unwrap().reject(record.id)?; pending_log_batch = None; }
+                                }
+                            }
+                            Message::ProtocolError(error) => {
+                                if !error.retryable && !matches!(error.code.as_str(), "unsupported_capability" | "capability_not_negotiated" | "unsupported_protocol") {
+                                    for (pending, queue) in [(&mut pending_metric_batch, &outbox), (&mut pending_log_batch, &logs)] {
+                                        if pending.as_ref().is_some_and(|record| record.id == envelope.message_id) {
+                                            queue.lock().unwrap().reject(envelope.message_id)?;
+                                            *pending = None;
+                                        }
+                                    }
+                                }
+                            }
+                            Message::HeartbeatAck(_) => { last_ack = Instant::now(); healthy.store(true, Ordering::Relaxed); }
+                            Message::HelloAck(ack) => { anyhow::ensure!(ack.accepted, "hello rejected"); }
                             Message::MetricSampleBatchAck(ack) => {
-                                if ack.accepted
-                                    && pending_metric_batch.as_ref().is_some_and(|pending| {
-                                        pending.batch_id == ack.batch_id
-                                    })
+                                if let Some(record) = pending_metric_batch.as_ref()
+                                    && matches!(&record.message, Message::MetricSampleBatch(batch) if batch.batch_id == ack.batch_id)
                                 {
+                                    if ack.accepted { outbox.lock().unwrap().acknowledge(record.id)?; }
+                                    else { outbox.lock().unwrap().reject(record.id)?; }
                                     pending_metric_batch = None;
                                 }
                             }
@@ -432,38 +579,29 @@ where
 
 async fn send_pending_metrics<S>(
     write: &mut S,
-    pending: &mut Option<MetricSampleBatch>,
-    sampler: &mut collectors::MetricSampler,
+    pending: &mut Option<Record>,
+    outbox: &Arc<Mutex<Outbox>>,
     protocol_version: u32,
-    agent_id: Uuid,
 ) -> anyhow::Result<()>
 where
     S: Sink<WsMessage> + Unpin,
     S::Error: std::fmt::Display,
 {
     if pending.is_none() {
-        let sample = sampler.collect().await;
-        let batch = MetricSampleBatch {
-            schema_version: protocol::M5_SCHEMA_VERSION,
-            batch_id: Uuid::new_v4(),
-            agent_id,
-            samples: vec![sample],
-        };
-        if serde_json::to_vec(&batch)?.len() > MAX_METRIC_BATCH_BYTES {
-            anyhow::bail!("metric sample batch exceeds protocol bound");
-        }
-        *pending = Some(batch);
+        *pending = outbox.lock().unwrap().front()?;
     }
-
-    if let Some(batch) = pending.as_ref() {
-        let envelope = Envelope::with_protocol_version(
+    if let Some(record) = pending.as_ref() {
+        let envelope = Envelope {
+            message_id: record.id,
             protocol_version,
-            Message::MetricSampleBatch(batch.clone()),
-        );
-        write
-            .send(WsMessage::Text(protocol::serialize_envelope(&envelope)?))
-            .await
-            .map_err(|error| anyhow::anyhow!("send metric sample batch: {error}"))?;
+            message: record.message.clone(),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            write.send(WsMessage::Text(protocol::serialize_envelope(&envelope)?)),
+        )
+        .await?
+        .map_err(|error| anyhow::anyhow!("send metric batch: {error}"))?;
     }
     Ok(())
 }
@@ -543,23 +681,36 @@ fn load_pending_snapshot(state_dir: &str) -> anyhow::Result<Option<PendingSnapsh
     if !path.exists() {
         return Ok(None);
     }
-    let contents = std::fs::read_to_string(&path)?;
-    if contents.len() > MAX_PENDING_SNAPSHOT_BYTES {
-        anyhow::bail!(
-            "pending snapshot {} exceeds {MAX_PENDING_SNAPSHOT_BYTES} bytes",
-            path.display()
+    let parsed = (|| -> anyhow::Result<PendingSnapshot> {
+        use std::io::Read;
+        let mut contents = Vec::new();
+        std::fs::File::open(&path)?
+            .take((MAX_PENDING_SNAPSHOT_BYTES + 1) as u64)
+            .read_to_end(&mut contents)?;
+        anyhow::ensure!(
+            contents.len() <= MAX_PENDING_SNAPSHOT_BYTES,
+            "pending snapshot exceeds size limit"
         );
+        let pending: PendingSnapshot = serde_json::from_slice(&contents)?;
+        pending.snapshot.validate()?;
+        pending.observations.validate()?;
+        Ok(pending)
+    })();
+    match parsed {
+        Ok(pending) => Ok(Some(pending)),
+        Err(error) => {
+            // Keep one bounded quarantine record; a corrupt snapshot cannot block heartbeats.
+            crate::outbox::atomic_write(
+                &Path::new(state_dir).join("inventory-loss.json"),
+                &serde_json::to_vec(
+                    &serde_json::json!({"at": crate::outbox::now(), "reason": error.to_string()}),
+                )?,
+            )?;
+            std::fs::rename(&path, Path::new(state_dir).join("rejected-snapshot.json"))?;
+            tracing::warn!(%error, "quarantined invalid inventory snapshot; collection will resume");
+            Ok(None)
+        }
     }
-    let pending: PendingSnapshot = serde_json::from_str(&contents)?;
-    pending
-        .snapshot
-        .validate()
-        .map_err(|error| anyhow::anyhow!("invalid pending snapshot: {error}"))?;
-    pending
-        .observations
-        .validate()
-        .map_err(|error| anyhow::anyhow!("invalid pending observations: {error}"))?;
-    Ok(Some(pending))
 }
 
 fn persist_pending_snapshot(state_dir: &str, pending: &PendingSnapshot) -> anyhow::Result<()> {
@@ -568,9 +719,7 @@ fn persist_pending_snapshot(state_dir: &str, pending: &PendingSnapshot) -> anyho
         anyhow::bail!("pending snapshot exceeds {MAX_PENDING_SNAPSHOT_BYTES} bytes");
     }
     let path = pending_snapshot_path(state_dir);
-    let temporary = path.with_extension("json.tmp");
-    write_private(&temporary, &encoded)?;
-    std::fs::rename(temporary, path)?;
+    crate::outbox::atomic_write(&path, encoded.as_bytes())?;
     Ok(())
 }
 
@@ -592,7 +741,7 @@ fn next_snapshot_sequence(state_dir: &str) -> anyhow::Result<u64> {
     let next = current
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("snapshot sequence exhausted"))?;
-    write_private(&path, &format!("{next}\n"))?;
+    crate::outbox::atomic_write(&path, format!("{next}\n").as_bytes())?;
     Ok(next)
 }
 

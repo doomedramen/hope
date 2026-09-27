@@ -290,7 +290,9 @@ impl JobHandler for AgentMetricRetention {
             .unwrap_or(DEFAULT_AGENT_METRIC_RETENTION_DAYS);
         let retention_days =
             retention::validate_retention_days(retention_days, "agent metric retention")?;
+        crate::metric_rollups::backfill_and_retain(pool).await?;
         let deleted = retention::purge_old_agent_metric_samples(pool, retention_days).await?;
+        crate::agent_logs::retention(pool).await?;
         if deleted > 0 {
             tracing::info!(
                 count = deleted,

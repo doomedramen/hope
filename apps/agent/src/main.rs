@@ -2,9 +2,12 @@ mod collectors;
 mod config;
 mod enroll;
 mod identity;
+mod logs;
+mod outbox;
 mod pinning;
 mod release_verify;
 mod run;
+mod updater;
 
 use clap::{Parser, Subcommand};
 use std::io::Read;
@@ -26,6 +29,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Apply a staged signed update; invoked by the separate systemd updater service.
+    ApplyUpdate,
     /// Register an agent-generated identity key using a single-use token.
     /// The CA fingerprint is required for direct LAN TLS (either
     /// `--code TOKEN.FINGERPRINT`, or `--token` + `--ca-fingerprint`
@@ -88,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Command::ApplyUpdate) => updater::apply().await?,
         Some(Command::Enroll {
             server,
             code,

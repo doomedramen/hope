@@ -1,8 +1,8 @@
 # Agent reliability, data logging, and operator UX
 
-Status: proposed implementation plan, 27 September 2026.
+Status: core implementation delivered; operational acceptance in progress, 27 September 2026.
 
-This plan gives equal weight to reliable metrics/inventory/agent diagnostics and searchable host/container logs. Managed agent updates are also a first-release requirement. The UI must make these capabilities useful from the device being investigated. Implementation has not started.
+This plan gives equal weight to reliable metrics/inventory/agent diagnostics and searchable host/container logs. Managed agent updates are also a first-release requirement. The UI must make these capabilities useful from the device being investigated. The core delivery, logging, managed-update, and investigation flows are implemented. See the implementation evidence below; the later capacity and usability gates remain open.
 
 ## Outcome
 
@@ -171,3 +171,14 @@ Treat telemetry and log ingestion as equal release requirements, with managed up
 Revalidate existing tickets before creating duplicates. Tickets 046 and 047 describe empty-state and keyboard-selection problems already addressed in the inspected source. Ticket 052's route-focus handling also exists. Ticket 053's sidebar proposal conflicts with the newer device-focused design and current top navigation. Verify behavior, then explicitly close or supersede stale tickets through the project's ticket workflow; this plan does not change ticket status.
 
 Track completion by demonstrated operator flows and failure recovery, not by adding more charts or increasing collected data. First release is complete only when agents can update and recover reliably, telemetry and selected host/container logs survive the agreed outage budget, and operators can investigate all three together.
+
+
+## Implementation evidence and remaining gates
+
+Implemented: independent collection with durable metric/log outboxes; idempotent log ingestion; opt-in journal/Docker sources with redaction and cursor persistence; versioned settings; signed outbound updates with a separate supervised helper; local rollback health and server stream verification; update policies and controls; server-wide fleet search/counts/pagination; URL-based detail views; log search, pause, export, and chart links; transactional fixed-time rollups and retention.
+
+Automated checks include real PostgreSQL migrations and 299 passing Rust tests (two pre-existing opt-in checks remain ignored), plus 79 UI tests. Focused tests exercise replay, revocation, optimistic settings, late rollup samples, required update streams, and stable paused log rows. Native Linux installer and journal redaction have also been exercised on a disposable Docker target. Additional update and recovery evidence is recorded in the operational validation report when complete.
+
+Still open: five-operator usability sessions; production-size mixed workload measurements and storage sizing; a real 30-minute outage; bulk fleet update controls; enrollment-attempt milestone correlation; user-configurable per-source rate/severity budgets; storage-usage estimates; a complete metric catalog; and longer-than-seven-day UI ranges. The current per-connection log budget is not a fleet-wide quota. These remain explicit gates or follow-up work rather than claimed guarantees.
+
+Operational instructions: [Agent data and updates](../operations/agent-data-and-updates.md). Architecture: [ADR-0021](../adr/0021-outbound-agent-operations.md).

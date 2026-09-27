@@ -911,7 +911,7 @@ pub fn observations_from_snapshot(snapshot: &InventorySnapshot) -> ObservationBa
                 source: "agent".into(),
                 observed_at_unix_secs: snapshot.collected_at_unix_secs,
                 state,
-                value: json!({"status": status_name}),
+                value: json!({"status": status_name, "reason": status.get("error")}),
             });
         }
     }

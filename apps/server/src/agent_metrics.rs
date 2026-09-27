@@ -94,6 +94,11 @@ fn validate_metric_sample_batch(parsed: &ParsedMetricSampleBatch) -> Result<(), 
         .validate()
         .map_err(|error| AgentMetricError::InvalidPayload(error.to_string()))?;
     for sample in &parsed.batch.samples {
+        if sample.collected_at_unix_secs > OffsetDateTime::now_utc().unix_timestamp() + 300 {
+            return Err(AgentMetricError::InvalidPayload(
+                "sample timestamp exceeds clock-skew tolerance".into(),
+            ));
+        }
         OffsetDateTime::from_unix_timestamp(sample.collected_at_unix_secs).map_err(|error| {
             AgentMetricError::InvalidPayload(format!("invalid collected_at_unix_secs: {error}"))
         })?;
@@ -146,6 +151,16 @@ pub async fn ingest_metric_sample_batch(
         .bind(&sample.metrics)
         .execute(&mut *tx)
         .await?;
+        if result.rows_affected() > 0 {
+            crate::metric_rollups::accumulate(
+                &mut tx,
+                authenticated_agent_id,
+                collected_at,
+                &sample.metrics,
+            )
+            .await?;
+            sqlx::query("update agent_metric_samples set rolled_up_at=now() where agent_id=$1 and sample_id=$2").bind(authenticated_agent_id).bind(sample.sample_id).execute(&mut *tx).await?;
+        }
         accepted_count += usize::try_from(result.rows_affected()).unwrap_or_default();
     }
     tx.commit().await?;
@@ -234,22 +249,27 @@ async fn build_metrics_response(
 
     let now = OffsetDateTime::now_utc();
     let from = now - range.duration();
-    let rows: Vec<(Value,)> = sqlx::query_as(
-        "select row_to_json(t) from ( \
+    let rows: Vec<(Value,)> = if range == MetricRange::OneHour {
+        sqlx::query_as(
+            "select row_to_json(t) from ( \
             select sample_id, collected_at, received_at, metrics \
               from agent_metric_samples \
-             where agent_id = $1 and collected_at >= $2 \
-             order by collected_at, sample_id \
+             where agent_id = $1 and collected_at >= $2 and collected_at <= $3 \
+             order by collected_at, sample_id limit 4096 \
         ) t",
-    )
-    .bind(agent_id)
-    .bind(from)
-    .fetch_all(pool)
-    .await?;
+        )
+        .bind(agent_id)
+        .bind(from)
+        .bind(now)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
     let latest: Option<(Value,)> = sqlx::query_as(
         "select row_to_json(t) from ( \
             select sample_id, collected_at, received_at, metrics \
-              from agent_metric_samples where agent_id = $1 \
+              from agent_metric_samples where agent_id = $1 and collected_at <= now() \
              order by collected_at desc, sample_id desc limit 1 \
         ) t",
     )
@@ -262,8 +282,52 @@ async fn build_metrics_response(
     if let Some(latest) = latest_value.as_ref() {
         dimension_rows.push((latest.clone(),));
     }
-    let dimensions = collect_dimensions(&dimension_rows);
-    let series = build_series(&rows, range);
+    let mut dimensions = collect_dimensions(&dimension_rows);
+    let resolution = match range {
+        MetricRange::OneHour => 15,
+        MetricRange::SixHours | MetricRange::OneDay => 300,
+        MetricRange::SevenDays => 3600,
+    };
+    let series = if range == MetricRange::OneHour {
+        build_series(&rows, range)
+    } else {
+        let series: Vec<(Value,)> = sqlx::query_as("select json_build_object('timestamp',bucket_start,'sample_count',sample_count,'values',stats) from agent_metric_rollups where agent_id=$1 and resolution=$2 and bucket_start >= $3 and bucket_start <= $4 order by bucket_start limit 720")
+            .bind(agent_id).bind(resolution).bind(from).bind(now).fetch_all(pool).await?;
+        series.into_iter().map(|(value,)| value).collect()
+    };
+    // Rollup keys retain dimensions that are absent from the most recent sample.
+    for point in &series {
+        if let Some(values) = point["values"].as_object() {
+            for key in values.keys() {
+                for (prefix, field) in [
+                    ("network.interfaces.", "network_interfaces"),
+                    ("disk.devices.", "disk_devices"),
+                    ("gpu.devices.", "gpu_devices"),
+                ] {
+                    if let Some((id, _)) = key
+                        .strip_prefix(prefix)
+                        .and_then(|key| key.rsplit_once('.'))
+                    {
+                        let entries = dimensions[field].as_array_mut().unwrap();
+                        let present = entries.iter().any(|entry| {
+                            if field == "gpu_devices" {
+                                entry["id"] == id
+                            } else {
+                                entry == id
+                            }
+                        });
+                        if !present {
+                            entries.push(if field == "gpu_devices" {
+                                json!({"id":id,"name":null,"vendor":null})
+                            } else {
+                                json!(id)
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
     let freshness = freshness(latest_value.as_ref(), now);
     let availability = availability(latest_value.as_ref());
 
@@ -276,6 +340,8 @@ async fn build_metrics_response(
         "availability": availability,
         "dimensions": dimensions,
         "series": series,
+        "resolution_seconds": resolution,
+        "raw_query_limited": rows.len() == 4096,
     })))
 }
 
@@ -283,34 +349,39 @@ fn build_series(rows: &[(Value,)], range: MetricRange) -> Vec<Value> {
     if rows.is_empty() {
         return Vec::new();
     }
-    let group_count = if range == MetricRange::OneHour {
-        rows.len()
-    } else {
-        rows.len().min(MAX_SERIES_POINTS)
+    let seconds = match range {
+        MetricRange::OneHour => 15,
+        MetricRange::SixHours | MetricRange::OneDay => 300,
+        MetricRange::SevenDays => 3600,
     };
-    let mut groups = (0..group_count)
-        .map(|_| SeriesGroup::default())
-        .collect::<Vec<_>>();
-    for (index, (row,)) in rows.iter().enumerate() {
-        let group = index.saturating_mul(group_count) / rows.len();
-        let group = group.min(group_count.saturating_sub(1));
+    let mut groups = BTreeMap::<i64, SeriesGroup>::new();
+    for (row,) in rows {
         let timestamp = row
             .get("collected_at")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        groups[group].timestamp = timestamp;
-        groups[group].sample_count += 1;
+        let Some(at) = parse_timestamp(&timestamp) else {
+            continue;
+        };
+        let bucket = at.unix_timestamp().div_euclid(seconds) * seconds;
+        let group = groups.entry(bucket).or_default();
+        group.timestamp = OffsetDateTime::from_unix_timestamp(bucket)
+            .unwrap()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        group.sample_count += 1;
         if let Some(metrics) = row.get("metrics") {
             let mut values = BTreeMap::new();
             flatten_numeric_metrics(metrics, "", &mut values);
             for (key, value) in values {
-                groups[group].values.entry(key).or_default().push(value);
+                group.values.entry(key).or_default().push(value);
             }
         }
     }
     groups
-        .into_iter()
+        .into_values()
+        .take(MAX_SERIES_POINTS)
         .map(|group| {
             let values = group
                 .values
@@ -347,7 +418,11 @@ struct SeriesGroup {
     values: BTreeMap<String, Vec<f64>>,
 }
 
-fn flatten_numeric_metrics(value: &Value, prefix: &str, output: &mut BTreeMap<String, f64>) {
+pub(crate) fn flatten_numeric_metrics(
+    value: &Value,
+    prefix: &str,
+    output: &mut BTreeMap<String, f64>,
+) {
     match value {
         Value::Number(number) => {
             if let Some(value) = number.as_f64().filter(|value| value.is_finite()) {
@@ -453,9 +528,10 @@ fn freshness(latest: Option<&Value>, now: OffsetDateTime) -> Value {
     let Some(collected_at) = collected_at else {
         return json!({"state": "empty", "age_seconds": Value::Null});
     };
+    let skew = (collected_at - now).whole_seconds() > 5;
     let age_seconds = (now - collected_at).whole_seconds().max(0);
     json!({
-        "state": if age_seconds <= FRESHNESS_STALE_AFTER_SECONDS { "fresh" } else { "stale" },
+        "state": if skew { "clock_skew" } else if age_seconds <= FRESHNESS_STALE_AFTER_SECONDS { "fresh" } else { "stale" },
         "age_seconds": age_seconds,
         "collected_at": collected_at,
         "received_at": latest.and_then(|value| value.get("received_at")).cloned().unwrap_or(Value::Null),
@@ -531,7 +607,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let series = build_series(&rows, MetricRange::SixHours);
-        assert_eq!(series.len(), MAX_SERIES_POINTS);
+        assert_eq!(series.len(), 4);
         let first = &series[0]["values"]["cpu.usage_percent"];
         assert_eq!(first["minimum"], 0.0);
         assert!(first["maximum"].as_f64().unwrap() >= first["average"].as_f64().unwrap());

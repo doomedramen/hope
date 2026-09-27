@@ -155,6 +155,8 @@ where
 {
     let (mut write, mut read) = ws_stream.split();
     let mut negotiated_capabilities: Option<protocol::NegotiatedCapabilities> = None;
+    let mut log_window = std::time::Instant::now();
+    let mut log_bytes = 0usize;
 
     while let Some(msg) = read.next().await {
         let msg = msg?;
@@ -308,6 +310,8 @@ where
                                     Capability::InventorySnapshots
                                         | Capability::BoundedObservations
                                         | Capability::ResourceMetrics
+                                        | Capability::LogStreaming
+                                        | Capability::ManagedUpdates
                                 )
                             });
                         }
@@ -361,6 +365,22 @@ where
                     break;
                 }
                 agents::touch_last_seen(&pool, agent.id).await?;
+                if negotiated_capabilities
+                    .as_ref()
+                    .is_some_and(|n| n.capabilities.contains(&Capability::ManagedUpdates))
+                {
+                    crate::managed_updates::verify_health(&pool, agent.id).await?;
+                    match crate::managed_updates::next_command(&pool, agent.id).await {
+                        Ok(Some(command)) => {
+                            let response = Envelope::new(Message::UpdateCommand(command));
+                            write
+                                .send(WsMessage::Text(protocol::serialize_envelope(&response)?))
+                                .await?;
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(%error,"cannot dispatch agent update"),
+                    }
+                }
                 let ack = Envelope::with_protocol_version(
                     protocol_version,
                     Message::HeartbeatAck(protocol::HeartbeatAck {
@@ -370,6 +390,97 @@ where
                 write
                     .send(WsMessage::Text(serde_json::to_string(&ack)?))
                     .await?;
+                if negotiated_capabilities
+                    .as_ref()
+                    .is_some_and(|n| n.capabilities.contains(&Capability::LogStreaming))
+                {
+                    let config = crate::agent_logs::effective_config(&pool, agent.id).await?;
+                    let response = Envelope::new(Message::CollectionConfig(config));
+                    write
+                        .send(WsMessage::Text(protocol::serialize_envelope(&response)?))
+                        .await?;
+                }
+            }
+            "log_batch" => {
+                if !negotiated_capabilities.as_ref().is_some_and(|n| {
+                    n.protocol_version == protocol_version
+                        && n.capabilities.contains(&Capability::LogStreaming)
+                }) {
+                    write
+                        .send(WsMessage::Text(protocol_error(
+                            message_id,
+                            "unsupported_capability",
+                            "log streaming not negotiated",
+                        )))
+                        .await?;
+                    continue;
+                }
+                let batch: protocol::LogBatch = match serde_json::from_value(value) {
+                    Ok(batch) => batch,
+                    Err(_) => {
+                        write
+                            .send(WsMessage::Text(protocol_error(
+                                message_id,
+                                "invalid_logs",
+                                "invalid log batch",
+                            )))
+                            .await?;
+                        continue;
+                    }
+                };
+                if batch.agent_id != agent.id {
+                    anyhow::bail!("log agent identity mismatch");
+                }
+                if log_window.elapsed() >= std::time::Duration::from_secs(60) {
+                    log_window = std::time::Instant::now();
+                    log_bytes = 0;
+                }
+                log_bytes = log_bytes.saturating_add(text.len());
+                let (accepted, retryable, reason) = if log_bytes > 4 * 1024 * 1024 {
+                    (
+                        false,
+                        true,
+                        Some("Log rate limit: retry after one minute".into()),
+                    )
+                } else if batch.validate().is_err() {
+                    (false, false, Some("invalid or oversized log batch".into()))
+                } else {
+                    match crate::agent_logs::ingest(&pool, agent.id, &batch).await {
+                        Ok(()) => (true, false, None),
+                        Err(sqlx::Error::RowNotFound) => {
+                            anyhow::bail!("agent revoked");
+                        }
+                        Err(sqlx::Error::Protocol(_)) => {
+                            (false, false, Some("invalid log timestamp".into()))
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "log ingest failed");
+                            (
+                                false,
+                                true,
+                                Some("ingestion temporarily unavailable".into()),
+                            )
+                        }
+                    }
+                };
+                let ack = Envelope::new(Message::LogBatchAck(protocol::LogBatchAck {
+                    batch_id: batch.batch_id,
+                    accepted,
+                    retryable,
+                    reason,
+                }));
+                write
+                    .send(WsMessage::Text(protocol::serialize_envelope(&ack)?))
+                    .await?;
+            }
+            "update_report" => {
+                let report: protocol::UpdateReport = serde_json::from_value(value)?;
+                crate::managed_updates::report(&pool, agent.id, &report).await?;
+                crate::managed_updates::verify_health(&pool, agent.id).await?;
+            }
+            "collection_config_ack" => {
+                let ack: protocol::CollectionConfigAck = serde_json::from_value(value)?;
+                crate::agent_logs::acknowledge_config(&pool, agent.id, &ack).await?;
             }
             "inventory_snapshot" => {
                 let Some(negotiated) = negotiated_capabilities.as_ref() else {
@@ -617,8 +728,12 @@ where
                         break;
                     }
                     Err(error) => {
-                        let response =
-                            protocol_error(message_id, "metric_rejected", &error.to_string());
+                        let code = if matches!(error, AgentMetricError::Database(_)) {
+                            "temporarily_unavailable"
+                        } else {
+                            "metric_rejected"
+                        };
+                        let response = protocol_error(message_id, code, &error.to_string());
                         write.send(WsMessage::Text(response)).await?;
                     }
                 }
@@ -646,6 +761,7 @@ fn protocol_error(message_id: Option<Uuid>, code: &str, reason: &str) -> String 
         "message_id": message_id.unwrap_or_else(Uuid::new_v4),
         "protocol_version": protocol::PROTOCOL_VERSION,
         "accepted": false,
+        "retryable": code == "temporarily_unavailable",
         "code": code,
         "reason": reason,
     })

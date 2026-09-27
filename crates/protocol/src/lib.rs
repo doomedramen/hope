@@ -6,6 +6,9 @@
 //! original Rust construction shape so older peers can continue to use the
 //! liveness path while the JSON hello advertises the compiled capabilities.
 
+mod operations;
+pub use operations::*;
+
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -98,6 +101,13 @@ pub enum Message {
     MetricSampleBatch(MetricSampleBatch),
     /// Server acknowledgement for a metric sample batch.
     MetricSampleBatchAck(MetricSampleBatchAck),
+    LogBatch(LogBatch),
+    LogBatchAck(LogBatchAck),
+    CollectionConfig(CollectionConfig),
+    CollectionConfigAck(CollectionConfigAck),
+    UpdateCommand(UpdateCommand),
+    UpdateReport(UpdateReport),
+    ProtocolError(ProtocolError),
 }
 
 /// Existing Rust fields stay source-compatible with the current server. The
@@ -183,6 +193,8 @@ pub enum Capability {
     Sockets,
     Docker,
     ResourceMetrics,
+    LogStreaming,
+    ManagedUpdates,
 }
 
 impl Capability {
@@ -199,6 +211,8 @@ impl Capability {
             Self::Sockets => "sockets",
             Self::Docker => "docker",
             Self::ResourceMetrics => "resource_metrics",
+            Self::LogStreaming => "log_streaming",
+            Self::ManagedUpdates => "managed_updates",
         }
     }
 }
@@ -285,6 +299,8 @@ pub fn default_agent_capabilities() -> Vec<Capability> {
         Capability::Sockets,
         Capability::Docker,
         Capability::ResourceMetrics,
+        Capability::LogStreaming,
+        Capability::ManagedUpdates,
     ]
 }
 
@@ -652,6 +668,24 @@ impl Message {
             Self::ObservationBatchAck(ack) => ack.validate(),
             Self::MetricSampleBatch(batch) => batch.validate(),
             Self::MetricSampleBatchAck(ack) => ack.validate(),
+            Self::LogBatch(batch) => batch.validate(),
+            Self::CollectionConfig(config) => config.validate(),
+            Self::UpdateCommand(command) => command.validate(),
+            Self::LogBatchAck(ack) => {
+                if let Some(reason) = &ack.reason {
+                    validate_string("reason", reason)?;
+                }
+                Ok(())
+            }
+            Self::CollectionConfigAck(_) => Ok(()),
+            Self::UpdateReport(report) => {
+                validate_string("state", &report.state)?;
+                validate_string("detail", &report.detail)
+            }
+            Self::ProtocolError(error) => {
+                validate_string("code", &error.code)?;
+                validate_string("reason", &error.reason)
+            }
         }
     }
 }

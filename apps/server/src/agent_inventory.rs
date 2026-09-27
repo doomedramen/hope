@@ -39,6 +39,8 @@ pub const SUPPORTED_CAPABILITIES: &[protocol::Capability] = &[
     protocol::Capability::InventorySnapshots,
     protocol::Capability::BoundedObservations,
     protocol::Capability::ResourceMetrics,
+    protocol::Capability::LogStreaming,
+    protocol::Capability::ManagedUpdates,
 ];
 
 #[derive(Debug, Error)]
@@ -1479,6 +1481,8 @@ fn normalize_mac(value: &str) -> Option<String> {
 pub struct AgentListQuery {
     pub cursor: Option<String>,
     pub limit: Option<i64>,
+    pub q: Option<String>,
+    pub status: Option<String>,
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
@@ -1489,57 +1493,77 @@ pub async fn list_agents(
     State(state): State<AppState>,
     Query(query): Query<AgentListQuery>,
 ) -> (StatusCode, Json<Value>) {
-    let limit = query.limit.map_or(100, |value| value.clamp(1, 100));
+    let limit = query.limit.unwrap_or(100).clamp(1, 100);
     let cursor = decode_cursor(&query.cursor);
-    let rows: Result<Vec<(Value,)>, sqlx::Error> = sqlx::query_as(
-        "select row_to_json(t) from ( \
-            select a.id, a.hostname, a.agent_version, a.os, a.arch, a.capabilities, \
-                   a.last_seen, a.last_heartbeat_at, a.protocol_version, a.revoked_at, \
-                   (select c.inventory from agent_inventory_current c where c.agent_id = a.id) as inventory, \
-                   case when a.revoked_at is not null then 'revoked' \
-                        when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
-                             now() - make_interval(secs => a.heartbeat_timeout_seconds::double precision) \
-                             then 'offline' \
-                        when coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
-                             now() - make_interval(secs => (a.heartbeat_timeout_seconds / 2)::double precision) \
-                             then 'stale' else 'online' end as status, \
-                   (select ir.device_id from identity_rules ir where ir.rule_type = 'agent_id' \
-                     and ir.value = a.id::text order by ir.created_at limit 1) as device_id, \
-                   a.created_at \
-              from agents a \
-             where ($1::timestamptz is null or (a.created_at, a.id) > ($1::timestamptz, $2)) \
-             order by a.created_at, a.id limit $3 \
-        ) t",
-    )
-    .bind(cursor.as_ref().map(|(created_at, _)| created_at.clone()))
-    .bind(cursor.as_ref().map(|(_, id)| *id))
-    .bind(limit)
-    .fetch_all(&state.pool)
-    .await;
+    if query.cursor.is_some() && cursor.is_none() {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid cursor");
+    }
+    if query.q.as_ref().is_some_and(|q| q.len() > 256) {
+        return api_error(StatusCode::BAD_REQUEST, "Search is too long");
+    }
+    let status = query.status.filter(|s| !s.is_empty());
+    if status
+        .as_ref()
+        .is_some_and(|s| !["online", "stale", "offline", "revoked"].contains(&s.as_str()))
+    {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid agent status");
+    }
+    let base = "with fleet as (select a.*, case when a.revoked_at is not null then 'revoked' when coalesce(a.last_heartbeat_at,a.last_seen,a.created_at) < now()-make_interval(secs=>a.heartbeat_timeout_seconds::double precision) then 'offline' when coalesce(a.last_heartbeat_at,a.last_seen,a.created_at) < now()-make_interval(secs=>(a.heartbeat_timeout_seconds/2)::double precision) then 'stale' else 'online' end as status from agents a), searched as (select * from fleet where $1::text is null or strpos(lower(concat_ws(' ',hostname,id::text,agent_version,os,arch,capabilities::text)),lower($1))>0) ";
+    let sql = format!(
+        "{base} select row_to_json(t) from (select a.id,a.hostname,a.agent_version,a.os,a.arch,a.capabilities,a.last_seen,a.last_heartbeat_at,a.protocol_version,a.revoked_at,a.status,a.created_at,(select c.inventory from agent_inventory_current c where c.agent_id=a.id) as inventory,(select ir.device_id from identity_rules ir where ir.rule_type='agent_id' and ir.value=a.id::text order by ir.created_at limit 1) as device_id from searched a where ($2::text is null or a.status=$2) and ($3::timestamptz is null or (a.created_at,a.id)>($3::timestamptz,$4::uuid)) order by a.created_at,a.id limit $5) t"
+    );
+    let rows: Result<Vec<(Value,)>, _> = sqlx::query_as(&sql)
+        .bind(&query.q)
+        .bind(&status)
+        .bind(cursor.as_ref().map(|(at, _)| at.clone()))
+        .bind(cursor.as_ref().map(|(_, id)| *id))
+        .bind(limit + 1)
+        .fetch_all(&state.pool)
+        .await;
     let Ok(rows) = rows else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            rows.unwrap_err().to_string(),
-        );
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "Could not load agents");
     };
-    let mut items: Vec<Value> = rows.into_iter().map(|(value,)| value).collect();
+    let more = rows.len() > limit as usize;
+    let mut items: Vec<Value> = rows
+        .into_iter()
+        .take(limit as usize)
+        .map(|(row,)| row)
+        .collect();
     for item in &mut items {
         if let Value::Object(map) = item {
             let inventory = map.remove("inventory").unwrap_or_else(|| json!({}));
-            map.insert(
-                "inventory_summary".to_string(),
-                inventory_summary(&inventory),
-            );
+            map.insert("inventory_summary".into(), inventory_summary(&inventory));
         }
     }
-    let next_cursor = items.last().and_then(|item| {
-        let created_at = item.get("created_at")?.as_str()?;
-        let id = Uuid::parse_str(item.get("id")?.as_str()?).ok()?;
-        Some(encode_cursor(created_at, id))
-    });
+    let summary_sql = format!(
+        "{base} select json_build_object('all',count(*),'online',count(*) filter(where status='online'),'stale',count(*) filter(where status='stale'),'offline',count(*) filter(where status='offline'),'revoked',count(*) filter(where status='revoked'),'filtered',count(*) filter(where $2::text is null or status=$2)) from searched"
+    );
+    let summary: Result<Value, _> = sqlx::query_scalar(&summary_sql)
+        .bind(&query.q)
+        .bind(&status)
+        .fetch_one(&state.pool)
+        .await;
+    let Ok(summary) = summary else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Could not load fleet counts",
+        );
+    };
+    let next_cursor = if more {
+        items.last().and_then(|item| {
+            Some(encode_cursor(
+                item["created_at"].as_str()?,
+                Uuid::parse_str(item["id"].as_str()?).ok()?,
+            ))
+        })
+    } else {
+        None
+    };
     (
         StatusCode::OK,
-        Json(json!({ "items": items, "next_cursor": next_cursor })),
+        Json(
+            json!({"items":items,"next_cursor":next_cursor,"counts":summary,"total":summary["filtered"]}),
+        ),
     )
 }
 

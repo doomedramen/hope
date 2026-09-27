@@ -362,6 +362,8 @@ export interface AgentMetricGpuDimension {
 }
 
 export interface AgentMetricsResponse {
+  resolution_seconds?: number;
+  raw_query_limited?: boolean;
   range: AgentMetricRange;
   from: string;
   to: string;
@@ -1120,8 +1122,15 @@ export async function fetchDevice(id: string): Promise<DeviceDetail> {
   return request<DeviceDetail>(`/api/v1/devices/${id}`);
 }
 
-export async function fetchAgents(): Promise<ApiPage<Agent>> {
-  return request<ApiPage<Agent>>("/api/v1/agents?limit=100");
+export async function fetchAgents(
+  params: { q?: string; status?: string; cursor?: string } = {},
+): Promise<
+  ApiPage<Agent> & { counts?: Record<string, number>; total?: number }
+> {
+  const search = new URLSearchParams({ limit: "100" });
+  for (const [key, value] of Object.entries(params))
+    if (value) search.set(key, value);
+  return request(`/api/v1/agents?${search}`);
 }
 
 export async function createAgentEnrollment(): Promise<AgentEnrollmentBootstrap> {
@@ -1590,4 +1599,92 @@ export async function login(input: {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export interface AgentLogEntry {
+  id: string;
+  event_id: string;
+  observed_at: string;
+  received_at: string;
+  source: string;
+  severity: string;
+  message: string;
+  attributes: Record<string, unknown>;
+}
+export interface AgentCollectionConfig {
+  revision: number;
+  journal_units: string[];
+  docker_containers: string[];
+  redact: string[];
+}
+export interface AgentCollectionSettings {
+  config: AgentCollectionConfig;
+  applied_revision: number | null;
+  log_retention_days: number;
+}
+export interface AgentUpdatePolicy {
+  mode: string;
+  channel: string;
+  pinned_version: string | null;
+  rollout_percent: number;
+  window_start_utc: number;
+  window_end_utc: number;
+}
+export interface AgentUpdateOperation {
+  id: string;
+  target_version: string;
+  previous_version: string | null;
+  state: string;
+  transport: string;
+  progress: { detail?: string };
+  last_error: string | null;
+  rollback_reason: string | null;
+  created_at: string;
+}
+export interface AgentManagedUpdates {
+  policy: AgentUpdatePolicy;
+  current_version?: string;
+  target_version: string | null;
+  blocked_reason: string | null;
+  manifest?: { release_notes?: string };
+  operations: AgentUpdateOperation[];
+}
+export function fetchAgentLogs(
+  id: string,
+  params: Record<string, string> = {},
+) {
+  return request<ApiPage<AgentLogEntry>>(
+    `/api/v1/agents/${id}/logs?${new URLSearchParams(params)}`,
+  );
+}
+export function fetchAgentCollection(id: string) {
+  return request<AgentCollectionSettings>(`/api/v1/agents/${id}/collection`);
+}
+export function saveAgentCollection(
+  id: string,
+  settings: AgentCollectionSettings,
+) {
+  return request<{ revision: number }>(`/api/v1/agents/${id}/collection`, {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+}
+export function fetchAgentUpdates(id: string) {
+  return request<AgentManagedUpdates>(`/api/v1/agents/${id}/managed-update`);
+}
+export function saveAgentUpdatePolicy(id: string, policy: AgentUpdatePolicy) {
+  return request(`/api/v1/agents/${id}/managed-update`, {
+    method: "PUT",
+    body: JSON.stringify(policy),
+  });
+}
+export function updateAgent(id: string, version: string) {
+  return request<{ operation_id: string }>(
+    `/api/v1/agents/${id}/managed-update`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ version }),
+    },
+  );
 }

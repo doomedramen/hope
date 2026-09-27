@@ -297,8 +297,11 @@ detect_architecture() {
         x86_64|amd64)
             ARCH="amd64"
             ;;
+        aarch64|arm64)
+            ARCH="arm64"
+            ;;
         *)
-            die "unsupported Linux architecture: $(uname -m); currently supported architecture is x86_64"
+            die "unsupported Linux architecture: $(uname -m); supported architectures are x86_64 and aarch64"
             ;;
     esac
 }
@@ -618,8 +621,43 @@ EOF
     UNIT_STAGE_PATH=""
 }
 
+install_updater() {
+    # The helper runs outside the agent service and only accepts signed bundles.
+    check_path_not_symlink /var/lib/hope-updater "updater state"
+    install -d -o root -g root -m 0755 /var/lib/hope-updater
+    install -o root -g root -m 0755 "$AGENT_PATH" /usr/local/libexec/hope-agent-updater
+    cat > /etc/systemd/system/hope-agent-update.service <<'UNIT'
+[Unit]
+Description=Apply signed Hope agent updates
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/hope-agent-updater apply-update
+TimeoutStartSec=5min
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/usr/local/libexec /var/lib/hope-updater
+PrivateTmp=true
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+UNIT
+    cat > /etc/systemd/system/hope-agent-update.timer <<'UNIT'
+[Unit]
+Description=Check staged Hope agent updates
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+Unit=hope-agent-update.service
+[Install]
+WantedBy=timers.target
+UNIT
+    chmod 0644 /etc/systemd/system/hope-agent-update.service /etc/systemd/system/hope-agent-update.timer
+    chown root:root /etc/systemd/system/hope-agent-update.service /etc/systemd/system/hope-agent-update.timer
+}
+
 start_service() {
     systemctl daemon-reload || die "systemd daemon-reload failed"
+    systemctl enable --now hope-agent-update.timer >/dev/null || die "could not enable updater timer"
     systemctl enable "$SERVICE_NAME" >/dev/null || die "could not enable $SERVICE_NAME"
     if ! systemctl restart "$SERVICE_NAME"; then
         systemctl --no-pager --full status "$SERVICE_NAME" || true
@@ -652,6 +690,9 @@ uninstall() {
         log "$SERVICE_NAME already inactive"
     fi
 
+    systemctl stop hope-agent-update.timer hope-agent-update.service >/dev/null 2>&1 || true
+    systemctl disable hope-agent-update.timer >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/hope-agent-update.timer /etc/systemd/system/hope-agent-update.service /usr/local/libexec/hope-agent-updater
     systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
     if [[ -e "$UNIT_PATH" || -L "$UNIT_PATH" ]]; then
         check_path_not_symlink "$UNIT_PATH" "systemd unit"
@@ -758,6 +799,7 @@ ensure_service_account
 install_agent_binary
 enroll_agent
 write_service_unit
+install_updater
 start_service
 
 log "installed Hope agent $VERSION for Linux/$ARCH"
