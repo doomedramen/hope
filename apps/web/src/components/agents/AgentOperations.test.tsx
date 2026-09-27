@@ -16,11 +16,14 @@ import {
   updateAgent,
   fetchAgentCollection,
   saveAgentCollection,
+  saveAgentUpdatePolicy,
+  type AgentUpdatePolicy,
 } from "@/lib/api";
 vi.mock("@/lib/api", () => ({
   fetchAgentLogs: vi.fn(),
   fetchAgentCollection: vi.fn(),
   saveAgentCollection: vi.fn(),
+  saveAgentUpdatePolicy: vi.fn(),
   fetchAgentUsage: vi.fn().mockResolvedValue({}),
   fetchAgentUpdates: vi.fn(),
   updateAgent: vi.fn(),
@@ -195,5 +198,85 @@ it("saves per-source bounds and removes policies for deselected sources", async 
       max_bytes_per_minute: 1048576,
     },
   });
+  cache.clear();
+});
+
+function renderUpdatePolicy() {
+  let storedPolicy: AgentUpdatePolicy = {
+    mode: "notify",
+    channel: "stable",
+    pinned_version: null,
+    rollout_percent: 5,
+    window_start_utc: 0,
+    window_end_utc: 0,
+  };
+  vi.mocked(fetchAgentCollection).mockResolvedValue({} as never);
+  vi.mocked(fetchAgentUpdates).mockImplementation(async () => ({
+    policy: storedPolicy,
+    target_version: null,
+    blocked_reason:
+      "Bootstrap required: install a signed agent with the updater service",
+    operations: [],
+  }));
+  vi.mocked(saveAgentUpdatePolicy).mockImplementation(async (_id, policy) => {
+    storedPolicy = { ...policy };
+    return { policy: storedPolicy };
+  });
+  const cache = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const view = render(
+    <QueryClientProvider client={cache}>
+      <AgentSettings agentId="a" />
+    </QueryClientProvider>,
+  );
+  return { cache, view };
+}
+
+it("saves automatic update policy on click and reloads the saved choice", async () => {
+  const { cache, view } = renderUpdatePolicy();
+  fireEvent.change(await screen.findByLabelText("Updates"), {
+    target: { value: "automatic" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save update policy" }));
+  await waitFor(() =>
+    expect(saveAgentUpdatePolicy).toHaveBeenCalledExactlyOnceWith("a", {
+      mode: "automatic",
+      channel: "stable",
+      pinned_version: null,
+      rollout_percent: 5,
+      window_start_utc: 0,
+      window_end_utc: 0,
+    }),
+  );
+  expect(await screen.findByText("Update policy saved.")).toBeVisible();
+  await waitFor(() => expect(fetchAgentUpdates).toHaveBeenCalledTimes(2));
+  view.unmount();
+  cache.clear();
+  render(
+    <QueryClientProvider client={cache}>
+      <AgentSettings agentId="a" />
+    </QueryClientProvider>,
+  );
+  expect(await screen.findByLabelText("Updates")).toHaveValue("automatic");
+  cache.clear();
+});
+
+it("shows policy save failures and allows retrying the selected choice", async () => {
+  const { cache } = renderUpdatePolicy();
+  vi.mocked(saveAgentUpdatePolicy).mockRejectedValueOnce(
+    new Error("Save failed"),
+  );
+  fireEvent.change(await screen.findByLabelText("Updates"), {
+    target: { value: "automatic" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save update policy" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Unavailable");
+  expect(screen.queryByText("Update policy saved.")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Updates")).toHaveValue("automatic");
+  fireEvent.click(screen.getByRole("button", { name: "Save update policy" }));
+  expect(await screen.findByText("Update policy saved.")).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(saveAgentUpdatePolicy).toHaveBeenCalledTimes(2);
   cache.clear();
 });

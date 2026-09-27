@@ -596,7 +596,9 @@ function PolicyForm({
         failure. At most three agents update at once.
       </p>
       <ErrorMessage error={save.error} />
-      <Button disabled={save.isPending}>Save update policy</Button>
+      <Button type="submit" disabled={save.isPending}>
+        {save.isPending ? "Saving update policy…" : "Save update policy"}
+      </Button>
       {save.isSuccess && (
         <p role="status" className="text-sm">
           Update policy saved.
