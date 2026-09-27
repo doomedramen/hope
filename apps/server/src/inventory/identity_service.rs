@@ -158,7 +158,7 @@ pub async fn reconcile(
     }
 }
 
-async fn attach_identifiers(
+pub(crate) async fn attach_identifiers(
     pool: &PgPool,
     device_id: Uuid,
     observed: &[Identifier],
@@ -344,6 +344,16 @@ async fn resolve_suggestion(
             .bind(&identifier.value)
             .execute(&mut *tx)
             .await;
+            if identifier.rule_type == IdentifierType::AgentId
+                && let Ok(agent_id) = Uuid::parse_str(&identifier.value)
+                && let Err(error) = sqlx::query("update agents set device_id=$1 where id=$2")
+                    .bind(candidate_device_id)
+                    .bind(agent_id)
+                    .execute(&mut *tx)
+                    .await
+            {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+            }
         }
     }
 
@@ -399,6 +409,59 @@ mod gate_tests {
             rule_type: t,
             value: v.to_string(),
             pinned: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmation_updates_agent_device_link_but_rejection_does_not() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let user_id = Uuid::new_v4();
+        sqlx::query("insert into users(id,email,password_hash) values ($1,$2,'x')")
+            .bind(user_id)
+            .bind(format!("{user_id}@example.test"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let original: Uuid =
+            sqlx::query_scalar("insert into devices(device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let candidate: Uuid =
+            sqlx::query_scalar("insert into devices(device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let agent_id = Uuid::new_v4();
+        sqlx::query(
+            "insert into agents(id,cert_fingerprint,cert_serial,device_id) values ($1,$2,$2,$3)",
+        )
+        .bind(agent_id)
+        .bind(agent_id.to_string())
+        .bind(original)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for confirm in [false, true] {
+            let suggestion: Uuid = sqlx::query_scalar("insert into identity_suggestions(candidate_device_id,observed,score,explanation) values ($1,$2,0.5,'{}') returning id")
+                .bind(candidate).bind(json!([id(IdentifierType::AgentId, &agent_id.to_string())]))
+                .fetch_one(&pool).await.unwrap();
+            let (status, _) = resolve_suggestion(
+                &AppState { pool: pool.clone() },
+                CurrentUser(user_id),
+                suggestion,
+                confirm,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let linked: Uuid = sqlx::query_scalar("select device_id from agents where id=$1")
+                .bind(agent_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(linked, if confirm { candidate } else { original });
         }
     }
 

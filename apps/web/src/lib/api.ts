@@ -109,6 +109,16 @@ export interface NetworkScansResponse {
   active_scan: ScanRun | null;
 }
 
+export interface DeviceAgent {
+  id: string;
+  hostname: string | null;
+  status: "online" | "stale" | "offline" | "revoked";
+  os: string | null;
+  arch: string | null;
+  agent_version: string | null;
+  last_seen: string | null;
+}
+
 export interface Device {
   id: string;
   device_type: string;
@@ -119,6 +129,7 @@ export interface Device {
   version: number;
   created_at: string;
   updated_at: string;
+  agents?: DeviceAgent[];
 }
 
 export interface Service {
@@ -291,7 +302,10 @@ export interface AgentSocketReachability {
   state: AgentReachabilityState;
   checked_at: string | null;
   worker_id: string | null;
-  endpoint: string | { address: string | null; port: number | null; protocol: string } | null;
+  endpoint:
+    | string
+    | { address: string | null; port: number | null; protocol: string }
+    | null;
 }
 
 export interface AgentSocketInventory {

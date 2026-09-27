@@ -334,36 +334,69 @@ pub async fn ingest_snapshot(
         snapshot.snapshot_id
     };
 
-    let agent: Option<(String, Option<OffsetDateTime>)> =
-        sqlx::query_as("select cert_fingerprint, revoked_at from agents where id = $1")
+    let agent: Option<(String, Option<OffsetDateTime>, Option<Uuid>)> =
+        sqlx::query_as("select cert_fingerprint, revoked_at, device_id from agents where id = $1")
             .bind(authenticated_agent_id)
             .fetch_optional(pool)
             .await?;
-    let Some((cert_fingerprint, revoked_at)) = agent else {
+    let Some((cert_fingerprint, revoked_at, linked_device_id)) = agent else {
         return Err(AgentInventoryError::UnknownAgent(authenticated_agent_id));
     };
     if revoked_at.is_some() {
         return Err(AgentInventoryError::RevokedAgent(authenticated_agent_id));
     }
 
-    // M1's identity service gives agent_id deterministic weight 1.0. This
-    // makes a retry/reconnect attach to the same canonical device while still
-    // preserving weaker identifiers as evidence for operator review.
     let identifiers = host_identifiers(authenticated_agent_id, &cert_fingerprint, snapshot);
-    // Seed the deterministic agent identity first. A stale/shared MAC can
-    // otherwise make the existing M1 scorer return a review suggestion before
-    // it sees the agent_id candidate, leaving an authenticated host without a
-    // canonical device.
-    let deterministic = identity_service::reconcile(pool, &identifiers[..1], None).await?;
-    let reconciliation = identity_service::reconcile(pool, &identifiers, None).await?;
-    let reconciliation = if reconciliation.device_id.is_some() {
-        reconciliation
+    let reconciliation = if let Some(linked) = linked_device_id {
+        // The foreign key is authoritative. Keep identifiers on the original
+        // member while projecting inventory onto its current canonical device.
+        identity_service::attach_identifiers(pool, linked, &identifiers).await?;
+        identity_service::ReconcileOutcome {
+            decision: domain::inventory::identity::Decision::AutoMatch,
+            device_id: Some(linked),
+            suggestion_id: None,
+            explanation: json!({"source": "agent_device_link"}),
+        }
     } else {
-        deterministic
+        let owners: Vec<Uuid> = sqlx::query_scalar(
+            "select distinct device_id from identity_rules where rule_type = 'agent_id' and value = $1",
+        ).bind(authenticated_agent_id.to_string()).fetch_all(pool).await?;
+        if owners.len() > 1 {
+            return Err(AgentInventoryError::ReconciliationMissingDevice);
+        }
+        if let Some(&owner) = owners.first() {
+            identity_service::attach_identifiers(pool, owner, &identifiers).await?;
+            identity_service::ReconcileOutcome {
+                decision: domain::inventory::identity::Decision::AutoMatch,
+                device_id: Some(owner),
+                suggestion_id: None,
+                explanation: json!({"source": "existing_agent_identity"}),
+            }
+        } else {
+            // Try existing strong host identities before creating a new device.
+            let result = identity_service::reconcile(pool, &identifiers, None).await?;
+            if result.device_id.is_some() {
+                result
+            } else {
+                // A weak/shared match remains a suggestion; the authenticated
+                // agent still needs its own device until an operator resolves it.
+                let result = identity_service::reconcile(pool, &identifiers[..1], None).await?;
+                identity_service::attach_identifiers(
+                    pool,
+                    result
+                        .device_id
+                        .ok_or(AgentInventoryError::ReconciliationMissingDevice)?,
+                    &identifiers,
+                )
+                .await?;
+                result
+            }
+        }
     };
-    let device_id = reconciliation
+    let linked_device_id = reconciliation
         .device_id
         .ok_or(AgentInventoryError::ReconciliationMissingDevice)?;
+    let device_id = crate::inventory::devices::resolve_device(pool, linked_device_id).await?;
     let reconciliation_json = json!({
         "decision": reconciliation.decision,
         "device_id": device_id,
@@ -493,8 +526,9 @@ pub async fn ingest_snapshot(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("update agents set last_seen = now(), last_heartbeat_at = now() where id = $1")
+    sqlx::query("update agents set last_seen = now(), last_heartbeat_at = now(), device_id = coalesce(device_id, $2) where id = $1")
         .bind(authenticated_agent_id)
+        .bind(linked_device_id)
         .execute(&mut *tx)
         .await?;
     recover_incident_in_tx(&mut tx, authenticated_agent_id).await?;
@@ -759,15 +793,9 @@ async fn project_inventory(
     snapshot_id: Uuid,
 ) -> sqlx::Result<()> {
     let source_instance = format!("agent:{agent_id}:snapshot:{}", snapshot.sequence);
-    let hostname =
-        inventory_string(&snapshot.inventory, &["hostname", "host_name"]).or_else(|| {
-            snapshot
-                .inventory
-                .get("system")
-                .and_then(|value| object_string(value, &["hostname", "host_name"]))
-        });
+    let hostname = host_inventory_string(&snapshot.inventory, &["hostname", "host_name"]);
     sqlx::query(
-        "update devices set device_type = 'physical_host', name = coalesce($2, name), \
+        "update devices set device_type = 'physical_host', name = coalesce(nullif(name, ''), $2), \
          updated_at = now(), version = version + 1 where id = $1",
     )
     .bind(device_id)
@@ -1056,16 +1084,21 @@ fn host_evidence(
         ("os", ["os", "operating_system"]),
         ("arch", ["arch", "architecture"]),
     ] {
-        if let Some(value) = inventory_string(&snapshot.inventory, &names).or_else(|| {
-            snapshot
-                .inventory
-                .get("system")
-                .and_then(|item| object_string(item, &names))
-        }) {
+        if let Some(value) = host_inventory_string(&snapshot.inventory, &names) {
             values.push((attribute, json!(value)));
         }
     }
     values
+}
+
+fn host_inventory_string<'a>(inventory: &'a Value, names: &[&str]) -> Option<&'a str> {
+    inventory_string(inventory, names).or_else(|| {
+        ["host", "system"].into_iter().find_map(|section| {
+            inventory
+                .get(section)
+                .and_then(|host| object_string(host, names))
+        })
+    })
 }
 
 async fn upsert_address(
@@ -1512,7 +1545,7 @@ pub async fn list_agents(
     }
     let base = "with fleet as (select a.*, case when a.revoked_at is not null then 'revoked' when coalesce(a.last_heartbeat_at,a.last_seen) is null then 'offline' when coalesce(a.last_heartbeat_at,a.last_seen,a.created_at) < now()-make_interval(secs=>a.heartbeat_timeout_seconds::double precision) then 'offline' when coalesce(a.last_heartbeat_at,a.last_seen,a.created_at) < now()-make_interval(secs=>(a.heartbeat_timeout_seconds/2)::double precision) then 'stale' else 'online' end as status from agents a), searched as (select * from fleet where $1::text is null or strpos(lower(concat_ws(' ',hostname,id::text,agent_version,os,arch,capabilities::text)),lower($1))>0) ";
     let sql = format!(
-        "{base} select row_to_json(t) from (select a.id,a.hostname,a.agent_version,a.os,a.arch,a.capabilities,a.last_seen,a.last_heartbeat_at,a.protocol_version,a.revoked_at,a.status,a.created_at,(select json_build_object('collected_at',m.collected_at,'cpu_percent',m.metrics #> '{{cpu,usage_percent}}','memory_percent',m.metrics #> '{{memory,used_percent}}','delivery',m.metrics->'delivery') from agent_metric_samples m where m.agent_id=a.id and m.collected_at<=now() order by m.collected_at desc,m.sample_id desc limit 1) as telemetry,(select c.inventory from agent_inventory_current c where c.agent_id=a.id) as inventory,(select ir.device_id from identity_rules ir where ir.rule_type='agent_id' and ir.value=a.id::text order by ir.created_at limit 1) as device_id from searched a where ($2::text is null or a.status=$2) and ($3::timestamptz is null or (a.created_at,a.id)>($3::timestamptz,$4::uuid)) order by a.created_at,a.id limit $5) t"
+        "{base} select row_to_json(t) from (select a.id,a.hostname,a.agent_version,a.os,a.arch,a.capabilities,a.last_seen,a.last_heartbeat_at,a.protocol_version,a.revoked_at,a.status,a.created_at,(select json_build_object('collected_at',m.collected_at,'cpu_percent',m.metrics #> '{{cpu,usage_percent}}','memory_percent',m.metrics #> '{{memory,used_percent}}','delivery',m.metrics->'delivery') from agent_metric_samples m where m.agent_id=a.id and m.collected_at<=now() order by m.collected_at desc,m.sample_id desc limit 1) as telemetry,(select c.inventory from agent_inventory_current c where c.agent_id=a.id) as inventory,(with recursive chain as (select id,canonical_of from devices where id=a.device_id union select d.id,d.canonical_of from devices d join chain c on d.id=c.canonical_of) select id from chain where canonical_of is null limit 1) as device_id from searched a where ($2::text is null or a.status=$2) and ($3::timestamptz is null or (a.created_at,a.id)>($3::timestamptz,$4::uuid)) order by a.created_at,a.id limit $5) t"
     );
     let rows: Result<Vec<(Value,)>, _> = sqlx::query_as(&sql)
         .bind(&query.q)
@@ -1684,8 +1717,7 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
                      when coalesce(a.last_heartbeat_at, a.last_seen) is null or coalesce(a.last_heartbeat_at, a.last_seen, a.created_at) < \
                        now() - make_interval(secs => (a.heartbeat_timeout_seconds / 2)::double precision) \
                      then 'stale' else 'online' end as status, \
-                   (select ir.device_id from identity_rules ir where ir.rule_type = 'agent_id' \
-                     and ir.value = a.id::text order by ir.created_at limit 1) as device_id, \
+                   a.device_id, \
                    a.created_at, a.last_heartbeat_at \
               from agents a where a.id = $1 \
         ) t",
@@ -1696,12 +1728,14 @@ async fn build_agent_detail(pool: &PgPool, agent_id: Uuid) -> sqlx::Result<Optio
     let Some((mut detail,)) = agent else {
         return Ok(None);
     };
-    let device_id: Option<Uuid> = sqlx::query_scalar(
-        "select device_id from identity_rules where rule_type = 'agent_id' and value = $1 order by created_at limit 1",
-    )
-    .bind(agent_id.to_string())
-    .fetch_optional(pool)
-    .await?;
+    let device_id: Option<Uuid> = sqlx::query_scalar("select device_id from agents where id = $1")
+        .bind(agent_id)
+        .fetch_one(pool)
+        .await?;
+    let device_id = match device_id {
+        Some(id) => Some(crate::inventory::devices::resolve_device(pool, id).await?),
+        None => None,
+    };
 
     let inventory: Option<(Value,)> =
         sqlx::query_as("select inventory from agent_inventory_current where agent_id = $1")
@@ -2287,6 +2321,137 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(device_count, 1);
+    }
+
+    #[tokio::test]
+    async fn current_host_schema_projects_name_and_persists_device_link() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let agent_id = Uuid::new_v4();
+        insert_test_agent(&pool, agent_id, false).await;
+        let mut report = snapshot(agent_id, 1);
+        report.inventory = json!({"host":{"hostname":"current-host","os":"linux","arch":"amd64"}});
+        let outcome = ingest_snapshot(&pool, agent_id, &report).await.unwrap();
+        let device_id = outcome.device_id.unwrap();
+        let link: Option<Uuid> = sqlx::query_scalar("select device_id from agents where id=$1")
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(link, Some(device_id));
+        let name: String = sqlx::query_scalar("select name from devices where id=$1")
+            .bind(device_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "current-host");
+        let os: Value =
+            sqlx::query_scalar("select value from evidence where subject_id=$1 and attribute='os'")
+                .bind(device_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(os, "linux");
+        sqlx::query("update devices set name='Operator name' where id=$1")
+            .bind(device_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut next = snapshot(agent_id, 2);
+        next.inventory = json!({"host":{"hostname":"renamed-host"}});
+        assert_eq!(
+            ingest_snapshot(&pool, agent_id, &next)
+                .await
+                .unwrap()
+                .device_id,
+            Some(device_id)
+        );
+        let name: String = sqlx::query_scalar("select name from devices where id=$1")
+            .bind(device_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "Operator name");
+        let survivor: Uuid =
+            sqlx::query_scalar("insert into devices(device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("update devices set canonical_of=$1,status='merged' where id=$2")
+            .bind(survivor)
+            .bind(device_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        next.sequence = 3;
+        next.message_id = Uuid::new_v4();
+        next.snapshot_id = Uuid::new_v4();
+        assert_eq!(
+            ingest_snapshot(&pool, agent_id, &next)
+                .await
+                .unwrap()
+                .device_id,
+            Some(survivor)
+        );
+        let link: Option<Uuid> = sqlx::query_scalar("select device_id from agents where id=$1")
+            .bind(agent_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            link,
+            Some(device_id),
+            "retain the original member for undo-merge"
+        );
+        assert_eq!(
+            build_agent_detail(&pool, agent_id).await.unwrap().unwrap()["device_id"],
+            json!(survivor)
+        );
+        let (status, Json(fleet)) = list_agents(
+            State(AppState { pool: pool.clone() }),
+            Query(AgentListQuery {
+                q: Some(agent_id.to_string()),
+                status: None,
+                limit: None,
+                cursor: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fleet["items"][0]["device_id"], json!(survivor));
+    }
+
+    #[tokio::test]
+    async fn first_inventory_links_to_existing_strong_host_identity() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let agent_id = Uuid::new_v4();
+        insert_test_agent(&pool, agent_id, false).await;
+        let device_id: Uuid =
+            sqlx::query_scalar("insert into devices(device_type) values ('unknown') returning id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let hardware = Uuid::new_v4().to_string();
+        sqlx::query(
+            "insert into identity_rules(device_id,rule_type,value) values ($1,'hardware_uuid',$2)",
+        )
+        .bind(device_id)
+        .bind(&hardware)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut report = snapshot(agent_id, 1);
+        report.inventory = json!({"host":{"hostname":"known-host","hardware_uuid":hardware}});
+        assert_eq!(
+            ingest_snapshot(&pool, agent_id, &report)
+                .await
+                .unwrap()
+                .device_id,
+            Some(device_id)
+        );
     }
 
     #[tokio::test]

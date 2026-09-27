@@ -1,5 +1,11 @@
 # Agent data, logs, and managed updates
 
+## Device links
+
+Migration 0041 adds `agents.device_id` as a foreign key to the device inventory. It backfills existing agent identity rules only when they identify one device; conflicting owners remain unlinked for review. New inventory persists this relationship and checks strong host identities before creating a device. Hostnames and IP addresses alone do not establish ownership.
+
+The device list and device detail show linked agent hostnames, connection status, and a direct Metrics link. Existing custom device names are preserved. Merge reads follow the surviving device while retaining the original relationship for undo-merge. Confirming an identity suggestion updates the relationship. Deploy the server and web app together; agents do not need reinstalling for this change.
+
 ## Upgrade order
 
 Deploy the server and migrations 0036–0038 before publishing an agent with log-streaming and managed-update capabilities. Existing agents keep their current protocol behavior.

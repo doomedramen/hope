@@ -213,6 +213,7 @@ export function InfrastructurePage() {
   const devicesQuery = useQuery({
     queryKey: ["devices"],
     queryFn: fetchDevices,
+    refetchInterval: 15_000,
   });
   const servicesQuery = useQuery({
     queryKey: ["services"],
@@ -238,9 +239,13 @@ export function InfrastructurePage() {
     const needle = search.trim().toLowerCase();
     if (!needle) return devices;
     return devices.filter((device) =>
-      [device.name, device.device_type, device.status, device.id].some(
-        (value) => value?.toLowerCase().includes(needle),
-      ),
+      [
+        device.name,
+        device.device_type,
+        device.status,
+        device.id,
+        ...(device.agents ?? []).flatMap((agent) => [agent.hostname, agent.os]),
+      ].some((value) => value?.toLowerCase().includes(needle)),
     );
   }, [devices, search]);
 
@@ -259,6 +264,7 @@ export function InfrastructurePage() {
     queryKey: ["device", selectedId],
     queryFn: () => fetchDevice(selectedId!),
     enabled: Boolean(selectedId),
+    refetchInterval: 15_000,
   });
   const addressesQuery = useQuery({
     queryKey: ["addresses"],
@@ -515,42 +521,46 @@ export function InfrastructurePage() {
                     ["down", "degraded"].includes(monitor.state),
                   ).length;
                   return (
-                    <button
-                      aria-current={
-                        device.id === selectedId ? "true" : undefined
-                      }
-                      className="flex min-h-16 w-full items-center justify-between gap-3 px-4 py-3 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"
-                      key={device.id}
-                      onClick={() => selectDevice(device.id)}
-                      type="button"
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate font-medium">
-                          {device.name || "Unnamed device"}
+                    <div key={device.id}>
+                      <button
+                        aria-current={
+                          device.id === selectedId ? "true" : undefined
+                        }
+                        className="flex min-h-16 w-full items-center justify-between gap-3 px-4 py-3 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"
+                        onClick={() => selectDevice(device.id)}
+                        type="button"
+                      >
+                        <span className="min-w-0">
+                          <span className="block break-words font-medium">
+                            {deviceDisplayName(device)}
+                          </span>
+                          <span className="block truncate text-xs text-muted-foreground">
+                            {currentIpsByDevice.get(device.id)?.[0] ??
+                              `Record updated ${formatRelative(device.updated_at)}`}
+                          </span>
+                          <span className="mt-1 block text-xs text-muted-foreground">
+                            {!observationsReady
+                              ? "Condition unavailable"
+                              : deviceServiceRows.length
+                                ? `${failing ? `${failing} needs attention · ` : ""}${deviceServiceRows.length} service${deviceServiceRows.length === 1 ? "" : "s"}` +
+                                  (monitorsPossiblyTruncated
+                                    ? " · check list limited"
+                                    : "")
+                                : "No service observations"}
+                          </span>
                         </span>
-                        <span className="block truncate text-xs text-muted-foreground">
-                          {currentIpsByDevice.get(device.id)?.[0] ??
-                            `Record updated ${formatRelative(device.updated_at)}`}
-                        </span>
-                        <span className="mt-1 block text-xs text-muted-foreground">
-                          {!observationsReady
-                            ? "Condition unavailable"
-                            : deviceServiceRows.length
-                              ? `${failing ? `${failing} needs attention · ` : ""}${deviceServiceRows.length} service${deviceServiceRows.length === 1 ? "" : "s"}` +
-                                (monitorsPossiblyTruncated
-                                  ? " · check list limited"
-                                  : "")
-                              : "No service observations"}
-                        </span>
-                      </span>
-                      <StatusBadge
-                        value={aggregateCondition(
-                          device,
-                          checks,
-                          observationsReady,
-                        )}
-                      />
-                    </button>
+                        <StatusBadge
+                          value={aggregateCondition(
+                            device,
+                            checks,
+                            observationsReady,
+                          )}
+                        />
+                      </button>
+                      <div className="px-4">
+                        <DeviceAgentLinks device={device} />
+                      </div>
+                    </div>
                   );
                 })}
               </div>
@@ -576,42 +586,50 @@ export function InfrastructurePage() {
                       observationsReady,
                     );
                     return (
-                      <button
-                        aria-pressed={device.id === selectedId}
-                        className="flex min-h-20 w-full items-center justify-between gap-3 p-4 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"
-                        key={device.id}
-                        onClick={() => selectDevice(device.id)}
-                        type="button"
-                      >
-                        <span className="flex min-w-0 items-center gap-3">
-                          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
-                            <ServerIcon aria-hidden="true" className="size-4" />
+                      <div key={device.id}>
+                        <button
+                          aria-pressed={device.id === selectedId}
+                          className="flex min-h-20 w-full items-center justify-between gap-3 p-4 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"
+                          onClick={() => selectDevice(device.id)}
+                          type="button"
+                        >
+                          <span className="flex min-w-0 items-center gap-3">
+                            <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground">
+                              <ServerIcon
+                                aria-hidden="true"
+                                className="size-4"
+                              />
+                            </span>
+                            <span className="min-w-0">
+                              <span className="block break-words font-medium">
+                                {deviceDisplayName(device)}
+                              </span>
+                              <span className="block truncate text-xs text-muted-foreground">
+                                {currentIpsByDevice.get(device.id)?.[0] ??
+                                  `Record updated ${formatRelative(device.updated_at)}`}
+                              </span>
+                              <span className="mt-1 block text-xs text-muted-foreground">
+                                {servicesQuery.isLoading ||
+                                monitorsQuery.isLoading
+                                  ? "Loading checks…"
+                                  : servicesQuery.isError ||
+                                      monitorsQuery.isError
+                                    ? "Condition unavailable"
+                                    : deviceServiceRows.length
+                                      ? `${failing ? `${failing} needs attention · ` : ""}${deviceServiceRows.length} service${deviceServiceRows.length === 1 ? "" : "s"}` +
+                                        (monitorsPossiblyTruncated
+                                          ? " · check list limited"
+                                          : "")
+                                      : "No service observations"}
+                              </span>
+                            </span>
                           </span>
-                          <span className="min-w-0">
-                            <span className="block truncate font-medium">
-                              {device.name || "Unnamed device"}
-                            </span>
-                            <span className="block truncate text-xs text-muted-foreground">
-                              {currentIpsByDevice.get(device.id)?.[0] ??
-                                `Record updated ${formatRelative(device.updated_at)}`}
-                            </span>
-                            <span className="mt-1 block text-xs text-muted-foreground">
-                              {servicesQuery.isLoading ||
-                              monitorsQuery.isLoading
-                                ? "Loading checks…"
-                                : servicesQuery.isError || monitorsQuery.isError
-                                  ? "Condition unavailable"
-                                  : deviceServiceRows.length
-                                    ? `${failing ? `${failing} needs attention · ` : ""}${deviceServiceRows.length} service${deviceServiceRows.length === 1 ? "" : "s"}` +
-                                      (monitorsPossiblyTruncated
-                                        ? " · check list limited"
-                                        : "")
-                                    : "No service observations"}
-                            </span>
-                          </span>
-                        </span>
-                        <StatusBadge value={condition} />
-                      </button>
+                          <StatusBadge value={condition} />
+                        </button>
+                        <div className="px-4">
+                          <DeviceAgentLinks device={device} />
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
@@ -656,7 +674,7 @@ export function InfrastructurePage() {
                           >
                             <TableCell>
                               <button
-                                aria-label={`Open ${device.name || "unnamed device"}`}
+                                aria-label={`Open ${deviceDisplayName(device)}`}
                                 aria-pressed={device.id === selectedId}
                                 className="flex min-h-11 min-w-0 w-full items-center gap-3 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                                 onClick={() => selectDevice(device.id)}
@@ -669,14 +687,15 @@ export function InfrastructurePage() {
                                   />
                                 </span>
                                 <span className="min-w-0">
-                                  <span className="block truncate font-medium">
-                                    {device.name || "Unnamed device"}
+                                  <span className="block break-words font-medium">
+                                    {deviceDisplayName(device)}
                                   </span>
                                   <span className="block truncate text-xs text-muted-foreground">
                                     {labelize(device.device_type)}
                                   </span>
                                 </span>
                               </button>
+                              <DeviceAgentLinks device={device} />
                             </TableCell>
                             <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
                               {interfacesQuery.isLoading ||
@@ -873,6 +892,46 @@ function StatusBadge({ value }: { value: string }) {
 
 function monitorDisplayState(monitor: Monitor): string {
   return monitor.enabled ? monitor.state : "disabled";
+}
+
+function deviceDisplayName(device: Device): string {
+  return (
+    device.name?.trim() ||
+    device.agents?.find((agent) => agent.hostname)?.hostname ||
+    "Unnamed device"
+  );
+}
+
+function DeviceAgentLinks({ device }: { device: Device }) {
+  if (!device.agents?.length) return null;
+  return (
+    <div className="min-w-0 space-y-1" aria-label="Installed agents">
+      {device.agents.map((agent) => (
+        <div
+          key={agent.id}
+          className="flex min-w-0 flex-wrap items-center gap-x-3 text-xs"
+        >
+          <span className="min-w-0 break-words text-muted-foreground">
+            {agent.hostname && agent.hostname !== deviceDisplayName(device)
+              ? `${agent.hostname} · `
+              : ""}
+            Agent {agent.status}
+            {agent.status !== "online"
+              ? ` · Last contact ${formatRelative(agent.last_seen)}`
+              : ""}
+          </span>
+          <a
+            className="inline-flex min-h-11 items-center rounded-sm text-sm underline underline-offset-4 outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            href={`/agents?agent=${encodeURIComponent(agent.id)}&tab=metrics`}
+            aria-label={`Agent metrics for ${agent.hostname || deviceDisplayName(device)}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            Metrics
+          </a>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function monitorServiceLabel(monitor: Monitor): string {
@@ -1109,8 +1168,8 @@ function DeviceDetail({
       <CardHeader className="border-b">
         <div className="min-w-0">
           <BackToDevices onBack={onBack} />
-          <CardTitle className="truncate">
-            {detail.name || "Unnamed device"}
+          <CardTitle className="break-words">
+            {deviceDisplayName(detail)}
           </CardTitle>
           <CardDescription className="flex flex-wrap gap-x-2">
             <span>{labelize(detail.device_type)}</span>
@@ -1119,6 +1178,7 @@ function DeviceDetail({
             ) : null}
             <span>Record updated {formatRelative(detail.updated_at)}</span>
           </CardDescription>
+          <DeviceAgentLinks device={detail} />
         </div>
         <CardAction>
           <StatusBadge value={currentCondition} />
@@ -1479,7 +1539,7 @@ function ReviewQueue({
   resolve: (id: string, decision: "confirm" | "reject") => void;
 }) {
   const names = new Map(
-    devices.map((device) => [device.id, device.name || "Unnamed device"]),
+    devices.map((device) => [device.id, deviceDisplayName(device)]),
   );
   return (
     <Card>
@@ -1943,8 +2003,7 @@ export function MergeDialog({
                     <SelectGroup>
                       {targets.map((device) => (
                         <SelectItem key={device.id} value={device.id}>
-                          {device.name || "Unnamed device"} ·{" "}
-                          {shortId(device.id)}
+                          {deviceDisplayName(device)} · {shortId(device.id)}
                         </SelectItem>
                       ))}
                     </SelectGroup>

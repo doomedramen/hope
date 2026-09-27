@@ -57,6 +57,47 @@ async fn aggregate_member_ids(pool: &PgPool, survivor: Uuid) -> sqlx::Result<Vec
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
+/// Read agent relationships in one query for the requested page, including links
+/// retained on merged members. Never infer agent ownership from an IP or hostname.
+async fn attach_agents(pool: &PgPool, devices: &mut [Value]) -> sqlx::Result<()> {
+    let ids: Vec<Uuid> = devices
+        .iter()
+        .filter_map(|device| device.get("id")?.as_str()?.parse().ok())
+        .collect();
+    let rows: Vec<(Uuid, Value)> = sqlx::query_as(
+        "with recursive members(root, id) as ( \
+            select id, id from unnest($1::uuid[]) id \
+            union \
+            select m.root, d.id from members m join devices d on d.canonical_of = m.id \
+         ), linked as ( \
+            select distinct m.root, a.id, a.hostname, a.os, a.arch, a.agent_version, \
+                coalesce(a.last_heartbeat_at, a.last_seen) as last_seen, a.created_at, \
+                case when a.revoked_at is not null then 'revoked' \
+                     when coalesce(a.last_heartbeat_at, a.last_seen) is null \
+                       or coalesce(a.last_heartbeat_at, a.last_seen) < now() - make_interval(secs => a.heartbeat_timeout_seconds::double precision) then 'offline' \
+                     when coalesce(a.last_heartbeat_at, a.last_seen) < now() - make_interval(secs => (a.heartbeat_timeout_seconds / 2)::double precision) then 'stale' \
+                     else 'online' end as status \
+            from members m join agents a on a.device_id = m.id \
+         ) select root, jsonb_build_object('id', id, 'hostname', hostname, 'os', os, 'arch', arch, \
+             'agent_version', agent_version, 'last_seen', last_seen, 'status', status) \
+           from linked order by root, (status = 'revoked'), last_seen desc nulls last, created_at desc, id",
+    ).bind(&ids).fetch_all(pool).await?;
+    let mut agents = std::collections::HashMap::<Uuid, Vec<Value>>::new();
+    for (id, agent) in rows {
+        agents.entry(id).or_default().push(agent);
+    }
+    for device in devices {
+        if let Some(id) = device
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|id| id.parse::<Uuid>().ok())
+        {
+            device["agents"] = json!(agents.remove(&id).unwrap_or_default());
+        }
+    }
+    Ok(())
+}
+
 pub async fn get(State(state): State<AppState>, Path(id): Path<Uuid>) -> (StatusCode, Json<Value>) {
     let survivor = match resolve_device(&state.pool, id).await {
         Ok(v) => v,
@@ -122,6 +163,9 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<Uuid>) -> (Status
         map.insert("merged_member_ids".to_string(), json!(member_ids));
     }
 
+    if let Err(e) = attach_agents(&state.pool, std::slice::from_mut(&mut device)).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
     (StatusCode::OK, Json(device))
 }
 
@@ -241,7 +285,10 @@ pub async fn list(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
-    let items: Vec<Value> = rows.into_iter().map(|(v,)| v).collect();
+    let mut items: Vec<Value> = rows.into_iter().map(|(v,)| v).collect();
+    if let Err(e) = attach_agents(&state.pool, &mut items).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
     let next_cursor = items.last().and_then(|last| {
         let created_at = last.get("created_at")?.as_str()?;
         let id = last.get("id")?.as_str()?;
@@ -646,6 +693,152 @@ mod gate_tests {
             .expect("connect to DATABASE_URL");
         sqlx::migrate!("../../migrations").run(&pool).await.unwrap();
         Some(pool)
+    }
+
+    #[tokio::test]
+    async fn agent_links_backfill_only_unambiguous_identity_rules() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.unwrap();
+        let first: Uuid =
+            sqlx::query_scalar("insert into devices(device_type) values ('unknown') returning id")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        let second: Uuid =
+            sqlx::query_scalar("insert into devices(device_type) values ('unknown') returning id")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        let known = Uuid::new_v4();
+        let ambiguous = Uuid::new_v4();
+        for agent in [known, ambiguous] {
+            sqlx::query("insert into agents(id, cert_fingerprint, cert_serial) values ($1,$2,$2)")
+                .bind(agent)
+                .bind(agent.to_string())
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        for (agent, device) in [
+            (known, first),
+            (known, first),
+            (ambiguous, first),
+            (ambiguous, second),
+        ] {
+            sqlx::query(
+                "insert into identity_rules(device_id,rule_type,value) values ($1,'agent_id',$2)",
+            )
+            .bind(device)
+            .bind(agent.to_string())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        }
+        // Exercise the actual upgrade SQL against pre-migration rows. Rollback
+        // restores the schema and fixtures for other database tests.
+        sqlx::query("alter table agents drop column device_id")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/0041_agent_device_link.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        let link: Option<Uuid> = sqlx::query_scalar("select device_id from agents where id=$1")
+            .bind(known)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(link, Some(first));
+        let link: Option<Uuid> = sqlx::query_scalar("select device_id from agents where id=$1")
+            .bind(ambiguous)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(link, None);
+        assert!(
+            sqlx::query("update agents set device_id=$1 where id=$2")
+                .bind(Uuid::new_v4())
+                .bind(known)
+                .execute(&mut *tx)
+                .await
+                .is_err()
+        );
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn device_reads_include_linked_agents_and_follow_merge_members() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+        let (survivor, _, _) = make_device_with_interface_and_evidence(&pool).await;
+        let (member, _, _) = make_device_with_interface_and_evidence(&pool).await;
+        sqlx::query("update devices set canonical_of=$1,status='merged' where id=$2")
+            .bind(survivor)
+            .bind(member)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut agent_ids = Vec::new();
+        for (link, age, revoked) in [
+            (Some(member), 0, false),
+            (Some(survivor), 70, false),
+            (Some(survivor), 120, false),
+            (Some(survivor), 0, true),
+            (None, 0, false),
+        ] {
+            let agent = Uuid::new_v4();
+            sqlx::query("insert into agents(id,cert_fingerprint,cert_serial,hostname,device_id,last_heartbeat_at,revoked_at) values ($1,$2,$2,'same-hostname',$3,now()-make_interval(secs=>$4),case when $5 then now() else null end)")
+                .bind(agent).bind(agent.to_string()).bind(link).bind(age as f64).bind(revoked).execute(&pool).await.unwrap();
+            agent_ids.push(agent);
+        }
+        let state = AppState { pool: pool.clone() };
+        let (status, Json(detail)) = get(State(state.clone()), AxumPath(member)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["id"], json!(survivor));
+        let agents = detail["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 4);
+        for (id, status) in agent_ids
+            .iter()
+            .zip(["online", "stale", "offline", "revoked"])
+        {
+            assert_eq!(
+                agents.iter().find(|a| a["id"] == json!(id)).unwrap()["status"],
+                status
+            );
+        }
+        // List and detail expose the same relationship without identity rules.
+        let (_, Json(page)) = list(
+            State(state),
+            Query(ListParams {
+                cursor: None,
+                limit: Some(200),
+            }),
+        )
+        .await;
+        assert_eq!(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["id"] == json!(survivor))
+                .unwrap()["agents"],
+            detail["agents"]
+        );
+        sqlx::query("update devices set canonical_of=null,status='active' where id=$1")
+            .bind(member)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut rows = vec![json!({"id":survivor}), json!({"id":member})];
+        attach_agents(&pool, &mut rows).await.unwrap();
+        assert_eq!(rows[0]["agents"].as_array().unwrap().len(), 3);
+        assert_eq!(rows[1]["agents"][0]["id"], json!(agent_ids[0]));
     }
 
     async fn make_device_with_interface_and_evidence(pool: &PgPool) -> (Uuid, Uuid, Uuid) {

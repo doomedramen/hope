@@ -161,6 +161,100 @@ describe("EditDeviceDialog", () => {
 });
 
 describe("InfrastructurePage", () => {
+  it("shows linked agent hostnames and metric links in the list and detail", async () => {
+    const device = detail("device-1", "");
+    device.agents = [
+      {
+        id: "agent-1",
+        hostname: "worker-london-01",
+        status: "online",
+        os: "linux",
+        arch: "amd64",
+        agent_version: "0.0.74",
+        last_seen: new Date().toISOString(),
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v1/devices?limit=100")
+          return Promise.resolve(
+            jsonResponse({ items: [device], next_cursor: null }),
+          );
+        if (path === "/api/v1/devices/device-1")
+          return Promise.resolve(jsonResponse(device));
+        return Promise.resolve(jsonResponse({ items: [], next_cursor: null }));
+      }),
+    );
+    renderInfrastructurePage();
+    const links = await screen.findAllByRole("link", {
+      name: "Agent metrics for worker-london-01",
+    });
+    expect(links).toHaveLength(2); // Desktop row and mobile card.
+    for (const link of links) {
+      expect(link).toHaveAttribute("href", "/agents?agent=agent-1&tab=metrics");
+      expect(link.closest("button")).toBeNull();
+    }
+    expect(screen.getAllByText("Agent online")).toHaveLength(2);
+    fireEvent.change(screen.getByRole("textbox", { name: "Search devices" }), {
+      target: { value: "worker-london" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open worker-london-01" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("link", {
+          name: "Agent metrics for worker-london-01",
+        }),
+      ).toHaveLength(2),
+    );
+  });
+
+  it("keeps custom names searchable by agent hostname and shows offline state", async () => {
+    const device = detail("device-1", "Media server");
+    device.agents = [
+      {
+        id: "agent-1",
+        hostname: "worker-london-01",
+        status: "offline",
+        os: "linux",
+        arch: "amd64",
+        agent_version: "0.0.74",
+        last_seen: null,
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) =>
+        Promise.resolve(
+          jsonResponse(
+            String(input) === "/api/v1/devices?limit=100"
+              ? { items: [device], next_cursor: null }
+              : { items: [], next_cursor: null },
+          ),
+        ),
+      ),
+    );
+    renderInfrastructurePage();
+    await screen.findByRole("button", { name: "Open Media server" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Search devices" }), {
+      target: { value: "worker-london" },
+    });
+    expect(
+      screen.getByRole("button", { name: "Open Media server" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/worker-london-01 · Agent offline/),
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByRole("link", {
+        name: "Agent metrics for worker-london-01",
+      }),
+    ).toHaveLength(2);
+  });
+
   it("queues a full scan from one device", async () => {
     const device = detail("device-1", "QA VM device");
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
