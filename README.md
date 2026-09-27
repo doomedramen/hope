@@ -1,6 +1,7 @@
 # hope
 
-Hope is a homelab operations platform for network discovery, monitoring,
+Hope stands for **Homelab Operations & Planning Engine**. It is a self-hosted
+platform for network discovery, monitoring,
 maintenance planning, notifications, and managed agents. The current backend
 includes the M1–M9 inventory, discovery, monitoring, agent, release-update,
 dependency, alert-suppression, and maintenance slices. The M9 maintenance API

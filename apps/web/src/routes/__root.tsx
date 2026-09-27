@@ -13,9 +13,10 @@ import {
   SearchIcon,
   ServerIcon,
   Settings2Icon,
-  ShieldCheckIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { HopeLogo } from "@/components/HopeLogo";
+import { HopeMark } from "@/components/HopeMark";
 import { AuthPanel } from "@/components/AuthPanel";
 import {
   DropdownMenu,
@@ -96,10 +97,7 @@ function RootLayout() {
           className="flex items-center gap-2 text-sm text-muted-foreground"
           role="status"
         >
-          <ShieldCheckIcon
-            aria-hidden="true"
-            className="size-4 animate-pulse"
-          />
+          <HopeMark className="size-6 animate-pulse" />
           Connecting to Hope
         </div>
       </main>
@@ -132,10 +130,7 @@ function RootLayout() {
             className="flex shrink-0 items-center gap-2 rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
             to="/devices"
           >
-            <span className="grid size-8 place-items-center rounded-lg bg-primary text-primary-foreground">
-              <ShieldCheckIcon aria-hidden="true" className="size-4" />
-            </span>
-            <span className="font-semibold tracking-tight">Hope</span>
+            <HopeLogo />
           </Link>
 
           <nav

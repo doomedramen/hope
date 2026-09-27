@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { ArrowRightIcon, KeyRoundIcon, ShieldCheckIcon } from "lucide-react";
+import { ArrowRightIcon, ShieldCheckIcon } from "lucide-react";
+import { HopeLogo } from "@/components/HopeLogo";
 import { getUserFacingError, login, setupAdmin } from "@/lib/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -54,8 +55,8 @@ export function AuthPanel({
       <section className="w-full max-w-md">
         <Card className="w-full shadow-sm">
           <CardHeader>
-            <div className="mb-4 flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-              <KeyRoundIcon />
+            <div className="mb-4 flex items-center gap-3">
+              <HopeLogo className="h-12" />
             </div>
             <CardTitle render={<h1 />}>
               {mode === "login" ? "Sign in" : "Create operator account"}

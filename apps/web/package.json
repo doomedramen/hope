@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "generate:icons": "node scripts/generate-icons.mjs",
     "build": "vite build && tsc -b",
     "lint": "oxlint",
     "format": "prettier --write .",
