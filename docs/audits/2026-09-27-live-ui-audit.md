@@ -89,7 +89,9 @@ The fingerprinting error now includes the specific validation failure instead of
 
 ## Verification after the server update
 
-Both previously missing host inventories were accepted after deployment. Each host now has an associated device and service records; the inspected host also shows interfaces, filesystems, processes, sockets, and a confirmed identity link. The initially replayed snapshots were approximately two hours old, so the delayed-inventory warning correctly remains visible. Fresh collection and Proxmox guest discovery are separate checks and were not established by replay alone.
+Both previously missing host inventories were accepted after deployment. Each host now has an associated device and service records; the inspected host also shows interfaces, filesystems, processes, sockets, and a confirmed identity link. The initially replayed snapshots were approximately two hours old, so the delayed-inventory warning correctly remained visible until the next collection. Both hosts subsequently delivered fresh inventory and cleared the delay warning, confirming continued ingestion beyond replay.
+
+Fresh snapshots report three collector limitations: network address data is unavailable, Docker engine or CLI is unavailable, and the Proxmox helper inventory is unavailable or stale. Guest discovery remains blocked on the host helper. Operator checks of the helper timer/service and effective address-family sandbox were requested. Docker absence on a Proxmox host does not itself establish a defect.
 
 A standard scan was launched against the existing confirmed network scope. The new job is progressing, but completion has not yet been verified. Launching it exposed another client defect: cached failed scan history took precedence over the successful launch response, leaving the old failure visible and the launch button enabled until a page refresh. The launch handler now updates and refreshes the network scan cache immediately. A regression test reproduces the stale failure before the fix and verifies the queued state, disabled launch action, cancellation action, and history refresh afterward.
 
