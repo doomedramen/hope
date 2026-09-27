@@ -105,8 +105,10 @@ The root oneshot runs two fixed, read-only `pvesh get` requests against the
 local node's QEMU and LXC inventories. It exports only VMID, name, type,
 reported power state, template flag, and basic resource metadata into
 `/run/hope-proxmox/inventory.json`. It does not export guest configurations,
-passwords, tokens, or other nodes' inventory. The network-facing agent stays
-unprivileged and receives no additional groups or sudo rights. Proxmox's
+passwords, tokens, or other nodes' inventory. Proxmox discovery grants the
+network-facing agent no additional groups or sudo rights. If Docker also runs
+on that host, the installer's separate [Docker access setup](../manual-agent-install.md#docker-inventory-access)
+can grant root-equivalent Docker access unless explicitly skipped. Proxmox's
 [local API shell](https://pve.proxmox.com/pve-docs/pvesh.1.html) requires root;
 the separate service keeps that permission outside the network-facing process.
 

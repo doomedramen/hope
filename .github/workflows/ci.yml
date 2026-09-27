@@ -17,6 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/test-proxmox-helper.sh
+      - run: bash scripts/test-agent-docker-access.sh
 
   rust-checks:
     name: fmt, clippy, test

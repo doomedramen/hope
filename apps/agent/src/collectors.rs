@@ -1715,49 +1715,32 @@ fn socket_owners() -> HashMap<u64, (u32, String)> {
 }
 
 async fn collect_docker() -> Result<Value, String> {
-    let engine = command_output(
-        "docker",
-        &["version", "--format", "{{json .Server}}"],
-        COMMAND_TIMEOUT,
-        MAX_COMMAND_OUTPUT_BYTES,
-    )
-    .await
-    .ok()
-    .and_then(|output| parse_first_json(&output));
+    let engine_result = docker_command_output(&["version", "--format", "{{json .Server}}"]).await;
+    let engine = engine_result
+        .as_ref()
+        .ok()
+        .and_then(|output| parse_first_json(output));
 
-    let containers = command_output(
-        "docker",
-        &["ps", "-a", "--no-trunc", "--format", "{{json .}}"],
-        COMMAND_TIMEOUT,
-        MAX_COMMAND_OUTPUT_BYTES,
-    )
-    .await
-    .ok()
-    .map(|output| parse_docker_containers(&output))
-    .unwrap_or_default();
-    let images = command_output(
-        "docker",
-        &["images", "--no-trunc", "--format", "{{json .}}"],
-        COMMAND_TIMEOUT,
-        MAX_COMMAND_OUTPUT_BYTES,
-    )
-    .await
-    .ok()
-    .map(|output| parse_json_lines(&output, MAX_ITEMS))
-    .unwrap_or_default();
-    let networks = command_output(
-        "docker",
-        &["network", "ls", "--format", "{{json .}}"],
-        COMMAND_TIMEOUT,
-        MAX_COMMAND_OUTPUT_BYTES,
-    )
-    .await
-    .ok()
-    .map(|output| parse_json_lines(&output, MAX_ITEMS))
-    .unwrap_or_default();
+    let containers = docker_command_output(&["ps", "-a", "--no-trunc", "--format", "{{json .}}"])
+        .await
+        .ok()
+        .map(|output| parse_docker_containers(&output))
+        .unwrap_or_default();
+    let images = docker_command_output(&["images", "--no-trunc", "--format", "{{json .}}"])
+        .await
+        .ok()
+        .map(|output| parse_json_lines(&output, MAX_ITEMS))
+        .unwrap_or_default();
+    let networks = docker_command_output(&["network", "ls", "--format", "{{json .}}"])
+        .await
+        .ok()
+        .map(|output| parse_json_lines(&output, MAX_ITEMS))
+        .unwrap_or_default();
 
     if engine.is_none() && containers.is_empty() && images.is_empty() && networks.is_empty() {
-        return Err("Docker engine or CLI unavailable".into());
+        return Err(engine_result.err().unwrap_or_else(|| {
+            "Docker returned no valid inventory; check the engine and CLI compatibility".into()
+        }));
     }
     Ok(json!({
         "engine": engine,
@@ -1765,6 +1748,38 @@ async fn collect_docker() -> Result<Value, String> {
         "images": images,
         "networks": networks,
     }))
+}
+
+async fn docker_command_output(args: &[&str]) -> Result<String, String> {
+    command_output_with_diagnostics(
+        "docker",
+        args,
+        COMMAND_TIMEOUT,
+        MAX_COMMAND_OUTPUT_BYTES,
+        true,
+    )
+    .await
+}
+
+fn docker_command_error(stderr: &str, fallback: String) -> String {
+    let message = stderr.to_ascii_lowercase();
+    if message.contains("permission denied")
+        && (message.contains("docker.sock")
+            || message.contains("connect to the docker")
+            || message.contains("unix socket"))
+    {
+        "Docker socket permission denied for the agent service user. Rerun the current Hope installer to configure local Docker access, or grant access explicitly; Docker access is root-equivalent on this host.".into()
+    } else if message.contains("cannot connect to the docker daemon")
+        || message.contains("is the docker daemon running")
+    {
+        "Docker engine is unreachable. Check that Docker is running and the agent's Docker endpoint is correct.".into()
+    } else {
+        // Do not forward arbitrary engine stderr: it can contain credentials or
+        // private endpoint details. Only known diagnostic categories are exposed.
+        format!(
+            "Docker inventory command failed ({fallback}); check engine availability and service-user socket access"
+        )
+    }
 }
 
 pub fn parse_json_lines(input: &str, max_items: usize) -> Vec<Value> {
@@ -1828,39 +1843,89 @@ async fn command_output(
     command_timeout: Duration,
     max_bytes: usize,
 ) -> Result<String, String> {
+    command_output_with_diagnostics(program, args, command_timeout, max_bytes, false).await
+}
+
+async fn command_output_with_diagnostics(
+    program: &str,
+    args: &[&str],
+    command_timeout: Duration,
+    max_bytes: usize,
+    docker_diagnostics: bool,
+) -> Result<String, String> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(if docker_diagnostics {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .kill_on_drop(true)
         .spawn()
-        .map_err(|err| format!("{program}: {err}"))?;
+        .map_err(|err| {
+            if docker_diagnostics && err.kind() == std::io::ErrorKind::NotFound {
+                "Docker CLI not found in the agent PATH; install Docker CLI on this host".to_owned()
+            } else {
+                format!("{program}: {err}")
+            }
+        })?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| format!("{program}: stdout unavailable"))?;
+    let stderr = child.stderr.take();
     let result = timeout(command_timeout, async {
-        let mut bytes = Vec::new();
-        stdout
-            .take((max_bytes + 1) as u64)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|err| format!("{program}: read stdout: {err}"))?;
-        if bytes.len() > max_bytes {
-            return Err(format!("{program} output exceeds {max_bytes} bytes"));
-        }
+        let read_stdout = async {
+            let mut bytes = Vec::new();
+            stdout
+                .take((max_bytes + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|err| format!("{program}: read stdout: {err}"))?;
+            if bytes.len() > max_bytes {
+                return Err(format!("{program} output exceeds {max_bytes} bytes"));
+            }
+            Ok(bytes)
+        };
+        let read_stderr = async {
+            let mut bytes = Vec::new();
+            if let Some(mut stderr) = stderr {
+                // Drain the pipe within the command timeout, but retain only a
+                // bounded prefix. Closing it early can fail a healthy process.
+                let mut chunk = [0u8; 1024];
+                loop {
+                    let count = stderr
+                        .read(&mut chunk)
+                        .await
+                        .map_err(|err| format!("{program}: read stderr: {err}"))?;
+                    if count == 0 {
+                        break;
+                    }
+                    let keep = count.min(MAX_TEXT_BYTES.saturating_sub(bytes.len()));
+                    bytes.extend_from_slice(&chunk[..keep]);
+                }
+            }
+            Ok::<_, String>(String::from_utf8_lossy(&bytes).into_owned())
+        };
+        let (bytes, stderr) = tokio::try_join!(read_stdout, read_stderr)?;
         let status = child
             .wait()
             .await
             .map_err(|err| format!("{program}: wait: {err}"))?;
         if !status.success() {
-            return Err(format!(
+            let error = format!(
                 "{program} exited with status {}",
                 status
                     .code()
                     .map_or_else(|| "signal".into(), |code| code.to_string())
-            ));
+            );
+            return Err(if docker_diagnostics {
+                docker_command_error(&stderr, error)
+            } else {
+                error
+            });
         }
         Ok::<_, String>(String::from_utf8_lossy(&bytes).into_owned())
     })
@@ -1881,6 +1946,68 @@ async fn command_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn docker_permission_failure_reports_the_required_repair() {
+        let error = command_output_with_diagnostics(
+            "sh",
+            &["-c", "printf 'permission denied while trying to connect to the docker API at unix:///var/run/docker.sock' >&2; exit 1"],
+            COMMAND_TIMEOUT,
+            MAX_COMMAND_OUTPUT_BYTES,
+            true,
+        ).await.expect_err("Docker access must fail");
+        assert!(error.contains("Docker socket permission denied"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn docker_diagnostics_distinguish_missing_cli_and_stopped_engine() {
+        let missing = command_output_with_diagnostics(
+            "/nonexistent/hope-test-docker",
+            &[],
+            COMMAND_TIMEOUT,
+            MAX_COMMAND_OUTPUT_BYTES,
+            true,
+        )
+        .await
+        .expect_err("missing CLI");
+        assert!(missing.contains("Docker CLI not found"), "{missing}");
+        let stopped = command_output_with_diagnostics(
+            "sh", &["-c", "printf 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?' >&2; exit 1"],
+            COMMAND_TIMEOUT, MAX_COMMAND_OUTPUT_BYTES, true,
+        ).await.expect_err("stopped engine");
+        assert!(
+            stopped.contains("Docker engine is unreachable"),
+            "{stopped}"
+        );
+    }
+
+    #[tokio::test]
+    async fn docker_diagnostics_do_not_publish_arbitrary_stderr() {
+        let error = command_output_with_diagnostics(
+            "sh",
+            &["-c", "printf 'private-token=example-secret' >&2; exit 1"],
+            COMMAND_TIMEOUT,
+            MAX_COMMAND_OUTPUT_BYTES,
+            true,
+        )
+        .await
+        .expect_err("failed command");
+        assert!(error.contains("exited with status 1"), "{error}");
+        assert!(!error.contains("example-secret"), "{error}");
+        let output = command_output_with_diagnostics(
+            "sh",
+            &[
+                "-c",
+                "i=0; while [ \"$i\" -lt 200 ]; do printf 'long warning\\n' >&2; i=$((i + 1)); done; printf '{\"Version\":\"test\"}'",
+            ],
+            COMMAND_TIMEOUT,
+            MAX_COMMAND_OUTPUT_BYTES,
+            true,
+        )
+        .await
+        .expect("successful command");
+        assert_eq!(output, r#"{"Version":"test"}"#);
+    }
 
     #[test]
     fn parsers_keep_representative_linux_fields() {

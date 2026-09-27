@@ -79,6 +79,14 @@ state directory, and a root-owned executable. The documented systemd unit
 uses `NoNewPrivileges`, `ProtectHome`, and `ProtectSystem`. The agent private
 key is `0600` and remains on its host.
 
+When Docker CLI and a standard root-owned, group-writable local Docker socket
+are present, the Linux installer adds the service account to its non-root
+`docker` group. Docker API access is root-equivalent on that host; the systemd
+sandbox does not prevent privileged actions through the engine. The installer
+prints this implication and supports `--docker-access skip` or
+`HOPE_DOCKER_ACCESS=skip` on each run. These options prevent new grants and do not
+revoke existing access. No socket permissions or unrelated groups are changed.
+
 *Gap*: collectors may need host-specific read privileges, and root or the same
 UID can still read the agent key. No TPM, secure enclave, or hardware-backed
 identity is required.

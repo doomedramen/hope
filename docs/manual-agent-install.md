@@ -39,6 +39,37 @@ Hope's connection address.
 
 ## Troubleshooting
 
+### Docker inventory access
+
+The Linux installer checks for Docker CLI and the standard local socket at
+`/var/run/docker.sock`. If that socket is root-owned, group-writable, and belongs
+to a non-root `docker` group, installation and reinstallation add `hope-agent`
+to that group without removing existing memberships. The installer explains
+that Docker access grants root-equivalent control on the machine running Docker,
+verifies an engine query as the service user, and restarts the agent.
+
+To opt out, set `HOPE_DOCKER_ACCESS=skip` on the installer process, or pass
+`--docker-access skip` on each installation or reinstallation. This prevents
+new permission grants; it does
+not revoke access previously granted by an operator or earlier installation.
+For example, with an existing enrollment:
+
+```sh
+curl -fsSL https://hope.example.com/agent/install.sh | sudo env HOPE_SERVER=https://hope.example.com HOPE_DOCKER_ACCESS=skip bash
+```
+
+Hosts without Docker still install normally. The installer does not start or
+install Docker, change socket permissions, join unrelated groups, or configure
+rootless/remote engines. If Docker is installed later, rerun the installer once
+the local engine is running. Binary-only managed updates do not change host
+permissions. Existing hosts with the old permission problem need one installer
+rerun; their enrollment and state are preserved.
+
+For Docker inside a Proxmox LXC, install the Hope agent inside that LXC. The
+Proxmox host agent discovers the LXC but cannot inventory its Docker engine.
+
+### Other installation issues
+
 - If network inventory reports `ip address data unavailable` but
   `sudo -u hope-agent ip -j address show` succeeds, check
   `systemctl show hope-agent -p RestrictAddressFamilies`. Older installer units

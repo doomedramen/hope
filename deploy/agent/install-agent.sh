@@ -18,6 +18,7 @@ RELEASE_URL=""
 VERSION="latest"
 CODE_STDIN=false
 YES=false
+DOCKER_ACCESS="${HOPE_DOCKER_ACCESS:-auto}"
 # The one-command bootstrap flow supplies these environment variables. The
 # older explicit flags remain supported for scripted upgrades and recovery.
 BOOTSTRAP_SERVER="${HOPE_SERVER:-${HSERV:-}}"
@@ -82,6 +83,10 @@ Install options:
   --release-url URL       Explicit /agent/v1/releases route root.
   --version VERSION       latest (default) or exact semantic version.
   --code-stdin            Read enrollment code from stdin; requires --yes.
+  --docker-access MODE    auto (default): grant access to a standard local Docker
+                          socket via its non-root docker group; skip: no changes.
+                          Docker access is root-equivalent on this host.
+                          HOPE_DOCKER_ACCESS sets the same policy.
   --yes                   Confirm noninteractive or destructive operation.
 
 Uninstall options:
@@ -151,6 +156,15 @@ while (( $# > 0 )); do
         --version=*)
             VERSION=${1#*=}
             [[ -n "$VERSION" ]] || die "--version requires a value"
+            shift
+            ;;
+        --docker-access)
+            require_value "$1" "${2-}"
+            DOCKER_ACCESS=$2
+            shift 2
+            ;;
+        --docker-access=*)
+            DOCKER_ACCESS=${1#*=}
             shift
             ;;
         --code-stdin)
@@ -444,6 +458,46 @@ ensure_service_account() {
         -exec chown "$SERVICE_USER:$SERVICE_GROUP" {} + \
         -exec chmod 0600 {} + \
         || die "could not secure existing state files"
+
+    configure_docker_access
+}
+
+configure_docker_access() {
+    local socket=/var/run/docker.sock
+    local socket_uid socket_gid socket_group socket_mode socket_info groups
+    if [[ "$DOCKER_ACCESS" == skip ]]; then
+        log "Docker access setup skipped; existing permissions are unchanged"
+        return 0
+    fi
+    if ! command -v docker >/dev/null 2>&1; then
+        log "Docker CLI not found; Docker access setup skipped"
+        return 0
+    fi
+    if [[ ! -S "$socket" || -L "$socket" ]]; then
+        log "Docker local socket unavailable or nonstandard; no permissions changed. Start Docker and rerun the installer for local inventory. Rootless/remote Docker requires separate configuration."
+        return 0
+    fi
+    socket_info=$(stat -Lc '%u:%g:%G:%a' "$socket") || die "could not inspect Docker socket permissions"
+    IFS=: read -r socket_uid socket_gid socket_group socket_mode <<< "$socket_info"
+    # Never join root or an unrelated group, or relax the socket permissions.
+    if [[ "$socket_uid" != 0 || "$socket_gid" == 0 || "$socket_group" != docker || ! "$socket_mode" =~ ^[0-7]{3,4}$ ]]; then
+        log "Docker socket has nonstandard ownership; no permissions changed. Configure Docker access for $SERVICE_USER explicitly."
+        return 0
+    fi
+    if (( (8#$socket_mode & 0020) == 0 )); then
+        log "Docker socket is not group-writable; no permissions changed. Configure Docker access for $SERVICE_USER explicitly."
+        return 0
+    fi
+    groups=$(id -nG "$SERVICE_USER") || die "could not inspect service user groups"
+    if [[ " $groups " != *" docker "* ]]; then
+        log "Enabling Docker inventory: adding $SERVICE_USER to docker grants root-equivalent access on this host. Use --docker-access skip to opt out."
+        usermod -aG docker "$SERVICE_USER" || { log "error: could not grant Docker access to $SERVICE_USER"; return 1; }
+    fi
+    if run_as_service timeout 5s docker --host unix:///var/run/docker.sock version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+        log "Docker access verified for $SERVICE_USER"
+    else
+        log "warning: Docker is still unavailable to $SERVICE_USER. Check the Docker engine and socket permissions; host inventory installation will continue."
+    fi
 }
 
 state_is_enrolled() {
@@ -792,6 +846,7 @@ if [[ "$OPERATION" == "uninstall" ]]; then
 fi
 
 [[ "$PURGE" == false ]] || die "--purge requires --uninstall"
+[[ "$DOCKER_ACCESS" == auto || "$DOCKER_ACCESS" == skip ]] || die "--docker-access must be auto or skip"
 derive_bootstrap_urls
 if [[ -n "$BOOTSTRAP_CODE" ]]; then
     CODE_STDIN=true
@@ -809,7 +864,7 @@ unset HOPE_SERVER HOPE_ENROLLMENT_CODE HHKEY HPKEY HSERV
     || die "--code-stdin is noninteractive; pass --yes"
 
 require_root
-require_command id uname mktemp rm chmod chown install mv find awk grep wc tr stat getent useradd usermod systemctl
+require_command id uname mktemp rm chmod chown install mv find awk grep wc tr stat getent useradd usermod systemctl timeout
 if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     die "required command not found: curl or wget"
 fi
