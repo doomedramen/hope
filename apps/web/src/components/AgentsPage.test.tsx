@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentsPage } from "./AgentsPage";
 import type { Agent, AgentDetail } from "@/lib/api";
@@ -205,10 +205,18 @@ describe("AgentsPage", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "Select edge-01" }),
     );
+    const overview = await screen.findByRole("tabpanel", { name: "Overview" });
     expect(
-      await screen.findByRole("region", { name: "Agent at a glance" }),
+      within(overview).getByRole("region", { name: "Agent at a glance" }),
     ).toBeVisible();
+    expect(
+      screen.getByRole("tablist", { name: "Agent views" })
+        .compareDocumentPosition(overview) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+    expect(
+      screen.queryByRole("region", { name: "Agent at a glance" }),
+    ).not.toBeInTheDocument();
     fireEvent.click(
       await screen.findByText("Agent identity and delivery details", {
         selector: "summary",

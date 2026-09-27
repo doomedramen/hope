@@ -862,15 +862,6 @@ function AgentDetailPanel({
         </CardAction>
       </CardHeader>
       <CardContent className="flex min-w-0 flex-col gap-5">
-        {activeTab === "overview" && (
-          <AgentAtGlance
-            agent={detail}
-            metrics={metricsQuery.data}
-            loading={metricsQuery.isLoading}
-            error={error || metricsQuery.error}
-            navigate={navigate}
-          />
-        )}
         <Tabs
           className="min-w-0"
           onValueChange={setActiveTab}
@@ -896,10 +887,13 @@ function AgentDetailPanel({
           </TabsList>
 
           <TabsContent className="pt-4" value="overview">
-            <p className="text-sm text-muted-foreground">
-              Open Metrics for trends or Logs for recent activity. Collection
-              and update controls are in Settings.
-            </p>
+            <AgentAtGlance
+              agent={detail}
+              metrics={metricsQuery.data}
+              loading={metricsQuery.isLoading}
+              error={error || metricsQuery.error}
+              navigate={navigate}
+            />
           </TabsContent>
 
           <TabsContent className="space-y-6 pt-4" value="settings">
