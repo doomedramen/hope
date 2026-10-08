@@ -218,3 +218,9 @@ Before each milestone commit, review staged files and ensure no keys, tokens, da
 ### Ticket 02 — contract and migration foundation completed 2026-10-08
 
 Shared DTOs now cover authentication, networks, merge, metric windows, enrollment tokens/reports, and SSH requests/responses. Scan/install states use Rust enums and generated TypeScript unions. Errors include stable status-based codes. Inventory, collector metadata, and metric dimensions have bounded strings/lists and finite numeric/range checks. Database adoption uses an ordered transactional version, preserves legacy identities/history, rejects future versions, and remains idempotent. Tests cover legacy host defaults, status values, invalid reports without storage, and database adoption. Native tests/Clippy and frontend types/lint pass. CI contract-drift enforcement is scheduled in Ticket 10.
+
+### Ticket 03 — discovery/enrichment milestone completed 2026-10-08
+
+The scheduler has an injectable probe backend and bounded host deadlines. TCP port 80 and refused-connection liveness are supported. Enrichment uses a bounded deduplicated queue, eight workers, visible host states, killable Linux/macOS resolvers, and capped resolver output. ARP validates frame fields, correlates source/target requests, chooses matching interface addresses, bounds pending requests, and moves raw sends off Tokio workers. Cancellation is rechecked after obtaining the persistence lock. Latest scan records remain available for each range.
+
+Native and Linux ARM64 tests/Clippy/formatting pass. Ten controlled discovery runs passed: five routed runs completed both ranges in 25.397–25.437 seconds; five on-link runs in 26.392–26.464 seconds. First responders appeared in 0.772–0.817 seconds. See docs/validation.md and its raw benchmark files. The shared limit is 200 probe starts per second; an absolute interface packet policer and measured frame counts are not claimed.

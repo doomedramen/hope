@@ -57,7 +57,11 @@ pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstr
             .map(|v| serde_json::from_str(&v))
             .transpose()?
             .unwrap_or_default(),
-        capabilities: state.0.capabilities.clone(),
+        capabilities: {
+            let mut capabilities = state.0.capabilities.clone();
+            capabilities.arp = capabilities.arp && state.0.scheduler.arp.available();
+            capabilities
+        },
         server_url: state.0.server_url.clone(),
     }))
 }

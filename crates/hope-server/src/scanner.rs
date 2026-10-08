@@ -2,7 +2,7 @@ use crate::{
     error::{ApiError, ApiResult},
     state::{State, now},
 };
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use hope_protocol::{Capabilities, Host, Network, ScanJob, ScanStatus, Service};
 use ipnet::Ipv4Net;
 use sqlx::Row;
@@ -27,57 +27,121 @@ struct Batch {
     cancel: CancellationToken,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct Observation {
+    pub alive: bool,
+    pub method: &'static str,
+    pub mac: Option<String>,
+    pub services: Vec<Service>,
+}
+pub(crate) trait Probe: Send + Sync {
+    fn probe(&self, ip: Ipv4Addr) -> BoxFuture<'_, Observation>;
+}
+struct NativeProbe {
+    limiter: Arc<ProbeLimiter>,
+    arp: crate::arp::Arp,
+    ping: Option<Arc<surge_ping::Client>>,
+}
+impl Probe for NativeProbe {
+    fn probe(&self, ip: Ipv4Addr) -> BoxFuture<'_, Observation> {
+        Box::pin(async move {
+            let (ping, ssh, http, https, mac) = tokio::join!(
+                ping(ip, &self.limiter, self.ping.as_deref()),
+                tcp_probe(ip, 22, &self.limiter),
+                tcp_probe(ip, 80, &self.limiter),
+                tcp_probe(ip, 443, &self.limiter),
+                async {
+                    if self.arp.on_link(ip) {
+                        let _permit = self.limiter.acquire().await.ok()?;
+                        self.arp.probe(ip).await
+                    } else {
+                        None
+                    }
+                }
+            );
+            Observation {
+                alive: ping
+                    || mac.is_some()
+                    || [ssh, http, https]
+                        .iter()
+                        .any(|result| *result != TcpResult::Unanswered),
+                method: if ping {
+                    "icmp"
+                } else if mac.is_some() {
+                    "arp"
+                } else {
+                    "tcp"
+                },
+                mac,
+                services: [(ssh, 22, "SSH"), (http, 80, "HTTP"), (https, 443, "HTTPS")]
+                    .into_iter()
+                    .filter(|(result, _, _)| *result == TcpResult::Open)
+                    .map(|(_, port, name)| Service {
+                        port,
+                        name: name.into(),
+                        observed_at: now(),
+                    })
+                    .collect(),
+            }
+        })
+    }
+}
 #[derive(Clone)]
 pub struct Scheduler {
     sender: mpsc::Sender<Batch>,
     pub(crate) limiter: Arc<ProbeLimiter>,
     pub(crate) arp: crate::arp::Arp,
 }
-
 impl Default for Scheduler {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl Scheduler {
     pub fn new() -> Self {
-        let (sender, mut receiver) = mpsc::channel::<Batch>(32);
-        let limiter = Arc::new(ProbeLimiter {
-            next: Mutex::new(Instant::now()),
-            sockets: Semaphore::new(64),
-        });
-        let scheduler = Self {
-            sender,
+        Self::native(std::env::var("HOPE_DISCOVERY_MODE").as_deref() != Ok("limited"))
+    }
+    pub(crate) fn native(enabled: bool) -> Self {
+        let limiter = Arc::new(ProbeLimiter::new());
+        let arp = crate::arp::Arp::new(enabled);
+        let backend = Arc::new(NativeProbe {
             limiter: limiter.clone(),
-            arp: crate::arp::Arp::new(
-                std::env::var("HOPE_DISCOVERY_MODE").as_deref() != Ok("limited"),
-            ),
-        };
+            arp: arp.clone(),
+            ping: surge_ping::Client::new(&surge_ping::Config::default())
+                .ok()
+                .map(Arc::new),
+        });
+        Self::with_backend(backend, limiter, arp)
+    }
+    pub(crate) fn with_backend(
+        backend: Arc<dyn Probe>,
+        limiter: Arc<ProbeLimiter>,
+        arp: crate::arp::Arp,
+    ) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<Batch>(32);
         tokio::spawn(async move {
             let mut queue = VecDeque::<Batch>::new();
             let mut work = FuturesUnordered::new();
             let mut tick = tokio::time::interval(Duration::from_millis(5));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let ping = surge_ping::Client::new(&surge_ping::Config::default())
-                .ok()
-                .map(Arc::new);
             loop {
                 tokio::select! {
                     batch = receiver.recv() => match batch { Some(batch) => queue.push_back(batch), None => break },
                     Some(()) = work.next(), if !work.is_empty() => {},
                     _ = tick.tick(), if !queue.is_empty() && work.len() < 64 => {
-                        if let Some(mut batch) = queue.pop_front()
-                            && !batch.cancel.is_cancelled()
-                                && let Some(ip) = batch.ips.pop_front() {
-                                    work.push(run_probe(batch.state.clone(), batch.job.clone(), ip, batch.cancel.clone(), limiter.clone(), ping.clone()));
-                                    if !batch.ips.is_empty() { queue.push_back(batch); }
-                                }
+                        if let Some(mut batch) = queue.pop_front() && !batch.cancel.is_cancelled() && let Some(ip) = batch.ips.pop_front() {
+                            work.push(run_probe(batch.state.clone(), batch.job.clone(), ip, batch.cancel.clone(), backend.clone()));
+                            if !batch.ips.is_empty() { queue.push_back(batch); }
+                        }
                     }
                 }
             }
         });
-        scheduler
+        Self {
+            sender,
+            limiter,
+            arp,
+        }
     }
 }
 
@@ -86,6 +150,12 @@ pub(crate) struct ProbeLimiter {
     sockets: Semaphore,
 }
 impl ProbeLimiter {
+    pub(crate) fn new() -> Self {
+        Self {
+            next: Mutex::new(Instant::now()),
+            sockets: Semaphore::new(64),
+        }
+    }
     pub(crate) async fn acquire(&self) -> anyhow::Result<tokio::sync::SemaphorePermit<'_>> {
         let permit = self.sockets.acquire().await?;
         let mut next = self.next.lock().await;
@@ -181,7 +251,7 @@ pub async fn cancel(state: &State, id: &str) -> ApiResult<()> {
 }
 
 pub async fn jobs(state: &State) -> ApiResult<Vec<ScanJob>> {
-    let rows = sqlx::query("SELECT * FROM scans ORDER BY started_at DESC LIMIT 100")
+    let rows = sqlx::query("SELECT * FROM scans WHERE id IN (SELECT id FROM scans ORDER BY started_at DESC LIMIT 100) OR id IN (SELECT id FROM (SELECT id,ROW_NUMBER() OVER(PARTITION BY network_id ORDER BY started_at DESC) AS rank FROM scans) WHERE rank=1) ORDER BY started_at DESC")
         .fetch_all(&state.0.db)
         .await?;
     Ok(rows
@@ -203,18 +273,31 @@ pub async fn jobs(state: &State) -> ApiResult<Vec<ScanJob>> {
         .collect::<anyhow::Result<_>>()?)
 }
 
-pub(crate) async fn tcp(ip: Ipv4Addr, port: u16, limiter: &ProbeLimiter) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TcpResult {
+    Open,
+    Refused,
+    Unanswered,
+}
+async fn tcp_probe(ip: Ipv4Addr, port: u16, limiter: &ProbeLimiter) -> TcpResult {
     let Ok(_permit) = limiter.acquire().await else {
-        return false;
+        return TcpResult::Unanswered;
     };
-    matches!(
-        timeout(
-            Duration::from_millis(750),
-            TcpStream::connect(SocketAddr::new(IpAddr::V4(ip), port))
-        )
-        .await,
-        Ok(Ok(_))
+    match timeout(
+        Duration::from_millis(750),
+        TcpStream::connect(SocketAddr::new(IpAddr::V4(ip), port)),
     )
+    .await
+    {
+        Ok(Ok(_)) => TcpResult::Open,
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            TcpResult::Refused
+        }
+        _ => TcpResult::Unanswered,
+    }
+}
+pub(crate) async fn tcp(ip: Ipv4Addr, port: u16, limiter: &ProbeLimiter) -> bool {
+    tcp_probe(ip, port, limiter).await == TcpResult::Open
 }
 
 async fn ping(ip: Ipv4Addr, limiter: &ProbeLimiter, client: Option<&surge_ping::Client>) -> bool {
@@ -237,39 +320,39 @@ async fn run_probe(
     job: ScanJob,
     ip: Ipv4Addr,
     cancel: CancellationToken,
-    limiter: Arc<ProbeLimiter>,
-    client: Option<Arc<surge_ping::Client>>,
+    backend: Arc<dyn Probe>,
 ) {
-    let arp = state.0.scheduler.arp.clone();
-    let result = tokio::select! {
+    let observation = tokio::select! {
         _ = cancel.cancelled() => return,
-        result = async { tokio::join!(ping(ip, &limiter, client.as_deref()), tcp(ip,22,&limiter), tcp(ip,443,&limiter), async {
-            if arp.on_link(ip) { let _permit=limiter.acquire().await.ok()?; arp.probe(ip).await } else { None }
-        }) } => result,
+        result = timeout(Duration::from_secs(6), backend.probe(ip)) => result.unwrap_or_default(),
     };
-    let mac = result.3;
-    let found = result.0 || result.1 || result.2 || mac.is_some();
+    let found = observation.alive;
+    let mac = observation.mac;
     if cancel.is_cancelled() {
         return;
     }
     let update = async {
         if found {
             let _guard = state.0.writes.lock().await;
+            if cancel.is_cancelled() { return anyhow::Ok(()); }
             let mut hosts = state.hosts().await?;
             let matching: Vec<_> = hosts.iter_mut().filter(|h| h.addresses.contains(&ip.to_string()) && (mac.is_none() || h.macs.is_empty() || h.macs.contains(mac.as_ref().unwrap_or(&String::new())))).collect();
             let mut host = if matching.len() == 1 { matching[0].clone() } else {
-                Host { id:Uuid::new_v4().to_string(),agent_id:None,name:ip.to_string(),addresses:vec![ip.to_string()],macs:vec![],network_ids:vec![],last_seen:now(),last_report:None,last_collected_at:None,agent_revoked:false,discovery_method:String::new(),inventory:None,metrics:None,collectors:vec![],services:vec![] }
+                Host { id:Uuid::new_v4().to_string(),agent_id:None,name:ip.to_string(),addresses:vec![ip.to_string()],macs:vec![],network_ids:vec![],last_seen:now(),last_report:None,last_collected_at:None,agent_revoked:false,enrichment_status:hope_protocol::EnrichmentStatus::Pending,discovery_method:String::new(),inventory:None,metrics:None,collectors:vec![],services:vec![] }
             };
             host.last_seen = now();
-            host.discovery_method = if result.0 { "icmp" } else if mac.is_some() { "arp" } else { "tcp" }.into();
+            host.discovery_method = observation.method.into();
             if let Some(mac) = mac && !host.macs.contains(&mac) { host.macs.push(mac); }
             if !host.network_ids.contains(&job.network_id) { host.network_ids.push(job.network_id.clone()); }
-            for (open, port, name) in [(result.1,22,"SSH"),(result.2,443,"HTTPS")] {
-                if open && !host.services.iter().any(|s| s.port == port) { host.services.push(Service {port,name:name.into(),observed_at:now()}); }
+            for service in observation.services {
+                if !host.services.iter().any(|s| s.port == service.port) { host.services.push(service); }
             }
+            host.enrichment_status = hope_protocol::EnrichmentStatus::Pending;
             state.save_host(&host).await?;
+            state.changed();
+            drop(_guard);
             // Enrichment has its own bounded queue and never holds discovery completion open.
-            crate::enrichment::enqueue(state.clone(), host.id.clone(), ip);
+            state.0.enrichment.enqueue(state.clone(), host.id.clone(), ip, cancel.clone()).await;
         }
         let row = sqlx::query("UPDATE scans SET scanned=scanned+1,discovered=discovered+? WHERE id=? AND status='running' RETURNING scanned,total")
             .bind(if found {1} else {0}).bind(&job.id).fetch_optional(&state.0.db).await?;
@@ -313,5 +396,179 @@ pub fn capabilities() -> Capabilities {
         arp,
         icmp,
         limitations,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct FakeProbe {
+        calls: Arc<Mutex<Vec<Ipv4Addr>>>,
+    }
+    impl Probe for FakeProbe {
+        fn probe(&self, ip: Ipv4Addr) -> BoxFuture<'_, Observation> {
+            Box::pin(async move {
+                self.calls.lock().await.push(ip);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Observation::default()
+            })
+        }
+    }
+    async fn fixture() -> (tempfile::TempDir, State, Arc<Mutex<Vec<Ipv4Addr>>>) {
+        let directory = tempfile::tempdir().expect("temporary");
+        let calls = Arc::new(Mutex::new(vec![]));
+        let scheduler = Scheduler::with_backend(
+            Arc::new(FakeProbe {
+                calls: calls.clone(),
+            }),
+            Arc::new(ProbeLimiter::new()),
+            crate::arp::Arp::new(false),
+        );
+        let state = State::open_with_scheduler(
+            directory.path().join("test.db").to_str().expect("path"),
+            "http://localhost:8080".into(),
+            "releases".into(),
+            Capabilities {
+                platform: "test".into(),
+                discovery_mode: "limited".into(),
+                arp: false,
+                icmp: false,
+                limitations: vec![],
+            },
+            Some(scheduler),
+        )
+        .await
+        .expect("state");
+        (directory, state, calls)
+    }
+    #[tokio::test]
+    async fn two_silent_ranges_receive_work_before_either_finishes() {
+        let (_directory, state, calls) = fixture().await;
+        let first = start(
+            &state,
+            &Network {
+                id: "first".into(),
+                name: "First".into(),
+                cidr: "192.168.1.0/24".into(),
+                enabled: false,
+            },
+        )
+        .await
+        .expect("first scan");
+        let second = start(
+            &state,
+            &Network {
+                id: "second".into(),
+                name: "Second".into(),
+                cidr: "192.168.30.0/24".into(),
+                enabled: false,
+            },
+        )
+        .await
+        .expect("second scan");
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let trace = calls.lock().await;
+                let one = trace.iter().any(|ip| ip.octets()[2] == 1);
+                let two = trace.iter().any(|ip| ip.octets()[2] == 30);
+                drop(trace);
+                if one && two {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fair dispatch");
+        assert!(
+            jobs(&state)
+                .await
+                .expect("jobs")
+                .iter()
+                .all(|j| j.scanned < j.total)
+        );
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let scans = jobs(&state).await.expect("jobs");
+                if scans
+                    .iter()
+                    .filter(|j| j.id == first.id || j.id == second.id)
+                    .all(|j| j.status == ScanStatus::Completed)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both completed");
+        assert_eq!(calls.lock().await.len(), 508);
+    }
+    #[tokio::test]
+    async fn cancellation_stops_dispatch_and_persists_status() {
+        let (_directory, state, calls) = fixture().await;
+        let job = start(
+            &state,
+            &Network {
+                id: "network".into(),
+                name: "Network".into(),
+                cidr: "192.168.0.0/20".into(),
+                enabled: false,
+            },
+        )
+        .await
+        .expect("scan");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancel(&state, &job.id).await.expect("cancel");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let count = calls.lock().await.len();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(calls.lock().await.len(), count);
+        assert_eq!(
+            jobs(&state).await.expect("jobs")[0].status,
+            ScanStatus::Cancelled
+        );
+    }
+    #[tokio::test]
+    async fn limiter_bounds_starts_and_live_probes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let limiter = Arc::new(ProbeLimiter::new());
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let times = Arc::new(Mutex::new(vec![]));
+        let mut work = FuturesUnordered::new();
+        for _ in 0..100 {
+            let limiter = limiter.clone();
+            let live = live.clone();
+            let peak = peak.clone();
+            let times = times.clone();
+            work.push(async move {
+                let _permit = limiter.acquire().await.expect("permit");
+                times.lock().await.push(Instant::now());
+                let count = live.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(count, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                live.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+        while work.next().await.is_some() {}
+        assert!(peak.load(Ordering::SeqCst) <= 64);
+        let times = times.lock().await;
+        assert!(
+            times
+                .windows(2)
+                .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_millis(5))
+        );
+    }
+    #[tokio::test]
+    async fn tcp_refusal_is_liveness_but_not_an_open_service() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        drop(listener);
+        let limiter = ProbeLimiter::new();
+        assert!(tcp_probe(Ipv4Addr::LOCALHOST, port, &limiter).await == TcpResult::Refused);
+        assert!(!tcp(Ipv4Addr::LOCALHOST, port, &limiter).await);
     }
 }

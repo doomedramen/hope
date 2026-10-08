@@ -1,0 +1,172 @@
+{
+  "fixture": "Two isolated /24 bridges; one HTTP-only responder each; remaining addresses silent; second range routed through .252",
+  "probe_starts_per_second_limit": 200,
+  "runs": [
+    {
+      "run": 1,
+      "first_responsive_host_seconds": 0.7869948340230621,
+      "both_completed_seconds": 25.436534334003227,
+      "scans": [
+        {
+          "id": "44b06bf6-69fd-4f13-9070-4d8b3500cd95",
+          "network_id": "34550d67-60f1-4818-a408-167804f79d67",
+          "cidr": "198.18.30.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 3,
+          "started_at": 1791488018.3799226,
+          "finished_at": 1791488043.7911642,
+          "error": null
+        },
+        {
+          "id": "5a4ddf87-71aa-4b9f-89e1-669a829f8d9c",
+          "network_id": "9ced68d9-76b4-42f1-90da-6547f8d0298c",
+          "cidr": "198.18.1.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 4,
+          "started_at": 1791488018.3746736,
+          "finished_at": 1791488043.4632068,
+          "error": null
+        }
+      ]
+    },
+    {
+      "run": 2,
+      "first_responsive_host_seconds": 0.8071275420079473,
+      "both_completed_seconds": 25.396583000023384,
+      "scans": [
+        {
+          "id": "4a6bb282-43f7-43e0-8ffe-02ffe93c93b8",
+          "network_id": "34550d67-60f1-4818-a408-167804f79d67",
+          "cidr": "198.18.30.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 3,
+          "started_at": 1791488043.8218772,
+          "finished_at": 1791488069.1921854,
+          "error": null
+        },
+        {
+          "id": "6c6687f4-489b-4c43-ade9-81e2b3bbcddd",
+          "network_id": "9ced68d9-76b4-42f1-90da-6547f8d0298c",
+          "cidr": "198.18.1.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 4,
+          "started_at": 1791488043.8120584,
+          "finished_at": 1791488068.8381827,
+          "error": null
+        }
+      ]
+    },
+    {
+      "run": 3,
+      "first_responsive_host_seconds": 0.7868906669900753,
+      "both_completed_seconds": 25.41363383398857,
+      "scans": [
+        {
+          "id": "e12e0694-652d-4840-857b-fdd42a5624a7",
+          "network_id": "34550d67-60f1-4818-a408-167804f79d67",
+          "cidr": "198.18.30.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 3,
+          "started_at": 1791488069.220025,
+          "finished_at": 1791488094.600686,
+          "error": null
+        },
+        {
+          "id": "d7a74b35-b5e0-44c6-9b87-f6d8f3a484e9",
+          "network_id": "9ced68d9-76b4-42f1-90da-6547f8d0298c",
+          "cidr": "198.18.1.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 4,
+          "started_at": 1791488069.2137022,
+          "finished_at": 1791488094.2980127,
+          "error": null
+        }
+      ]
+    },
+    {
+      "run": 4,
+      "first_responsive_host_seconds": 0.8168805000022985,
+      "both_completed_seconds": 25.421461082994938,
+      "scans": [
+        {
+          "id": "889876c1-e599-47c1-8eba-6e768d058bd7",
+          "network_id": "34550d67-60f1-4818-a408-167804f79d67",
+          "cidr": "198.18.30.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 3,
+          "started_at": 1791488094.6265955,
+          "finished_at": 1791488119.9946785,
+          "error": null
+        },
+        {
+          "id": "0d73a650-a4d7-4367-97db-1073ad1da4b1",
+          "network_id": "9ced68d9-76b4-42f1-90da-6547f8d0298c",
+          "cidr": "198.18.1.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 4,
+          "started_at": 1791488094.621722,
+          "finished_at": 1791488119.6935594,
+          "error": null
+        }
+      ]
+    },
+    {
+      "run": 5,
+      "first_responsive_host_seconds": 0.8132439579931088,
+      "both_completed_seconds": 25.405263749998994,
+      "scans": [
+        {
+          "id": "334cdb30-a2fc-41ab-b537-57db6881793b",
+          "network_id": "34550d67-60f1-4818-a408-167804f79d67",
+          "cidr": "198.18.30.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 3,
+          "started_at": 1791488120.0523636,
+          "finished_at": 1791488145.4290335,
+          "error": null
+        },
+        {
+          "id": "292e9946-8a1b-4125-a3f4-0dbe4879371e",
+          "network_id": "9ced68d9-76b4-42f1-90da-6547f8d0298c",
+          "cidr": "198.18.1.0/24",
+          "status": "completed",
+          "scanned": 254,
+          "total": 254,
+          "discovered": 4,
+          "started_at": 1791488120.044125,
+          "finished_at": 1791488145.116902,
+          "error": null
+        }
+      ]
+    }
+  ],
+  "docker": "29.4.0",
+  "image": "sha256:1b8a3ada7ef87961e2f87006bc64392b662efbcfa62fbfe989b69a38eae13e47",
+  "capabilities": {
+    "platform": "linux",
+    "discovery_mode": "native",
+    "arp": true,
+    "icmp": true,
+    "limitations": []
+  },
+  "http_only_hosts_detected": true,
+  "targets_passed": true
+}

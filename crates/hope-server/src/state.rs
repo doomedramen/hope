@@ -29,6 +29,7 @@ pub struct Inner {
     pub release_dir: String,
     pub enrollment_ca: Option<String>,
     pub scheduler: crate::scanner::Scheduler,
+    pub enrichment: crate::enrichment::Queue,
     pub login_attempts: Mutex<HashMap<String, (u32, f64)>>,
 }
 
@@ -52,7 +53,16 @@ impl State {
         path: &str,
         server_url: String,
         release_dir: String,
+        capabilities: Capabilities,
+    ) -> Result<Self> {
+        Self::open_with_scheduler(path, server_url, release_dir, capabilities, None).await
+    }
+    pub(crate) async fn open_with_scheduler(
+        path: &str,
+        server_url: String,
+        release_dir: String,
         mut capabilities: Capabilities,
+        scheduler: Option<crate::scanner::Scheduler>,
     ) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -67,7 +77,8 @@ impl State {
         sqlx::query("UPDATE scans SET status='interrupted', finished_at=?, error='Server restarted; start a new scan' WHERE status IN ('queued','running')")
             .bind(now()).execute(&db).await?;
         let (events, _) = broadcast::channel(256);
-        let scheduler = crate::scanner::Scheduler::new();
+        let scheduler =
+            scheduler.unwrap_or_else(|| crate::scanner::Scheduler::native(capabilities.arp));
         capabilities.arp = capabilities.arp && scheduler.arp.available();
         if !capabilities.arp && capabilities.limitations.is_empty() {
             capabilities.limitations.push(
@@ -89,6 +100,7 @@ impl State {
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
             scheduler,
+            enrichment: crate::enrichment::Queue::new(),
             login_attempts: Mutex::new(HashMap::new()),
         }));
         Ok(state)

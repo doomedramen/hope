@@ -148,6 +148,7 @@ pub async fn enroll(
             last_report: None,
             last_collected_at: None,
             agent_revoked: false,
+            enrichment_status: hope_protocol::EnrichmentStatus::Pending,
             discovery_method: "agent".into(),
             inventory: None,
             metrics: None,

@@ -244,6 +244,8 @@ pub struct Host {
     pub last_collected_at: Option<f64>,
     #[serde(default)]
     pub agent_revoked: bool,
+    #[serde(default)]
+    pub enrichment_status: EnrichmentStatus,
     pub discovery_method: String,
     pub inventory: Option<Inventory>,
     pub metrics: Option<Metrics>,
