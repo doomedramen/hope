@@ -204,3 +204,13 @@ Before each milestone commit, review staged files and ensure no keys, tokens, da
 ## Suggested next-model prompt
 
 > Continue H.O.P.E from the current branch and working tree. Read AGENTS.md and docs/IMPLEMENTATION_HANDOFF.md. Start with the first incomplete ticket, preserve all existing changes, and execute tickets in order. Follow the behavior and acceptance criteria exactly; add focused tests for failure cases. Update the handoff with evidence and commit verified milestones without co-author trailers. Do not claim unrun platform tests or benchmarks passed. Stay on this branch; do not create worktrees. Keep going through all locally achievable work and report external validation gaps precisely.
+
+## Implementation progress
+
+### Ticket 01 — completed 2026-10-08
+
+- Preserved and reviewed the previous working tree; formatted Rust and application frontend files, added Prettier commands.
+- Type generation now stages a sibling temporary file and replaces the contract only on success. Injected a failing Cargo command and verified byte-for-byte preservation and temporary-file cleanup.
+- Linux compilation exposed the private `pnet_datalink::IpNetwork` import; replaced it with the public address accessor. Linux ARM64 release workspace compilation passed in the Docker Rust stage.
+- Native Rust tests (six), Clippy, formatting, frontend typecheck/lint/static export, and three Chromium tests pass. Generated protocol trailing whitespace was removed at the source generator.
+- This establishes a build baseline only. Discovery, installation, and resource gates listed above remain open.

@@ -8,6 +8,8 @@ pub struct Config {
     pub server: String,
     pub agent_id: String,
     pub credential: Option<String>,
+    #[serde(default)]
+    pub pending_credential: Option<String>,
     pub ca_pem: Option<String>,
 }
 pub fn directory() -> PathBuf {

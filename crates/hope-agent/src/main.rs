@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
             server,
             agent_id: Uuid::new_v4().to_string(),
             credential: None,
+            pending_credential: None,
             ca_pem,
         };
         config::save(&dir, &config).await?;
@@ -97,12 +98,24 @@ async fn main() -> Result<()> {
             operation == "enroll",
             "Enrollment was interrupted. Retry with a fresh enrollment token."
         );
+        if configuration.pending_credential.is_none() {
+            use rand::RngCore;
+            let mut bytes = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut bytes);
+            configuration.pending_credential =
+                Some(bytes.iter().map(|b| format!("{b:02x}")).collect());
+            config::save(&dir, &configuration).await?;
+        }
         let (inventory, _, _) = collector.sample().await;
         let request = EnrollmentRequest {
             schema_version: SCHEMA_VERSION,
             token: std::env::var("HOPE_ENROLLMENT_TOKEN")
                 .context("HOPE_ENROLLMENT_TOKEN is required")?,
             agent_id: configuration.agent_id.clone(),
+            credential: configuration
+                .pending_credential
+                .clone()
+                .context("Missing pending credential")?,
             inventory,
         };
         let response = client
@@ -117,6 +130,7 @@ async fn main() -> Result<()> {
         );
         let enrolled: EnrollmentResponse = response.json().await?;
         configuration.credential = Some(enrolled.credential);
+        configuration.pending_credential = None;
         config::save(&dir, &configuration).await?;
     }
     let credential = configuration

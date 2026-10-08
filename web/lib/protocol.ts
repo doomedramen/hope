@@ -6,12 +6,16 @@ export type CollectorStatus = { name: string, available: boolean, detail: string
 export type Inventory = { hostname: string, os: string, architecture: string, cpu_model: string, cpu_cores: number, memory_total_bytes: number, interfaces: Array<Interface>, disks: Array<Disk>, gpus: Array<Gpu>, collectors: Array<CollectorStatus>, };
 export type Metrics = { cpu_percent: number | null, memory_used_bytes: number | null, memory_total_bytes: number | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null, disk_read_bytes_per_second: number | null, disk_write_bytes_per_second: number | null, disks: Array<Disk>, gpus: Array<Gpu>, };
 export type AgentReport = { schema_version: number, report_id: string, agent_id: string, collected_at: number, inventory: Inventory | null, metrics: Metrics, collectors: Array<CollectorStatus>, };
-export type EnrollmentRequest = { schema_version: number, token: string, agent_id: string, inventory: Inventory, };
+export type EnrollmentRequest = { schema_version: number, token: string, agent_id: string,
+/**
+ * Client-generated secret persisted before enrollment, allowing safe retries after a lost response.
+ */
+credential: string, inventory: Inventory, };
 export type EnrollmentResponse = { credential: string, report_interval_seconds: number, };
 export type Network = { id: string, name: string, cidr: string, enabled: boolean, };
 export type ScanJob = { id: string, network_id: string, cidr: string, status: string, scanned: number, total: number, discovered: number, started_at: number, finished_at: number | null, error: string | null, };
 export type Service = { port: number, name: string, observed_at: number, };
-export type Host = { id: string, agent_id: string | null, name: string, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>, };
+export type Host = { id: string, agent_id: string | null, name: string, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>, };
 export type MetricPoint = { collected_at: number, resolution_seconds: number, metrics: Metrics, };
 export type Position = { id: string, x: number, y: number, };
 export type MapLink = { id: string, source: string, target: string, label: string, };

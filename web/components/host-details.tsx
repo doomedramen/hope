@@ -6,29 +6,318 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectGroup, SelectItem } from "@/components/ui/select";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+} from "@/components/ui/select";
 import { MetricHistory } from "@/components/metric-history";
 import { age, bytes, percentage, post, status } from "@/lib/api";
 import type { Host } from "@/lib/protocol";
 
-export function HostDetails({ host, hosts, close, install, refresh }: { host: Host; hosts: Host[]; close: () => void; install: () => void; refresh: () => void }) {
-  const [error, setError] = useState(""); const [source, setSource] = useState<string | null>(null); const [confirmRevoke, setConfirmRevoke] = useState(false);
-  const inventory = host.inventory; const metrics = host.metrics;
-  async function revoke() { try { await post(`/agents/${host.agent_id}/revoke`); setConfirmRevoke(false); refresh(); } catch (e) { setError((e as Error).message); } }
-  async function merge() { if (!source) return; try { await post(`/hosts/${host.id}/merge`, { source_id: source }); setSource(null); refresh(); } catch (e) { setError((e as Error).message); } }
-  return <aside className="host-details" aria-label="Host details"><header className="flex items-start justify-between gap-3"><div className="min-w-0"><h2 className="truncate text-xl font-semibold">{host.name}</h2><p className="mt-1 break-all text-sm text-muted-foreground">{host.addresses.join(", ")}</p></div><Button variant="ghost" size="icon" aria-label="Close host details" onClick={close}><X /></Button></header>
-    <div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{status(host)}</Badge><span className="text-xs text-muted-foreground">Seen {age(host.last_seen)}</span></div>
-    {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
-    {!host.agent_id && <Button onClick={install}><Download data-icon="inline-start" />Install reporting agent</Button>}
-    <section><h3 className="detail-heading"><Cpu size={16} />Hardware</h3>{inventory ? <dl className="detail-list"><dt>System</dt><dd>{inventory.os}</dd><dt>Architecture</dt><dd>{inventory.architecture}</dd><dt>CPU</dt><dd>{inventory.cpu_model}</dd><dt>Cores</dt><dd>{inventory.cpu_cores}</dd><dt>Memory</dt><dd>{bytes(inventory.memory_total_bytes)}</dd></dl> : <p className="text-sm text-muted-foreground">Install an agent to see hardware and resource usage.</p>}</section>
-    {metrics && <><div className="resource-pair"><div><span>CPU</span><strong>{percentage(metrics.cpu_percent)}</strong></div><div><span>Memory</span><strong>{metrics.memory_total_bytes ? percentage((metrics.memory_used_bytes ?? 0) / metrics.memory_total_bytes * 100) : "—"}</strong></div></div><p className="text-xs text-muted-foreground">Received {age(host.last_report)}. Stale values remain visible with their timestamp.</p></>}
-    <Separator /><section><h3 className="detail-heading"><Network size={16} />Network</h3><dl className="detail-list"><dt>MAC</dt><dd>{host.macs.join(", ") || "Unavailable"}</dd><dt>Discovery</dt><dd>{host.discovery_method}</dd>{metrics && <><dt>Receive</dt><dd>{bytes(metrics.network_rx_bytes_per_second)}/s</dd><dt>Transmit</dt><dd>{bytes(metrics.network_tx_bytes_per_second)}/s</dd></>}</dl>{inventory?.interfaces.map(i => <div key={i.name} className="interface-row"><strong>{i.name}</strong><span>{i.addresses.join(", ") || "No address"}</span>{i.gateway && <span>Gateway {i.gateway}</span>}</div>)}</section>
-    <section><h3 className="detail-heading">Observed services</h3><div className="flex flex-wrap gap-2">{host.services.length ? host.services.map(s => <Badge key={s.port} variant="outline">{s.port} / {s.name}</Badge>) : <p className="text-sm text-muted-foreground">No open services observed yet.</p>}</div></section>
-    {(metrics?.disks ?? inventory?.disks ?? []).length > 0 && <><Separator /><section><h3 className="detail-heading"><HardDrive size={16} />Storage</h3>{(metrics?.disks ?? inventory?.disks ?? []).map(d => <div key={`${d.name}-${d.mount}`} className="storage-row"><div className="flex justify-between gap-3 text-sm"><span className="truncate">{d.mount}</span><span>{bytes(d.available_bytes)} free</span></div><Progress value={d.total_bytes ? (1 - d.available_bytes / d.total_bytes) * 100 : 0} aria-label={`${d.mount} storage used`} /><p className="text-xs text-muted-foreground">{d.filesystem} / {bytes(d.total_bytes)}</p></div>)}{metrics && <p className="text-xs text-muted-foreground">Disk read {bytes(metrics.disk_read_bytes_per_second)}/s; write {bytes(metrics.disk_write_bytes_per_second)}/s</p>}</section></>}
-    {(metrics?.gpus ?? inventory?.gpus ?? []).length > 0 && <section><h3 className="detail-heading">Graphics</h3>{(metrics?.gpus ?? inventory?.gpus ?? []).map((g, i) => <div key={`${g.name}-${i}`} className="interface-row"><strong>{g.name}</strong><span>Utilization {percentage(g.utilization_percent)} / VRAM {bytes(g.memory_used_bytes)}</span><span>{g.temperature_celsius == null ? "Temperature unavailable" : `${g.temperature_celsius.toFixed(0)}°C`}</span></div>)}</section>}
-    {host.agent_id && <><Separator /><MetricHistory hostId={host.id} lastReport={host.last_report} /><section><h3 className="detail-heading">Collector availability</h3>{host.collectors.filter(c => !c.available).map(c => <p key={c.name} className="mb-2 text-xs text-muted-foreground"><strong>{c.name.replaceAll("_", " ")}</strong>: {c.detail}</p>)}{host.collectors.length > 0 && host.collectors.every(c => c.available) && <p className="text-sm text-muted-foreground">All collectors are available.</p>}</section>
-      <section><h3 className="detail-heading">Reconcile a discovered host</h3><p className="mb-3 text-xs text-muted-foreground">Merge a duplicate discovery into this agent after verifying it is the same machine.</p><Select value={source} onValueChange={setSource}><SelectTrigger className="w-full"><SelectValue placeholder="Choose a discovered host" /></SelectTrigger><SelectContent><SelectGroup>{hosts.filter(h => !h.agent_id && h.id !== host.id).map(h => <SelectItem key={h.id} value={h.id}>{h.name} ({h.addresses[0]})</SelectItem>)}</SelectGroup></SelectContent></Select><Button className="mt-2" variant="outline" disabled={!source} onClick={merge}>Merge selected host</Button></section>
-      <Separator />{confirmRevoke ? <Alert><AlertDescription>This agent will no longer be able to send reports.<div className="mt-3 flex gap-2"><Button variant="destructive" onClick={revoke}>Revoke credential</Button><Button variant="outline" onClick={() => setConfirmRevoke(false)}>Cancel</Button></div></AlertDescription></Alert> : <Button variant="outline" onClick={() => setConfirmRevoke(true)}><ShieldOff data-icon="inline-start" />Revoke agent access</Button>}
-    </>}
-  </aside>;
+export function HostDetails({
+  host,
+  hosts,
+  close,
+  install,
+  refresh,
+}: {
+  host: Host;
+  hosts: Host[];
+  close: () => void;
+  install: () => void;
+  refresh: () => void;
+}) {
+  const [error, setError] = useState("");
+  const [source, setSource] = useState<string | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+  const inventory = host.inventory;
+  const metrics = host.metrics;
+  async function revoke() {
+    try {
+      await post(`/agents/${host.agent_id}/revoke`);
+      setConfirmRevoke(false);
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  async function merge() {
+    if (!source) return;
+    try {
+      await post(`/hosts/${host.id}/merge`, { source_id: source });
+      setSource(null);
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  return (
+    <aside className="host-details" aria-label="Host details">
+      <header className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="truncate text-xl font-semibold">{host.name}</h2>
+          <p className="mt-1 break-all text-sm text-muted-foreground">
+            {host.addresses.join(", ")}
+          </p>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Close host details"
+          onClick={close}
+        >
+          <X />
+        </Button>
+      </header>
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant="secondary">{status(host)}</Badge>
+        <span className="text-xs text-muted-foreground">
+          Seen {age(host.last_seen)}
+        </span>
+      </div>
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      {!host.agent_id && (
+        <Button onClick={install}>
+          <Download data-icon="inline-start" />
+          Install reporting agent
+        </Button>
+      )}
+      <section>
+        <h3 className="detail-heading">
+          <Cpu size={16} />
+          Hardware
+        </h3>
+        {inventory ? (
+          <dl className="detail-list">
+            <dt>System</dt>
+            <dd>{inventory.os}</dd>
+            <dt>Architecture</dt>
+            <dd>{inventory.architecture}</dd>
+            <dt>CPU</dt>
+            <dd>{inventory.cpu_model}</dd>
+            <dt>Cores</dt>
+            <dd>{inventory.cpu_cores}</dd>
+            <dt>Memory</dt>
+            <dd>{bytes(inventory.memory_total_bytes)}</dd>
+          </dl>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Install an agent to see hardware and resource usage.
+          </p>
+        )}
+      </section>
+      {metrics && (
+        <>
+          <div className="resource-pair">
+            <div>
+              <span>CPU</span>
+              <strong>{percentage(metrics.cpu_percent)}</strong>
+            </div>
+            <div>
+              <span>Memory</span>
+              <strong>
+                {metrics.memory_total_bytes
+                  ? percentage(
+                      ((metrics.memory_used_bytes ?? 0) /
+                        metrics.memory_total_bytes) *
+                        100,
+                    )
+                  : "—"}
+              </strong>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Collected {age(host.last_collected_at)}; received{" "}
+            {age(host.last_report)}.
+          </p>
+        </>
+      )}
+      <Separator />
+      <section>
+        <h3 className="detail-heading">
+          <Network size={16} />
+          Network
+        </h3>
+        <dl className="detail-list">
+          <dt>MAC</dt>
+          <dd>{host.macs.join(", ") || "Unavailable"}</dd>
+          <dt>Discovery</dt>
+          <dd>{host.discovery_method}</dd>
+          {metrics && (
+            <>
+              <dt>Receive</dt>
+              <dd>{bytes(metrics.network_rx_bytes_per_second)}/s</dd>
+              <dt>Transmit</dt>
+              <dd>{bytes(metrics.network_tx_bytes_per_second)}/s</dd>
+            </>
+          )}
+        </dl>
+        {inventory?.interfaces.map((i) => (
+          <div key={i.name} className="interface-row">
+            <strong>{i.name}</strong>
+            <span>{i.addresses.join(", ") || "No address"}</span>
+            {i.gateway && <span>Gateway {i.gateway}</span>}
+          </div>
+        ))}
+      </section>
+      <section>
+        <h3 className="detail-heading">Observed services</h3>
+        <div className="flex flex-wrap gap-2">
+          {host.services.length ? (
+            host.services.map((s) => (
+              <Badge key={s.port} variant="outline">
+                {s.port} / {s.name}
+              </Badge>
+            ))
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No open services observed yet.
+            </p>
+          )}
+        </div>
+      </section>
+      {(metrics?.disks ?? inventory?.disks ?? []).length > 0 && (
+        <>
+          <Separator />
+          <section>
+            <h3 className="detail-heading">
+              <HardDrive size={16} />
+              Storage
+            </h3>
+            {(metrics?.disks ?? inventory?.disks ?? []).map((d) => (
+              <div key={`${d.name}-${d.mount}`} className="storage-row">
+                <div className="flex justify-between gap-3 text-sm">
+                  <span className="truncate">{d.mount}</span>
+                  <span>{bytes(d.available_bytes)} free</span>
+                </div>
+                <Progress
+                  value={
+                    d.total_bytes
+                      ? (1 - d.available_bytes / d.total_bytes) * 100
+                      : 0
+                  }
+                  aria-label={`${d.mount} storage used`}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {d.filesystem} / {bytes(d.total_bytes)}
+                </p>
+              </div>
+            ))}
+            {metrics && (
+              <p className="text-xs text-muted-foreground">
+                Disk read {bytes(metrics.disk_read_bytes_per_second)}/s; write{" "}
+                {bytes(metrics.disk_write_bytes_per_second)}/s
+              </p>
+            )}
+          </section>
+        </>
+      )}
+      {(metrics?.gpus ?? inventory?.gpus ?? []).length > 0 && (
+        <section>
+          <h3 className="detail-heading">Graphics</h3>
+          {(metrics?.gpus ?? inventory?.gpus ?? []).map((g, i) => (
+            <div key={`${g.name}-${i}`} className="interface-row">
+              <strong>{g.name}</strong>
+              <span>
+                Utilization {percentage(g.utilization_percent)} / VRAM{" "}
+                {bytes(g.memory_used_bytes)}
+              </span>
+              <span>
+                {g.temperature_celsius == null
+                  ? "Temperature unavailable"
+                  : `${g.temperature_celsius.toFixed(0)}°C`}
+              </span>
+            </div>
+          ))}
+        </section>
+      )}
+      {host.agent_id && (
+        <>
+          <Separator />
+          <MetricHistory hostId={host.id} lastReport={host.last_report} />
+          <section>
+            <h3 className="detail-heading">Collector availability</h3>
+            {host.collectors
+              .filter((c) => !c.available)
+              .map((c) => (
+                <p key={c.name} className="mb-2 text-xs text-muted-foreground">
+                  <strong>{c.name.replaceAll("_", " ")}</strong>: {c.detail}
+                </p>
+              ))}
+            {host.collectors.length > 0 &&
+              host.collectors.every((c) => c.available) && (
+                <p className="text-sm text-muted-foreground">
+                  All collectors are available.
+                </p>
+              )}
+          </section>
+          <section>
+            <h3 className="detail-heading">Reconcile a discovered host</h3>
+            <p className="mb-3 text-xs text-muted-foreground">
+              Merge a duplicate discovery into this agent after verifying it is
+              the same machine.
+            </p>
+            <Select value={source} onValueChange={setSource}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Choose a discovered host" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {hosts
+                    .filter((h) => !h.agent_id && h.id !== host.id)
+                    .map((h) => (
+                      <SelectItem key={h.id} value={h.id}>
+                        {h.name} ({h.addresses[0]})
+                      </SelectItem>
+                    ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <Button
+              className="mt-2"
+              variant="outline"
+              disabled={!source}
+              onClick={merge}
+            >
+              Merge selected host
+            </Button>
+          </section>
+          <Separator />
+          {host.agent_revoked ? (
+            <Badge variant="outline">Agent access revoked</Badge>
+          ) : confirmRevoke ? (
+            <Alert>
+              <AlertDescription>
+                This agent will no longer be able to send reports.
+                <div className="mt-3 flex gap-2">
+                  <Button variant="destructive" onClick={revoke}>
+                    Revoke credential
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setConfirmRevoke(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <Button variant="outline" onClick={() => setConfirmRevoke(true)}>
+              <ShieldOff data-icon="inline-start" />
+              Revoke agent access
+            </Button>
+          )}
+        </>
+      )}
+    </aside>
+  );
 }

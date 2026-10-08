@@ -29,14 +29,7 @@ pub fn enqueue(state: State, id: String, ip: Ipv4Addr) {
             (3389, "RDP"),
             (8080, "HTTP alternate"),
         ] {
-            if matches!(
-                timeout(
-                    Duration::from_millis(500),
-                    tokio::net::TcpStream::connect((ip, port))
-                )
-                .await,
-                Ok(Ok(_))
-            ) {
+            if crate::scanner::tcp(ip, port, &state.0.scheduler.limiter).await {
                 services.push(Service {
                     port,
                     name: name.into(),
@@ -50,9 +43,10 @@ pub fn enqueue(state: State, id: String, ip: Ipv4Addr) {
         if let Ok(Some(mut host)) = state.host(&id).await {
             host.services = services;
             if host.agent_id.is_none()
-                && let Some(name) = hostname {
-                    host.name = name;
-                }
+                && let Some(name) = hostname
+            {
+                host.name = name;
+            }
             if let Err(error) = state.save_host(&host).await {
                 tracing::warn!(%error,"enrichment could not be saved");
             }

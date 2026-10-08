@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod api;
+pub mod arp;
 pub mod auth;
 pub mod enrichment;
 pub mod error;

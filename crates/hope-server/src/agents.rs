@@ -37,15 +37,16 @@ pub fn install_command(state: &State, token: &str) -> String {
         .0
         .enrollment_ca
         .as_ref()
-        .map(|_| " HOPE_CA_CERT='/path/to/hope-ca.pem'")
-        .unwrap_or("");
-    let curl_ca = if state.0.enrollment_ca.is_some() {
-        " --cacert '/path/to/hope-ca.pem'"
-    } else {
-        ""
-    };
+        .map(|path| format!(" HOPE_CA_CERT={}", shell_quote(path)))
+        .unwrap_or_default();
+    let curl_ca = state
+        .0
+        .enrollment_ca
+        .as_ref()
+        .map(|path| format!(" --cacert {}", shell_quote(path)))
+        .unwrap_or_default();
     format!(
-        "( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f \"$installer\"' EXIT; curl --fail --silent --show-error --location --proto '=https'{curl_ca} {server}/agent/install -o \"$installer\" && HOPE_SERVER={server} HOPE_ENROLLMENT_TOKEN={}{} sh \"$installer\" )",
+        "( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f \"$installer\"' EXIT; curl --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https'{curl_ca} {server}/agent/install -o \"$installer\" && HOPE_SERVER={server} HOPE_ENROLLMENT_TOKEN={}{} sh \"$installer\" )",
         shell_quote(token),
         ca
     )
@@ -108,19 +109,35 @@ pub async fn enroll(
     Extract(state): Extract<State>,
     Json(request): Json<EnrollmentRequest>,
 ) -> ApiResult<Json<EnrollmentResponse>> {
-    if request.schema_version != SCHEMA_VERSION || Uuid::parse_str(&request.agent_id).is_err() {
+    if request.schema_version != SCHEMA_VERSION
+        || Uuid::parse_str(&request.agent_id).is_err()
+        || request.credential.len() != 64
+        || !request.credential.bytes().all(|b| b.is_ascii_hexdigit())
+    {
         return Err(ApiError::bad(
             "Unsupported schema or invalid agent identity",
         ));
     }
     validate_inventory(&request.inventory)?;
     let _guard = state.0.writes.lock().await;
-    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE id=?")
-        .bind(&request.agent_id)
-        .fetch_one(&state.0.db)
-        .await?;
-    if exists > 0 {
-        return Err(ApiError(StatusCode::CONFLICT,"Agent identity is already enrolled; preserve its credential or explicitly reset its identity".into()));
+    let existing: Option<(String, bool)> =
+        sqlx::query_as("SELECT credential_hash,revoked FROM agents WHERE id=?")
+            .bind(&request.agent_id)
+            .fetch_optional(&state.0.db)
+            .await?;
+    if let Some((credential_hash, revoked)) = existing {
+        if revoked || credential_hash != hash(&request.credential) {
+            return Err(ApiError(StatusCode::CONFLICT,"Agent identity is already enrolled or revoked; preserve its credential or explicitly reset its identity".into()));
+        }
+        let recovered = sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND expires_at>? AND (used_at IS NULL OR agent_id=?)")
+            .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).bind(&request.agent_id).execute(&state.0.db).await?.rows_affected();
+        if recovered != 1 {
+            return Err(ApiError::unauthorized());
+        }
+        return Ok(Json(EnrollmentResponse {
+            credential: request.credential,
+            report_interval_seconds: 30,
+        }));
     }
     let addresses = inventory_addresses(&request.inventory);
     let macs = inventory_macs(&request.inventory);
@@ -142,6 +159,8 @@ pub async fn enroll(
             network_ids: vec![],
             last_seen: 0.0,
             last_report: None,
+            last_collected_at: None,
+            agent_revoked: false,
             discovery_method: "agent".into(),
             inventory: None,
             metrics: None,
@@ -155,7 +174,7 @@ pub async fn enroll(
     host.macs = macs;
     host.inventory = Some(request.inventory);
     host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
-    let credential = secret();
+    let credential = request.credential;
     let mut tx = state.0.db.begin().await?;
     let changed=sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND used_at IS NULL AND expires_at>?")
         .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).execute(&mut *tx).await?.rows_affected();
@@ -201,7 +220,7 @@ pub async fn report(
         || Uuid::parse_str(&report.report_id).is_err()
         || !report.collected_at.is_finite()
         || report.collected_at > now() + 300.0
-        || report.collected_at < now() - 7.0 * 86400.0
+        || report.collected_at < now() - 86400.0
     {
         return Err(ApiError::bad(
             "Invalid report version, identity, or timestamp",
@@ -245,6 +264,7 @@ pub async fn report(
         host.last_report = Some(now());
         host.last_seen = now();
         if report.collected_at >= previous {
+            host.last_collected_at = Some(report.collected_at);
             if let Some(inv) = report.inventory {
                 host.name = inv.hostname.clone();
                 host.addresses = inventory_addresses(&inv);
@@ -279,6 +299,12 @@ pub async fn revoke(
         .bind(&id)
         .execute(&state.0.db)
         .await?;
+    for mut host in state.hosts().await? {
+        if host.agent_id.as_ref() == Some(&id) {
+            host.agent_revoked = true;
+            state.save_host(&host).await?;
+        }
+    }
     state.changed();
     Ok(Json(json!({"ok":true})))
 }

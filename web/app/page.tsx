@@ -1,2 +1,4 @@
 import { Console } from "@/components/console";
-export default function Home() { return <Console />; }
+export default function Home() {
+  return <Console />;
+}

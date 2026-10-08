@@ -52,7 +52,7 @@ impl State {
         path: &str,
         server_url: String,
         release_dir: String,
-        capabilities: Capabilities,
+        mut capabilities: Capabilities,
     ) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(path)
@@ -70,6 +70,13 @@ impl State {
             .bind(now()).execute(&db).await?;
         let (events, _) = broadcast::channel(256);
         let scheduler = crate::scanner::Scheduler::new();
+        capabilities.arp = capabilities.arp && scheduler.arp.available();
+        if !capabilities.arp && capabilities.limitations.is_empty() {
+            capabilities.limitations.push(
+                "Active ARP is unavailable on this interface; physical topology may be incomplete."
+                    .into(),
+            );
+        }
         let state = Self(Arc::new(Inner {
             db,
             events,
@@ -80,7 +87,9 @@ impl State {
             server_url,
             capabilities,
             release_dir,
-            enrollment_ca: std::env::var("HOPE_AGENT_CA").ok(),
+            enrollment_ca: std::env::var("HOPE_AGENT_CA")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
             scheduler,
             login_attempts: Mutex::new(HashMap::new()),
         }));

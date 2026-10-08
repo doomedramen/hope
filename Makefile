@@ -1,6 +1,6 @@
 .PHONY: check build run types test
 types:
-	cargo run --quiet -p hope-server -- export-types > web/lib/protocol.ts
+	./scripts/generate-types.sh
 check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings

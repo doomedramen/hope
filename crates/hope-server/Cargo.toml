@@ -30,6 +30,9 @@ url = "2"
 subtle = "2"
 russh = "0.54"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+pnet_datalink = "0.35"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

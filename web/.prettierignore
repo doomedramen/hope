@@ -1,0 +1,8 @@
+node_modules
+.next
+out
+playwright-report
+test-results
+lib/protocol.ts
+components/ui
+package-lock.json

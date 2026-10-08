@@ -62,11 +62,12 @@ impl Collector {
                 && let (Some(rx), Some(tx)) = (
                     rate(previous.0, counters.0, elapsed),
                     rate(previous.1, counters.1, elapsed),
-                ) {
-                    receive += rx;
-                    transmit += tx;
-                    has_rate = true;
-                }
+                )
+            {
+                receive += rx;
+                transmit += tx;
+                has_rate = true;
+            }
             current_network.insert(name.clone(), counters);
         }
         self.previous_network = current_network;
@@ -278,21 +279,22 @@ async fn gpu_inventory() -> Vec<Gpu> {
         )
         .await
             && let Ok(value) = serde_json::from_str::<serde_json::Value>(&output)
-                && let Some(devices) = value["SPDisplaysDataType"].as_array() {
-                    for device in devices.iter().take(32) {
-                        gpus.push(Gpu {
-                            name: device["sppci_model"].as_str().unwrap_or("GPU").into(),
-                            vendor: device["spdisplays_vendor"]
-                                .as_str()
-                                .unwrap_or("Unknown")
-                                .into(),
-                            utilization_percent: None,
-                            memory_used_bytes: None,
-                            memory_total_bytes: None,
-                            temperature_celsius: None,
-                        });
-                    }
-                }
+            && let Some(devices) = value["SPDisplaysDataType"].as_array()
+        {
+            for device in devices.iter().take(32) {
+                gpus.push(Gpu {
+                    name: device["sppci_model"].as_str().unwrap_or("GPU").into(),
+                    vendor: device["spdisplays_vendor"]
+                        .as_str()
+                        .unwrap_or("Unknown")
+                        .into(),
+                    utilization_percent: None,
+                    memory_used_bytes: None,
+                    memory_total_bytes: None,
+                    temperature_celsius: None,
+                });
+            }
+        }
     } else if let Ok(mut entries) = tokio::fs::read_dir("/sys/class/drm").await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -360,12 +362,13 @@ async fn gpu_metrics(gpus: &mut Vec<Gpu>) {
         gpu.memory_used_bytes = read_number(&format!("{base}/mem_info_vram_used")).await;
         gpu.memory_total_bytes = read_number(&format!("{base}/mem_info_vram_total")).await;
         if let Ok(mut entries) = tokio::fs::read_dir(format!("{base}/hwmon")).await
-            && let Ok(Some(entry)) = entries.next_entry().await {
-                gpu.temperature_celsius =
-                    read_number(&entry.path().join("temp1_input").to_string_lossy())
-                        .await
-                        .map(|v| v / 1000.0);
-            }
+            && let Ok(Some(entry)) = entries.next_entry().await
+        {
+            gpu.temperature_celsius =
+                read_number(&entry.path().join("temp1_input").to_string_lossy())
+                    .await
+                    .map(|v| v / 1000.0);
+        }
     }
 }
 async fn read_number(path: &str) -> Option<f64> {

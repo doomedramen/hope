@@ -173,12 +173,13 @@ pub async fn check_origin(
 ) -> ApiResult<Response> {
     if !matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS") {
         if let Some(origin) = request.headers().get("origin")
-            && origin.to_str().ok() != Some(state.0.server_url.as_str()) {
-                return Err(ApiError(
-                    StatusCode::FORBIDDEN,
-                    "Untrusted request origin".into(),
-                ));
-            }
+            && origin.to_str().ok() != Some(state.0.server_url.as_str())
+        {
+            return Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "Untrusted request origin".into(),
+            ));
+        }
         if request
             .headers()
             .get("sec-fetch-site")
