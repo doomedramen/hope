@@ -7,14 +7,10 @@ use axum::{
     extract::{Path, Query, State as Extract},
 };
 use hope_protocol::{MetricPoint, Metrics};
-use serde::Deserialize;
 use sqlx::Row;
 use std::collections::BTreeMap;
 
-#[derive(Deserialize)]
-pub struct Window {
-    pub hours: Option<u32>,
-}
+pub use hope_protocol::MetricWindow as Window;
 pub async fn history(
     Extract(state): Extract<State>,
     Path(id): Path<String>,

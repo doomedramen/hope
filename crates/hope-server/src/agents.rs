@@ -10,7 +10,7 @@ use axum::{
 use hope_protocol::{
     AgentReport, EnrollmentRequest, EnrollmentResponse, Host, Inventory, SCHEMA_VERSION,
 };
-use serde_json::json;
+use hope_protocol::{EnrollmentTokenResponse, OkResponse, ReportResponse};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -51,33 +51,20 @@ pub fn install_command(state: &State, token: &str) -> String {
         ca
     )
 }
-pub async fn token(Extract(state): Extract<State>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn token(Extract(state): Extract<State>) -> ApiResult<Json<EnrollmentTokenResponse>> {
     let token = issue_token(&state).await?;
-    Ok(Json(
-        json!({"token":token,"expires_at":now()+900.0,"command":install_command(&state,&token),"custom_ca_required":state.0.enrollment_ca.is_some()}),
-    ))
+    Ok(Json(EnrollmentTokenResponse {
+        command: install_command(&state, &token),
+        token,
+        expires_at: now() + 900.0,
+        custom_ca_required: state.0.enrollment_ca.is_some(),
+    }))
 }
 
 pub fn validate_inventory(inv: &Inventory) -> ApiResult<()> {
-    if inv.hostname.is_empty()
-        || inv.hostname.len() > 255
-        || inv.interfaces.len() > 128
-        || inv.disks.len() > 128
-        || inv.gpus.len() > 32
-        || inv.collectors.len() > 64
-    {
-        return Err(ApiError::bad("Inventory exceeds supported limits"));
-    }
-    if inv.interfaces.iter().any(|i| {
-        i.addresses.len() > 64
-            || i.addresses
-                .iter()
-                .any(|a| a.parse::<std::net::IpAddr>().is_err())
-    }) {
-        return Err(ApiError::bad("Invalid interface addresses"));
-    }
-    Ok(())
+    crate::validation::inventory(inv)
 }
+
 pub fn inventory_addresses(inv: &Inventory) -> Vec<String> {
     let mut addresses: Vec<_> = inv
         .interfaces
@@ -200,7 +187,7 @@ pub async fn report(
     Extract(state): Extract<State>,
     headers: HeaderMap,
     Json(report): Json<AgentReport>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<ReportResponse>> {
     let credential = headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())
@@ -226,12 +213,8 @@ pub async fn report(
             "Invalid report version, identity, or timestamp",
         ));
     }
-    if report.metrics.disks.len() > 128
-        || report.metrics.gpus.len() > 32
-        || report.collectors.len() > 64
-    {
-        return Err(ApiError::bad("Too many metric dimensions"));
-    }
+    crate::validation::metrics(&report.metrics)?;
+    crate::validation::collectors(&report.collectors)?;
     if let Some(inv) = &report.inventory {
         validate_inventory(inv)?;
     }
@@ -287,13 +270,16 @@ pub async fn report(
         state.save_host(&host).await?;
         state.changed();
     }
-    Ok(Json(json!({"accepted":true,"duplicate":inserted==0})))
+    Ok(Json(ReportResponse {
+        accepted: true,
+        duplicate: inserted == 0,
+    }))
 }
 
 pub async fn revoke(
     Extract(state): Extract<State>,
     Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<OkResponse>> {
     let _guard = state.0.writes.lock().await;
     sqlx::query("UPDATE agents SET revoked=1 WHERE id=?")
         .bind(&id)
@@ -306,5 +292,5 @@ pub async fn revoke(
         }
     }
     state.changed();
-    Ok(Json(json!({"ok":true})))
+    Ok(Json(OkResponse { ok: true }))
 }

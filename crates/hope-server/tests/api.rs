@@ -416,3 +416,48 @@ async fn network_validation_and_restart_recovery() {
         .expect("status");
     assert_eq!(status, "interrupted");
 }
+
+#[tokio::test]
+async fn invalid_schema_and_metrics_are_rejected_without_storage() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let mut report = AgentReport {
+        schema_version: 999,
+        report_id: Uuid::new_v4().to_string(),
+        agent_id: agent,
+        collected_at: now(),
+        inventory: None,
+        metrics: Metrics::default(),
+        collectors: vec![],
+    };
+    let result = request(
+        &app,
+        "POST",
+        "/api/v1/agent/report",
+        json!(report),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(result.0, StatusCode::BAD_REQUEST);
+    assert_eq!(result.1["code"], "invalid_request");
+    report.schema_version = SCHEMA_VERSION;
+    report.metrics.cpu_percent = Some(101.0);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/report",
+            json!(report),
+            Some(("authorization", &bearer))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metrics")
+        .fetch_one(&state.0.db)
+        .await
+        .expect("count");
+    assert_eq!(count, 0);
+}

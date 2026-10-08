@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use hope_protocol::ErrorResponse;
 
 #[derive(Debug)]
 pub struct ApiError(pub StatusCode, pub String);
@@ -20,7 +20,23 @@ impl ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({"error": self.1}))).into_response()
+        let code = match self.0 {
+            StatusCode::BAD_REQUEST => "invalid_request",
+            StatusCode::UNAUTHORIZED => "authentication_required",
+            StatusCode::FORBIDDEN => "forbidden",
+            StatusCode::NOT_FOUND => "not_found",
+            StatusCode::CONFLICT => "conflict",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+            _ => "internal_error",
+        };
+        (
+            self.0,
+            Json(ErrorResponse {
+                code: code.into(),
+                error: self.1,
+            }),
+        )
+            .into_response()
     }
 }
 impl<E: Into<anyhow::Error>> From<E> for ApiError {

@@ -4,13 +4,11 @@ use crate::{
     state::{State, hash, now},
 };
 use axum::{Json, extract::State as Extract};
-use hope_protocol::InstallJob;
+use hope_protocol::{FingerprintResponse, InstallJob, InstallStatus};
 use russh::{
     ChannelMsg, client,
     keys::{PrivateKeyWithHashAlg, ssh_key},
 };
-use serde::Deserialize;
-use serde_json::json;
 use std::{net::IpAddr, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::timeout};
 use uuid::Uuid;
@@ -31,12 +29,7 @@ impl client::Handler for PinnedClient {
             .is_none_or(|expected| *expected == fingerprint))
     }
 }
-#[derive(Deserialize)]
-pub struct Target {
-    pub host_id: String,
-    pub address: String,
-    pub port: Option<u16>,
-}
+pub use hope_protocol::SshTarget as Target;
 async fn validate_target(state: &State, target: &Target) -> ApiResult<IpAddr> {
     let host = state
         .host(&target.host_id)
@@ -59,7 +52,7 @@ fn config() -> Arc<client::Config> {
 pub async fn fingerprint(
     Extract(state): Extract<State>,
     Json(target): Json<Target>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<FingerprintResponse>> {
     let ip = validate_target(&state, &target).await?;
     let observed = Arc::new(Mutex::new(None));
     let session = timeout(
@@ -88,20 +81,13 @@ pub async fn fingerprint(
             "en",
         )
         .await;
-    Ok(Json(
-        json!({"fingerprint":fingerprint,"instruction":"Verify this fingerprint through a trusted channel before installation."}),
-    ))
+    Ok(Json(FingerprintResponse {
+        fingerprint,
+        instruction: "Verify this fingerprint through a trusted channel before installation."
+            .into(),
+    }))
 }
-#[derive(Deserialize)]
-pub struct InstallRequest {
-    #[serde(flatten)]
-    pub target: Target,
-    pub username: String,
-    pub fingerprint: String,
-    pub password: Option<String>,
-    pub private_key: Option<String>,
-    pub passphrase: Option<String>,
-}
+pub use hope_protocol::SshInstallRequest as InstallRequest;
 pub async fn install(
     Extract(state): Extract<State>,
     Json(request): Json<InstallRequest>,
@@ -121,7 +107,12 @@ pub async fn install(
     }
     let mut jobs = state.0.installs.lock().await;
     jobs.retain(|_, j| j.created_at > now() - 86400.0);
-    if jobs.values().filter(|j| j.status == "running").count() >= 4 {
+    if jobs
+        .values()
+        .filter(|j| j.status == InstallStatus::Running)
+        .count()
+        >= 4
+    {
         return Err(ApiError::bad(
             "At most four SSH installations may run concurrently",
         ));
@@ -134,7 +125,7 @@ pub async fn install(
     let job = InstallJob {
         id: Uuid::new_v4().to_string(),
         host: request.target.address.clone(),
-        status: "running".into(),
+        status: InstallStatus::Running,
         messages: vec!["Connecting with the verified host key".into()],
         created_at: now(),
     };
@@ -150,17 +141,17 @@ pub async fn install(
         .await;
         let (status, message) = match result {
             Ok(Ok(())) => (
-                "completed",
+                InstallStatus::Completed,
                 "Agent enrolled and first report received".to_string(),
             ),
-            Ok(Err(e)) => ("failed", e.to_string()),
+            Ok(Err(e)) => (InstallStatus::Failed, e.to_string()),
             Err(_) => (
-                "failed",
+                InstallStatus::Uncertain,
                 "Installation exceeded five minutes; inspect the host before retrying".into(),
             ),
         };
         if let Some(job) = task_state.0.installs.lock().await.get_mut(&id) {
-            job.status = status.into();
+            job.status = status;
             job.messages.push(message);
         }
         task_state.changed();

@@ -5,10 +5,12 @@ pub mod auth;
 pub mod enrichment;
 pub mod error;
 pub mod metrics;
+pub mod migrations;
 pub mod releases;
 pub mod scanner;
 pub mod ssh;
 pub mod state;
+pub mod validation;
 
 use axum::{
     Router,

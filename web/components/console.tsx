@@ -67,6 +67,7 @@ import { InstallDialog } from "@/components/install-dialog";
 import { HostDetails } from "@/components/host-details";
 import { api, post, put, bytes, age, percentage, status } from "@/lib/api";
 import type {
+  AuthStatus as Auth,
   Bootstrap,
   Host,
   MapState,
@@ -77,7 +78,6 @@ const NetworkMap = dynamic(
   () => import("@/components/network-map").then((m) => m.NetworkMap),
   { ssr: false, loading: () => <Skeleton className="h-[65vh] w-full" /> },
 );
-type Auth = { setup_required: boolean; authenticated: boolean };
 
 export function Console() {
   const [auth, setAuth] = useState<Auth | null>(null);

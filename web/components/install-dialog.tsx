@@ -27,15 +27,14 @@ import {
   SelectGroup,
   SelectItem,
 } from "@/components/ui/select";
-import type { Host, InstallJob } from "@/lib/protocol";
+import type {
+  EnrollmentTokenResponse as Enrollment,
+  FingerprintResponse,
+  Host,
+  InstallJob,
+} from "@/lib/protocol";
 import { api, post } from "@/lib/api";
 
-type Enrollment = {
-  token: string;
-  command: string;
-  expires_at: number;
-  custom_ca_required: boolean;
-};
 export function InstallDialog({
   open,
   onOpenChange,
@@ -195,7 +194,7 @@ function SshInstall({ host }: { host: Host }) {
     setError("");
     setVerified(false);
     try {
-      const result = await post<{ fingerprint: string }>(
+      const result = await post<FingerprintResponse>(
         "/ssh/fingerprint",
         target,
       );

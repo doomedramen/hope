@@ -4,6 +4,115 @@ use ts_rs::TS;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanStatus {
+    Queued,
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+    Interrupted,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EnrichmentStatus {
+    #[default]
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Reporting,
+    Stale,
+    Revoked,
+    Unenrolled,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallStatus {
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct LoginRequest {
+    pub password: String,
+    pub setup_token: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct AuthStatus {
+    pub setup_required: bool,
+    pub authenticated: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct OkResponse {
+    pub ok: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ReportResponse {
+    pub accepted: bool,
+    pub duplicate: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ErrorResponse {
+    pub code: String,
+    pub error: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct NetworkInput {
+    pub name: String,
+    pub cidr: String,
+    pub enabled: Option<bool>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct NetworkUpdate {
+    pub enabled: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct MergeRequest {
+    pub source_id: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct MetricWindow {
+    pub hours: Option<u32>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct EnrollmentTokenResponse {
+    pub token: String,
+    pub expires_at: f64,
+    pub command: String,
+    pub custom_ca_required: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SshTarget {
+    pub host_id: String,
+    pub address: String,
+    pub port: Option<u16>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SshInstallRequest {
+    #[serde(flatten)]
+    pub target: SshTarget,
+    pub username: String,
+    pub fingerprint: String,
+    pub password: Option<String>,
+    pub private_key: Option<String>,
+    pub passphrase: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct FingerprintResponse {
+    pub fingerprint: String,
+    pub instruction: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Interface {
     pub name: String,
@@ -105,7 +214,7 @@ pub struct ScanJob {
     pub id: String,
     pub network_id: String,
     pub cidr: String,
-    pub status: String,
+    pub status: ScanStatus,
     pub scanned: u32,
     pub total: u32,
     pub discovered: u32,
@@ -193,7 +302,7 @@ pub struct Bootstrap {
 pub struct InstallJob {
     pub id: String,
     pub host: String,
-    pub status: String,
+    pub status: InstallStatus,
     pub messages: Vec<String>,
     pub created_at: f64,
 }
@@ -201,6 +310,23 @@ pub struct InstallJob {
 /// Generate declarations from the same types used by the Rust HTTP handlers.
 pub fn typescript() -> String {
     let declarations = [
+        ScanStatus::decl(),
+        EnrichmentStatus::decl(),
+        AgentStatus::decl(),
+        InstallStatus::decl(),
+        LoginRequest::decl(),
+        AuthStatus::decl(),
+        OkResponse::decl(),
+        ReportResponse::decl(),
+        ErrorResponse::decl(),
+        NetworkInput::decl(),
+        NetworkUpdate::decl(),
+        MergeRequest::decl(),
+        MetricWindow::decl(),
+        EnrollmentTokenResponse::decl(),
+        SshTarget::decl(),
+        SshInstallRequest::decl(),
+        FingerprintResponse::decl(),
         Interface::decl(),
         Disk::decl(),
         Gpu::decl(),
@@ -233,4 +359,21 @@ pub fn typescript() -> String {
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn legacy_host_defaults_new_metadata() {
+        let host: Host = serde_json::from_str(r#"{"id":"host","agent_id":null,"name":"host","addresses":[],"macs":[],"network_ids":[],"last_seen":0,"last_report":null,"discovery_method":"tcp","inventory":null,"metrics":null,"collectors":[],"services":[]}"#).expect("legacy host");
+        assert!(!host.agent_revoked);
+        assert!(host.last_collected_at.is_none());
+    }
+    #[test]
+    fn contract_statuses_reject_unknown_values() {
+        assert!(serde_json::from_str::<ScanStatus>("\"running\"").is_ok());
+        assert!(serde_json::from_str::<ScanStatus>("\"unknown\"").is_err());
+        assert!(serde_json::from_str::<InstallStatus>("\"unknown\"").is_err());
+    }
 }

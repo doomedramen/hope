@@ -10,25 +10,20 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use serde::Deserialize;
-use serde_json::json;
+use hope_protocol::{AuthStatus, OkResponse};
 use subtle::ConstantTimeEq;
 
 pub async fn status(
     Extract(state): Extract<State>,
     headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(
-        json!({"setup_required": state.meta("password_hash").await?.is_none(), "authenticated": valid_session(&state, &headers).await?}),
-    ))
+) -> ApiResult<Json<AuthStatus>> {
+    Ok(Json(AuthStatus {
+        setup_required: state.meta("password_hash").await?.is_none(),
+        authenticated: valid_session(&state, &headers).await?,
+    }))
 }
 
-#[derive(Deserialize)]
-pub struct Login {
-    pub password: String,
-    pub setup_token: Option<String>,
-}
-
+pub use hope_protocol::LoginRequest as Login;
 pub async fn setup(Extract(state): Extract<State>, Json(body): Json<Login>) -> ApiResult<Response> {
     let _lock = state.0.writes.lock().await;
     if state.meta("password_hash").await?.is_some() {
@@ -126,7 +121,7 @@ async fn new_session(state: &State) -> ApiResult<Response> {
     );
     Ok((
         [(axum::http::header::SET_COOKIE, cookie)],
-        Json(json!({"ok":true})),
+        Json(OkResponse { ok: true }),
     )
         .into_response())
 }
@@ -205,7 +200,7 @@ pub async fn logout(Extract(state): Extract<State>, headers: HeaderMap) -> ApiRe
             "set-cookie",
             "hope_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
         )],
-        Json(json!({"ok":true})),
+        Json(OkResponse { ok: true }),
     )
         .into_response())
 }

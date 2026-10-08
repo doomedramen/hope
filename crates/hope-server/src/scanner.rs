@@ -3,7 +3,7 @@ use crate::{
     state::{State, now},
 };
 use futures::{StreamExt, stream::FuturesUnordered};
-use hope_protocol::{Capabilities, Host, Network, ScanJob, Service};
+use hope_protocol::{Capabilities, Host, Network, ScanJob, ScanStatus, Service};
 use ipnet::Ipv4Net;
 use sqlx::Row;
 use std::{
@@ -133,7 +133,7 @@ pub async fn start(state: &State, network: &Network) -> ApiResult<ScanJob> {
         id: Uuid::new_v4().to_string(),
         network_id: network.id.clone(),
         cidr: net.to_string(),
-        status: "running".into(),
+        status: ScanStatus::Running,
         scanned: 0,
         total: ips.len() as u32,
         discovered: 0,
@@ -147,7 +147,7 @@ pub async fn start(state: &State, network: &Network) -> ApiResult<ScanJob> {
     .bind(&job.id)
     .bind(&job.network_id)
     .bind(&job.cidr)
-    .bind(&job.status)
+    .bind("running")
     .bind(job.total)
     .bind(job.started_at)
     .execute(&state.0.db)
@@ -186,19 +186,21 @@ pub async fn jobs(state: &State) -> ApiResult<Vec<ScanJob>> {
         .await?;
     Ok(rows
         .into_iter()
-        .map(|r| ScanJob {
-            id: r.get("id"),
-            network_id: r.get("network_id"),
-            cidr: r.get("cidr"),
-            status: r.get("status"),
-            scanned: r.get::<i64, _>("scanned") as u32,
-            total: r.get::<i64, _>("total") as u32,
-            discovered: r.get::<i64, _>("discovered") as u32,
-            started_at: r.get("started_at"),
-            finished_at: r.get("finished_at"),
-            error: r.get("error"),
+        .map(|r| -> anyhow::Result<ScanJob> {
+            Ok(ScanJob {
+                id: r.get("id"),
+                network_id: r.get("network_id"),
+                cidr: r.get("cidr"),
+                status: serde_json::from_value(serde_json::Value::String(r.get("status")))?,
+                scanned: r.get::<i64, _>("scanned") as u32,
+                total: r.get::<i64, _>("total") as u32,
+                discovered: r.get::<i64, _>("discovered") as u32,
+                started_at: r.get("started_at"),
+                finished_at: r.get("finished_at"),
+                error: r.get("error"),
+            })
         })
-        .collect())
+        .collect::<anyhow::Result<_>>()?)
 }
 
 pub(crate) async fn tcp(ip: Ipv4Addr, port: u16, limiter: &ProbeLimiter) -> bool {

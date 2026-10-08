@@ -12,9 +12,8 @@ use axum::{
     },
 };
 use futures::StreamExt;
+use hope_protocol::OkResponse;
 use hope_protocol::{Bootstrap, Host, MapState, Network};
-use serde::Deserialize;
-use serde_json::json;
 use sqlx::Row;
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
@@ -62,12 +61,7 @@ pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstr
         server_url: state.0.server_url.clone(),
     }))
 }
-#[derive(Deserialize)]
-pub struct NetworkInput {
-    pub name: String,
-    pub cidr: String,
-    pub enabled: Option<bool>,
-}
+pub use hope_protocol::NetworkInput;
 pub async fn add_network(
     Extract(state): Extract<State>,
     Json(body): Json<NetworkInput>,
@@ -107,22 +101,19 @@ pub async fn add_network(
     state.changed();
     Ok(Json(network))
 }
-#[derive(Deserialize)]
-pub struct NetworkUpdate {
-    pub enabled: bool,
-}
+pub use hope_protocol::NetworkUpdate;
 pub async fn update_network(
     Extract(state): Extract<State>,
     Path(id): Path<String>,
     Json(body): Json<NetworkUpdate>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<OkResponse>> {
     sqlx::query("UPDATE networks SET enabled=? WHERE id=?")
         .bind(body.enabled)
         .bind(id)
         .execute(&state.0.db)
         .await?;
     state.changed();
-    Ok(Json(json!({"ok":true})))
+    Ok(Json(OkResponse { ok: true }))
 }
 pub async fn start_scan(
     Extract(state): Extract<State>,
@@ -138,9 +129,9 @@ pub async fn start_scan(
 pub async fn cancel_scan(
     Extract(state): Extract<State>,
     Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<OkResponse>> {
     scanner::cancel(&state, &id).await?;
-    Ok(Json(json!({"ok":true})))
+    Ok(Json(OkResponse { ok: true }))
 }
 pub async fn map(
     Extract(state): Extract<State>,
@@ -171,10 +162,7 @@ pub async fn map(
     state.changed();
     Ok(Json(map))
 }
-#[derive(Deserialize)]
-pub struct Merge {
-    pub source_id: String,
-}
+pub use hope_protocol::MergeRequest as Merge;
 pub async fn merge(
     Extract(state): Extract<State>,
     Path(target): Path<String>,

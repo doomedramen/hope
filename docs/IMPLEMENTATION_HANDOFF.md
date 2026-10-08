@@ -214,3 +214,7 @@ Before each milestone commit, review staged files and ensure no keys, tokens, da
 - Linux compilation exposed the private `pnet_datalink::IpNetwork` import; replaced it with the public address accessor. Linux ARM64 release workspace compilation passed in the Docker Rust stage.
 - Native Rust tests (six), Clippy, formatting, frontend typecheck/lint/static export, and three Chromium tests pass. Generated protocol trailing whitespace was removed at the source generator.
 - This establishes a build baseline only. Discovery, installation, and resource gates listed above remain open.
+
+### Ticket 02 — contract and migration foundation completed 2026-10-08
+
+Shared DTOs now cover authentication, networks, merge, metric windows, enrollment tokens/reports, and SSH requests/responses. Scan/install states use Rust enums and generated TypeScript unions. Errors include stable status-based codes. Inventory, collector metadata, and metric dimensions have bounded strings/lists and finite numeric/range checks. Database adoption uses an ordered transactional version, preserves legacy identities/history, rejects future versions, and remains idempotent. Tests cover legacy host defaults, status values, invalid reports without storage, and database adoption. Native tests/Clippy and frontend types/lint pass. CI contract-drift enforcement is scheduled in Ticket 10.

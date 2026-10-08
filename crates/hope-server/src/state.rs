@@ -63,9 +63,7 @@ impl State {
             .max_connections(5)
             .connect_with(options)
             .await?;
-        sqlx::raw_sql(include_str!("schema.sql"))
-            .execute(&db)
-            .await?;
+        crate::migrations::run(&db).await?;
         sqlx::query("UPDATE scans SET status='interrupted', finished_at=?, error='Server restarted; start a new scan' WHERE status IN ('queued','running')")
             .bind(now()).execute(&db).await?;
         let (events, _) = broadcast::channel(256);
