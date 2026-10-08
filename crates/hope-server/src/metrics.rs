@@ -7,10 +7,102 @@ use axum::{
     extract::{Path, Query, State as Extract},
 };
 use hope_protocol::{MetricPoint, Metrics};
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::BTreeMap;
 
 pub use hope_protocol::MetricWindow as Window;
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Statistic {
+    sum: f64,
+    count: u64,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Statistics(BTreeMap<String, Statistic>);
+impl Statistics {
+    fn sample(metrics: &Metrics) -> Self {
+        let mut result = Self::default();
+        macro_rules! scalar { ($($field:ident),*) => { $(result.add(stringify!($field), metrics.$field);)* }; }
+        scalar!(
+            cpu_percent,
+            memory_used_bytes,
+            memory_total_bytes,
+            network_rx_bytes_per_second,
+            network_tx_bytes_per_second,
+            disk_read_bytes_per_second,
+            disk_write_bytes_per_second
+        );
+        for gpu in &metrics.gpus {
+            let key = gpu_key(&gpu.vendor, &gpu.name);
+            result.add(&format!("{key}:utilization"), gpu.utilization_percent);
+            result.add(&format!("{key}:used"), gpu.memory_used_bytes);
+            result.add(&format!("{key}:total"), gpu.memory_total_bytes);
+            result.add(&format!("{key}:temperature"), gpu.temperature_celsius);
+        }
+        for disk in &metrics.disks {
+            let key = disk_key(&disk.name, &disk.mount, &disk.filesystem);
+            result.add(&format!("{key}:available"), Some(disk.available_bytes));
+            result.add(&format!("{key}:total"), Some(disk.total_bytes));
+        }
+        result
+    }
+    fn add(&mut self, key: &str, value: Option<f64>) {
+        if let Some(value) = value.filter(|v| v.is_finite()) {
+            let entry = self.0.entry(key.into()).or_default();
+            entry.sum += value;
+            entry.count += 1;
+        }
+    }
+    fn merge(&mut self, other: &Self) {
+        for (key, value) in &other.0 {
+            let entry = self.0.entry(key.clone()).or_default();
+            entry.sum += value.sum;
+            entry.count += value.count;
+        }
+    }
+    fn mean(&self, key: &str) -> Option<f64> {
+        self.0
+            .get(key)
+            .filter(|s| s.count > 0)
+            .map(|s| s.sum / s.count as f64)
+    }
+    fn apply(&self, mut latest: Metrics) -> Metrics {
+        macro_rules! scalar { ($($field:ident),*) => { $(latest.$field = self.mean(stringify!($field));)* }; }
+        scalar!(
+            cpu_percent,
+            memory_used_bytes,
+            memory_total_bytes,
+            network_rx_bytes_per_second,
+            network_tx_bytes_per_second,
+            disk_read_bytes_per_second,
+            disk_write_bytes_per_second
+        );
+        for gpu in &mut latest.gpus {
+            let key = gpu_key(&gpu.vendor, &gpu.name);
+            gpu.utilization_percent = self.mean(&format!("{key}:utilization"));
+            gpu.memory_used_bytes = self.mean(&format!("{key}:used"));
+            gpu.memory_total_bytes = self.mean(&format!("{key}:total"));
+            gpu.temperature_celsius = self.mean(&format!("{key}:temperature"));
+        }
+        for disk in &mut latest.disks {
+            let key = disk_key(&disk.name, &disk.mount, &disk.filesystem);
+            if let Some(value) = self.mean(&format!("{key}:available")) {
+                disk.available_bytes = value;
+            }
+            if let Some(value) = self.mean(&format!("{key}:total")) {
+                disk.total_bytes = value;
+            }
+        }
+        latest
+    }
+}
+fn gpu_key(vendor: &str, name: &str) -> String {
+    format!("gpu:{}", serde_json::json!([vendor, name]))
+}
+fn disk_key(name: &str, mount: &str, filesystem: &str) -> String {
+    format!("disk:{}", serde_json::json!([name, mount, filesystem]))
+}
+
 pub async fn history(
     Extract(state): Extract<State>,
     Path(id): Path<String>,
@@ -21,103 +113,176 @@ pub async fn history(
         return Ok(Json(vec![]));
     };
     let hours = window.hours.unwrap_or(24).clamp(1, 168);
-    let rows=sqlx::query("SELECT collected_at,resolution,body FROM metrics WHERE agent_id=? AND collected_at>=? ORDER BY collected_at LIMIT 10000")
+    let rows = sqlx::query("SELECT collected_at,resolution,body,statistics FROM metrics WHERE agent_id=? AND collected_at>=? ORDER BY collected_at DESC LIMIT 10000")
         .bind(agent).bind(now()-hours as f64*3600.0).fetch_all(&state.0.db).await?;
-    let points: Vec<MetricPoint> = rows
-        .into_iter()
-        .map(|r| {
-            Ok(MetricPoint {
-                collected_at: r.get("collected_at"),
-                resolution_seconds: r.get::<i64, _>("resolution") as u32,
-                metrics: serde_json::from_str(r.get("body"))?,
-            })
-        })
-        .collect::<anyhow::Result<_>>()?;
-    Ok(Json(if hours > 24 {
-        bucket(points, 900)
-    } else if hours > 6 {
-        bucket(points, 120)
-    } else {
-        points
-    }))
-}
-
-fn average(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
-    let values: Vec<_> = values.flatten().filter(|v| v.is_finite()).collect();
-    (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
-}
-pub fn aggregate(values: &[Metrics]) -> Metrics {
-    let mut result = values.last().cloned().unwrap_or_default();
-    result.cpu_percent = average(values.iter().map(|v| v.cpu_percent));
-    result.memory_used_bytes = average(values.iter().map(|v| v.memory_used_bytes));
-    result.memory_total_bytes = average(values.iter().map(|v| v.memory_total_bytes));
-    result.network_rx_bytes_per_second =
-        average(values.iter().map(|v| v.network_rx_bytes_per_second));
-    result.network_tx_bytes_per_second =
-        average(values.iter().map(|v| v.network_tx_bytes_per_second));
-    result.disk_read_bytes_per_second =
-        average(values.iter().map(|v| v.disk_read_bytes_per_second));
-    result.disk_write_bytes_per_second =
-        average(values.iter().map(|v| v.disk_write_bytes_per_second));
-    for gpu in &mut result.gpus {
-        let matches: Vec<_> = values
-            .iter()
-            .flat_map(|v| &v.gpus)
-            .filter(|g| g.name == gpu.name && g.vendor == gpu.vendor)
-            .collect();
-        gpu.utilization_percent = average(matches.iter().map(|g| g.utilization_percent));
-        gpu.memory_used_bytes = average(matches.iter().map(|g| g.memory_used_bytes));
-        gpu.temperature_celsius = average(matches.iter().map(|g| g.temperature_celsius));
+    let mut points = vec![];
+    for row in rows.into_iter().rev() {
+        let point = MetricPoint {
+            collected_at: row.get("collected_at"),
+            resolution_seconds: row.get::<i64, _>("resolution") as u32,
+            metrics: serde_json::from_str(row.get("body"))?,
+        };
+        let statistics: Option<String> = row.get("statistics");
+        let statistics = statistics
+            .map(|s| serde_json::from_str::<Statistics>(&s))
+            .transpose()?;
+        let statistics = statistics.or_else(|| {
+            (point.resolution_seconds == 30).then(|| Statistics::sample(&point.metrics))
+        });
+        points.push((point, statistics));
     }
-    result
+    let seconds = if hours > 24 {
+        900
+    } else if hours > 6 {
+        120
+    } else {
+        0
+    };
+    // Legacy rollups have no recoverable per-metric counts. Preserve their values rather
+    // than inventing weights; they expire naturally after seven days.
+    if seconds == 0 || points.iter().any(|(_, statistics)| statistics.is_none()) {
+        return Ok(Json(points.into_iter().map(|(point, _)| point).collect()));
+    }
+    Ok(Json(weighted_bucket(points, seconds)))
 }
-pub fn bucket(points: Vec<MetricPoint>, seconds: u32) -> Vec<MetricPoint> {
-    let mut groups: BTreeMap<i64, Vec<Metrics>> = BTreeMap::new();
-    for point in points {
-        groups
-            .entry(point.collected_at as i64 / seconds as i64)
-            .or_default()
-            .push(point.metrics);
+fn weighted_bucket(
+    points: Vec<(MetricPoint, Option<Statistics>)>,
+    seconds: u32,
+) -> Vec<MetricPoint> {
+    let mut groups: BTreeMap<i64, (Metrics, Statistics)> = BTreeMap::new();
+    for (point, statistics) in points {
+        let entry = groups
+            .entry((point.collected_at / seconds as f64).floor() as i64)
+            .or_default();
+        entry.0 = point.metrics;
+        if let Some(statistics) = statistics {
+            entry.1.merge(&statistics);
+        }
     }
     groups
         .into_iter()
-        .map(|(t, values)| MetricPoint {
-            collected_at: (t * seconds as i64) as f64,
+        .map(|(time, (latest, statistics))| MetricPoint {
+            collected_at: (time * seconds as i64) as f64,
             resolution_seconds: seconds,
-            metrics: aggregate(&values),
+            metrics: statistics.apply(latest),
         })
         .collect()
 }
-
+pub fn aggregate(values: &[Metrics]) -> Metrics {
+    let mut statistics = Statistics::default();
+    for value in values {
+        statistics.merge(&Statistics::sample(value));
+    }
+    statistics.apply(values.last().cloned().unwrap_or_default())
+}
 pub async fn retain(state: &State) -> anyhow::Result<()> {
-    let _guard = state.0.writes.lock().await;
+    let start = std::time::Instant::now();
     let cutoff = ((now() - 86400.0) / 300.0).floor() * 300.0;
-    // Work in bounded batches of complete five-minute groups. Never retain unbounded raw history.
-    let groups=sqlx::query("SELECT agent_id,CAST(collected_at/300 AS INTEGER) AS bucket FROM metrics WHERE resolution=30 AND collected_at<? GROUP BY agent_id,bucket LIMIT 500")
+    let groups = sqlx::query("SELECT raw.agent_id,CAST(raw.collected_at/300 AS INTEGER) AS bucket FROM metrics AS raw WHERE raw.resolution=30 AND raw.collected_at<? AND NOT EXISTS(SELECT 1 FROM metrics AS legacy WHERE legacy.agent_id=raw.agent_id AND legacy.report_id='rollup-' || CAST(raw.collected_at/300 AS INTEGER) AND legacy.statistics IS NULL) GROUP BY raw.agent_id,bucket LIMIT 128")
         .bind(cutoff).fetch_all(&state.0.db).await?;
-    let mut tx = state.0.db.begin().await?;
     for group in groups {
+        if start.elapsed() > std::time::Duration::from_secs(2) {
+            break;
+        }
+        // Release the write lock and commit after each bucket so live reports can proceed.
+        let _guard = state.0.writes.lock().await;
         let agent: String = group.get("agent_id");
         let bucket: i64 = group.get("bucket");
         let from = (bucket * 300) as f64;
-        let rows=sqlx::query("SELECT body FROM metrics WHERE agent_id=? AND resolution=30 AND collected_at>=? AND collected_at<?")
+        let mut tx = state.0.db.begin().await?;
+        let existing =
+            sqlx::query("SELECT body,statistics FROM metrics WHERE agent_id=? AND report_id=?")
+                .bind(&agent)
+                .bind(format!("rollup-{bucket}"))
+                .fetch_optional(&mut *tx)
+                .await?;
+        let mut statistics = Statistics::default();
+        let mut latest = Metrics::default();
+        if let Some(existing) = existing {
+            let stored: Option<String> = existing.get("statistics");
+            let Some(stored) = stored else {
+                // Exceptional pre-upgrade late samples remain intact until expiry. A legacy
+                // aggregate's unknown weights cannot be reconstructed without fabricating data.
+                tx.commit().await?;
+                continue;
+            };
+            statistics = serde_json::from_str(&stored)?;
+            latest = serde_json::from_str(existing.get("body"))?;
+        }
+        let rows = sqlx::query("SELECT body FROM metrics WHERE agent_id=? AND resolution=30 AND collected_at>=? AND collected_at<? ORDER BY collected_at")
             .bind(&agent).bind(from).bind(from+300.0).fetch_all(&mut *tx).await?;
-        let values: Vec<Metrics> = rows
-            .into_iter()
-            .map(|r| serde_json::from_str(r.get("body")))
-            .collect::<Result<_, _>>()?;
-        sqlx::query("INSERT OR REPLACE INTO metrics(agent_id,report_id,collected_at,resolution,body) VALUES(?,?,?,300,?)")
-            .bind(&agent).bind(format!("rollup-{bucket}")).bind(from).bind(serde_json::to_string(&aggregate(&values))?).execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM metrics WHERE agent_id=? AND resolution=30 AND collected_at>=? AND collected_at<?").bind(&agent).bind(from).bind(from+300.0).execute(&mut *tx).await?;
+        for row in rows {
+            latest = serde_json::from_str(row.get("body"))?;
+            statistics.merge(&Statistics::sample(&latest));
+        }
+        sqlx::query("INSERT OR REPLACE INTO metrics(agent_id,report_id,collected_at,resolution,body,statistics) VALUES(?,?,?,300,?,?)")
+            .bind(&agent).bind(format!("rollup-{bucket}")).bind(from).bind(serde_json::to_string(&statistics.apply(latest))?).bind(serde_json::to_string(&statistics)?).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM metrics WHERE agent_id=? AND resolution=30 AND collected_at>=? AND collected_at<?")
+            .bind(&agent).bind(from).bind(from+300.0).execute(&mut *tx).await?;
+        tx.commit().await?;
     }
-    sqlx::query("DELETE FROM metrics WHERE collected_at<?")
+    let _guard = state.0.writes.lock().await;
+    let mut tx = state.0.db.begin().await?;
+    sqlx::query("DELETE FROM metrics WHERE rowid IN (SELECT rowid FROM metrics WHERE collected_at<? LIMIT 5000)")
         .bind(now() - 7.0 * 86400.0)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM scans WHERE finished_at<?")
-        .bind(now() - 7.0 * 86400.0)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "DELETE FROM scans WHERE rowid IN (SELECT rowid FROM scans WHERE finished_at<? LIMIT 500)",
+    )
+    .bind(now() - 7.0 * 86400.0)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mixed_resolutions_use_per_metric_counts_and_preserve_nulls() {
+        let samples = [
+            Metrics {
+                cpu_percent: Some(10.0),
+                ..Default::default()
+            },
+            Metrics {
+                cpu_percent: Some(30.0),
+                ..Default::default()
+            },
+            Metrics::default(),
+        ];
+        let mut stats = Statistics::default();
+        for sample in &samples {
+            stats.merge(&Statistics::sample(sample));
+        }
+        let points = vec![
+            (
+                MetricPoint {
+                    collected_at: 300.0,
+                    resolution_seconds: 300,
+                    metrics: aggregate(&samples),
+                },
+                Some(stats),
+            ),
+            (
+                MetricPoint {
+                    collected_at: 610.0,
+                    resolution_seconds: 30,
+                    metrics: Metrics {
+                        cpu_percent: Some(80.0),
+                        ..Default::default()
+                    },
+                },
+                Some(Statistics::sample(&Metrics {
+                    cpu_percent: Some(80.0),
+                    ..Default::default()
+                })),
+            ),
+        ];
+        let result = weighted_bucket(points, 900);
+        assert_eq!(result[0].metrics.cpu_percent, Some(40.0));
+        assert!(result[0].metrics.memory_used_bytes.is_none());
+    }
 }

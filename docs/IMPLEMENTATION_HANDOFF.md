@@ -224,3 +224,20 @@ Shared DTOs now cover authentication, networks, merge, metric windows, enrollmen
 The scheduler has an injectable probe backend and bounded host deadlines. TCP port 80 and refused-connection liveness are supported. Enrichment uses a bounded deduplicated queue, eight workers, visible host states, killable Linux/macOS resolvers, and capped resolver output. ARP validates frame fields, correlates source/target requests, chooses matching interface addresses, bounds pending requests, and moves raw sends off Tokio workers. Cancellation is rechecked after obtaining the persistence lock. Latest scan records remain available for each range.
 
 Native and Linux ARM64 tests/Clippy/formatting pass. Ten controlled discovery runs passed: five routed runs completed both ranges in 25.397–25.437 seconds; five on-link runs in 26.392–26.464 seconds. First responders appeared in 0.772–0.817 seconds. See docs/validation.md and its raw benchmark files. The shared limit is 200 probe starts per second; an absolute interface packet policer and measured frame counts are not claimed.
+
+### Pause checkpoint — Ticket 04 partially completed, 2026-10-08
+
+The user requested a pause. Resume at Ticket 04; do not skip to release claims.
+
+Verified changes:
+
+- Enrollment retries recover a lost response without duplicating identity; concurrent reuse permits only one identity.
+- Report authorization occurs under the same write lock as revocation. A queued report cannot commit after revocation. Credential and visible revocation state change transactionally.
+- Revoked identities can retain their host/history through an administrator-issued token bound to that identity and a new credential. Old credentials remain rejected; retrying the replacement is idempotent. The installer command and frontend support this token scope, and sudo preserves the explicit reset flag.
+- Reports commit network membership with host/sample state. Manual merges remove qualified source positions in every map mode. Ambiguous discovery observations no longer create a fresh duplicate on every scan.
+- Migration 2 adds rollup statistics, bound reset-token metadata, and cleanup indexes. Rollups keep per-metric sums/counts; mixed-resolution averages preserve nulls and use those counts. Repeated retention merges late samples with existing rollups instead of replacing a full bucket. Each bucket commits and releases the write lock; cleanup is bounded.
+- Legacy rollups lack recoverable counts. They remain unchanged and bypass further display grouping until expiry. Exceptional legacy late raw samples are preserved until seven-day expiry and excluded from new rollup work so they cannot starve normal cleanup.
+
+Checks at checkpoint: 24 native Rust tests, Clippy, Rust formatting, shell syntax, frontend typecheck/lint, and static production export pass. Latest Linux image and discovery benchmark evidence belong to the preceding discovery milestone; Ticket 04 has not yet been rebuilt/retested on Linux or exercised in browser acceptance.
+
+Still required for Ticket 04: seven-day/250-host retention load while reports/discovery writes proceed; explicit boundary/restart tests; ambiguous MAC and manual-merge regression tests; full review of association behavior. Before extending GPU history, add stable GPU identifiers: vendor/name keys collide when a host has multiple identical GPU models, and collector correlation needs the same identifier. Tickets 05–11 remain open. Visible browser review is also pending: the user asked to see the site when interactive testing starts; open it visibly in Codex before that testing.

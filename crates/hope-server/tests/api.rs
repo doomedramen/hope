@@ -461,3 +461,247 @@ async fn invalid_schema_and_metrics_are_rejected_without_storage() {
         .expect("count");
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+async fn enrollment_retry_recovers_lost_response_without_duplicate_identity() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, token) = enrolled(&state, &app).await;
+    let mut body = EnrollmentRequest {
+        schema_version: SCHEMA_VERSION,
+        token,
+        agent_id: agent,
+        credential: credential.clone(),
+        inventory: inventory(),
+    };
+    let result = request(&app, "POST", "/api/v1/agent/enroll", json!(body), None).await;
+    assert_eq!(result.0, StatusCode::OK);
+    assert_eq!(result.1["credential"], credential);
+    assert_eq!(state.hosts().await.expect("hosts").len(), 1);
+    body.credential = hope_server::state::secret();
+    assert_eq!(
+        request(&app, "POST", "/api/v1/agent/enroll", json!(body), None)
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn concurrent_enrollment_uses_token_for_only_one_identity() {
+    let (_dir, state, app, _) = setup().await;
+    let token = agents::issue_token(&state).await.expect("token");
+    let first = json!(EnrollmentRequest {
+        schema_version: SCHEMA_VERSION,
+        token: token.clone(),
+        agent_id: Uuid::new_v4().to_string(),
+        credential: hope_server::state::secret(),
+        inventory: inventory()
+    });
+    let second = json!(EnrollmentRequest {
+        schema_version: SCHEMA_VERSION,
+        token,
+        agent_id: Uuid::new_v4().to_string(),
+        credential: hope_server::state::secret(),
+        inventory: inventory()
+    });
+    let (one, two) = tokio::join!(
+        request(&app, "POST", "/api/v1/agent/enroll", first, None),
+        request(&app, "POST", "/api/v1/agent/enroll", second, None)
+    );
+    assert!(
+        (one.0 == StatusCode::OK && two.0 == StatusCode::UNAUTHORIZED)
+            || (two.0 == StatusCode::OK && one.0 == StatusCode::UNAUTHORIZED)
+    );
+    assert_eq!(state.hosts().await.expect("hosts").len(), 1);
+}
+
+#[tokio::test]
+async fn queued_report_cannot_commit_after_revocation() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let held = state.0.writes.lock().await;
+    let revoke = {
+        let app = app.clone();
+        let agent = agent.clone();
+        tokio::spawn(async move {
+            request(
+                &app,
+                "POST",
+                &format!("/api/v1/agents/{agent}/revoke"),
+                json!({}),
+                Some(("cookie", &cookie)),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let report = {
+        let app = app.clone();
+        tokio::spawn(async move {
+            request(
+                &app,
+                "POST",
+                "/api/v1/agent/report",
+                json!(AgentReport {
+                    schema_version: SCHEMA_VERSION,
+                    report_id: Uuid::new_v4().to_string(),
+                    agent_id: agent,
+                    collected_at: now(),
+                    inventory: None,
+                    metrics: Metrics::default(),
+                    collectors: vec![]
+                }),
+                Some(("authorization", &format!("Bearer {credential}"))),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    drop(held);
+    assert_eq!(revoke.await.expect("revoke").0, StatusCode::OK);
+    assert_eq!(report.await.expect("report").0, StatusCode::UNAUTHORIZED);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metrics")
+        .fetch_one(&state.0.db)
+        .await
+        .expect("count");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn revoked_identity_requires_bound_token_and_new_secret_for_recovery() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, old, old_token) = enrolled(&state, &app).await;
+    let host_id = state.hosts().await.expect("hosts")[0].id.clone();
+    request(
+        &app,
+        "POST",
+        &format!("/api/v1/agents/{agent}/revoke"),
+        json!({}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    let mut body = EnrollmentRequest {
+        schema_version: SCHEMA_VERSION,
+        token: old_token,
+        agent_id: agent.clone(),
+        credential: old.clone(),
+        inventory: inventory(),
+    };
+    assert_eq!(
+        request(&app, "POST", "/api/v1/agent/enroll", json!(body), None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let token = agents::issue_token_for_reset(&state, Some(&agent))
+        .await
+        .expect("reset token");
+    body.token = token;
+    assert_eq!(
+        request(&app, "POST", "/api/v1/agent/enroll", json!(body), None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    body.credential = hope_server::state::secret();
+    assert_eq!(
+        request(&app, "POST", "/api/v1/agent/enroll", json!(body), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(&app, "POST", "/api/v1/agent/enroll", json!(body), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let hosts = state.hosts().await.expect("hosts");
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].id, host_id);
+    assert!(!hosts[0].agent_revoked);
+    let report = AgentReport {
+        schema_version: SCHEMA_VERSION,
+        report_id: Uuid::new_v4().to_string(),
+        agent_id: agent,
+        collected_at: now(),
+        inventory: None,
+        metrics: Metrics::default(),
+        collectors: vec![],
+    };
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/report",
+            json!(report),
+            Some(("authorization", &format!("Bearer {old}")))
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/report",
+            json!(report),
+            Some(("authorization", &format!("Bearer {}", body.credential)))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn retention_merges_late_samples_without_replacing_completed_bucket() {
+    let (_dir, state, _, _) = setup().await;
+    let old = ((now() - 90000.0) / 300.0).floor() * 300.0;
+    for (id, time, cpu) in [("first", old + 10.0, 10.0), ("second", old + 30.0, 30.0)] {
+        sqlx::query(
+            "INSERT INTO metrics(agent_id,report_id,collected_at,body) VALUES('agent',?,?,?)",
+        )
+        .bind(id)
+        .bind(time)
+        .bind(
+            serde_json::to_string(&Metrics {
+                cpu_percent: Some(cpu),
+                ..Default::default()
+            })
+            .expect("json"),
+        )
+        .execute(&state.0.db)
+        .await
+        .expect("insert");
+    }
+    metrics::retain(&state).await.expect("first cleanup");
+    sqlx::query(
+        "INSERT INTO metrics(agent_id,report_id,collected_at,body) VALUES('agent','late',?,?)",
+    )
+    .bind(old + 50.0)
+    .bind(
+        serde_json::to_string(&Metrics {
+            cpu_percent: Some(80.0),
+            ..Default::default()
+        })
+        .expect("json"),
+    )
+    .execute(&state.0.db)
+    .await
+    .expect("late insert");
+    metrics::retain(&state).await.expect("merge");
+    metrics::retain(&state).await.expect("repeat");
+    let bodies: Vec<String> = sqlx::query_scalar("SELECT body FROM metrics")
+        .fetch_all(&state.0.db)
+        .await
+        .expect("body");
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<Metrics>(&bodies[0])
+            .expect("metrics")
+            .cpu_percent,
+        Some(40.0)
+    );
+}

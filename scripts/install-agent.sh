@@ -10,7 +10,7 @@ case "$(uname -m)" in x86_64|amd64) architecture=x86_64;; arm64|aarch64) archite
 
 if [ "$(id -u)" -ne 0 ] && [ "${HOPE_INSTALL_MODE:-auto}" != user ] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
     echo 'Using available non-interactive sudo for a system service.'
-    exec sudo -n --preserve-env=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR sh "$0" "$operation"
+    exec sudo -n --preserve-env=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR,HOPE_RESET_CREDENTIAL sh "$0" "$operation"
 fi
 system=false
 if [ "$(id -u)" -eq 0 ]; then system=true; fi

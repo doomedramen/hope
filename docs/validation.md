@@ -35,7 +35,7 @@ Before tuning, all five directly attached runs published responders in 0.77–0.
 ## Gates still open
 
 - Discovery frame/cost measurements; completion targets passed in both controlled fixtures.
-- Report/retention concurrency and recovery tests, 250-host retention load.
+- Remaining report/retention boundary, restart, association, and 250-host retention load checks.
 - Agent delivery fault tests and 30-minute RSS/CPU measurements.
 - Expanded browser behavior and visible interactive review.
 - Transactional installer harness, actual systemd/launchd service matrix.
@@ -44,3 +44,7 @@ Before tuning, all five directly attached runs published responders in 0.77–0.
 - Signed artifacts for all four target platforms and protected release CI.
 
 Never treat synthetic browser inventory as discovery evidence, command mocks as real service evidence, or cross-compilation as installation evidence.
+
+## Paused data-integrity checkpoint
+
+Ticket 04 is partially complete. Native checks pass: 24 Rust tests, Clippy, formatting; shell installer syntax; frontend typecheck/lint/static export. Regression tests cover lost enrollment responses, concurrent token reuse, revocation/report ordering, identity-bound credential replacement, weighted mixed-resolution history, and late-sample retention idempotence. The Linux image, browser acceptance, 250-host load, and remaining boundary/association tests have not been rerun for this checkpoint. See the handoff's pause checkpoint before resuming.

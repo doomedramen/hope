@@ -327,33 +327,11 @@ async fn run_probe(
         result = timeout(Duration::from_secs(6), backend.probe(ip)) => result.unwrap_or_default(),
     };
     let found = observation.alive;
-    let mac = observation.mac;
     if cancel.is_cancelled() {
         return;
     }
     let update = async {
-        if found {
-            let _guard = state.0.writes.lock().await;
-            if cancel.is_cancelled() { return anyhow::Ok(()); }
-            let mut hosts = state.hosts().await?;
-            let matching: Vec<_> = hosts.iter_mut().filter(|h| h.addresses.contains(&ip.to_string()) && (mac.is_none() || h.macs.is_empty() || h.macs.contains(mac.as_ref().unwrap_or(&String::new())))).collect();
-            let mut host = if matching.len() == 1 { matching[0].clone() } else {
-                Host { id:Uuid::new_v4().to_string(),agent_id:None,name:ip.to_string(),addresses:vec![ip.to_string()],macs:vec![],network_ids:vec![],last_seen:now(),last_report:None,last_collected_at:None,agent_revoked:false,enrichment_status:hope_protocol::EnrichmentStatus::Pending,discovery_method:String::new(),inventory:None,metrics:None,collectors:vec![],services:vec![] }
-            };
-            host.last_seen = now();
-            host.discovery_method = observation.method.into();
-            if let Some(mac) = mac && !host.macs.contains(&mac) { host.macs.push(mac); }
-            if !host.network_ids.contains(&job.network_id) { host.network_ids.push(job.network_id.clone()); }
-            for service in observation.services {
-                if !host.services.iter().any(|s| s.port == service.port) { host.services.push(service); }
-            }
-            host.enrichment_status = hope_protocol::EnrichmentStatus::Pending;
-            state.save_host(&host).await?;
-            state.changed();
-            drop(_guard);
-            // Enrichment has its own bounded queue and never holds discovery completion open.
-            state.0.enrichment.enqueue(state.clone(), host.id.clone(), ip, cancel.clone()).await;
-        }
+        if found { persist_observation(&state, &job, ip, observation, &cancel).await?; }
         let row = sqlx::query("UPDATE scans SET scanned=scanned+1,discovered=discovered+? WHERE id=? AND status='running' RETURNING scanned,total")
             .bind(if found {1} else {0}).bind(&job.id).fetch_optional(&state.0.db).await?;
         if let Some(row) = row
@@ -370,6 +348,81 @@ async fn run_probe(
         state.0.scans.lock().await.remove(&job.id);
         state.changed();
     }
+}
+
+async fn persist_observation(
+    state: &State,
+    job: &ScanJob,
+    ip: Ipv4Addr,
+    observation: Observation,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    let _guard = state.0.writes.lock().await;
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    let address = ip.to_string();
+    let hosts = state.hosts().await?;
+    let candidates: Vec<_> = hosts
+        .iter()
+        .filter(|host| {
+            host.addresses.contains(&address)
+                && observation
+                    .mac
+                    .as_ref()
+                    .is_none_or(|mac| host.macs.is_empty() || host.macs.contains(mac))
+        })
+        .collect();
+    // Ambiguous evidence stays available for manual reconciliation. Repeated scans
+    // must not create a new duplicate every time the same ambiguity is observed.
+    if candidates.len() > 1 {
+        return Ok(());
+    }
+    let mut host = candidates
+        .first()
+        .map(|host| (*host).clone())
+        .unwrap_or_else(|| Host {
+            id: Uuid::new_v4().to_string(),
+            agent_id: None,
+            name: address.clone(),
+            addresses: vec![address],
+            macs: vec![],
+            network_ids: vec![],
+            last_seen: now(),
+            last_report: None,
+            last_collected_at: None,
+            agent_revoked: false,
+            enrichment_status: hope_protocol::EnrichmentStatus::Pending,
+            discovery_method: String::new(),
+            inventory: None,
+            metrics: None,
+            collectors: vec![],
+            services: vec![],
+        });
+    host.last_seen = now();
+    host.discovery_method = observation.method.into();
+    if let Some(mac) = observation.mac
+        && !host.macs.contains(&mac)
+    {
+        host.macs.push(mac);
+    }
+    if !host.network_ids.contains(&job.network_id) {
+        host.network_ids.push(job.network_id.clone());
+    }
+    for service in observation.services {
+        host.services.retain(|old| old.port != service.port);
+        host.services.push(service);
+    }
+    host.enrichment_status = hope_protocol::EnrichmentStatus::Pending;
+    state.save_host(&host).await?;
+    state.changed();
+    drop(_guard);
+    state
+        .0
+        .enrichment
+        .enqueue(state.clone(), host.id, ip, cancel.clone())
+        .await;
+    Ok(())
 }
 
 pub fn capabilities() -> Capabilities {

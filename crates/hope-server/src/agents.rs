@@ -10,7 +10,7 @@ use axum::{
 use hope_protocol::{
     AgentReport, EnrollmentRequest, EnrollmentResponse, Host, Inventory, SCHEMA_VERSION,
 };
-use hope_protocol::{EnrollmentTokenResponse, OkResponse, ReportResponse};
+use hope_protocol::{EnrollmentTokenRequest, EnrollmentTokenResponse, OkResponse, ReportResponse};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -19,19 +19,42 @@ pub fn shell_quote(value: &str) -> String {
 }
 
 pub async fn issue_token(state: &State) -> ApiResult<String> {
+    issue_token_for_reset(state, None).await
+}
+pub async fn issue_token_for_reset(
+    state: &State,
+    reset_agent_id: Option<&str>,
+) -> ApiResult<String> {
+    if let Some(id) = reset_agent_id {
+        let revoked: Option<bool> = sqlx::query_scalar("SELECT revoked FROM agents WHERE id=?")
+            .bind(id)
+            .fetch_optional(&state.0.db)
+            .await?;
+        if revoked != Some(true) {
+            return Err(ApiError::bad(
+                "Credential replacement requires an existing revoked agent",
+            ));
+        }
+    }
     let token = secret();
     sqlx::query("DELETE FROM enrollment_tokens WHERE expires_at < ?")
         .bind(now() - 86400.0)
         .execute(&state.0.db)
         .await?;
-    sqlx::query("INSERT INTO enrollment_tokens(token_hash,expires_at) VALUES(?,?)")
-        .bind(hash(&token))
-        .bind(now() + 900.0)
-        .execute(&state.0.db)
-        .await?;
+    sqlx::query(
+        "INSERT INTO enrollment_tokens(token_hash,expires_at,reset_agent_id) VALUES(?,?,?)",
+    )
+    .bind(hash(&token))
+    .bind(now() + 900.0)
+    .bind(reset_agent_id)
+    .execute(&state.0.db)
+    .await?;
     Ok(token)
 }
 pub fn install_command(state: &State, token: &str) -> String {
+    install_command_with_reset(state, token, false)
+}
+pub fn install_command_with_reset(state: &State, token: &str, reset: bool) -> String {
     let server = shell_quote(&state.0.server_url);
     let ca = state
         .0
@@ -39,6 +62,11 @@ pub fn install_command(state: &State, token: &str) -> String {
         .as_ref()
         .map(|path| format!(" HOPE_CA_CERT={}", shell_quote(path)))
         .unwrap_or_default();
+    let reset = if reset {
+        " HOPE_RESET_CREDENTIAL=1"
+    } else {
+        ""
+    };
     let curl_ca = state
         .0
         .enrollment_ca
@@ -46,15 +74,18 @@ pub fn install_command(state: &State, token: &str) -> String {
         .map(|path| format!(" --cacert {}", shell_quote(path)))
         .unwrap_or_default();
     format!(
-        "( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f \"$installer\"' EXIT; curl --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https'{curl_ca} {server}/agent/install -o \"$installer\" && HOPE_SERVER={server} HOPE_ENROLLMENT_TOKEN={}{} sh \"$installer\" )",
+        "( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f \"$installer\"' EXIT; curl --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https'{curl_ca} {server}/agent/install -o \"$installer\" && HOPE_SERVER={server} HOPE_ENROLLMENT_TOKEN={}{}{reset} sh \"$installer\" )",
         shell_quote(token),
         ca
     )
 }
-pub async fn token(Extract(state): Extract<State>) -> ApiResult<Json<EnrollmentTokenResponse>> {
-    let token = issue_token(&state).await?;
+pub async fn token(
+    Extract(state): Extract<State>,
+    Json(body): Json<EnrollmentTokenRequest>,
+) -> ApiResult<Json<EnrollmentTokenResponse>> {
+    let token = issue_token_for_reset(&state, body.reset_agent_id.as_deref()).await?;
     Ok(Json(EnrollmentTokenResponse {
-        command: install_command(&state, &token),
+        command: install_command_with_reset(&state, &token, body.reset_agent_id.is_some()),
         token,
         expires_at: now() + 900.0,
         custom_ca_required: state.0.enrollment_ca.is_some(),
@@ -113,11 +144,42 @@ pub async fn enroll(
             .fetch_optional(&state.0.db)
             .await?;
     if let Some((credential_hash, revoked)) = existing {
-        if revoked || credential_hash != hash(&request.credential) {
+        if revoked {
+            // Only an administrator-issued, identity-bound token can replace a revoked secret.
+            let mut tx = state.0.db.begin().await?;
+            let consumed = sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND expires_at>? AND used_at IS NULL AND reset_agent_id=?")
+                .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).bind(&request.agent_id).execute(&mut *tx).await?.rows_affected();
+            if consumed != 1 || credential_hash == hash(&request.credential) {
+                return Err(ApiError::unauthorized());
+            }
+            sqlx::query("UPDATE agents SET revoked=0,credential_hash=? WHERE id=?")
+                .bind(hash(&request.credential))
+                .bind(&request.agent_id)
+                .execute(&mut *tx)
+                .await?;
+            let body: String = sqlx::query_scalar("SELECT body FROM hosts WHERE agent_id=?")
+                .bind(&request.agent_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            let mut host: Host = serde_json::from_str(&body)?;
+            host.agent_revoked = false;
+            sqlx::query("UPDATE hosts SET body=? WHERE agent_id=?")
+                .bind(serde_json::to_string(&host)?)
+                .bind(&request.agent_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            state.changed();
+            return Ok(Json(EnrollmentResponse {
+                credential: request.credential,
+                report_interval_seconds: 30,
+            }));
+        }
+        if credential_hash != hash(&request.credential) {
             return Err(ApiError(StatusCode::CONFLICT,"Agent identity is already enrolled or revoked; preserve its credential or explicitly reset its identity".into()));
         }
-        let recovered = sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND expires_at>? AND (used_at IS NULL OR agent_id=?)")
-            .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).bind(&request.agent_id).execute(&state.0.db).await?.rows_affected();
+        let recovered = sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND expires_at>? AND (used_at IS NULL OR agent_id=?) AND (reset_agent_id IS NULL OR reset_agent_id=?)")
+            .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).bind(&request.agent_id).bind(&request.agent_id).execute(&state.0.db).await?.rows_affected();
         if recovered != 1 {
             return Err(ApiError::unauthorized());
         }
@@ -125,6 +187,14 @@ pub async fn enroll(
             credential: request.credential,
             report_interval_seconds: 30,
         }));
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
+        .fetch_one(&state.0.db)
+        .await?;
+    if count >= 250 {
+        return Err(ApiError::bad(
+            "This installation supports at most 250 agent identities",
+        ));
     }
     let addresses = inventory_addresses(&request.inventory);
     let macs = inventory_macs(&request.inventory);
@@ -164,7 +234,7 @@ pub async fn enroll(
     host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
     let credential = request.credential;
     let mut tx = state.0.db.begin().await?;
-    let changed=sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND used_at IS NULL AND expires_at>?")
+    let changed=sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND used_at IS NULL AND expires_at>? AND reset_agent_id IS NULL")
         .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
         return Err(ApiError::unauthorized());
@@ -194,6 +264,7 @@ pub async fn report(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .ok_or_else(ApiError::unauthorized)?;
+    let _guard = state.0.writes.lock().await;
     let exists: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agents WHERE id=? AND credential_hash=? AND revoked=0",
     )
@@ -219,7 +290,6 @@ pub async fn report(
     if let Some(inv) = &report.inventory {
         validate_inventory(inv)?;
     }
-    let _guard = state.0.writes.lock().await;
     let row = sqlx::query("SELECT body FROM hosts WHERE agent_id=?")
         .bind(&report.agent_id)
         .fetch_optional(&state.0.db)
@@ -258,6 +328,7 @@ pub async fn report(
             host.metrics = Some(report.metrics);
             host.collectors = report.collectors;
         }
+        host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
         sqlx::query("UPDATE hosts SET name=?,body=? WHERE agent_id=?")
             .bind(&host.name)
             .bind(serde_json::to_string(&host)?)
@@ -267,8 +338,6 @@ pub async fn report(
     }
     tx.commit().await?;
     if inserted > 0 {
-        host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
-        state.save_host(&host).await?;
         state.changed();
     }
     Ok(Json(ReportResponse {
@@ -282,16 +351,22 @@ pub async fn revoke(
     Path(id): Path<String>,
 ) -> ApiResult<Json<OkResponse>> {
     let _guard = state.0.writes.lock().await;
+    let mut tx = state.0.db.begin().await?;
     sqlx::query("UPDATE agents SET revoked=1 WHERE id=?")
         .bind(&id)
-        .execute(&state.0.db)
+        .execute(&mut *tx)
         .await?;
     for mut host in state.hosts().await? {
         if host.agent_id.as_ref() == Some(&id) {
             host.agent_revoked = true;
-            state.save_host(&host).await?;
+            sqlx::query("UPDATE hosts SET body=? WHERE id=?")
+                .bind(serde_json::to_string(&host)?)
+                .bind(&host.id)
+                .execute(&mut *tx)
+                .await?;
         }
     }
+    tx.commit().await?;
     state.changed();
     Ok(Json(OkResponse { ok: true }))
 }

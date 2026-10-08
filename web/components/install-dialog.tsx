@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/select";
 import type {
   EnrollmentTokenResponse as Enrollment,
+  EnrollmentTokenRequest,
   FingerprintResponse,
   Host,
   InstallJob,
@@ -52,7 +53,11 @@ export function InstallDialog({
     setBusy(true);
     setError("");
     try {
-      setEnrollment(await post<Enrollment>("/enrollment-tokens"));
+      setEnrollment(
+        await post<Enrollment>("/enrollment-tokens", {
+          reset_agent_id: host?.agent_revoked ? host.agent_id : null,
+        } satisfies EnrollmentTokenRequest),
+      );
       setCopied(false);
     } catch (e) {
       setError((e as Error).message);

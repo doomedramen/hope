@@ -84,6 +84,11 @@ pub struct MergeRequest {
 pub struct MetricWindow {
     pub hours: Option<u32>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, TS, Default)]
+pub struct EnrollmentTokenRequest {
+    #[serde(default)]
+    pub reset_agent_id: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct EnrollmentTokenResponse {
     pub token: String,
@@ -325,6 +330,7 @@ pub fn typescript() -> String {
         NetworkUpdate::decl(),
         MergeRequest::decl(),
         MetricWindow::decl(),
+        EnrollmentTokenRequest::decl(),
         EnrollmentTokenResponse::decl(),
         SshTarget::decl(),
         SshInstallRequest::decl(),

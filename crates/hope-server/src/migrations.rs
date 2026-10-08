@@ -7,14 +7,18 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut *tx)
         .await?;
-    ensure!(version <= 1, "Database version is newer than this server");
-    if version < 1 {
-        sqlx::raw_sql(include_str!("schema.sql"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("PRAGMA user_version = 1")
-            .execute(&mut *tx)
-            .await?;
+    let migrations = [
+        (1, include_str!("schema.sql")),
+        (2, include_str!("migrations/0002_statistics_and_reset.sql")),
+    ];
+    ensure!(version <= 2, "Database version is newer than this server");
+    for (target, source) in migrations {
+        if version < target {
+            sqlx::raw_sql(source).execute(&mut *tx).await?;
+            sqlx::query(&format!("PRAGMA user_version = {target}"))
+                .execute(&mut *tx)
+                .await?;
+        }
     }
     tx.commit().await?;
     Ok(())

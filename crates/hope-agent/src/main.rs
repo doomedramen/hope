@@ -92,6 +92,17 @@ async fn main() -> Result<()> {
             "Existing agent belongs to another server; uninstall and explicitly remove its identity before changing servers"
         );
     }
+    if std::env::var("HOPE_RESET_CREDENTIAL").as_deref() == Ok("1") {
+        anyhow::ensure!(
+            operation == "enroll",
+            "Credential replacement requires enrollment"
+        );
+        if configuration.credential.is_some() {
+            configuration.credential = None;
+            configuration.pending_credential = None;
+            config::save(&dir, &configuration).await?;
+        }
+    }
     let client = config::client(&configuration)?;
     if configuration.credential.is_none() {
         anyhow::ensure!(

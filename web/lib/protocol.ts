@@ -12,6 +12,7 @@ export type NetworkInput = { name: string, cidr: string, enabled: boolean | null
 export type NetworkUpdate = { enabled: boolean, };
 export type MergeRequest = { source_id: string, };
 export type MetricWindow = { hours: number | null, };
+export type EnrollmentTokenRequest = { reset_agent_id: string | null, };
 export type EnrollmentTokenResponse = { token: string, expires_at: number, command: string, custom_ca_required: boolean, };
 export type SshTarget = { host_id: string, address: string, port: number | null, };
 export type SshInstallRequest = { username: string, fingerprint: string, password: string | null, private_key: string | null, passphrase: string | null, host_id: string, address: string, port: number | null, };

@@ -220,7 +220,9 @@ pub async fn merge(
         }
     }
     map.links.retain(|l| l.source != l.target);
-    map.positions.retain(|p| p.id != source.id);
+    map.positions.retain(|p| {
+        p.id != source.id && p.id.rsplit_once(':').is_none_or(|(_, id)| id != source.id)
+    });
     let mut tx = state.0.db.begin().await?;
     sqlx::query("UPDATE hosts SET body=? WHERE id=?")
         .bind(serde_json::to_string(&target)?)
