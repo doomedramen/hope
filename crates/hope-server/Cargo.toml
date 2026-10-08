@@ -1,0 +1,36 @@
+[package]
+name = "hope-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hope-protocol.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum = { version = "0.8", features = ["macros"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "limit"] }
+argon2 = "0.5"
+ipnet = "2"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+futures = "0.3"
+surge-ping = "0.8"
+url = "2"
+subtle = "2"
+russh = "0.54"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"

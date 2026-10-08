@@ -1,0 +1,28 @@
+FROM node:26-bookworm-slim AS web
+WORKDIR /build/web
+COPY web/package*.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+FROM rust:1.96-bookworm AS rust
+RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY scripts ./scripts
+RUN cargo build --release --locked --workspace
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libcap2-bin libc-bin && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 hope && useradd --uid 10001 --gid hope --no-create-home hope \
+    && mkdir -p /var/lib/hope /opt/hope/releases && chown hope:hope /var/lib/hope
+COPY --from=rust /build/target/release/hope-server /usr/local/bin/hope-server
+COPY --from=rust /build/target/release/hope-agent /opt/hope/hope-agent-unsigned
+RUN setcap cap_net_raw=ep /usr/local/bin/hope-server
+COPY --from=web /build/web/out /opt/hope/web
+ENV HOPE_DATA_DIR=/var/lib/hope HOPE_WEB_DIR=/opt/hope/web HOPE_RELEASE_DIR=/opt/hope/releases HOPE_BIND=0.0.0.0:8080
+USER hope
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
+ENTRYPOINT ["hope-server"]

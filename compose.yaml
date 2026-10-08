@@ -1,0 +1,21 @@
+services:
+  hope:
+    build: .
+    image: hope:local
+    restart: unless-stopped
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    environment:
+      HOPE_SERVER_URL: ${HOPE_SERVER_URL:?Set your HTTPS server URL in .env}
+      HOPE_BIND: ${HOPE_BIND:-127.0.0.1:8080}
+      HOPE_DISCOVERY_MODE: native
+      HOPE_AGENT_CA: ${HOPE_AGENT_CA:-}
+    volumes:
+      - hope-data:/var/lib/hope
+      - ./releases:/opt/hope/releases:ro
+    read_only: true
+    tmpfs: [/tmp]
+    stop_grace_period: 15s
+volumes:
+  hope-data:

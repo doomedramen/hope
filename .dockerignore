@@ -1,0 +1,12 @@
+.git
+target
+data
+releases
+web/node_modules
+web/.next
+web/out
+web/test-results
+web/playwright-report
+.env
+**/*.pem
+**/*.key

@@ -1,0 +1,10 @@
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, expires_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS networks (id TEXT PRIMARY KEY, name TEXT NOT NULL, cidr TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS hosts (id TEXT PRIMARY KEY, agent_id TEXT UNIQUE, name TEXT NOT NULL, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, credential_hash TEXT NOT NULL UNIQUE, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS enrollment_tokens (token_hash TEXT PRIMARY KEY, expires_at REAL NOT NULL, used_at REAL, agent_id TEXT);
+CREATE TABLE IF NOT EXISTS scans (id TEXT PRIMARY KEY, network_id TEXT NOT NULL, cidr TEXT NOT NULL, status TEXT NOT NULL, scanned INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL, discovered INTEGER NOT NULL DEFAULT 0, started_at REAL NOT NULL, finished_at REAL, error TEXT);
+CREATE INDEX IF NOT EXISTS scans_network ON scans(network_id,started_at);
+CREATE TABLE IF NOT EXISTS metrics (agent_id TEXT NOT NULL, report_id TEXT NOT NULL, collected_at REAL NOT NULL, resolution INTEGER NOT NULL DEFAULT 30, body TEXT NOT NULL, PRIMARY KEY(agent_id,report_id));
+CREATE INDEX IF NOT EXISTS metrics_time ON metrics(agent_id,collected_at);
