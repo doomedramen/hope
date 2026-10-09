@@ -9,6 +9,8 @@ export async function api<T>(
     headers: { "Content-Type": "application/json", ...options.headers },
   });
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith("/auth/"))
+      window.dispatchEvent(new Event("hope:session-expired"));
     const body = await response
       .json()
       .catch(() => ({ error: `Request failed (${response.status})` }));

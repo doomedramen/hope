@@ -701,3 +701,12 @@ input {
     scroll-behavior: auto !important;
   }
 }
+
+.mobile-logout {
+  display: none;
+}
+@media (max-width: 720px) {
+  .mobile-logout {
+    display: inline-flex;
+  }
+}

@@ -1,18 +1,21 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   Controls,
   Handle,
   Position,
   ReactFlow,
+  useNodesInitialized,
+  useReactFlow,
   type Node,
   type NodeProps,
+  type NodeChange,
   type Connection,
   type Edge,
 } from "@xyflow/react";
 import { Computer, Router, Network as NetworkIcon } from "lucide-react";
-import type { Host, MapState, Network } from "@/lib/protocol";
+import type { Host, MapEdit, MapState, Network } from "@/lib/protocol";
 import { percentage, status } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import "@xyflow/react/dist/style.css";
@@ -67,9 +70,10 @@ function DeviceNode({ data, selected }: NodeProps<HopeNode>) {
           <span>
             RAM{" "}
             <strong>
-              {data.host.metrics?.memory_total_bytes
+              {data.host.metrics?.memory_total_bytes &&
+              data.host.metrics.memory_used_bytes != null
                 ? percentage(
-                    ((data.host.metrics.memory_used_bytes ?? 0) /
+                    (data.host.metrics.memory_used_bytes /
                       data.host.metrics.memory_total_bytes) *
                       100,
                   )
@@ -83,6 +87,20 @@ function DeviceNode({ data, selected }: NodeProps<HopeNode>) {
   );
 }
 const nodeTypes = { hope: DeviceNode };
+function InitialViewport() {
+  const initialized = useNodesInitialized();
+  const { fitView } = useReactFlow();
+  const fitted = useRef(false);
+  useEffect(() => {
+    if (!initialized || fitted.current) return;
+    const frame = requestAnimationFrame(() => {
+      fitted.current = true;
+      void fitView({ padding: 0.25, maxZoom: 1 });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [initialized, fitView]);
+  return null;
+}
 
 export function NetworkMap({
   hosts,
@@ -99,17 +117,41 @@ export function NetworkMap({
   mode: "topology" | "subnets" | "health";
   selected: string | null;
   onSelect: (id: string) => void;
-  onSave: (map: MapState) => Promise<void>;
+  onSave: (edit: MapEdit) => Promise<void>;
 }) {
   const [moving, setMoving] = useState<
     Record<string, { x: number; y: number }>
   >({});
+  const [measurements, setMeasurements] = useState<
+    Record<string, { width: number; height: number }>
+  >({});
+  const measure = (changes: NodeChange<HopeNode>[]) => {
+    const dimensions = changes.filter(
+      (change) => change.type === "dimensions" && change.dimensions,
+    );
+    if (!dimensions.length) return;
+    setMeasurements((previous) => {
+      const next = { ...previous };
+      let changed = false;
+      for (const change of dimensions) {
+        if (change.type !== "dimensions" || !change.dimensions) continue;
+        if (
+          previous[change.id]?.width !== change.dimensions.width ||
+          previous[change.id]?.height !== change.dimensions.height
+        ) {
+          next[change.id] = change.dimensions;
+          changed = true;
+        }
+      }
+      return changed ? next : previous;
+    });
+  };
   const { nodes, edges } = useMemo(() => {
     const nodes: HopeNode[] = [];
     const edges: Edge[] = [];
     const visibleIds = new Set(hosts.map((h) => h.id));
     const position = (id: string, fallback: { x: number; y: number }) =>
-      moving[id] ??
+      moving[`${mode}:${id}`] ??
       layout.positions.find((p) => p.id === `${mode}:${id}`) ??
       fallback;
     const groups = [
@@ -120,19 +162,29 @@ export function NetworkMap({
         cidr: "Outside configured ranges",
       },
     ];
-    let column = 0;
+    let offset = 0;
     for (const group of groups) {
       const members = hosts.filter(
-        (h) => (h.network_ids[0] ?? "ungrouped") === group.id,
+        (h) =>
+          (networks.find((n) => h.network_ids.includes(n.id))?.id ??
+            "ungrouped") === group.id,
       );
       if (!members.length && group.id === "ungrouped") continue;
-      const x = column * 620;
-      column++;
+      const columns = Math.min(
+        8,
+        Math.max(2, Math.ceil(Math.sqrt(members.length))),
+      );
+      const x = offset;
+      const center = (columns - 1) * 140 + 20;
+      offset += columns * 280 + 60;
       const root = `network-${group.id}`;
       nodes.push({
         id: root,
         type: "hope",
-        position: position(root, { x: x + 160, y: 0 }),
+        position: position(root, {
+          x: x + center,
+          y: mode === "subnets" ? 0 : -300,
+        }),
         data: {
           label: group.label,
           subtitle: group.cidr,
@@ -147,8 +199,8 @@ export function NetworkMap({
           id: host.id,
           type: "hope",
           position: position(host.id, {
-            x: x + (index % 2) * 280,
-            y: 160 + Math.floor(index / 2) * 180,
+            x: x + (index % columns) * 280,
+            y: 160 + Math.floor(index / columns) * 180,
           }),
           selected: selected === host.id,
           data: {
@@ -159,16 +211,17 @@ export function NetworkMap({
             health: mode === "health",
           },
         });
-        if (mode === "subnets")
-          edges.push({
-            id: `${root}-${host.id}`,
-            source: root,
-            target: host.id,
-            label: "Member",
-            className: "membership-edge",
-            type: "smoothstep",
-          });
-        else {
+        if (mode === "subnets") {
+          if (group.id !== "ungrouped")
+            edges.push({
+              id: `${root}-${host.id}`,
+              source: root,
+              target: host.id,
+              label: "Member",
+              className: "membership-edge",
+              type: "smoothstep",
+            });
+        } else {
           const gateway = host.inventory?.interfaces.find(
             (i) => i.gateway,
           )?.gateway;
@@ -181,7 +234,7 @@ export function NetworkMap({
               nodes.push({
                 id: source,
                 type: "hope",
-                position: position(source, { x: x + 160, y: -150 }),
+                position: position(source, { x: x + center, y: -150 }),
                 data: {
                   label: gateway,
                   subtitle: "Reported default gateway",
@@ -198,7 +251,7 @@ export function NetworkMap({
                 label: "Reported gateway",
                 type: "smoothstep",
               });
-          } else
+          } else if (group.id !== "ungrouped")
             edges.push({
               id: `${root}-${host.id}`,
               source: root,
@@ -220,8 +273,14 @@ export function NetworkMap({
           type: "smoothstep",
           className: "manual-edge",
         });
-    return { nodes, edges };
-  }, [hosts, networks, layout, mode, moving, selected]);
+    return {
+      nodes: nodes.map((node) => ({
+        ...node,
+        measured: measurements[node.id],
+      })),
+      edges,
+    };
+  }, [hosts, networks, layout, mode, moving, selected, measurements]);
   const connect = (connection: Connection) => {
     if (
       !connection.source ||
@@ -235,54 +294,64 @@ export function NetworkMap({
     )
       return;
     void onSave({
-      ...layout,
-      links: [
-        ...layout.links,
-        {
-          id: crypto.randomUUID(),
-          source: connection.source,
-          target: connection.target,
-          label: "Connection",
-        },
-      ],
+      operation: "add_link",
+      link: {
+        id: crypto.randomUUID(),
+        source: connection.source,
+        target: connection.target,
+        label: "Connection",
+      },
     });
   };
   return (
     <div className="network-canvas" data-testid="network-map">
       <ReactFlow<HopeNode>
         nodes={nodes}
+        onNodesChange={measure}
         edges={edges}
         nodeTypes={nodeTypes}
-        fitView
-        fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
-        minZoom={0.15}
+        minZoom={0.02}
         maxZoom={1.6}
         onNodeClick={(_, node) => {
           if (node.data.host) onSelect(node.id);
         }}
         onNodeDrag={(_, node) =>
-          setMoving((previous) => ({ ...previous, [node.id]: node.position }))
+          setMoving((previous) => ({
+            ...previous,
+            [`${mode}:${node.id}`]: node.position,
+          }))
         }
         onNodeDragStop={(_, node) => {
+          const key = `${mode}:${node.id}`;
+          const position = node.position;
           void onSave({
-            ...layout,
-            positions: [
-              ...layout.positions.filter((p) => p.id !== `${mode}:${node.id}`),
-              { id: `${mode}:${node.id}`, ...node.position },
-            ],
+            operation: "set_position",
+            position: { id: key, ...position },
+          }).then(() => {
+            setMoving((previous) => {
+              if (
+                previous[key]?.x !== position.x ||
+                previous[key]?.y !== position.y
+              )
+                return previous;
+              const next = { ...previous };
+              delete next[key];
+              return next;
+            });
           });
         }}
         onConnect={connect}
         onEdgeDoubleClick={(_, edge) => {
           if (edge.id.startsWith("manual-"))
             void onSave({
-              ...layout,
-              links: layout.links.filter((l) => `manual-${l.id}` !== edge.id),
+              operation: "remove_link",
+              id: edge.id.slice("manual-".length),
             });
         }}
         deleteKeyCode={null}
         proOptions={{ hideAttribution: false }}
       >
+        <InitialViewport />
         <Background gap={24} size={1} color="var(--border)" />
         <Controls showInteractive={false} />
       </ReactFlow>

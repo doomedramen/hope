@@ -30,6 +30,7 @@ import {
 import type {
   EnrollmentTokenResponse as Enrollment,
   EnrollmentTokenRequest,
+  ReleaseAvailability,
   FingerprintResponse,
   Host,
   InstallJob,
@@ -49,10 +50,29 @@ export function InstallDialog({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [releases, setReleases] = useState<ReleaseAvailability | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    api<ReleaseAvailability>("/releases")
+      .then((result) => {
+        if (alive) setReleases(result);
+      })
+      .catch((failure) => {
+        if (alive) setError(failure.message);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open]);
   async function generate() {
     setBusy(true);
     setError("");
     try {
+      if (!releases?.packaged_platforms.length)
+        throw new Error(
+          "No signed agent packages are available on this server.",
+        );
       setEnrollment(
         await post<Enrollment>("/enrollment-tokens", {
           reset_agent_id: host?.agent_revoked ? host.agent_id : null,
@@ -87,7 +107,10 @@ export function InstallDialog({
         <Tabs defaultValue="manual">
           <TabsList>
             <TabsTrigger value="manual">Install manually</TabsTrigger>
-            <TabsTrigger value="ssh" disabled={!host}>
+            <TabsTrigger
+              value="ssh"
+              disabled={!host || !releases?.packaged_platforms.length}
+            >
               Install over SSH
             </TabsTrigger>
           </TabsList>
@@ -96,13 +119,25 @@ export function InstallDialog({
               Run the generated command on a Linux or macOS host. The installer
               detects architecture, permissions, and the service manager.
             </p>
+            {releases && (
+              <Alert>
+                <AlertDescription>
+                  {releases.packaged_platforms.length
+                    ? `Packaged targets: ${releases.packaged_platforms.join(", ")}. The installer verifies the signature before execution.`
+                    : "No signed agent packages are available. The server administrator must package releases before agents can be installed."}
+                </AlertDescription>
+              </Alert>
+            )}
             {error && (
               <Alert variant="destructive">
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             )}
             {!enrollment ? (
-              <Button onClick={generate} disabled={busy}>
+              <Button
+                onClick={generate}
+                disabled={busy || !releases?.packaged_platforms.length}
+              >
                 <KeyRound data-icon="inline-start" />
                 {busy ? "Generating…" : "Generate installation command"}
               </Button>
@@ -159,7 +194,7 @@ export function InstallDialog({
             </p>
           </TabsContent>
           <TabsContent value="ssh" className="pt-4">
-            {host && <SshInstall key={host.id} host={host} />}
+            {open && host && <SshInstall key={host.id} host={host} />}
           </TabsContent>
         </Tabs>
       </DialogContent>

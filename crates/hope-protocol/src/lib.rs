@@ -297,8 +297,24 @@ pub struct MapLink {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, Default)]
 pub struct MapState {
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub revision: u64,
     pub positions: Vec<Position>,
     pub links: Vec<MapLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum MapEdit {
+    SetPosition { position: Position },
+    AddLink { link: MapLink },
+    RemoveLink { id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ReleaseAvailability {
+    pub packaged_platforms: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -368,6 +384,8 @@ pub fn typescript() -> String {
         Position::decl(),
         MapLink::decl(),
         MapState::decl(),
+        MapEdit::decl(),
+        ReleaseAvailability::decl(),
         Capabilities::decl(),
         Bootstrap::decl(),
         InstallJob::decl(),

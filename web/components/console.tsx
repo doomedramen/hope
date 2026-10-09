@@ -71,6 +71,7 @@ import type {
   Bootstrap,
   Host,
   MapState,
+  MapEdit,
   Network as HopeNetwork,
 } from "@/lib/protocol";
 
@@ -91,6 +92,12 @@ export function Console() {
   );
   useEffect(() => {
     void check();
+    const expired = () =>
+      setAuth((current) =>
+        current ? { ...current, authenticated: false } : current,
+      );
+    window.addEventListener("hope:session-expired", expired);
+    return () => window.removeEventListener("hope:session-expired", expired);
   }, [check]);
   if (error)
     return (
@@ -256,7 +263,12 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     if (refreshPending.current) return;
     refreshPending.current = true;
     try {
-      setData(await api<Bootstrap>("/bootstrap"));
+      const latest = await api<Bootstrap>("/bootstrap");
+      setData((previous) =>
+        previous && previous.map.revision > latest.map.revision
+          ? { ...latest, map: previous.map }
+          : latest,
+      );
       setError("");
     } catch (e) {
       setError((e as Error).message);
@@ -298,7 +310,8 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     const url = new URL(window.location.href);
     if (id) url.searchParams.set("host", id);
     else url.searchParams.delete("host");
-    window.history.replaceState({}, "", url);
+    if (url.href !== window.location.href)
+      window.history.pushState({}, "", url);
   };
   async function action(work: () => Promise<unknown>) {
     setBusy(true);
@@ -312,15 +325,50 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       setBusy(false);
     }
   }
-  async function saveMap(map: MapState) {
+  const [unsavedMap, setUnsavedMap] = useState<MapEdit[]>([]);
+  const mapQueue = useRef<Promise<void>>(Promise.resolve());
+  function saveMap(edit: MapEdit): Promise<void> {
+    const task = mapQueue.current.then(() => performSaveMap(edit));
+    mapQueue.current = task.catch(() => {});
+    return task;
+  }
+  async function performSaveMap(edit: MapEdit) {
     try {
-      const saved = await put<MapState>("/map", map);
+      const saved = await api<MapState>("/map", {
+        method: "PATCH",
+        body: JSON.stringify(edit),
+      });
+      if (edit.operation === "set_position")
+        setUnsavedMap((pending) =>
+          pending.filter(
+            (old) =>
+              old.operation !== "set_position" ||
+              old.position.id !== edit.position.id,
+          ),
+        );
       setData((previous) =>
-        previous ? { ...previous, map: saved } : previous,
+        previous && saved.revision >= previous.map.revision
+          ? { ...previous, map: saved }
+          : previous,
       );
     } catch (e) {
-      setError((e as Error).message);
+      setUnsavedMap((pending) => [
+        ...pending.filter(
+          (old) =>
+            edit.operation !== "set_position" ||
+            old.operation !== "set_position" ||
+            old.position.id !== edit.position.id,
+        ),
+        edit,
+      ]);
+      setError(`Map change not saved: ${(e as Error).message}`);
     }
+  }
+  async function retryMap() {
+    const pending = unsavedMap;
+    setUnsavedMap([]);
+    setError("");
+    for (const edit of pending) await saveMap(edit);
   }
   const hosts = data?.hosts ?? [];
   const networks = data?.networks ?? [];
@@ -428,11 +476,35 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
               / Network observatory
             </span>
           </div>
-          <Button variant="outline" onClick={() => setInstallOpen(true)}>
-            <ArrowDownToLine data-icon="inline-start" />
-            Add agent
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="mobile-logout"
+              aria-label="Sign out"
+              onClick={() => {
+                void action(onLogout);
+              }}
+            >
+              <LogOut />
+            </Button>
+            <Button variant="outline" onClick={() => setInstallOpen(true)}>
+              <ArrowDownToLine data-icon="inline-start" />
+              Add agent
+            </Button>
+          </div>
         </header>
+        {unsavedMap.length > 0 && (
+          <Button
+            variant="outline"
+            onClick={() => {
+              void retryMap();
+            }}
+          >
+            Retry {unsavedMap.length} unsaved map{" "}
+            {unsavedMap.length === 1 ? "change" : "changes"}
+          </Button>
+        )}
         <div className="page-heading">
           <div>
             <h1>
@@ -689,6 +761,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
               </Empty>
             ) : view === "map" ? (
               <NetworkMap
+                key={mode}
                 hosts={visible}
                 networks={networks.filter(
                   (n) => network === "all" || n.id === network,
@@ -728,11 +801,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           void refresh();
         }}
       />
-      <InstallDialog
-        open={installOpen}
-        onOpenChange={setInstallOpen}
-        host={host}
-      />
+      {installOpen && (
+        <InstallDialog
+          key={host?.id ?? "manual"}
+          open={installOpen}
+          onOpenChange={setInstallOpen}
+          host={host}
+        />
+      )}
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
           <DialogHeader>
@@ -873,16 +949,20 @@ function NetworkDialog({
   const [cidr, setCidr] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [created, setCreated] = useState<HopeNetwork | null>(null);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError("");
     try {
-      const network = await post<HopeNetwork>("/networks", {
-        name,
-        cidr,
-        enabled: true,
-      });
+      const network =
+        created ??
+        (await post<HopeNetwork>("/networks", {
+          name,
+          cidr,
+          enabled: true,
+        }));
+      setCreated(network);
       onAdded();
       try {
         await post(`/networks/${network.id}/scan`);
@@ -893,6 +973,7 @@ function NetworkDialog({
         return;
       }
       onOpenChange(false);
+      setCreated(null);
       setName("");
       setCidr("");
       onAdded();
@@ -903,7 +984,18 @@ function NetworkDialog({
     }
   }
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(value) => {
+        onOpenChange(value);
+        if (!value) {
+          setCreated(null);
+          setName("");
+          setCidr("");
+          setError("");
+        }
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Add a network</DialogTitle>
@@ -924,6 +1016,7 @@ function NetworkDialog({
                 id="network-name"
                 placeholder="Home network"
                 required
+                disabled={created != null}
                 maxLength={120}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -935,6 +1028,7 @@ function NetworkDialog({
                 id="network-cidr"
                 placeholder="192.168.1.0/24"
                 required
+                disabled={created != null}
                 value={cidr}
                 onChange={(e) => setCidr(e.target.value)}
               />
@@ -945,7 +1039,11 @@ function NetworkDialog({
             </Field>
           </FieldGroup>
           <Button disabled={busy} type="submit">
-            {busy ? "Adding network…" : "Add and discover"}
+            {busy
+              ? "Starting discovery…"
+              : created
+                ? "Retry discovery"
+                : "Add and discover"}
           </Button>
         </form>
       </DialogContent>

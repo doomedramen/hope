@@ -29,7 +29,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/networks/{id}", put(api::update_network))
         .route("/networks/{id}/scan", post(api::start_scan))
         .route("/scans/{id}/cancel", post(api::cancel_scan))
-        .route("/map", put(api::map))
+        .route("/map", put(api::map).patch(api::edit_map))
         .route("/hosts/{id}/merge", post(api::merge))
         .route("/hosts/{id}/metrics", get(metrics::history))
         .route("/enrollment-tokens", post(agents::token))
@@ -38,6 +38,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/ssh/fingerprint", post(ssh::fingerprint))
         .route("/ssh/install", post(ssh::install))
         .route("/ssh/jobs", get(ssh::jobs))
+        .route("/releases", get(releases::availability))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,

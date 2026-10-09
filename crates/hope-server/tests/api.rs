@@ -789,6 +789,7 @@ async fn ambiguous_mac_requires_manual_merge_and_preserves_history_and_map() {
         StatusCode::OK
     );
     let map = MapState {
+        revision: 0,
         positions: ["topology", "subnets", "health"]
             .into_iter()
             .map(|mode| Position {
@@ -850,4 +851,96 @@ async fn ambiguous_mac_requires_manual_merge_and_preserves_history_and_map() {
         .await
         .expect("history");
     assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn independent_map_edits_are_atomic_and_retryable() {
+    let (_directory, state, app, cookie) = setup().await;
+    let (agent_id, _, _) = enrolled(&state, &app).await;
+    let host_id = state
+        .hosts()
+        .await
+        .expect("hosts")
+        .into_iter()
+        .find(|host| host.agent_id.as_deref() == Some(&agent_id))
+        .expect("enrolled host")
+        .id;
+    let mut other = state.host(&host_id).await.expect("query").expect("host");
+    other.id = Uuid::new_v4().to_string();
+    other.agent_id = None;
+    state.save_host(&other).await.expect("other host");
+    let mut edits = tokio::task::JoinSet::new();
+    for index in 0..30 {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        edits.spawn(async move {
+            request(&app, "PATCH", "/api/v1/map", json!({"operation":"set_position","position":{"id":format!("topology:node-{index}"),"x":index,"y":0}}), Some(("cookie", &cookie))).await.0
+        });
+    }
+    while let Some(result) = edits.join_next().await {
+        assert_eq!(result.expect("edit task"), StatusCode::OK);
+    }
+    let link = json!({"operation":"add_link","link":{"id":"manual-fixture","source":host_id,"target":other.id,"label":"Known cable"}});
+    for _ in 0..2 {
+        let (status, map) = request(
+            &app,
+            "PATCH",
+            "/api/v1/map",
+            link.clone(),
+            Some(("cookie", &cookie)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(map["positions"].as_array().expect("positions").len(), 30);
+        assert_eq!(map["links"].as_array().expect("links").len(), 1);
+    }
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/api/v1/map",
+            json!({"revision":0,"positions":[],"links":[]}),
+            Some(("cookie", &cookie))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let mut conflicting = link;
+    conflicting["link"]["label"] = json!("Different meaning");
+    assert_eq!(
+        request(
+            &app,
+            "PATCH",
+            "/api/v1/map",
+            conflicting,
+            Some(("cookie", &cookie))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, map) = request(
+        &app,
+        "PATCH",
+        "/api/v1/map",
+        json!({"operation":"remove_link","id":"manual-fixture"}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(map["positions"].as_array().expect("positions").len(), 30);
+    assert!(map["links"].as_array().expect("links").is_empty());
+    assert_eq!(
+        request(
+            &app,
+            "PATCH",
+            "/api/v1/map",
+            json!({"operation":"set_position","position":{"id":"bad","x":1e7,"y":0}}),
+            Some(("cookie", &cookie))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
 }

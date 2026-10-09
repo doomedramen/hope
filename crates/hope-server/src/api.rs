@@ -139,8 +139,36 @@ pub async fn cancel_scan(
 }
 pub async fn map(
     Extract(state): Extract<State>,
-    Json(map): Json<MapState>,
+    Json(mut map): Json<MapState>,
 ) -> ApiResult<Json<MapState>> {
+    let _guard = state.0.writes.lock().await;
+    let current: MapState = state
+        .meta("map")
+        .await?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?
+        .unwrap_or_default();
+    if map.revision != current.revision {
+        return Err(ApiError(
+            axum::http::StatusCode::CONFLICT,
+            "Map changed; reload before replacing the layout".into(),
+        ));
+    }
+    map.revision = next_revision(current.revision)?;
+    validate_map(&state, &map).await?;
+    state.set_meta("map", &serde_json::to_string(&map)?).await?;
+    state.changed();
+    Ok(Json(map))
+}
+fn next_revision(revision: u64) -> ApiResult<u64> {
+    if revision >= 9_007_199_254_740_991 {
+        return Err(ApiError::bad("Map revision limit reached"));
+    }
+    revision
+        .checked_add(1)
+        .ok_or_else(|| ApiError::bad("Map revision limit reached"))
+}
+async fn validate_map(state: &State, map: &MapState) -> ApiResult<()> {
     if map.positions.len() > 2000
         || map.links.len() > 2000
         || map
@@ -162,6 +190,63 @@ pub async fn map(
     {
         return Err(ApiError::bad("Manual links must connect existing hosts"));
     }
+    if map
+        .positions
+        .iter()
+        .any(|p| p.id.is_empty() || p.id.len() > 255)
+        || map
+            .links
+            .iter()
+            .any(|l| l.id.is_empty() || l.id.len() > 128)
+        || map
+            .positions
+            .iter()
+            .enumerate()
+            .any(|(i, p)| map.positions[..i].iter().any(|other| other.id == p.id))
+        || map
+            .links
+            .iter()
+            .enumerate()
+            .any(|(i, l)| map.links[..i].iter().any(|other| other.id == l.id))
+    {
+        return Err(ApiError::bad("Invalid or duplicate map identifiers"));
+    }
+    Ok(())
+}
+pub async fn edit_map(
+    Extract(state): Extract<State>,
+    Json(edit): Json<hope_protocol::MapEdit>,
+) -> ApiResult<Json<MapState>> {
+    let _guard = state.0.writes.lock().await;
+    let mut map: MapState = state
+        .meta("map")
+        .await?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?
+        .unwrap_or_default();
+    match edit {
+        hope_protocol::MapEdit::SetPosition { position } => {
+            map.positions.retain(|p| p.id != position.id);
+            map.positions.push(position);
+        }
+        hope_protocol::MapEdit::AddLink { link } => {
+            if let Some(existing) = map.links.iter().find(|l| l.id == link.id) {
+                if existing.source != link.source
+                    || existing.target != link.target
+                    || existing.label != link.label
+                {
+                    return Err(ApiError::bad("This map link identifier already exists"));
+                }
+            } else {
+                map.links.push(link);
+            }
+        }
+        hope_protocol::MapEdit::RemoveLink { id } => {
+            map.links.retain(|l| l.id != id);
+        }
+    }
+    map.revision = next_revision(map.revision)?;
+    validate_map(&state, &map).await?;
     state.set_meta("map", &serde_json::to_string(&map)?).await?;
     state.changed();
     Ok(Json(map))
@@ -223,6 +308,7 @@ pub async fn merge(
     map.positions.retain(|p| {
         p.id != source.id && p.id.rsplit_once(':').is_none_or(|(_, id)| id != source.id)
     });
+    map.revision = next_revision(map.revision)?;
     let mut tx = state.0.db.begin().await?;
     sqlx::query("UPDATE hosts SET body=? WHERE id=?")
         .bind(serde_json::to_string(&target)?)

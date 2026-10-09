@@ -84,6 +84,10 @@ export function HostDetails({
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
+      <p className="text-xs text-muted-foreground">
+        Discovery: {host.discovery_method}. Enrichment: {host.enrichment_status}
+        .
+      </p>
       {!host.agent_id && (
         <Button onClick={install}>
           <Download data-icon="inline-start" />
@@ -124,10 +128,9 @@ export function HostDetails({
             <div>
               <span>Memory</span>
               <strong>
-                {metrics.memory_total_bytes
+                {metrics.memory_total_bytes && metrics.memory_used_bytes != null
                   ? percentage(
-                      ((metrics.memory_used_bytes ?? 0) /
-                        metrics.memory_total_bytes) *
+                      (metrics.memory_used_bytes / metrics.memory_total_bytes) *
                         100,
                     )
                   : "—"}
@@ -160,6 +163,28 @@ export function HostDetails({
             </>
           )}
         </dl>
+        {(metrics?.network_interfaces.length ?? 0) > 0 && (
+          <p className="text-xs text-muted-foreground">
+            Total scope:{" "}
+            {metrics?.network_interfaces
+              .filter((i) => i.included_in_total)
+              .map((i) => i.name)
+              .join(", ") || "unavailable"}
+            . Individual counters include other interfaces.
+          </p>
+        )}
+        {metrics?.network_interfaces.map((i) => (
+          <div className="interface-row" key={`counter:${i.name}`}>
+            <strong>{i.name} counters</strong>
+            <span>
+              RX {bytes(i.received_bytes)} · TX {bytes(i.transmitted_bytes)}
+            </span>
+            <span>
+              RX {bytes(i.rx_bytes_per_second)}/s · TX{" "}
+              {bytes(i.tx_bytes_per_second)}/s
+            </span>
+          </div>
+        ))}
         {inventory?.interfaces.map((i) => (
           <div key={i.name} className="interface-row">
             <strong>{i.name}</strong>
@@ -184,6 +209,25 @@ export function HostDetails({
           )}
         </div>
       </section>
+      {metrics && !metrics.disks.length && !!inventory?.disks.length && (
+        <section>
+          <h3 className="detail-heading">Storage inventory</h3>
+          <p className="text-xs text-muted-foreground">
+            Filesystem metrics are unavailable. Last reported mounts:
+          </p>
+          {inventory.disks.map((disk) => (
+            <div
+              className="interface-row"
+              key={JSON.stringify([disk.name, disk.mount, disk.filesystem])}
+            >
+              <strong>{disk.mount}</strong>
+              <span>
+                {disk.name} · {disk.filesystem} · {bytes(disk.total_bytes)}
+              </span>
+            </div>
+          ))}
+        </section>
+      )}
       {(metrics?.disks ?? inventory?.disks ?? []).length > 0 && (
         <>
           <Separator />
@@ -198,14 +242,16 @@ export function HostDetails({
                   <span className="truncate">{d.mount}</span>
                   <span>{bytes(d.available_bytes)} free</span>
                 </div>
-                <Progress
-                  value={
-                    d.total_bytes
-                      ? (1 - d.available_bytes / d.total_bytes) * 100
-                      : 0
-                  }
-                  aria-label={`${d.mount} storage used`}
-                />
+                {d.total_bytes > 0 ? (
+                  <Progress
+                    value={(1 - d.available_bytes / d.total_bytes) * 100}
+                    aria-label={`${d.mount} storage used`}
+                  />
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Filesystem usage unavailable
+                  </p>
+                )}
                 <p className="text-xs text-muted-foreground">
                   {d.filesystem} / {bytes(d.total_bytes)}
                 </p>
@@ -224,7 +270,7 @@ export function HostDetails({
         <section>
           <h3 className="detail-heading">Graphics</h3>
           {(metrics?.gpus ?? inventory?.gpus ?? []).map((g, i) => (
-            <div key={`${g.name}-${i}`} className="interface-row">
+            <div key={g.id ?? `${g.name}-${i}`} className="interface-row">
               <strong>{g.name}</strong>
               <span>
                 Utilization {percentage(g.utilization_percent)} / VRAM{" "}
