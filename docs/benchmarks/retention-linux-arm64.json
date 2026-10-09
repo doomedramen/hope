@@ -1,0 +1,16 @@
+{
+  "aggregate_days": 6,
+  "architecture": "aarch64",
+  "concurrent_discovery_writes": 25,
+  "concurrent_reports": 25,
+  "database_bytes": 564416512,
+  "hosts": 250,
+  "platform": "linux",
+  "profile": "release",
+  "raw_hours": 24,
+  "report_latency_max_ms": 14.036418,
+  "report_latency_median_ms": 3.063917,
+  "retention_calls": 2,
+  "retention_seconds": 0.552102628,
+  "seeded_samples": 1154500
+}

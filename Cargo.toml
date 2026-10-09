@@ -25,3 +25,8 @@ hope-protocol = { path = "crates/hope-protocol" }
 lto = "thin"
 strip = true
 codegen-units = 1
+
+# Build-time proc macros are loaded by rustc, not shipped with H.O.P.E. Keep
+# their symbols intact to avoid malformed stripped Mach-O libraries on macOS.
+[profile.release.build-override]
+strip = false

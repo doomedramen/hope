@@ -495,6 +495,42 @@ mod tests {
         (directory, state, calls)
     }
     #[tokio::test]
+    async fn ambiguous_observations_do_not_create_repeated_duplicates() {
+        let (_directory, state, _) = fixture().await;
+        for id in ["first", "second"] {
+            let host: Host = serde_json::from_value(serde_json::json!({"id":id,"agent_id":null,"name":id,"addresses":["192.168.1.10"],"macs":[],"network_ids":[],"last_seen":0,"last_report":null,"discovery_method":"tcp","inventory":null,"metrics":null,"collectors":[],"services":[]})).expect("host");
+            state.save_host(&host).await.expect("save");
+        }
+        let job = ScanJob {
+            id: "job".into(),
+            network_id: "network".into(),
+            cidr: "192.168.1.0/24".into(),
+            status: ScanStatus::Running,
+            scanned: 0,
+            total: 254,
+            discovered: 0,
+            started_at: now(),
+            finished_at: None,
+            error: None,
+        };
+        for _ in 0..3 {
+            persist_observation(
+                &state,
+                &job,
+                "192.168.1.10".parse().expect("ip"),
+                Observation {
+                    alive: true,
+                    method: "tcp",
+                    ..Default::default()
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("observation");
+        }
+        assert_eq!(state.hosts().await.expect("hosts").len(), 2);
+    }
+    #[tokio::test]
     async fn two_silent_ranges_receive_work_before_either_finishes() {
         let (_directory, state, calls) = fixture().await;
         let first = start(

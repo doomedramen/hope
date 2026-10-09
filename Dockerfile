@@ -7,6 +7,7 @@ RUN npm run build
 
 FROM rust:1.96-bookworm AS rust
 RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
+RUN rustup component add clippy rustfmt
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
@@ -18,12 +19,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/hope-server target/release/hope-agent /build/dist/
 
 FROM rust AS checks
-RUN rustup component add clippy rustfmt
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo fmt --all -- --check \
     && cargo test --workspace --locked \
     && cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+FROM checks AS load-checks
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo test --release --locked -p hope-server --test retention_load -- --ignored --nocapture \
+    && cp /build/target/retention-benchmark.json /build/dist/retention-benchmark.json
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libcap2-bin libc-bin && rm -rf /var/lib/apt/lists/* \

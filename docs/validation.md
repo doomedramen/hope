@@ -48,3 +48,18 @@ Never treat synthetic browser inventory as discovery evidence, command mocks as 
 ## Paused data-integrity checkpoint
 
 Ticket 04 is partially complete. Native checks pass: 24 Rust tests, Clippy, formatting; shell installer syntax; frontend typecheck/lint/static export. Regression tests cover lost enrollment responses, concurrent token reuse, revocation/report ordering, identity-bound credential replacement, weighted mixed-resolution history, and late-sample retention idempotence. The Linux image, browser acceptance, 250-host load, and remaining boundary/association tests have not been rerun for this checkpoint. See the handoff's pause checkpoint before resuming.
+
+## Retention and association — 2026-10-09
+
+Native and Linux ARM64 checks pass: 28 Rust tests, formatting, and Clippy. The explicit release load test also passes on both platforms. It seeds 250 identities with 24 hours of raw samples, six days of five-minute aggregates, and 2,500 late samples: 1,154,500 stored samples, approximately 538 MiB. It measures the report handler and simulated discovery persistence while retention runs; HTTP transport, collectors, and actual network probing are outside this load fixture.
+
+| Platform | Cleanup calls | Cleanup seconds | Concurrent reports | Report median ms | Report maximum ms |
+| --- | --- | --- | --- | --- | --- |
+| [macOS ARM64](benchmarks/retention-macos-arm64.json) | 2 | 0.226 | 13 | 0.868 | 2.140 |
+| [Linux ARM64 VM](benchmarks/retention-linux-arm64.json) | 2 | 0.552 | 25 | 3.064 | 14.036 |
+
+Reproduce with `cargo test --release --locked -p hope-server --test retention_load -- --ignored --nocapture`, or build Docker target `load-checks`. The native compiler is Rust 1.96.0; the Linux image uses 1.96.1. OrbStack's default BuildKit DNS failed to resolve the Rust component host during this run; `docker build --network=host --target load-checks -t hope:load-checks .` completed. This changes only the validation build's network mode.
+
+Boundary/restart tests exposed and fixed deletion of a partially retained five-minute bucket. Rollups now expire only when their full interval is older than seven days; history queries include overlapping retained buckets. Tests also verify unique-MAC enrollment, refusal to associate by IP alone, ambiguous-MAC manual reconciliation, preserved history, qualified map-position cleanup, and repeated ambiguous discovery without duplicate growth.
+
+Release builds on macOS exposed a malformed stripped build-time proc-macro library. Build dependencies now retain symbols while shipped release binaries retain stripping, using Cargo's [build-profile overrides](https://doc.rust-lang.org/cargo/reference/profiles.html#overrides). Unused SQLx default features were removed. The native release load test then compiled and passed.

@@ -1,0 +1,16 @@
+{
+  "aggregate_days": 6,
+  "architecture": "aarch64",
+  "concurrent_discovery_writes": 13,
+  "concurrent_reports": 13,
+  "database_bytes": 564416512,
+  "hosts": 250,
+  "platform": "macos",
+  "profile": "release",
+  "raw_hours": 24,
+  "report_latency_max_ms": 2.1395,
+  "report_latency_median_ms": 0.868208,
+  "retention_calls": 2,
+  "retention_seconds": 0.226413208,
+  "seeded_samples": 1154500
+}

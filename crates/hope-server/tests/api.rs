@@ -705,3 +705,149 @@ async fn retention_merges_late_samples_without_replacing_completed_bucket() {
         Some(40.0)
     );
 }
+
+fn discovered(id: &str, address: &str, mac: &str) -> Host {
+    serde_json::from_value(json!({"id":id,"agent_id":null,"name":id,"addresses":[address],"macs":[mac],"network_ids":[],"last_seen":now(),"last_report":null,"discovery_method":"arp","inventory":null,"metrics":null,"collectors":[],"services":[{"port":22,"name":"SSH","observed_at":now()}]})).expect("discovered host")
+}
+
+#[tokio::test]
+async fn enrollment_requires_unique_mac_evidence_not_an_ip_match() {
+    let (_dir, state, app, _) = setup().await;
+    let source = discovered("same-ip-other-device", "192.168.1.10", "02:00:00:00:00:02");
+    state.save_host(&source).await.expect("source");
+    let (agent, _, _) = enrolled(&state, &app).await;
+    let hosts = state.hosts().await.expect("hosts");
+    assert_eq!(hosts.len(), 2);
+    assert!(
+        hosts
+            .iter()
+            .find(|h| h.id == source.id)
+            .expect("source")
+            .agent_id
+            .is_none()
+    );
+    assert_ne!(
+        hosts
+            .iter()
+            .find(|h| h.agent_id.as_ref() == Some(&agent))
+            .expect("agent")
+            .id,
+        source.id
+    );
+
+    let (_dir, state, app, _) = setup().await;
+    let source = discovered("same-device", "192.168.1.99", "02:00:00:00:00:01");
+    state.save_host(&source).await.expect("source");
+    let (agent, _, _) = enrolled(&state, &app).await;
+    let hosts = state.hosts().await.expect("hosts");
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].id, source.id);
+    assert_eq!(hosts[0].agent_id.as_ref(), Some(&agent));
+    assert_eq!(hosts[0].addresses, vec!["192.168.1.10"]);
+}
+
+#[tokio::test]
+async fn ambiguous_mac_requires_manual_merge_and_preserves_history_and_map() {
+    let (_dir, state, app, cookie) = setup().await;
+    for host in [
+        discovered("source", "192.168.1.10", "02:00:00:00:00:01"),
+        discovered("other", "192.168.1.11", "02:00:00:00:00:01"),
+    ] {
+        state.save_host(&host).await.expect("source");
+    }
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let hosts = state.hosts().await.expect("hosts");
+    assert_eq!(hosts.len(), 3);
+    let target = hosts
+        .iter()
+        .find(|h| h.agent_id.as_ref() == Some(&agent))
+        .expect("target")
+        .id
+        .clone();
+    let report = AgentReport {
+        schema_version: SCHEMA_VERSION,
+        report_id: Uuid::new_v4().to_string(),
+        agent_id: agent.clone(),
+        collected_at: now(),
+        inventory: None,
+        metrics: Metrics {
+            cpu_percent: Some(42.0),
+            ..Default::default()
+        },
+        collectors: vec![],
+    };
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/report",
+            json!(report),
+            Some(("authorization", &format!("Bearer {credential}")))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let map = MapState {
+        positions: ["topology", "subnets", "health"]
+            .into_iter()
+            .map(|mode| Position {
+                id: format!("{mode}:source"),
+                x: 1.0,
+                y: 2.0,
+            })
+            .chain(std::iter::once(Position {
+                id: format!("health:{target}"),
+                x: 3.0,
+                y: 4.0,
+            }))
+            .collect(),
+        links: vec![MapLink {
+            id: "manual".into(),
+            source: "source".into(),
+            target: "other".into(),
+            label: "Known relationship".into(),
+        }],
+    };
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/api/v1/map",
+            json!(map),
+            Some(("cookie", &cookie))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            &format!("/api/v1/hosts/{target}/merge"),
+            json!({"source_id":"source"}),
+            Some(("cookie", &cookie))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(state.hosts().await.expect("hosts").len(), 2);
+    let map: MapState =
+        serde_json::from_str(&state.meta("map").await.expect("map").expect("saved"))
+            .expect("map json");
+    assert_eq!(map.positions.len(), 1);
+    assert_eq!(map.links[0].source, target);
+    assert_eq!(map.links[0].target, "other");
+    let host = state.host(&target).await.expect("host").expect("exists");
+    assert_eq!(host.agent_id.as_ref(), Some(&agent));
+    assert_eq!(host.metrics.expect("metrics").cpu_percent, Some(42.0));
+    assert!(host.services.iter().any(|s| s.port == 22));
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metrics WHERE agent_id=?")
+        .bind(agent)
+        .fetch_one(&state.0.db)
+        .await
+        .expect("history");
+    assert_eq!(count, 1);
+}

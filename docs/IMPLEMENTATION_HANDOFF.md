@@ -6,7 +6,7 @@ Audit date: 2026-10-08. Audience: an implementation model continuing this reposi
 
 Continue the existing implementation. Do not regenerate the app or replace its architecture. The foundation runs, but it is not release-ready. Complete the tickets below in order, keeping each change small enough to review. A passing happy-path test is not evidence that installation, discovery, or resource targets have been met.
 
-Working directory: `/Users/martin/Developer/hope`. Current branch: `main`. Baseline commit: `1ae83e7` (`feat: build Hope discovery server, reporting agent, and web console`). There is no Git remote configured. Stay on the current branch, commit verified milestones without co-author trailers, and push when a remote exists. Never create a branch or worktree without asking and waiting for permission. Do not reset, stash away, or discard the existing working tree.
+Working directory: `/Users/martin/Developer/hope`. Current branch: `main`. Baseline commit: `1ae83e7` (`feat: build Hope discovery server, reporting agent, and web console`). Remote `origin` is now configured as `https://github.com/doomedramen/hope.git`. Stay on the current branch, commit verified milestones without co-author trailers, and push when a remote exists. Never create a branch or worktree without asking and waiting for permission. Do not reset, stash away, or discard the existing working tree.
 
 At handoff there are uncommitted changes in protocol, server, agent, and frontend files, plus new `crates/hope-server/src/arp.rs`, `web/playwright.config.ts`, and `web/tests/`. They contain enrollment retry support, report freshness/revocation metadata, shared probe limiting, active Linux ARP, and browser tests. Preserve and finish them. This document's commit does not commit those implementation changes.
 
@@ -241,3 +241,11 @@ Verified changes:
 Checks at checkpoint: 24 native Rust tests, Clippy, Rust formatting, shell syntax, frontend typecheck/lint, and static production export pass. Latest Linux image and discovery benchmark evidence belong to the preceding discovery milestone; Ticket 04 has not yet been rebuilt/retested on Linux or exercised in browser acceptance.
 
 Still required for Ticket 04: seven-day/250-host retention load while reports/discovery writes proceed; explicit boundary/restart tests; ambiguous MAC and manual-merge regression tests; full review of association behavior. Before extending GPU history, add stable GPU identifiers: vendor/name keys collide when a host has multiple identical GPU models, and collector correlation needs the same identifier. Tickets 05–11 remain open. Visible browser review is also pending: the user asked to see the site when interactive testing starts; open it visibly in Codex before that testing.
+
+### Ticket 04 — completed 2026-10-09
+
+Finished deterministic retention boundary/restart tests, unique/ambiguous MAC enrollment, IP-only refusal, manual merge/history/map preservation, and repeated ambiguous-discovery tests. Fixed premature expiry of partial seven-day buckets and included overlap in history queries. Native and Linux ARM64 formatting/Clippy and 28 tests pass. Explicit release load tests on both platforms use 1,154,500 samples for 250 hosts; cleanup takes 0.226 seconds natively and 0.552 seconds in the Linux VM, while report-handler maximum latency stays below 15 ms. See docs/validation.md for scope, commands, environment, and raw results.
+
+The macOS release build also required unstripped build-time proc macros; shipped binaries still use release stripping. Removed unused SQLx default features. OrbStack BuildKit's default DNS failed repeatedly; a validation-only `--network=host` build completed Linux checks and the load test. Tool installation now precedes source copying so changes can reuse that layer.
+
+Remote origin is configured. Continue with Ticket 05 and push verified milestones on main. GPU identifiers and visible browser review remain required.
