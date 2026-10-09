@@ -30,6 +30,37 @@ pub async fn read(dir: &Path) -> Result<Config> {
     )
     .context("Invalid agent configuration")
 }
+pub fn validate_identity(configuration: &Config) -> Result<()> {
+    uuid::Uuid::parse_str(&configuration.agent_id).context("Invalid agent identity")?;
+    for credential in [&configuration.credential, &configuration.pending_credential]
+        .into_iter()
+        .flatten()
+    {
+        anyhow::ensure!(
+            credential.len() == 64 && credential.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "Invalid credential state"
+        );
+    }
+    let _ = client(configuration)?;
+    Ok(())
+}
+pub async fn restore_settings(directory: &Path, previous: &Path) -> Result<()> {
+    let _lock = lock(directory).await?;
+    let current = read(directory).await?;
+    let mut old: Config = serde_json::from_slice(&read_bounded(previous, 128 * 1024).await?)?;
+    validate_identity(&current)?;
+    validate_identity(&old)?;
+    anyhow::ensure!(
+        current.agent_id == old.agent_id && current.server == old.server,
+        "Rollback must preserve the same agent and server"
+    );
+    // Enrollment is an independent server-side transaction. Never discard a
+    // issued or pending credential when rolling back local package settings.
+    old.credential = current.credential;
+    old.pending_credential = current.pending_credential;
+    save(directory, &old).await
+}
+
 pub async fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path.parent().context("No state directory")?;
     tokio::fs::create_dir_all(parent).await?;
@@ -192,6 +223,45 @@ mod tests {
         while let Some(entry) = entries.next_entry().await.expect("entry") {
             assert!(!entry.file_name().to_string_lossy().ends_with(".tmp"));
         }
+    }
+    #[tokio::test]
+    async fn settings_rollback_preserves_issued_and_pending_credentials() {
+        let directory = tempfile::tempdir().expect("state");
+        let identity = uuid::Uuid::new_v4().to_string();
+        let old = Config {
+            server: "http://localhost:8080".into(),
+            agent_id: identity.clone(),
+            credential: Some("a".repeat(64)),
+            pending_credential: None,
+            ca_pem: None,
+        };
+        let previous = directory.path().join("previous.json");
+        write_private(&previous, &serde_json::to_vec(&old).expect("json"))
+            .await
+            .expect("backup");
+        let current = Config {
+            credential: Some("b".repeat(64)),
+            pending_credential: Some("c".repeat(64)),
+            ..old
+        };
+        save(directory.path(), &current).await.expect("current");
+        restore_settings(directory.path(), &previous)
+            .await
+            .expect("rollback");
+        let restored = read(directory.path()).await.expect("restored");
+        assert!(
+            restored.agent_id == identity
+                && restored.credential == current.credential
+                && restored.pending_credential == current.pending_credential
+        );
+        let foreign = Config {
+            agent_id: uuid::Uuid::new_v4().to_string(),
+            ..restored
+        };
+        write_private(&previous, &serde_json::to_vec(&foreign).expect("json"))
+            .await
+            .expect("foreign");
+        assert!(restore_settings(directory.path(), &previous).await.is_err());
     }
     #[cfg(unix)]
     #[tokio::test]

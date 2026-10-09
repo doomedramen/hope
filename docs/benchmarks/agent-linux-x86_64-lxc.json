@@ -1,0 +1,20 @@
+{
+  "platform": "linux",
+  "architecture": "x86_64",
+  "kernel": "7.0.14-19-pve",
+  "cpu_model": "Intel(R) Core(TM) i5-8500T CPU @ 2.10GHz",
+  "available_cpus": 1,
+  "os_release": "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nNAME=\"Debian GNU/Linux\"\nVERSION_ID=\"13\"\nVERSION=\"13 (trixie)\"\nVERSION_CODENAME=trixie\nDEBIAN_VERSION_FULL=13.7\nID=debian\nHOME_URL=\"https://www.debian.org/\"\nSUPPORT_URL=\"https://www.debian.org/support\"\nBUG_REPORT_URL=\"https://bugs.debian.org/\"\n",
+  "memory_total_kib": "MemTotal:         524288 kB",
+  "binary_sha256": "3c287663f5de2d8c09b4102135aa5740f2b227eb5566da37204106b346b94fea",
+  "warmup_seconds": 60,
+  "elapsed_seconds": 1800.0003919950686,
+  "agent_cpu_seconds": 0.27,
+  "collector_child_cpu_seconds": 0.0,
+  "cpu_percent_one_core_including_children": 0.01499999673337514,
+  "rss_median_bytes": 4825088,
+  "rss_peak_bytes": 4923392,
+  "sample_count": 1801,
+  "source_commit": "d07be94",
+  "measurement_scope": "One Debian LXC, 30 seconds with jitter, authenticated HTTPS loopback reverse tunnel; parent RSS sampled once per second; CPU includes waited collector children. GPU inventory visible; GPU driver metrics unavailable."
+}

@@ -40,6 +40,32 @@ async fn execute() -> Result<()> {
     if operation == "status" {
         return status::show(&dir, &std::env::args().skip(2).collect::<Vec<_>>()).await;
     }
+    if operation == "check-config" {
+        let configuration = config::read(&dir).await?;
+        config::validate_identity(&configuration)?;
+        if let Ok(server) = std::env::var("HOPE_SERVER") {
+            anyhow::ensure!(
+                server.trim_end_matches('/') == configuration.server,
+                "Existing agent belongs to another server"
+            );
+        }
+        if configuration.credential.is_none() {
+            anyhow::ensure!(
+                std::env::var("HOPE_ENROLLMENT_TOKEN").is_ok_and(|token| !token.is_empty()),
+                "Incomplete enrollment requires a token"
+            );
+        }
+        println!("Agent configuration is valid");
+        return Ok(());
+    }
+    if operation == "restore-config" {
+        let previous = std::env::args()
+            .nth(2)
+            .context("Use restore-config PREVIOUS_CONFIG_FILE")?;
+        config::restore_settings(&dir, std::path::Path::new(&previous)).await?;
+        println!("Previous settings restored; enrollment identity retained");
+        return Ok(());
+    }
     let mut collector = collect::Collector::new();
     if operation == "inspect" {
         let (inventory, metrics, collectors) = collector.sample().await;

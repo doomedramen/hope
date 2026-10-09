@@ -16,10 +16,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--host', required=True)
 parser.add_argument('--known-hosts', required=True)
 parser.add_argument('--directory', default='target/lxc-validation')
+parser.add_argument('--server', default='https://localhost:9443')
+parser.add_argument('--enrollment-token-env', help='Read an already issued token from this environment variable')
+parser.add_argument('--visible-site', action='store_true', help='Install persistent service without starting a benchmark')
 args = parser.parse_args()
 ipaddress.ip_address(args.host)
 directory = Path(args.directory).resolve()
-server = 'https://localhost:9443'
+server = args.server
 context = ssl.create_default_context(cafile=str(directory / 'keys/ca.pem'))
 client = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
@@ -27,9 +30,14 @@ def api(path, body=None):
     request = urllib.request.Request(server + '/api/v1' + path, data=None if body is None else json.dumps(body).encode(), headers={'Content-Type': 'application/json', 'Origin': server})
     return json.load(client.open(request, timeout=15))
 
-status = api('/auth/status')
-api('/auth/setup' if status['setup_required'] else '/auth/login', {'password':'hope-lxc-fixture-password','setup_token':'hope-lxc-validation-setup-token'})
-token = api('/enrollment-tokens', {})['token']
+if args.enrollment_token_env:
+    token = os.environ[args.enrollment_token_env]
+else:
+    if args.visible_site:
+        parser.error('--visible-site requires --enrollment-token-env')
+    status = api('/auth/status')
+    api('/auth/setup' if status['setup_required'] else '/auth/login', {'password':'hope-lxc-fixture-password','setup_token':'hope-lxc-validation-setup-token'})
+    token = api('/enrollment-tokens', {})['token']
 activation = str(uuid.uuid4())
 environment = dict(os.environ)
 environment['SSHPASS'] = environment.pop('HOPE_TEST_SSH_PASSWORD')
@@ -77,6 +85,42 @@ done
 echo 'The fixture service has not sent an accepted report' >&2
 exit 1
 '''
+if args.visible_site:
+    script = script.replace('hope-agent-test', 'hope-agent')
+    script = script.replace('set -eu\n', 'set -eu\nif [ -e /var/lib/hope-agent/config.json ] || systemctl cat hope-agent.service >/dev/null 2>&1; then echo "Existing installation found; use the upgrade workflow" >&2; exit 1; fi\n', 1)
+    start = script.index('systemd-run --quiet')
+    end = script.index('attempt=0', start)
+    script = script[:start] + r'''cat > /etc/systemd/system/hope-agent.service <<EOF
+[Unit]
+Description=H.O.P.E host reporting agent
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=hope-agent
+Group=hope-agent
+ExecStart=$binary run
+Environment=HOPE_AGENT_DIR=$state
+Environment=HOPE_ACTIVATION_ID=$HOPE_ACTIVATION_ID
+Restart=on-failure
+RestartSec=30
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=$state
+CapabilityBoundingSet=
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod 0644 /etc/systemd/system/hope-agent.service
+systemctl daemon-reload
+systemctl enable --now hope-agent.service
+''' + script[end:]
+    start = script.index('        python3 /root/hope-resource-sample.py')
+    end = script.index('        exit 0', start)
+    script = script[:start] + '        echo "Persistent service report accepted"\n' + script[end:]
 variables = {'HOPE_SERVER':server,'HOPE_ENROLLMENT_TOKEN':token,'HOPE_ACTIVATION_ID':activation}
 script = 'set +x\n' + ''.join(f'{name}={shlex.quote(value)}\nexport {name}\n' for name,value in variables.items()) + script
 result = subprocess.run(['sshpass','-e','ssh', '-T', *options, remote, 'sh -s'], input=script, text=True, env=environment, capture_output=True, timeout=180)
@@ -85,4 +129,4 @@ if result.returncode:
     print(result.stderr[-4096:])
     raise SystemExit(result.returncode)
 print(result.stdout)
-(directory / 'probe.json').write_text(json.dumps({'host':args.host,'activation_id':activation,'binary_fixture':'hope-agent-test','measurement_seconds':1800},indent=2)+'\n')
+(directory / ('visible-probe.json' if args.visible_site else 'probe.json')).write_text(json.dumps({'host':args.host,'activation_id':activation,'binary_fixture':'hope-agent' if args.visible_site else 'hope-agent-test','measurement_seconds':0 if args.visible_site else 1800},indent=2)+'\n')
