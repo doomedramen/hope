@@ -2,6 +2,7 @@ mod collect;
 mod config;
 mod delivery;
 mod reporting;
+mod status;
 use anyhow::{Context, Result};
 use config::Config;
 use hope_protocol::{EnrollmentRequest, EnrollmentResponse, SCHEMA_VERSION};
@@ -37,11 +38,7 @@ async fn execute() -> Result<()> {
     }
     let dir = config::directory();
     if operation == "status" {
-        let report = tokio::fs::read_to_string(dir.join("last-report"))
-            .await
-            .context("No report has been accepted yet")?;
-        println!("Last accepted report: {}", report.trim());
-        return Ok(());
+        return status::show(&dir, &std::env::args().skip(2).collect::<Vec<_>>()).await;
     }
     let mut collector = collect::Collector::new();
     if operation == "inspect" {
@@ -61,27 +58,32 @@ async fn execute() -> Result<()> {
             .unwrap_or(10)
             .clamp(2, 120);
         let mut measurements = vec![];
+        let mut collector_measurements = vec![];
         for _ in 0..samples {
             let start = Instant::now();
             let _ = collector.sample().await;
             measurements.push(start.elapsed().as_secs_f64() * 1000.0);
+            collector_measurements.push(collector.costs.clone());
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         println!(
             "{}",
-            serde_json::json!({"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH,"samples":samples,"collection_ms":measurements})
+            serde_json::json!({"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH,"samples":samples,"collection_ms":measurements,"collector_costs":collector_measurements})
         );
         return Ok(());
     }
     anyhow::ensure!(
-        matches!(operation.as_str(), "enroll" | "run" | "once"),
-        "Use run, enroll, once, inspect, status, benchmark, or --version"
+        matches!(operation.as_str(), "enroll" | "configure" | "run" | "once"),
+        "Use run, enroll, configure, once, inspect, status, benchmark, or --version"
     );
     let _state_lock = config::lock(&dir).await?;
     let mut configuration = if tokio::fs::try_exists(dir.join("config.json")).await? {
         config::read(&dir).await?
     } else {
-        anyhow::ensure!(operation == "enroll", "Agent is not enrolled");
+        anyhow::ensure!(
+            matches!(operation.as_str(), "enroll" | "configure"),
+            "Agent is not enrolled"
+        );
         let server = std::env::var("HOPE_SERVER")
             .context("HOPE_SERVER is required")?
             .trim_end_matches('/')
@@ -99,6 +101,7 @@ async fn execute() -> Result<()> {
             pending_credential: None,
             ca_pem,
         };
+        let _ = config::client(&config)?;
         config::save(&dir, &config).await?;
         config
     };
@@ -108,22 +111,18 @@ async fn execute() -> Result<()> {
             "Existing agent belongs to another server; uninstall and explicitly remove its identity before changing servers"
         );
     }
-    if std::env::var("HOPE_RESET_CREDENTIAL").as_deref() == Ok("1") {
+    let reset_credential = std::env::var("HOPE_RESET_CREDENTIAL").as_deref() == Ok("1");
+    if reset_credential {
         anyhow::ensure!(
-            operation == "enroll",
+            matches!(operation.as_str(), "enroll" | "configure"),
             "Credential replacement requires enrollment"
         );
         anyhow::ensure!(
             std::env::var("HOPE_ENROLLMENT_TOKEN").is_ok_and(|token| !token.is_empty()),
             "Credential replacement requires an enrollment token"
         );
-        if configuration.credential.is_some() {
-            configuration.credential = None;
-            configuration.pending_credential = None;
-            config::save(&dir, &configuration).await?;
-        }
     }
-    if operation == "enroll"
+    if matches!(operation.as_str(), "enroll" | "configure")
         && let Ok(path) = std::env::var("HOPE_CA_CERT")
     {
         let pem =
@@ -135,10 +134,10 @@ async fn execute() -> Result<()> {
         }
         config::save(&dir, &configuration).await?;
     }
-    let client = config::client(&configuration)?;
-    if configuration.credential.is_none() {
+    if configuration.credential.is_none() || reset_credential {
+        let client = config::client(&configuration)?;
         anyhow::ensure!(
-            operation == "enroll",
+            matches!(operation.as_str(), "enroll" | "configure"),
             "Enrollment was interrupted. Retry with a fresh enrollment token."
         );
         if configuration.pending_credential.is_none() {
@@ -172,9 +171,18 @@ async fn execute() -> Result<()> {
             response.status()
         );
         let enrolled: EnrollmentResponse = delivery::bounded_json(response).await?;
+        anyhow::ensure!(
+            Some(&enrolled.credential) == configuration.pending_credential.as_ref(),
+            "Enrollment returned an unexpected credential"
+        );
         configuration.credential = Some(enrolled.credential);
         configuration.pending_credential = None;
         config::save(&dir, &configuration).await?;
+    }
+    if operation == "configure" {
+        let _ = config::client(&configuration)?;
+        println!("Agent configuration ready; service reporting has not been confirmed");
+        return Ok(());
     }
     let bytes = config::read_bounded(&dir.join("spool.json"), delivery::MAX_BYTES)
         .await

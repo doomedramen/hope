@@ -7,7 +7,13 @@ use std::{
 use sysinfo::{Disks, Networks, System};
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
+#[derive(Clone, serde::Serialize)]
+pub struct CollectorCost {
+    pub collector: &'static str,
+    pub milliseconds: f64,
+}
 pub struct Collector {
+    pub costs: Vec<CollectorCost>,
     system: System,
     networks: Networks,
     disks: DiskProbe,
@@ -85,6 +91,7 @@ impl Collector {
         system.refresh_cpu_usage();
         system.refresh_memory();
         Self {
+            costs: Vec::with_capacity(10),
             system,
             networks: Networks::new_with_refreshed_list(),
             disks: DiskProbe::new(),
@@ -97,17 +104,35 @@ impl Collector {
             first: true,
         }
     }
+    fn cost(&mut self, collector: &'static str, started: Instant) {
+        self.costs.push(CollectorCost {
+            collector,
+            milliseconds: started.elapsed().as_secs_f64() * 1000.0,
+        });
+    }
     pub async fn sample(&mut self) -> (Inventory, Metrics, Vec<CollectorStatus>) {
         let elapsed = self.last.elapsed().as_secs_f64();
         self.last = Instant::now();
+        self.costs.clear();
+        let started = Instant::now();
         self.system.refresh_cpu_usage();
+        self.cost("cpu", started);
+        let started = Instant::now();
         self.system.refresh_memory();
+        self.cost("memory", started);
+        let started = Instant::now();
         self.networks.refresh(true);
+        self.cost("network_refresh", started);
+        let started = Instant::now();
         let disk_sample = self.disks.sample(Duration::from_millis(500)).await;
+        self.cost("filesystems", started);
         if let Some(disks) = &disk_sample {
             self.disk_inventory = disks.clone();
         }
+        let started = Instant::now();
         let gateway = default_gateway().await;
+        self.cost("gateway", started);
+        let started = Instant::now();
         let mut receive = 0.0;
         let mut transmit = 0.0;
         let mut has_rate = true;
@@ -161,20 +186,27 @@ impl Collector {
         has_rate = has_rate && selected > 0;
         network_interfaces.sort_by(|a, b| a.name.cmp(&b.name));
         self.previous_network = current_network;
+        self.cost("network_counters", started);
         let disks = disk_sample.clone().unwrap_or_default();
+        let started = Instant::now();
         let io = disk_counters().await;
+        self.cost("disk_io", started);
         let disk_rate = self
             .previous_disk
             .zip(io)
             .map(|(old, new)| (rate(old.0, new.0, elapsed), rate(old.1, new.1, elapsed)));
         self.previous_disk = io;
         if self.gpu_at.elapsed() > Duration::from_secs(3600) {
+            let started = Instant::now();
             self.gpus = gpu_inventory().await;
+            self.cost("gpu_inventory", started);
             self.gpu_at = Instant::now();
         }
         let mut gpus = self.gpus.clone();
         if cfg!(target_os = "linux") {
+            let started = Instant::now();
             gpu_metrics(&mut gpus).await;
+            self.cost("gpu_metrics", started);
         }
         let gpu_metrics_available = gpus.iter().any(|g| g.utilization_percent.is_some());
         let collectors = vec![
@@ -210,6 +242,7 @@ impl Collector {
                 Some("GPU driver metrics are unavailable; inventory remains visible"),
             ),
         ];
+        let started = Instant::now();
         let interfaces = interfaces(&self.networks, gateway);
         let inventory = Inventory {
             hostname: System::host_name().unwrap_or_else(|| "Unnamed host".into()),
@@ -233,7 +266,8 @@ impl Collector {
             collectors: collectors.clone(),
         };
         let metrics = Metrics {
-            cpu_percent: (!self.first).then(|| self.system.global_cpu_usage() as f64),
+            cpu_percent: (!self.first && !self.system.cpus().is_empty())
+                .then(|| self.system.global_cpu_usage() as f64),
             memory_used_bytes: Some(self.system.used_memory() as f64),
             memory_total_bytes: Some(self.system.total_memory() as f64),
             network_rx_bytes_per_second: has_rate.then_some(receive),
@@ -244,6 +278,7 @@ impl Collector {
             disks,
             gpus,
         };
+        self.cost("inventory", started);
         self.first = false;
         (inventory, metrics, collectors)
     }

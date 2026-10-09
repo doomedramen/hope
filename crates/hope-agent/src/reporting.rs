@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use hope_protocol::{AgentReport, CollectorStatus, Inventory, Metrics, SCHEMA_VERSION};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{future::Future, path::Path, pin::Pin, time::Duration};
 use tokio::time::{Instant, sleep_until};
 use uuid::Uuid;
@@ -21,15 +21,17 @@ impl Sampler for collect::Collector {
         Box::pin(self.sample())
     }
 }
-#[derive(Serialize)]
-struct Acceptance {
-    agent_id: String,
-    report_id: String,
-    run_id: String,
-    process_id: u32,
-    operation: String,
-    collected_at: f64,
-    accepted_at: f64,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Acceptance {
+    pub(crate) agent_id: String,
+    pub(crate) report_id: String,
+    pub(crate) run_id: String,
+    pub(crate) process_id: u32,
+    pub(crate) operation: String,
+    pub(crate) collected_at: f64,
+    pub(crate) accepted_at: f64,
+    #[serde(default)]
+    pub(crate) activation_id: Option<String>,
 }
 #[derive(Default)]
 struct InventoryDelivery {
@@ -71,6 +73,10 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
         .clone()
         .context("Missing agent credential")?;
     let run_id = Uuid::new_v4().to_string();
+    let activation_id = std::env::var("HOPE_ACTIVATION_ID").ok();
+    if let Some(id) = &activation_id {
+        Uuid::parse_str(id).context("Invalid service activation identifier")?;
+    }
     let started = now();
     let mut next_sample = Instant::now();
     let mut retry_at = Instant::now();
@@ -107,7 +113,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                             marker_at=report.collected_at;
                             let accepted=now();
                             config::write_private(&dir.join("last-report"),accepted.to_string().as_bytes()).await?;
-                            config::write_private(&dir.join("last-acceptance.json"),&serde_json::to_vec(&Acceptance { agent_id:configuration.agent_id.clone(),report_id:report.report_id.clone(),run_id:run_id.clone(),process_id:std::process::id(),operation:operation.into(),collected_at:report.collected_at,accepted_at:accepted })?).await?;
+                            config::write_private(&dir.join("last-acceptance.json"),&serde_json::to_vec(&Acceptance { agent_id:configuration.agent_id.clone(),report_id:report.report_id.clone(),run_id:run_id.clone(),process_id:std::process::id(),operation:operation.into(),activation_id:activation_id.clone(),collected_at:report.collected_at,accepted_at:accepted })?).await?;
                         }
                         config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
                         if operation!="run" && first_report.as_ref()==Some(&report.report_id) { println!("Agent report accepted"); return Ok(()); }
