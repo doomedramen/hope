@@ -153,7 +153,7 @@ else
 <key>Label</key><string>io.hope.agent</string>
 <key>ProgramArguments</key><array><string>$(xml_escape "$binary")</string><string>run</string></array>
 <key>EnvironmentVariables</key><dict><key>HOPE_AGENT_DIR</key><string>$(xml_escape "$state")</string></dict>
-<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>30</integer>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>30</integer>
 <key>StandardErrorPath</key><string>$(xml_escape "$state")/agent.log</string>
 EOF
     if "$system"; then printf '<key>UserName</key><string>%s</string>\n' "$service_user" >> "$unit"; fi

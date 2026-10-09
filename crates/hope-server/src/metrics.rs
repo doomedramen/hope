@@ -32,8 +32,16 @@ impl Statistics {
             disk_read_bytes_per_second,
             disk_write_bytes_per_second
         );
+        for interface in &metrics.network_interfaces {
+            let key = format!("network:{}", serde_json::json!(interface.name));
+            result.add(&format!("{key}:rx"), interface.rx_bytes_per_second);
+            result.add(&format!("{key}:tx"), interface.tx_bytes_per_second);
+        }
         for gpu in &metrics.gpus {
-            let key = gpu_key(&gpu.vendor, &gpu.name);
+            if gpu.id.is_none() {
+                continue;
+            }
+            let key = gpu_key(gpu.id.as_deref(), &gpu.vendor, &gpu.name);
             result.add(&format!("{key}:utilization"), gpu.utilization_percent);
             result.add(&format!("{key}:used"), gpu.memory_used_bytes);
             result.add(&format!("{key}:total"), gpu.memory_total_bytes);
@@ -77,8 +85,16 @@ impl Statistics {
             disk_read_bytes_per_second,
             disk_write_bytes_per_second
         );
+        for interface in &mut latest.network_interfaces {
+            let key = format!("network:{}", serde_json::json!(interface.name));
+            interface.rx_bytes_per_second = self.mean(&format!("{key}:rx"));
+            interface.tx_bytes_per_second = self.mean(&format!("{key}:tx"));
+        }
         for gpu in &mut latest.gpus {
-            let key = gpu_key(&gpu.vendor, &gpu.name);
+            if gpu.id.is_none() {
+                continue;
+            }
+            let key = gpu_key(gpu.id.as_deref(), &gpu.vendor, &gpu.name);
             gpu.utilization_percent = self.mean(&format!("{key}:utilization"));
             gpu.memory_used_bytes = self.mean(&format!("{key}:used"));
             gpu.memory_total_bytes = self.mean(&format!("{key}:total"));
@@ -96,8 +112,9 @@ impl Statistics {
         latest
     }
 }
-fn gpu_key(vendor: &str, name: &str) -> String {
-    format!("gpu:{}", serde_json::json!([vendor, name]))
+fn gpu_key(id: Option<&str>, vendor: &str, name: &str) -> String {
+    id.map(|id| format!("gpu-id:{id}"))
+        .unwrap_or_else(|| format!("gpu:{}", serde_json::json!([vendor, name])))
 }
 fn disk_key(name: &str, mount: &str, filesystem: &str) -> String {
     format!("disk:{}", serde_json::json!([name, mount, filesystem]))
@@ -336,6 +353,47 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(count, 0);
+    }
+    #[test]
+    fn identical_gpu_models_keep_separate_adapter_averages() {
+        let gpu = |id: &str, utilization| hope_protocol::Gpu {
+            id: Some(id.into()),
+            name: "Same model".into(),
+            vendor: "NVIDIA".into(),
+            utilization_percent: Some(utilization),
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            temperature_celsius: None,
+        };
+        let samples = [
+            Metrics {
+                gpus: vec![gpu("first", 10.0), gpu("second", 90.0)],
+                ..Default::default()
+            },
+            Metrics {
+                gpus: vec![gpu("second", 50.0), gpu("first", 30.0)],
+                ..Default::default()
+            },
+        ];
+        let result = aggregate(&samples);
+        assert_eq!(
+            result
+                .gpus
+                .iter()
+                .find(|g| g.id.as_deref() == Some("first"))
+                .expect("first")
+                .utilization_percent,
+            Some(20.0)
+        );
+        assert_eq!(
+            result
+                .gpus
+                .iter()
+                .find(|g| g.id.as_deref() == Some("second"))
+                .expect("second")
+                .utilization_percent,
+            Some(70.0)
+        );
     }
     #[test]
     fn mixed_resolutions_use_per_metric_counts_and_preserve_nulls() {

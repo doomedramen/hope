@@ -22,8 +22,14 @@ fn disks(values: &[Disk]) -> bool {
 }
 fn gpus(values: &[Gpu]) -> bool {
     values.len() <= 32
+        && values.iter().enumerate().all(|(index, gpu)| {
+            gpu.id.is_none() || !values[..index].iter().any(|other| other.id == gpu.id)
+        })
         && values.iter().all(|gpu| {
-            text(&gpu.name, 255)
+            gpu.id
+                .as_ref()
+                .is_none_or(|id| !id.is_empty() && text(id, 255))
+                && text(&gpu.name, 255)
                 && text(&gpu.vendor, 128)
                 && optional(gpu.utilization_percent, 100.0)
                 && optional(
@@ -82,6 +88,17 @@ pub fn inventory(value: &Inventory) -> ApiResult<()> {
     collectors(&value.collectors)
 }
 pub fn metrics(value: &Metrics) -> ApiResult<()> {
+    if value.network_interfaces.len() > 128
+        || value.network_interfaces.iter().any(|i| {
+            !text(&i.name, 128)
+                || !number(i.received_bytes, 1e20)
+                || !number(i.transmitted_bytes, 1e20)
+                || !optional(i.rx_bytes_per_second, 1e15)
+                || !optional(i.tx_bytes_per_second, 1e15)
+        })
+    {
+        return Err(ApiError::bad("Invalid interface counters"));
+    }
     if !optional(value.cpu_percent, 100.0)
         || !optional(value.memory_total_bytes, 1e18)
         || !optional(

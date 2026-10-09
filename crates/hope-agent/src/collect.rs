@@ -1,25 +1,79 @@
-use hope_protocol::{CollectorStatus, Disk, Gpu, Interface, Inventory, Metrics};
+use hope_protocol::{CollectorStatus, Disk, Gpu, Interface, Inventory, Metrics, NetworkCounter};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
 use sysinfo::{Disks, Networks, System};
-use tokio::{process::Command, time::timeout};
+use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
 pub struct Collector {
     system: System,
     networks: Networks,
-    disks: Disks,
+    disks: DiskProbe,
+    disk_inventory: Vec<Disk>,
     last: Instant,
-    previous_network: HashMap<String, (u64, u64)>,
+    previous_network: HashMap<String, (u64, u64, String)>,
     previous_disk: Option<(u64, u64)>,
     gpus: Vec<Gpu>,
     gpu_at: Instant,
     first: bool,
 }
 
+struct DiskProbe {
+    receiver: Option<tokio::sync::oneshot::Receiver<Vec<Disk>>>,
+    collect: std::sync::Arc<dyn Fn() -> Vec<Disk> + Send + Sync>,
+}
+impl DiskProbe {
+    fn new() -> Self {
+        Self {
+            receiver: None,
+            collect: std::sync::Arc::new(|| {
+                // A single detached worker may wait on a remote filesystem. It cannot
+                // accumulate further workers or prevent process shutdown.
+                let disks = Disks::new_with_refreshed_list();
+                disks
+                    .iter()
+                    .take(128)
+                    .map(|disk| Disk {
+                        name: disk.name().to_string_lossy().into(),
+                        mount: disk.mount_point().to_string_lossy().into(),
+                        filesystem: disk.file_system().to_string_lossy().into(),
+                        total_bytes: disk.total_space() as f64,
+                        available_bytes: disk.available_space() as f64,
+                    })
+                    .collect()
+            }),
+        }
+    }
+    async fn sample(&mut self, deadline: Duration) -> Option<Vec<Disk>> {
+        if self.receiver.is_none() {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let collect = self.collect.clone();
+            std::thread::Builder::new()
+                .name("hope-filesystems".into())
+                .spawn(move || {
+                    let _ = sender.send(collect());
+                })
+                .ok()?;
+            self.receiver = Some(receiver);
+        }
+        match timeout(deadline, self.receiver.as_mut()?).await {
+            Ok(Ok(disks)) => {
+                self.receiver = None;
+                Some(disks)
+            }
+            Ok(Err(_)) => {
+                self.receiver = None;
+                None
+            }
+            Err(_) => None,
+        }
+    }
+}
+
 pub fn rate(previous: u64, current: u64, seconds: f64) -> Option<f64> {
-    if seconds <= 0.0 || current < previous {
+    if !seconds.is_finite() || seconds <= 0.0 || current < previous {
         None
     } else {
         Some((current - previous) as f64 / seconds)
@@ -33,7 +87,8 @@ impl Collector {
         Self {
             system,
             networks: Networks::new_with_refreshed_list(),
-            disks: Disks::new_with_refreshed_list(),
+            disks: DiskProbe::new(),
+            disk_inventory: vec![],
             last: Instant::now(),
             previous_network: HashMap::new(),
             previous_disk: None,
@@ -48,41 +103,65 @@ impl Collector {
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
         self.networks.refresh(true);
-        self.disks.refresh(true);
+        let disk_sample = self.disks.sample(Duration::from_millis(500)).await;
+        if let Some(disks) = &disk_sample {
+            self.disk_inventory = disks.clone();
+        }
+        let gateway = default_gateway().await;
         let mut receive = 0.0;
         let mut transmit = 0.0;
-        let mut has_rate = false;
+        let mut has_rate = true;
+        let mut selected = 0;
+        let mut network_interfaces = vec![];
         let mut current_network = HashMap::new();
-        for (name, network) in &self.networks {
-            if name == "lo" || name == "lo0" {
-                continue;
-            }
-            let counters = (network.total_received(), network.total_transmitted());
-            if let Some(previous) = self.previous_network.get(name)
-                && let (Some(rx), Some(tx)) = (
-                    rate(previous.0, counters.0, elapsed),
-                    rate(previous.1, counters.1, elapsed),
-                )
-            {
-                receive += rx;
-                transmit += tx;
-                has_rate = true;
-            }
-            current_network.insert(name.clone(), counters);
-        }
-        self.previous_network = current_network;
-        let disks: Vec<Disk> = self
-            .disks
+        for (name, network) in self
+            .networks
             .iter()
+            .filter(|(name, _)| *name != "lo" && *name != "lo0")
             .take(128)
-            .map(|d| Disk {
-                name: d.name().to_string_lossy().into(),
-                mount: d.mount_point().to_string_lossy().into(),
-                filesystem: d.file_system().to_string_lossy().into(),
-                total_bytes: d.total_space() as f64,
-                available_bytes: d.available_space() as f64,
-            })
-            .collect();
+        {
+            let counters = (network.total_received(), network.total_transmitted());
+            let mac = network.mac_address().to_string();
+            let previous = self.previous_network.get(name).filter(|old| old.2 == mac);
+            let rx = previous.and_then(|old| rate(old.0, counters.0, elapsed));
+            let tx = previous.and_then(|old| rate(old.1, counters.1, elapsed));
+            // A default-route interface avoids counting the same traffic again on
+            // bridges, tunnel adapters, and their physical underlay. All counters
+            // remain available individually, with the total's scope explicit.
+            let included = gateway
+                .as_ref()
+                .map(|(interface, _)| interface == name)
+                .unwrap_or_else(|| {
+                    ![
+                        "veth", "docker", "br-", "bridge", "virbr", "tap", "tun", "utun", "wg",
+                        "bond",
+                    ]
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+                });
+            if included {
+                selected += 1;
+                if let (Some(rx), Some(tx)) = (rx, tx) {
+                    receive += rx;
+                    transmit += tx;
+                } else {
+                    has_rate = false;
+                }
+            }
+            network_interfaces.push(NetworkCounter {
+                name: name.clone(),
+                received_bytes: counters.0 as f64,
+                transmitted_bytes: counters.1 as f64,
+                rx_bytes_per_second: rx,
+                tx_bytes_per_second: tx,
+                included_in_total: included,
+            });
+            current_network.insert(name.clone(), (counters.0, counters.1, mac));
+        }
+        has_rate = has_rate && selected > 0;
+        network_interfaces.sort_by(|a, b| a.name.cmp(&b.name));
+        self.previous_network = current_network;
+        let disks = disk_sample.clone().unwrap_or_default();
         let io = disk_counters().await;
         let disk_rate = self
             .previous_disk
@@ -99,10 +178,20 @@ impl Collector {
         }
         let gpu_metrics_available = gpus.iter().any(|g| g.utilization_percent.is_some());
         let collectors = vec![
-            status("cpu", true, None),
+            status(
+                "cpu",
+                !self.first && !self.system.cpus().is_empty(),
+                Some("CPU utilization needs a previous sample"),
+            ),
             status("memory", true, None),
             status("network", true, None),
-            status("storage", true, None),
+            status(
+                "storage",
+                disk_sample.is_some(),
+                Some(
+                    "Filesystem collector is unavailable or still waiting; last inventory is retained",
+                ),
+            ),
             status(
                 "disk_io",
                 io.is_some(),
@@ -121,7 +210,7 @@ impl Collector {
                 Some("GPU driver metrics are unavailable; inventory remains visible"),
             ),
         ];
-        let interfaces = interfaces(&self.networks).await;
+        let interfaces = interfaces(&self.networks, gateway);
         let inventory = Inventory {
             hostname: System::host_name().unwrap_or_else(|| "Unnamed host".into()),
             os: format!(
@@ -139,7 +228,7 @@ impl Collector {
             cpu_cores: self.system.cpus().len() as u32,
             memory_total_bytes: self.system.total_memory() as f64,
             interfaces,
-            disks: disks.clone(),
+            disks: self.disk_inventory.clone(),
             gpus: gpus.clone(),
             collectors: collectors.clone(),
         };
@@ -149,6 +238,7 @@ impl Collector {
             memory_total_bytes: Some(self.system.total_memory() as f64),
             network_rx_bytes_per_second: has_rate.then_some(receive),
             network_tx_bytes_per_second: has_rate.then_some(transmit),
+            network_interfaces,
             disk_read_bytes_per_second: disk_rate.and_then(|r| r.0),
             disk_write_bytes_per_second: disk_rate.and_then(|r| r.1),
             disks,
@@ -180,11 +270,21 @@ pub fn stable_inventory(mut inventory: Inventory) -> Inventory {
         gpu.temperature_celsius = None;
     }
     inventory
+        .disks
+        .sort_by(|a, b| (&a.name, &a.mount).cmp(&(&b.name, &b.mount)));
+    inventory
+        .gpus
+        .sort_by(|a, b| (&a.id, &a.vendor, &a.name).cmp(&(&b.id, &b.vendor, &b.name)));
+    for interface in &mut inventory.interfaces {
+        interface.addresses.sort();
+    }
+    inventory.interfaces.sort_by(|a, b| a.name.cmp(&b.name));
+    inventory.collectors.sort_by(|a, b| a.name.cmp(&b.name));
+    inventory
 }
 
-async fn interfaces(networks: &Networks) -> Vec<Interface> {
+fn interfaces(networks: &Networks, gateway: Option<(String, String)>) -> Vec<Interface> {
     let addresses = if_addrs::get_if_addrs().unwrap_or_default();
-    let gateway = default_gateway().await;
     let mut interfaces: Vec<_> = networks
         .iter()
         .filter(|(name, _)| *name != "lo" && *name != "lo0")
@@ -243,7 +343,12 @@ async fn disk_counters() -> Option<(u64, u64)> {
         if p.len() < 14 {
             continue;
         }
-        if p[2].starts_with("loop") || p[2].starts_with("ram") || p[2].starts_with("dm-") {
+        if p[2].starts_with("loop")
+            || p[2].starts_with("ram")
+            || p[2].starts_with("dm-")
+            || p[2].starts_with("md")
+            || p[2].starts_with("zram")
+        {
             continue;
         }
         if tokio::fs::try_exists(format!("/sys/block/{}", p[2]))
@@ -259,16 +364,39 @@ async fn disk_counters() -> Option<(u64, u64)> {
 }
 async fn command(binary: &str, args: &[&str], seconds: u64) -> Option<String> {
     let mut cmd = Command::new(binary);
-    cmd.args(args).kill_on_drop(true);
-    let output = timeout(Duration::from_secs(seconds), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() || output.stdout.len() > 1024 * 1024 {
-        return None;
+    cmd.args(args)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let result = timeout(Duration::from_secs(seconds), async {
+        let mut bytes = vec![];
+        child
+            .stdout
+            .take()?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .ok()?;
+        if bytes.len() > 1024 * 1024 {
+            return None;
+        }
+        if !child.wait().await.ok()?.success() {
+            return None;
+        }
+        String::from_utf8(bytes).ok()
+    })
+    .await;
+    match result {
+        Ok(Some(output)) => Some(output),
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            None
+        }
     }
-    String::from_utf8(output.stdout).ok()
 }
+
 async fn gpu_inventory() -> Vec<Gpu> {
     let mut gpus = vec![];
     if cfg!(target_os = "macos") {
@@ -283,6 +411,9 @@ async fn gpu_inventory() -> Vec<Gpu> {
         {
             for device in devices.iter().take(32) {
                 gpus.push(Gpu {
+                    id: device["sppci_slot_name"]
+                        .as_str()
+                        .map(|slot| format!("macos-slot:{slot}")),
                     name: device["sppci_model"].as_str().unwrap_or("GPU").into(),
                     vendor: device["spdisplays_vendor"]
                         .as_str()
@@ -314,7 +445,13 @@ async fn gpu_inventory() -> Vec<Gpu> {
                 "0x8086" => "Intel",
                 _ => "Unknown",
             };
+            let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path.clone());
+            let id = format!(
+                "sysfs:{:x}",
+                Sha256::digest(canonical.to_string_lossy().as_bytes())
+            );
             gpus.push(Gpu {
+                id: Some(id),
                 name: format!("{vendor_name} {} ({name})", device.trim()),
                 vendor: vendor_name.into(),
                 utilization_percent: None,
@@ -322,15 +459,19 @@ async fn gpu_inventory() -> Vec<Gpu> {
                 memory_total_bytes: None,
                 temperature_celsius: None,
             });
+            if gpus.len() >= 32 {
+                break;
+            }
         }
     }
+    gpus.sort_by(|a, b| (&a.id, &a.name).cmp(&(&b.id, &b.name)));
     gpus
 }
 async fn gpu_metrics(gpus: &mut Vec<Gpu>) {
     if let Some(output) = command(
         "nvidia-smi",
         &[
-            "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+            "--query-gpu=uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
             "--format=csv,noheader,nounits",
         ],
         2,
@@ -338,20 +479,7 @@ async fn gpu_metrics(gpus: &mut Vec<Gpu>) {
     .await
     {
         gpus.retain(|g| g.vendor != "NVIDIA");
-        for line in output.lines().take(32) {
-            let fields: Vec<_> = line.split(',').map(str::trim).collect();
-            if fields.len() != 5 {
-                continue;
-            }
-            gpus.push(Gpu {
-                name: fields[0].into(),
-                vendor: "NVIDIA".into(),
-                utilization_percent: fields[1].parse().ok(),
-                memory_used_bytes: fields[2].parse::<f64>().ok().map(|v| v * 1048576.0),
-                memory_total_bytes: fields[3].parse::<f64>().ok().map(|v| v * 1048576.0),
-                temperature_celsius: fields[4].parse().ok(),
-            });
-        }
+        gpus.extend(parse_nvidia(&output));
     }
     for gpu in gpus.iter_mut().filter(|g| g.vendor == "AMD") {
         let Some(card) = gpu.name.split('(').nth(1).and_then(|s| s.strip_suffix(')')) else {
@@ -371,18 +499,91 @@ async fn gpu_metrics(gpus: &mut Vec<Gpu>) {
         }
     }
 }
+fn parse_nvidia(output: &str) -> Vec<Gpu> {
+    output
+        .lines()
+        .take(32)
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split(',').map(str::trim).collect();
+            if fields.len() != 6 {
+                return None;
+            }
+            let number = |field: &str| field.parse::<f64>().ok().filter(|value| value.is_finite());
+            Some(Gpu {
+                id: fields[0]
+                    .starts_with("GPU-")
+                    .then(|| format!("nvidia:{}", fields[0])),
+                name: fields[1].into(),
+                vendor: "NVIDIA".into(),
+                utilization_percent: number(fields[2]).filter(|v| (0.0..=100.0).contains(v)),
+                memory_used_bytes: number(fields[3])
+                    .filter(|v| *v >= 0.0)
+                    .map(|v| v * 1048576.0),
+                memory_total_bytes: number(fields[4])
+                    .filter(|v| *v >= 0.0)
+                    .map(|v| v * 1048576.0),
+                temperature_celsius: number(fields[5]),
+            })
+        })
+        .collect()
+}
+
 async fn read_number(path: &str) -> Option<f64> {
     tokio::fs::read_to_string(path)
         .await
         .ok()?
         .trim()
-        .parse()
+        .parse::<f64>()
         .ok()
+        .filter(|value| value.is_finite())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn hanging_filesystems_do_not_accumulate_workers() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let count = Arc::new(AtomicUsize::new(0));
+        let called = count.clone();
+        let mut probe = DiskProbe {
+            receiver: None,
+            collect: Arc::new(move || {
+                called.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(100));
+                vec![]
+            }),
+        };
+        for _ in 0..5 {
+            assert!(probe.sample(Duration::from_millis(2)).await.is_none());
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(probe.sample(Duration::from_secs(1)).await.is_some());
+    }
+    #[tokio::test]
+    async fn commands_are_killed_on_deadline_or_excess_output() {
+        let start = Instant::now();
+        assert!(command("sh", &["-c", "exec sleep 10"], 0).await.is_none());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(
+            command("sh", &["-c", "exec yes oversized-output"], 1)
+                .await
+                .is_none()
+        );
+    }
+    #[test]
+    fn duplicate_gpu_models_have_distinct_driver_ids_and_missing_values() {
+        let gpus = parse_nvidia(
+            "GPU-first, Same model, 10, 100, 1000, 50\nGPU-second, Same model, N/A, N/A, 1000, N/A",
+        );
+        assert_eq!(gpus.len(), 2);
+        assert_ne!(gpus[0].id, gpus[1].id);
+        assert!(gpus[1].utilization_percent.is_none());
+        assert!(gpus[1].memory_used_bytes.is_none());
+    }
     #[test]
     fn counter_reset_is_unavailable() {
         assert_eq!(rate(100, 50, 30.0), None);

@@ -249,3 +249,11 @@ Finished deterministic retention boundary/restart tests, unique/ambiguous MAC en
 The macOS release build also required unstripped build-time proc macros; shipped binaries still use release stripping. Removed unused SQLx default features. OrbStack BuildKit's default DNS failed repeatedly; a validation-only `--network=host` build completed Linux checks and the load test. Tool installation now precedes source copying so changes can reuse that layer.
 
 Remote origin is configured. Continue with Ticket 05 and push verified milestones on main. GPU identifiers and visible browser review remain required.
+
+### Ticket 05 — delivery and collector milestone, 2026-10-09
+
+Collection now races in-flight HTTP requests under a single spool owner. Runtime/startup spool bounds are 120 reports, 4 MiB, and one hour; corrupt/oversized files, excessive decoded counts, wrong identities, and future timestamps are rejected or evicted. Retry-After (seconds/date), transport/429/server failures, bounded backoff, explicit revocation, and accepted-only success markers are implemented. Inventory suppression advances only after acceptance and cannot regress on older backlog. State writes are atomic/private with an exclusive process lock. CA updates validate PEM bundles; redirects remain disabled; SIGTERM/SIGINT save the spool.
+
+Commands cap output while reading and kill/reap on deadline. Filesystem probing permits only one detached worker, bounded waiting, cached inventory, and explicit unavailable metrics. GPU IDs distinguish identical cards where native interfaces expose identity; unidentified legacy devices retain snapshots instead of ambiguous averages. Per-interface lifetime counters/rates are included, with reset/unavailable semantics and explicit total membership; default-route totals avoid common virtual-interface duplication. Stacked disk counters are excluded.
+
+Native and Linux ARM64 Rust formatting, Clippy, and 42 ordinary tests pass, including 14 agent fault tests. Frontend types and production export pass. Actual 30-second cadence/resource measurements and platform certificate/service tests remain gates in Tickets 10/11. No CPU/RSS target is claimed from these tests. Visible local preview opened before interactive testing, with separate demo state and disabled 198.18.x discovery ranges. Continue Ticket 06.

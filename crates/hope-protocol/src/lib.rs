@@ -137,6 +137,9 @@ pub struct Disk {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Gpu {
+    /// Driver UUID or device path; absent when the platform cannot identify the adapter.
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub vendor: String,
     pub utilization_percent: Option<f64>,
@@ -166,6 +169,16 @@ pub struct Inventory {
     pub collectors: Vec<CollectorStatus>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct NetworkCounter {
+    pub name: String,
+    pub received_bytes: f64,
+    pub transmitted_bytes: f64,
+    pub rx_bytes_per_second: Option<f64>,
+    pub tx_bytes_per_second: Option<f64>,
+    pub included_in_total: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, Default)]
 pub struct Metrics {
     pub cpu_percent: Option<f64>,
@@ -173,6 +186,8 @@ pub struct Metrics {
     pub memory_total_bytes: Option<f64>,
     pub network_rx_bytes_per_second: Option<f64>,
     pub network_tx_bytes_per_second: Option<f64>,
+    #[serde(default)]
+    pub network_interfaces: Vec<NetworkCounter>,
     pub disk_read_bytes_per_second: Option<f64>,
     pub disk_write_bytes_per_second: Option<f64>,
     pub disks: Vec<Disk>,
@@ -340,6 +355,7 @@ pub fn typescript() -> String {
         Gpu::decl(),
         CollectorStatus::decl(),
         Inventory::decl(),
+        NetworkCounter::decl(),
         Metrics::decl(),
         AgentReport::decl(),
         EnrollmentRequest::decl(),

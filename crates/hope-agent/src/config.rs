@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
@@ -24,7 +24,7 @@ pub fn directory() -> PathBuf {
 }
 pub async fn read(dir: &Path) -> Result<Config> {
     serde_json::from_slice(
-        &tokio::fs::read(dir.join("config.json"))
+        &read_bounded(&dir.join("config.json"), 128 * 1024)
             .await
             .context("Agent is not enrolled. Run the H.O.P.E installer first.")?,
     )
@@ -33,23 +33,94 @@ pub async fn read(dir: &Path) -> Result<Config> {
 pub async fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path.parent().context("No state directory")?;
     tokio::fs::create_dir_all(parent).await?;
+    let metadata = tokio::fs::symlink_metadata(parent).await?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "State directory must not be a symbolic link"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
     }
-    let temporary = path.with_extension("tmp");
+    let temporary = parent.join(format!(".hope-{}.tmp", uuid::Uuid::new_v4()));
     let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options.open(&temporary).await?;
-    file.write_all(data).await?;
-    file.sync_all().await?;
-    drop(file);
-    tokio::fs::rename(temporary, path).await?;
-    Ok(())
+    let result = async {
+        file.write_all(data).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&temporary, path).await?;
+        let parent = parent.to_owned();
+        tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all()).await??;
+        anyhow::Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    result
 }
+pub async fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>> {
+    let file = tokio::fs::File::open(path).await?;
+    let mut data = vec![];
+    file.take(maximum as u64 + 1).read_to_end(&mut data).await?;
+    anyhow::ensure!(
+        data.len() <= maximum,
+        "State file exceeds the supported size"
+    );
+    Ok(data)
+}
+pub async fn lock(dir: &Path) -> Result<std::fs::File> {
+    tokio::fs::create_dir_all(dir).await?;
+    let metadata = tokio::fs::symlink_metadata(dir).await?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "State directory must not be a symbolic link"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await?;
+    }
+    let path = dir.join("agent.lock");
+    if tokio::fs::symlink_metadata(&path)
+        .await
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        anyhow::bail!("Agent lock must not be a symbolic link");
+    }
+    tokio::task::spawn_blocking(move || {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path)?;
+        file.try_lock()
+            .context("Another agent process owns this state directory")?;
+        Ok(file)
+    })
+    .await?
+}
+pub async fn shutdown() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut termination) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! { _=termination.recv()=>{}, _=tokio::signal::ctrl_c()=>{} }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 pub async fn save(dir: &Path, config: &Config) -> Result<()> {
     write_private(&dir.join("config.json"), &serde_json::to_vec(config)?).await
 }
@@ -75,7 +146,78 @@ pub fn client(config: &Config) -> Result<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("hope-agent/", env!("CARGO_PKG_VERSION")));
     if let Some(pem) = &config.ca_pem {
-        builder = builder.add_root_certificate(reqwest::Certificate::from_pem(pem.as_bytes())?);
+        let certificates = reqwest::Certificate::from_pem_bundle(pem.as_bytes())?;
+        anyhow::ensure!(
+            !certificates.is_empty(),
+            "Custom CA file contains no certificates"
+        );
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+        }
     }
     Ok(builder.build()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn state_has_one_owner_and_atomic_private_writes() {
+        let directory = tempfile::tempdir().expect("temporary");
+        let first = lock(directory.path()).await.expect("first owner");
+        assert!(lock(directory.path()).await.is_err());
+        drop(first);
+        let _next = lock(directory.path()).await.expect("next owner");
+        let path = directory.path().join("sample.json");
+        write_private(&path, b"first").await.expect("first write");
+        write_private(&path, b"second").await.expect("replacement");
+        assert_eq!(read_bounded(&path, 6).await.expect("read"), b"second");
+        assert!(read_bounded(&path, 3).await.is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                tokio::fs::metadata(&path)
+                    .await
+                    .expect("file")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        let mut entries = tokio::fs::read_dir(directory.path())
+            .await
+            .expect("entries");
+        while let Some(entry) = entries.next_entry().await.expect("entry") {
+            assert!(!entry.file_name().to_string_lossy().ends_with(".tmp"));
+        }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_state_is_rejected_before_changing_target_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let directory = tempfile::tempdir().expect("temporary");
+        let target = directory.path().join("target");
+        tokio::fs::create_dir(&target).await.expect("target");
+        tokio::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .await
+            .expect("permissions");
+        let link = directory.path().join("link");
+        symlink(&target, &link).expect("link");
+        assert!(
+            write_private(&link.join("config.json"), b"private")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            tokio::fs::metadata(target)
+                .await
+                .expect("target")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+    }
 }

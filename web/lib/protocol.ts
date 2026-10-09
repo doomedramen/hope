@@ -19,10 +19,15 @@ export type SshInstallRequest = { username: string, fingerprint: string, passwor
 export type FingerprintResponse = { fingerprint: string, instruction: string, };
 export type Interface = { name: string, mac: string | null, addresses: Array<string>, gateway: string | null, };
 export type Disk = { name: string, mount: string, filesystem: string, total_bytes: number, available_bytes: number, };
-export type Gpu = { name: string, vendor: string, utilization_percent: number | null, memory_used_bytes: number | null, memory_total_bytes: number | null, temperature_celsius: number | null, };
+export type Gpu = {
+/**
+ * Driver UUID or device path; absent when the platform cannot identify the adapter.
+ */
+id: string | null, name: string, vendor: string, utilization_percent: number | null, memory_used_bytes: number | null, memory_total_bytes: number | null, temperature_celsius: number | null, };
 export type CollectorStatus = { name: string, available: boolean, detail: string | null, };
 export type Inventory = { hostname: string, os: string, architecture: string, cpu_model: string, cpu_cores: number, memory_total_bytes: number, interfaces: Array<Interface>, disks: Array<Disk>, gpus: Array<Gpu>, collectors: Array<CollectorStatus>, };
-export type Metrics = { cpu_percent: number | null, memory_used_bytes: number | null, memory_total_bytes: number | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null, disk_read_bytes_per_second: number | null, disk_write_bytes_per_second: number | null, disks: Array<Disk>, gpus: Array<Gpu>, };
+export type NetworkCounter = { name: string, received_bytes: number, transmitted_bytes: number, rx_bytes_per_second: number | null, tx_bytes_per_second: number | null, included_in_total: boolean, };
+export type Metrics = { cpu_percent: number | null, memory_used_bytes: number | null, memory_total_bytes: number | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null, network_interfaces: Array<NetworkCounter>, disk_read_bytes_per_second: number | null, disk_write_bytes_per_second: number | null, disks: Array<Disk>, gpus: Array<Gpu>, };
 export type AgentReport = { schema_version: number, report_id: string, agent_id: string, collected_at: number, inventory: Inventory | null, metrics: Metrics, collectors: Array<CollectorStatus>, };
 export type EnrollmentRequest = { schema_version: number, token: string, agent_id: string,
 /**
