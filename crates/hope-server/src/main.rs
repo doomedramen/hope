@@ -10,6 +10,19 @@ async fn main() -> Result<()> {
         print!("{}", hope_protocol::typescript());
         return Ok(());
     }
+    if std::env::args().nth(1).as_deref() == Some("backup") {
+        let destination = std::env::args()
+            .nth(2)
+            .context("usage: hope-server backup DESTINATION.db")?;
+        let data = std::env::var("HOPE_DATA_DIR").unwrap_or_else(|_| "data".into());
+        hope_server::backup::run(
+            &std::path::Path::new(&data).join("hope.db"),
+            std::path::Path::new(&destination),
+        )
+        .await?;
+        println!("Backup written to {destination}");
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -57,7 +70,10 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
-            timer.tick().await;
+            tokio::select! {
+                _ = maintenance.0.shutdown.cancelled() => break,
+                _ = timer.tick() => {}
+            }
             if let Err(error) = metrics::retain(&maintenance).await {
                 tracing::error!(%error,"metric retention failed");
             }
@@ -68,9 +84,15 @@ async fn main() -> Result<()> {
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(300));
         timer.tick().await;
         loop {
-            timer.tick().await;
+            tokio::select! {
+                _ = monitoring.0.shutdown.cancelled() => break,
+                _ = timer.tick() => {}
+            }
             if let Ok(networks) = api::networks(&monitoring).await {
                 for network in networks.into_iter().filter(|n| n.enabled) {
+                    if monitoring.0.shutdown.is_cancelled() {
+                        break;
+                    }
                     let _ = scanner::start(&monitoring, &network).await;
                 }
             }
@@ -83,14 +105,12 @@ async fn main() -> Result<()> {
         state.clone(),
         &std::env::var("HOPE_WEB_DIR").unwrap_or_else(|_| "web/out".into()),
     );
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
-    for token in state.0.scans.lock().await.values() {
-        token.cancel();
-    }
-    state.0.db.close().await;
-    Ok(())
+    hope_server::lifecycle::serve(
+        state,
+        listener,
+        router,
+        hope_server::lifecycle::stop_signal(),
+        hope_server::lifecycle::SHUTDOWN_DEADLINE,
+    )
+    .await
 }

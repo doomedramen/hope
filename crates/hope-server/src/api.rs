@@ -324,11 +324,21 @@ pub async fn merge(
     state.changed();
     Ok(Json(target))
 }
+/// Server-sent change notifications. A receiver that falls behind the broadcast buffer gets a
+/// `resync` event (the client reloads everything) instead of silently missing changes. The stream
+/// ends when the server shuts down, after ten minutes, or when the client disconnects; dropping
+/// the response drops the broadcast receiver.
 pub async fn events(
     Extract(state): Extract<State>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>> {
     let stream = BroadcastStream::new(state.0.events.subscribe())
-        .map(|_| Ok(Event::default().event("refresh").data("{}")))
-        .take_until(tokio::time::sleep(std::time::Duration::from_secs(600)));
+        .map(|message| {
+            Ok(match message {
+                Ok(_) => Event::default().event("refresh").data("{}"),
+                Err(_) => Event::default().event("resync").data("{}"),
+            })
+        })
+        .take_until(tokio::time::sleep(std::time::Duration::from_secs(600)))
+        .take_until(state.0.shutdown.clone().cancelled_owned());
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

@@ -1,10 +1,12 @@
 use crate::{
+    auth::limited,
     error::{ApiError, ApiResult},
+    limits::ClientKey,
     state::{State, hash, now, secret},
 };
 use axum::{
     Json,
-    extract::{Path, State as Extract},
+    extract::{Extension, Path, State as Extract},
     http::{HeaderMap, StatusCode},
 };
 use hope_protocol::{
@@ -123,10 +125,25 @@ pub fn inventory_macs(inv: &Inventory) -> Vec<String> {
     macs
 }
 
+/// Failed enrollments count against the client; successful ones do not, and there is no global
+/// ceiling that would let an attacker block a legitimate agent.
 pub async fn enroll(
     Extract(state): Extract<State>,
+    Extension(client): Extension<ClientKey>,
     Json(request): Json<EnrollmentRequest>,
 ) -> ApiResult<Json<EnrollmentResponse>> {
+    limited(state.0.enroll_limit.check(&client.0, now()))?;
+    let result = enroll_inner(&state, request).await;
+    if result.is_err() {
+        state.0.enroll_limit.hit(&client.0, now());
+    }
+    result
+}
+async fn enroll_inner(
+    state: &State,
+    request: EnrollmentRequest,
+) -> ApiResult<Json<EnrollmentResponse>> {
+    let state = state.clone();
     if request.schema_version != SCHEMA_VERSION
         || Uuid::parse_str(&request.agent_id).is_err()
         || request.credential.len() != 64
@@ -256,14 +273,35 @@ pub async fn enroll(
 
 pub async fn report(
     Extract(state): Extract<State>,
+    Extension(client): Extension<ClientKey>,
     headers: HeaderMap,
     Json(report): Json<AgentReport>,
 ) -> ApiResult<Json<ReportResponse>> {
-    let credential = headers
+    limited(state.0.report_denied.check(&client.0, now()))?;
+    let Some(credential) = headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .ok_or_else(ApiError::unauthorized)?;
+    else {
+        state.0.report_denied.hit(&client.0, now());
+        return Err(ApiError::unauthorized());
+    };
+    // Authenticate before queueing on the global write lock so unauthenticated callers cannot
+    // hold up legitimate writers. The check is repeated under the lock to order against revocation.
+    let known: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agents WHERE id=? AND credential_hash=? AND revoked=0",
+    )
+    .bind(&report.agent_id)
+    .bind(hash(credential))
+    .fetch_one(&state.0.db)
+    .await?;
+    if known != 1 {
+        state.0.report_denied.hit(&client.0, now());
+        return Err(ApiError::unauthorized());
+    }
+    // Keyed by the authenticated identity only: a valid credential never meets a shared ceiling.
+    limited(state.0.report_limit.check(&report.agent_id, now()))?;
+    state.0.report_limit.hit(&report.agent_id, now());
     let _guard = state.0.writes.lock().await;
     let exists: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agents WHERE id=? AND credential_hash=? AND revoked=0",

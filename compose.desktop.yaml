@@ -10,10 +10,13 @@ services:
       HOPE_SERVER_URL: ${HOPE_SERVER_URL:?Set your HTTPS server URL in .env}
       HOPE_DISCOVERY_MODE: limited
       HOPE_AGENT_CA: ${HOPE_AGENT_CA:-}
+      HOPE_TRUSTED_PROXIES: ${HOPE_TRUSTED_PROXIES:-}
     volumes:
       - hope-data:/var/lib/hope
       - ./releases:/opt/hope/releases:ro
     read_only: true
     tmpfs: [/tmp]
+    # The server drains within 8 seconds of SIGTERM; keep Docker's default grace period explicit.
+    stop_grace_period: 10s
 volumes:
   hope-data:

@@ -284,13 +284,16 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     source.onopen = () => setConnected(true);
     source.onerror = () => setConnected(false);
-    source.addEventListener("refresh", () => {
+    const schedule = () => {
       if (!timer)
         timer = setTimeout(() => {
           timer = undefined;
           void refresh();
         }, 500);
-    });
+    };
+    source.addEventListener("refresh", schedule);
+    // The server dropped events for this slow client: reload everything.
+    source.addEventListener("resync", schedule);
     const fallback = setInterval(() => {
       void refresh();
     }, 15000);

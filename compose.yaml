@@ -11,6 +11,7 @@ services:
       HOPE_BIND: ${HOPE_BIND:-127.0.0.1:8080}
       HOPE_DISCOVERY_MODE: native
       HOPE_AGENT_CA: ${HOPE_AGENT_CA:-}
+      HOPE_TRUSTED_PROXIES: ${HOPE_TRUSTED_PROXIES:-}
     volumes:
       - hope-data:/var/lib/hope
       - ./releases:/opt/hope/releases:ro

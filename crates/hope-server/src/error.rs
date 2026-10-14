@@ -27,16 +27,25 @@ impl IntoResponse for ApiError {
             StatusCode::NOT_FOUND => "not_found",
             StatusCode::CONFLICT => "conflict",
             StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+            StatusCode::SERVICE_UNAVAILABLE => "unavailable",
             _ => "internal_error",
         };
-        (
+        let transient = self.0 == StatusCode::SERVICE_UNAVAILABLE;
+        let mut response = (
             self.0,
             Json(ErrorResponse {
                 code: code.into(),
                 error: self.1,
             }),
         )
-            .into_response()
+            .into_response();
+        if transient {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("2"),
+            );
+        }
+        response
     }
 }
 impl<E: Into<anyhow::Error>> From<E> for ApiError {

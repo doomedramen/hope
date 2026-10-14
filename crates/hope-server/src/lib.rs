@@ -2,8 +2,12 @@ pub mod agents;
 pub mod api;
 pub mod arp;
 pub mod auth;
+pub mod backup;
 pub mod enrichment;
 pub mod error;
+pub mod headers;
+pub mod lifecycle;
+pub mod limits;
 pub mod metrics;
 pub mod migrations;
 pub mod releases;
@@ -63,6 +67,14 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::check_origin,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            limits::client_key,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            headers::apply,
         ))
         .with_state(state)
 }

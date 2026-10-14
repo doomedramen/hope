@@ -120,9 +120,14 @@ async fn seven_days_for_250_hosts_keep_reports_and_discovery_writes_responsive()
                     format!("Bearer {credential}").parse().expect("header"),
                 );
                 let start = Instant::now();
-                let response = agents::report(Extract(state.clone()), headers, Json(report))
-                    .await
-                    .expect("live report");
+                let response = agents::report(
+                    Extract(state.clone()),
+                    axum::extract::Extension(hope_server::limits::ClientKey("test".into())),
+                    headers,
+                    Json(report),
+                )
+                .await
+                .expect("live report");
                 assert!(response.0.accepted);
                 latencies
                     .lock()

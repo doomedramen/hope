@@ -32,7 +32,41 @@ pub struct Inner {
     pub enrollment_ca: Option<String>,
     pub scheduler: crate::scanner::Scheduler,
     pub enrichment: crate::enrichment::Queue,
-    pub login_attempts: Mutex<HashMap<String, (u32, f64)>>,
+    /// Cancelled when the process begins shutting down.
+    pub shutdown: CancellationToken,
+    pub proxies: crate::limits::TrustedProxies,
+    /// Failed logins per client (no global ceiling; see `limits`).
+    pub login_limit: crate::limits::Limiter,
+    /// Bounds concurrent password hashing; exhaustion is a transient 503, never a lockout.
+    pub hashing: tokio::sync::Semaphore,
+    /// `scheme://host[:port]` of the canonical URL, normalized for Origin comparison.
+    pub canonical_origin: String,
+    /// Probe and enrichment tasks that may still write to the database.
+    pub active_tasks: std::sync::atomic::AtomicUsize,
+    /// Failed enrollments per client.
+    pub enroll_limit: crate::limits::Limiter,
+    /// Rejected agent report credentials per client.
+    pub report_denied: crate::limits::Limiter,
+    /// Reports per authenticated agent identity (no global ceiling).
+    pub report_limit: crate::limits::Limiter,
+}
+
+/// Serialized origin of an absolute URL (lowercase host, default port omitted), or None.
+pub fn normalize_origin(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    let origin = url.origin();
+    origin.is_tuple().then(|| origin.ascii_serialization())
+}
+
+/// Counts a background task that may write to the database; shutdown waits for these.
+pub struct TaskGuard(State);
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        self.0
+            .0
+            .active_tasks
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 pub fn now() -> f64 {
@@ -75,6 +109,13 @@ impl State {
         inner.enrollment_ca = agent_ca.filter(|s| !s.trim().is_empty());
         Ok(Self(Arc::new(inner)))
     }
+    /// Replace the trusted reverse-proxy list (otherwise read from `HOPE_TRUSTED_PROXIES`).
+    pub fn with_trusted_proxies(self, proxies: crate::limits::TrustedProxies) -> Result<Self> {
+        let mut inner =
+            Arc::try_unwrap(self.0).map_err(|_| anyhow::anyhow!("state already shared"))?;
+        inner.proxies = proxies;
+        Ok(Self(Arc::new(inner)))
+    }
     pub(crate) async fn open_with_scheduler(
         path: &str,
         server_url: String,
@@ -113,6 +154,9 @@ impl State {
             scans: Mutex::new(HashMap::new()),
             installs: Mutex::new(HashSet::new()),
             ssh_limits: std::sync::Mutex::new(crate::ssh::Limits::default()),
+            hashing: tokio::sync::Semaphore::new(2),
+            canonical_origin: normalize_origin(&server_url).unwrap_or_default(),
+            active_tasks: std::sync::atomic::AtomicUsize::new(0),
             secure_cookie: server_url.starts_with("https://"),
             server_url,
             capabilities,
@@ -122,9 +166,20 @@ impl State {
                 .filter(|s| !s.trim().is_empty()),
             scheduler,
             enrichment: crate::enrichment::Queue::new(),
-            login_attempts: Mutex::new(HashMap::new()),
+            shutdown: CancellationToken::new(),
+            proxies: crate::limits::TrustedProxies::from_env()?,
+            login_limit: crate::limits::Limiter::new(60.0, 10),
+            enroll_limit: crate::limits::Limiter::new(60.0, 20),
+            report_denied: crate::limits::Limiter::new(60.0, 30),
+            report_limit: crate::limits::Limiter::new(60.0, 120),
         }));
         Ok(state)
+    }
+    pub fn track(&self) -> TaskGuard {
+        self.0
+            .active_tasks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        TaskGuard(self.clone())
     }
     pub fn changed(&self) {
         let _ = self.0.events.send("refresh".into());

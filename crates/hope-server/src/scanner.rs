@@ -184,6 +184,9 @@ pub fn parse_range(cidr: &str) -> ApiResult<Ipv4Net> {
 }
 
 pub async fn start(state: &State, network: &Network) -> ApiResult<ScanJob> {
+    if state.0.shutdown.is_cancelled() {
+        return Err(ApiError::bad("The server is shutting down"));
+    }
     let net = parse_range(&network.cidr)?;
     let mut active = state.0.scans.lock().await;
     let running: i64 = sqlx::query_scalar(
@@ -222,6 +225,15 @@ pub async fn start(state: &State, network: &Network) -> ApiResult<ScanJob> {
     .bind(job.started_at)
     .execute(&state.0.db)
     .await?;
+    if state.0.shutdown.is_cancelled() {
+        // Shutdown began after the first check; do not leave a row claiming to run.
+        sqlx::query("UPDATE scans SET status='interrupted',finished_at=?,error='Server stopped; start a new scan' WHERE id=?")
+            .bind(now())
+            .bind(&job.id)
+            .execute(&state.0.db)
+            .await?;
+        return Err(ApiError::bad("The server is shutting down"));
+    }
     let cancel = CancellationToken::new();
     active.insert(job.id.clone(), cancel.clone());
     state
@@ -322,6 +334,7 @@ async fn run_probe(
     cancel: CancellationToken,
     backend: Arc<dyn Probe>,
 ) {
+    let _task = state.track();
     let observation = tokio::select! {
         _ = cancel.cancelled() => return,
         result = timeout(Duration::from_secs(6), backend.probe(ip)) => result.unwrap_or_default(),
@@ -438,7 +451,11 @@ pub fn capabilities() -> Capabilities {
     let icmp = surge_ping::Client::new(&surge_ping::Config::default()).is_ok();
     let mut limitations = vec![];
     if !arp {
-        limitations.push("Layer 2 discovery is unavailable. MAC addresses and physical topology may be incomplete.".into());
+        limitations.push(if mode == "limited" {
+            "Limited discovery mode (for example Docker Desktop): the server cannot see your LAN's layer 2, so ARP, MAC addresses and physical topology are unavailable, and probes reach only what the container network can route to. Run the Linux host-network deployment for full discovery."
+        } else {
+            "Layer 2 discovery is unavailable. MAC addresses and physical topology may be incomplete."
+        }.into());
     }
     if !icmp {
         limitations.push("ICMP is unavailable. Allow raw sockets for ping discovery; TCP probing remains active.".into());

@@ -1,11 +1,12 @@
 use crate::{
     error::{ApiError, ApiResult},
+    limits::ClientKey,
     state::{State, hash, now, secret},
 };
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use axum::{
     Json,
-    extract::{Request, State as Extract},
+    extract::{Extension, Request, State as Extract},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -24,20 +25,27 @@ pub async fn status(
 }
 
 pub use hope_protocol::LoginRequest as Login;
-pub async fn setup(Extract(state): Extract<State>, Json(body): Json<Login>) -> ApiResult<Response> {
+pub async fn setup(
+    Extract(state): Extract<State>,
+    Extension(client): Extension<ClientKey>,
+    Json(body): Json<Login>,
+) -> ApiResult<Response> {
+    let setup_key = format!("setup:{}", client.0);
+    limited(state.0.login_limit.check(&setup_key, now()))?;
     let _lock = state.0.writes.lock().await;
     if state.meta("password_hash").await?.is_some() {
         return Err(ApiError::bad("Setup already completed"));
     }
-    let expected = state
-        .meta("setup_token_hash")
-        .await?
-        .ok_or_else(ApiError::unauthorized)?;
+    let Some(expected) = state.meta("setup_token_hash").await? else {
+        state.0.login_limit.hit(&setup_key, now());
+        return Err(ApiError::unauthorized());
+    };
     if !bool::from(
         expected
             .as_bytes()
             .ct_eq(hash(body.setup_token.as_deref().unwrap_or("")).as_bytes()),
     ) {
+        state.0.login_limit.hit(&setup_key, now());
         return Err(ApiError::unauthorized());
     }
     if body.password.len() < 12 || body.password.len() > 256 {
@@ -46,6 +54,7 @@ pub async fn setup(Extract(state): Extract<State>, Json(body): Json<Login>) -> A
         ));
     }
     let password = body.password;
+    let _permit = hash_permit(&state).await?;
     let encoded = tokio::task::spawn_blocking(move || {
         Argon2::default()
             .hash_password(
@@ -63,29 +72,47 @@ pub async fn setup(Extract(state): Extract<State>, Json(body): Json<Login>) -> A
     new_session(&state).await
 }
 
-pub async fn login(Extract(state): Extract<State>, Json(body): Json<Login>) -> ApiResult<Response> {
+/// Map a limiter refusal to a bounded 429 that reveals nothing about secrets.
+pub fn limited(result: Result<(), u64>) -> ApiResult<()> {
+    result.map_err(|wait| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("Too many attempts; retry in {wait} seconds"),
+        )
+    })
+}
+
+/// Bound concurrent password hashing. Exhaustion is transient (503 + Retry-After): it can delay a
+/// login during a flood but never locks anyone out.
+async fn hash_permit(state: &State) -> ApiResult<tokio::sync::SemaphorePermit<'_>> {
+    match tokio::time::timeout(std::time::Duration::from_secs(2), state.0.hashing.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Server busy; retry shortly".into(),
+        )),
+    }
+}
+
+pub async fn login(
+    Extract(state): Extract<State>,
+    Extension(client): Extension<ClientKey>,
+    Json(body): Json<Login>,
+) -> ApiResult<Response> {
+    // Only failures count, per client address (see `HOPE_TRUSTED_PROXIES`); there is no global
+    // login ceiling an attacker could fill to lock the administrator out.
+    limited(state.0.login_limit.check(&client.0, now()))?;
+    let fail = || {
+        state.0.login_limit.hit(&client.0, now());
+        ApiError::unauthorized()
+    };
     if body.password.len() > 256 {
-        return Err(ApiError::unauthorized());
+        return Err(fail());
     }
-    // One administrator: a global bounded rate limit avoids trusting proxy-supplied IP headers.
-    {
-        let mut attempts = state.0.login_attempts.lock().await;
-        let entry = attempts.entry("admin".into()).or_insert((0, now()));
-        if now() - entry.1 > 60.0 {
-            *entry = (0, now());
-        }
-        if entry.0 >= 10 {
-            return Err(ApiError(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Too many attempts; wait one minute".into(),
-            ));
-        }
-        entry.0 += 1;
-    }
-    let encoded = state
-        .meta("password_hash")
-        .await?
-        .ok_or_else(ApiError::unauthorized)?;
+    let Some(encoded) = state.meta("password_hash").await? else {
+        return Err(fail());
+    };
+    let permit = hash_permit(&state).await?;
     let valid = tokio::task::spawn_blocking(move || {
         PasswordHash::new(&encoded).is_ok_and(|parsed| {
             Argon2::default()
@@ -94,9 +121,11 @@ pub async fn login(Extract(state): Extract<State>, Json(body): Json<Login>) -> A
         })
     })
     .await?;
+    drop(permit);
     if !valid {
-        return Err(ApiError::unauthorized());
+        return Err(fail());
     }
+    state.0.login_limit.clear(&client.0);
     new_session(&state).await
 }
 
@@ -168,17 +197,24 @@ pub async fn check_origin(
 ) -> ApiResult<Response> {
     if !matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS") {
         if let Some(origin) = request.headers().get("origin")
-            && origin.to_str().ok() != Some(state.0.server_url.as_str())
+            && origin
+                .to_str()
+                .ok()
+                .and_then(crate::state::normalize_origin)
+                .as_deref()
+                != Some(state.0.canonical_origin.as_str())
         {
             return Err(ApiError(
                 StatusCode::FORBIDDEN,
                 "Untrusted request origin".into(),
             ));
         }
+        // Browsers always send this header; agents and curl do not. Anything that is not
+        // same-origin (or a direct navigation) is refused, including same-site siblings.
         if request
             .headers()
             .get("sec-fetch-site")
-            .is_some_and(|h| h == "cross-site")
+            .is_some_and(|h| h != "same-origin" && h != "none")
         {
             return Err(ApiError(
                 StatusCode::FORBIDDEN,
@@ -189,6 +225,11 @@ pub async fn check_origin(
     Ok(next.run(request).await)
 }
 pub async fn logout(Extract(state): Extract<State>, headers: HeaderMap) -> ApiResult<Response> {
+    let secure = if state.0.secure_cookie {
+        "; Secure"
+    } else {
+        ""
+    };
     if let Some(token) = session_token(&headers) {
         sqlx::query("DELETE FROM sessions WHERE token_hash=?")
             .bind(hash(token))
@@ -198,7 +239,7 @@ pub async fn logout(Extract(state): Extract<State>, headers: HeaderMap) -> ApiRe
     Ok((
         [(
             "set-cookie",
-            "hope_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+            format!("hope_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}"),
         )],
         Json(OkResponse { ok: true }),
     )

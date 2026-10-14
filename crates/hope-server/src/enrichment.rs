@@ -40,8 +40,8 @@ impl Queue {
                 tokio::select! {
                     work = receiver.recv(), if active.len() < 8 => {
                         let Some(work) = work else { while active.next().await.is_some() {} break; };
-                        let id = work.id.clone(); let pending = active_ids.clone(); let worker = worker.clone();
-                        active.push(async move { worker(work).await; pending.lock().await.remove(&id); });
+                        let id = work.id.clone(); let pending = active_ids.clone(); let worker = worker.clone(); let guard = work.state.track();
+                        active.push(async move { let _guard = guard; worker(work).await; pending.lock().await.remove(&id); });
                     }
                     Some(()) = active.next(), if !active.is_empty() => {}
                 }

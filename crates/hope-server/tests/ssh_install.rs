@@ -14,9 +14,8 @@ use hope_server::{
     state::{State, hash, now, secret},
 };
 use http_body_util::BodyExt;
-use rand::rngs::OsRng;
 use russh::{
-    Channel, ChannelId, CryptoVec,
+    Channel, ChannelId,
     keys::{Algorithm, PrivateKey, PublicKey, ssh_key::LineEnding},
     server::{self, Auth, Handler, Msg, Session},
 };
@@ -142,14 +141,10 @@ impl Handler for Conn {
             for step in steps {
                 match step {
                     Step::Out(text) => {
-                        let _ = handle
-                            .data(channel, CryptoVec::from_slice(text.as_bytes()))
-                            .await;
+                        let _ = handle.data(channel, text.into_bytes()).await;
                     }
                     Step::Err(text) => {
-                        let _ = handle
-                            .extended_data(channel, 1, CryptoVec::from_slice(text.as_bytes()))
-                            .await;
+                        let _ = handle.extended_data(channel, 1, text.into_bytes()).await;
                     }
                     Step::Sleep(d) => tokio::time::sleep(d).await,
                     Step::Run(hook) => hook(command.clone()).await,
@@ -237,12 +232,13 @@ async fn fixture_with(agent: Option<(&str, &str)>, ca: Option<&str>) -> Fixture 
         .next()
         .expect("session")
         .to_string();
-    let host_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("host key");
+    let host_key = PrivateKey::random(&mut rand010::rng(), Algorithm::Ed25519).expect("host key");
     let host_fingerprint = host_key
         .public_key()
         .fingerprint(Default::default())
         .to_string();
-    let client_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("client key");
+    let client_key =
+        PrivateKey::random(&mut rand010::rng(), Algorithm::Ed25519).expect("client key");
     let shared = Arc::new(Shared {
         observed: Mutex::default(),
         script: Mutex::default(),
@@ -468,9 +464,14 @@ async fn send_report(state: &State, agent: &str, credential: &str) {
         },
         collectors: vec![],
     };
-    let _ = agents::report(Extract(state.clone()), headers, Json(report))
-        .await
-        .expect("report accepted");
+    let _ = agents::report(
+        Extract(state.clone()),
+        axum::extract::Extension(hope_server::limits::ClientKey("test".into())),
+        headers,
+        Json(report),
+    )
+    .await
+    .expect("report accepted");
 }
 /// Simulates the installed agent: enrolls with the job's token, then reports.
 fn enroll_and_report(state: &State, agent: &str, credential: &str) -> Step {
@@ -490,6 +491,7 @@ fn enroll_with(
             tokio::time::sleep(Duration::from_millis(400)).await;
             let _ = agents::enroll(
                 Extract(state.clone()),
+                axum::extract::Extension(hope_server::limits::ClientKey("test".into())),
                 Json(EnrollmentRequest {
                     schema_version: SCHEMA_VERSION,
                     token: token_of(&command),
@@ -698,7 +700,7 @@ async fn wrong_password_wrong_key_and_wrong_passphrase_fail_without_running_anyt
         (Some("failed"), Some("AUTH_FAILED"))
     );
 
-    let other = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+    let other = PrivateKey::random(&mut rand010::rng(), Algorithm::Ed25519).unwrap();
     let other_pem = other.to_openssh(LineEnding::LF).unwrap().to_string();
     let job = f
         .run(f.with(&f.host_fingerprint, json!({"private_key": other_pem})))
@@ -709,7 +711,7 @@ async fn wrong_password_wrong_key_and_wrong_passphrase_fail_without_running_anyt
     let connections = f.shared.observed.lock().unwrap().connections;
     let encrypted = f
         .client_key
-        .encrypt(&mut OsRng, PASSPHRASE)
+        .encrypt(&mut rand010::rng(), PASSPHRASE)
         .unwrap()
         .to_openssh(LineEnding::LF)
         .unwrap()
@@ -1222,4 +1224,48 @@ async fn long_and_non_utf8_message_tails_still_yield_the_error_code() {
     ]);
     let job = f.run(f.password_request()).await;
     assert_eq!(job["error_code"], "DOWNLOAD_FAILED", "{job}");
+}
+
+#[tokio::test]
+async fn shutdown_settles_running_job_as_interrupted_within_the_deadline() {
+    let f = fixture().await;
+    f.script(vec![
+        err("hope-install: phase=stage"),
+        Step::Sleep(Duration::from_secs(60)),
+    ]);
+    let (status, job) = f
+        .call("POST", "/api/v1/ssh/install", f.password_request())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = job["id"].as_str().unwrap().to_string();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (_, running) = f
+        .call("GET", &format!("/api/v1/ssh/jobs/{id}"), json!({}))
+        .await;
+    assert_eq!(running["status"], "running");
+
+    let started = std::time::Instant::now();
+    hope_server::lifecycle::settle(&f.state, Duration::from_secs(6)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // The pool is closed; read the persisted state through a fresh connection.
+    let reopened = State::open(
+        f.db.to_str().unwrap(),
+        "https://hope.example".into(),
+        "releases".into(),
+        capabilities(),
+    )
+    .await
+    .expect("reopen");
+    let stored = ssh::load_job(&reopened, &id).await.unwrap().expect("job");
+    assert_eq!(stored.status, InstallStatus::Interrupted);
+    assert_eq!(stored.error_code.as_deref(), Some("SERVER_RESTARTED"));
+    assert_eq!(stored.stage, Some(InstallStage::Stage));
+    assert!(stored.finished_at.is_some());
+    // New work is refused once shutdown has begun.
+    assert!(f.state.0.shutdown.is_cancelled());
 }

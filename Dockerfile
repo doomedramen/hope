@@ -37,10 +37,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && mkdir -p /var/lib/hope /opt/hope/releases && chown hope:hope /var/lib/hope
 COPY --from=rust /build/dist/hope-server /usr/local/bin/hope-server
 COPY --from=rust /build/dist/hope-agent /opt/hope/hope-agent-unsigned
+# The binary carries a file capability, so the container's bounding set MUST include NET_RAW
+# (compose `cap_add: [NET_RAW]`); without it exec fails with "operation not permitted". Do not set
+# no-new-privileges. The process still runs as the unprivileged user hope.
 RUN setcap cap_net_raw=ep /usr/local/bin/hope-server
 COPY --from=web /build/web/out /opt/hope/web
 ENV HOPE_DATA_DIR=/var/lib/hope HOPE_WEB_DIR=/opt/hope/web HOPE_RELEASE_DIR=/opt/hope/releases HOPE_BIND=0.0.0.0:8080
 USER hope
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
+# Probe the configured listener (a wildcard bind is reached through loopback).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "b=${HOPE_BIND:-127.0.0.1:8080}; h=${b%:*}; case \"$h\" in 0.0.0.0|\"[::]\"|\"\") h=127.0.0.1;; esac; curl -fsS --max-time 2 \"http://$h:${b##*:}/healthz\" >/dev/null"]
 ENTRYPOINT ["hope-server"]

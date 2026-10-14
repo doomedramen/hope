@@ -40,7 +40,7 @@ Before tuning, all five directly attached runs published responders in 0.77–0.
 - Expanded browser behavior and visible interactive review.
 - Transactional installer harness, actual systemd/launchd service matrix.
 - Isolated SSH provisioning integration tests.
-- HTTPS/custom CA/proxy, persistent restart, SIGTERM shutdown, backup/restore.
+- Ticket 09 gates are recorded below; open there: real-host HTTPS reverse proxy (Caddy/nginx) behavior, Docker Desktop on Windows, and the full-LAN Linux host-network run.
 - Signed artifacts for all four target platforms and protected release CI.
 
 Never treat synthetic browser inventory as discovery evidence, command mocks as real service evidence, or cross-compilation as installation evidence.
@@ -100,3 +100,53 @@ The visible deployment currently uses an explicit test CA and a loopback SSH rev
 [Measured Linux x86_64 agent resources](benchmarks/agent-linux-x86_64-lxc.json): 60-second warmup followed by 1,800 seconds, one-second polling, Intel Core i5-8500T and one available CPU, Debian 13.7 LXC with 512 MiB RAM. Median parent RSS 4,825,088 bytes (4.60 MiB), sampled peak 4,923,392 bytes (4.70 MiB); CPU including waited collector children 0.015% of one core. The result is for the exact recorded binary, normal reporting and this container only. Parent RSS excludes child memory and may miss sub-second peaks. GPU inventory is exposed but driver utilization is unavailable. It does not establish macOS, other architectures, outage behavior, collector costs, or all GPU backends.
 
 Native agent checks after the configuration validation/rollback helpers: 16 unit tests and one CLI integration test pass, with workspace formatting and all-targets/all-features Clippy (warnings denied). Settings rollback retains the server-issued credential and pending retry identity, and rejects a snapshot from another identity/server. Production installer integration of these helpers remains open.
+
+## Operational hardening (Ticket 09) — 2026-10-14
+
+Base commit `acdf128` plus the uncommitted Ticket 09 working tree. Hosts: macOS ARM64 (Rust 1.96.0, Node 26.8.2) for native checks; OrbStack Linux ARM64 VM (Docker, image `hope:t09`, id `sha256:bfd8c2a3…`, built with `docker build --network=host -t hope:t09 .`) for container checks. Browser: Playwright Chromium.
+
+| Command / procedure | Environment | Date | Base | Result |
+| --- | --- | --- | --- | --- |
+| `make types` | macOS | 2026-10-14 | acdf128 | Pass; generated files unchanged |
+| `cargo fmt --all -- --check` | macOS | 2026-10-14 | acdf128 | Pass |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | macOS | 2026-10-14 | acdf128 | Pass |
+| `cargo test --workspace --locked` | macOS | 2026-10-14 | acdf128 | Pass: includes 13 `hardening` tests, SIGTERM binary test, SSH shutdown test, limiter unit tests (`ssh_install` 20) |
+| `python3 -I -m unittest discover -s tests/installer` | macOS | 2026-10-14 | acdf128 | Pass, 56 tests |
+| `npm --prefix web run typecheck`, `lint`, `format:check`, `build` | macOS | 2026-10-14 | acdf128 | Pass |
+| `npm --prefix web run test:e2e` | macOS, Chromium | 2026-10-14 | acdf128 | Pass, 10 tests (new: hardening headers, no CSP violation, hydration under the policy) |
+| `docker compose config -q` for `compose.yaml` and `compose.desktop.yaml` | macOS Docker | 2026-10-14 | acdf128 | Pass |
+| Image build `docker build --network=host -t hope:t09 .` | OrbStack Linux ARM64 | 2026-10-14 | acdf128 | Pass |
+| Desktop compose (`compose.desktop.yaml`, image override) | OrbStack | 2026-10-14 | acdf128 | Healthy; uid 10001; `CapEff` = `NET_RAW` only; capabilities `arp:false, icmp:true`, limitation text names Docker Desktop |
+| Host-network compose (`compose.yaml`, `HOPE_BIND=127.0.0.1:18081`) | OrbStack | 2026-10-14 | acdf128 | Healthy; capabilities `arp:true, icmp:true`; health check followed the non-default port |
+| Persistent restart (`compose restart`, then stop/start) | OrbStack | 2026-10-14 | acdf128 | Network, password and sessions-by-login persisted in the named volume |
+| `docker stop` with a running 4,094-address scan and open SSE stream | OrbStack | 2026-10-14 | acdf128 | Exit 0 in 0.12 s; stream closed by server; scan `interrupted` after restart |
+| `hope-server backup` via `docker compose exec` (read-only rootfs) | OrbStack | 2026-10-14 | acdf128 | Wrote 0600 file; live `hope.db` was 4 KiB with 170 KiB of data in `-wal`, confirming why a main-file copy is unsafe |
+| Discovery fixture on-link, 1 run: `scripts/benchmark-discovery.py --image hope:t09 --runs 1 --on-link` | OrbStack, disposable bridges `198.18.1.0/24`, `198.18.30.0/24` | 2026-10-14 | acdf128 | First responder 0.78 s, both ranges complete 26.39 s (target 30 s) |
+| Discovery fixture routed, 1 run | OrbStack | 2026-10-14 | acdf128 | First responder 0.76 s, complete 25.44 s |
+| HTTPS via `tests/agent/https_proxy.py` with a private test CA, container behind it | macOS proxy, OrbStack container | 2026-10-14 | acdf128 | Secure cookie + HSTS observed; `curl` and `hope-agent enroll` without the CA fail (`UnknownIssuer`); with `HOPE_CA_CERT` enroll and first report accepted; cross-origin POST 403; SSE event relayed and closed on `docker stop` |
+| `npm --prefix web audit` | macOS | 2026-10-14 | acdf128 | 9 high, all `braces`<=3.0.3 via `fast-glob`/`micromatch` in dev tooling (`eslint-config-next`, `shadcn` CLI). No patched `braces` exists; the only offered fix is a major downgrade (`shadcn@1.0.0`, `eslint-config-next@14`), not applied. Not part of the static export or the server runtime |
+| `cargo audit` before / after | macOS | 2026-10-14 | acdf128 | Before: 7 (russh and russh-cryptovec RUSTSEC-2026-0153/0154 high; rustls RUSTSEC-2026-0346..0349; rsa RUSTSEC-2023-0071). After `cargo update -p rustls` (0.23.46) and `russh` 0.54.5 -> 0.60.3: 1 remaining, `rsa` Marvin timing attack, no upstream fix, reached only through russh's RSA key support |
+| `cargo report future-incompatibilities` | macOS | 2026-10-14 | acdf128 | russh 0.54.5 warned (`macro_export` absolute path lint). Gone in 0.60.3; no warnings remain |
+
+Unit coverage added: login/enrollment/report limiters (per-client isolation from the global ceiling, bounded key table), trusted-proxy `X-Forwarded-For` handling, same-origin checks for POST/PUT/PATCH/DELETE (`Origin`, `Sec-Fetch-Site` cross-site and same-site), cookie flags with http and https canonical origins, session expiry and logout invalidation, `no-store`/`Pragma` on API responses including errors, fixed error text that never quotes request bodies, SSE `resync` after broadcast overrun, subscriber release on client drop, stream closure on shutdown, consistent backup during concurrent paired writes with restore through `State::open`, and SIGTERM of the real binary.
+
+Unverified or limited:
+
+- The Linux discovery fixture ran with one run per mode on an OrbStack VM, not the five-run protocol, and not on a real LAN with `network_mode: host`. Host networking on Docker Desktop for Mac is a VM network; it says nothing about physical-LAN ARP. The `arp:true` report above is the VM's virtual interface only.
+- Docker Desktop for Windows and Docker Engine on a physical Linux host were not tested.
+- TLS was tested with a Python test proxy on macOS, not Caddy/nginx/Traefik. Proxy buffering, HTTP/2, idle timeouts and `X-Forwarded-For` handling in real proxies are unvalidated; `HOPE_TRUSTED_PROXIES` was exercised only in-process.
+- The `rsa` advisory and the `braces` advisory remain open (see above).
+- Backup was exercised in-process and with the CLI in a container; restore procedure was exercised through `State::open` on the backup, not by replacing the file inside a stopped container volume.
+- Browser SSE reconnect timing after a server restart was not measured in Chromium.
+
+### Ticket 09 review follow-up — 2026-10-14
+
+Rate limits redesigned so attackers cannot lock out the administrator or agents: no global ceilings at all; failures-only per-client budgets (success consumes nothing, a successful login clears the client); password-hash concurrency semaphore (2 permits, 2 s wait, 503 + `Retry-After`); eviction (expired, then least recently hit) instead of an overflow bucket; IPv6 /64 keys and IPv4-mapped unwrapping before key and trusted-proxy matching; loopback trusted by default when `HOPE_BIND` is loopback-only; one-time warnings for ignored/unparseable `X-Forwarded-For`; normalized Origin comparison; shutdown waits for probe/enrichment tasks before closing the pool; shutdown races closed for scan and SSH job creation; backup fsyncs file and directory.
+
+| Command | Environment | Date | Base | Result |
+| --- | --- | --- | --- | --- |
+| `cargo fmt --all -- --check`, clippy `-D warnings`, `cargo test --workspace --locked`, `make types` | macOS | 2026-10-14 | acdf128 | Pass (hope-server: 22 lib, 19 hardening, 20 ssh_install, 1 shutdown; types unchanged) |
+| `python3 -I -m unittest discover -s tests/installer`, web typecheck/lint/build, `test:e2e` | macOS | 2026-10-14 | acdf128 | Pass (installer 56; web typecheck/lint/build; e2e 10) |
+| Container smoke on rebuilt `hope:t09` (desktop compose, project `hopet09r`) | OrbStack | 2026-10-14 | acdf128 | Healthy, 12 consecutive successful logins from one client, `docker stop` exit 0 in 0.15 s; project removed |
+
+New tests: 4 limiter unit tests (failure-only budgets, eviction with legitimate keys surviving, IPv6 /64 + v4-mapped, loopback default), and in `hardening.rs` distributed failures vs. administrator and free successes, hashing saturation 503, valid agents under distributed bad credentials, normalized Origin, startup reconciliation of running scans, and refusal after shutdown begins. Not tested: the exact interleaving of a scan/SSH-job insert racing `settle` (a deterministic test needs injected delays); the post-insert recheck is simple and covered only by the refusal path.

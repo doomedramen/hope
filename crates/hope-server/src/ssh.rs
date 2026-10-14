@@ -37,7 +37,7 @@ use tokio::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-pub const SERVER_RESTARTED_MESSAGE: &str = "The server restarted while this installation was running. The remote host may be partly installed; inspect it before retrying.";
+pub const SERVER_RESTARTED_MESSAGE: &str = "The server stopped or restarted while this installation was running. The remote host's state is unknown: it may be partly installed, and its agent may still enroll later. Inspect the host before retrying.";
 const MAX_CONCURRENT_JOBS: usize = 4;
 const MAX_HISTORY: i64 = 100;
 const HISTORY_SECONDS: f64 = 30.0 * 86400.0;
@@ -635,6 +635,15 @@ struct Outcome {
     agent_id: Option<String>,
 }
 impl Outcome {
+    /// The server is stopping: the remote outcome is unknown, so never claim a result.
+    fn interrupted() -> Self {
+        Self {
+            status: InstallStatus::Interrupted,
+            code: Some("SERVER_RESTARTED"),
+            message: SERVER_RESTARTED_MESSAGE.into(),
+            agent_id: None,
+        }
+    }
     fn code(code: &'static str) -> Self {
         let entry = lookup(code);
         Self {
@@ -734,6 +743,9 @@ pub async fn install(
     Extract(state): Extract<State>,
     Json(request): Json<InstallRequest>,
 ) -> ApiResult<Json<InstallJob>> {
+    if state.0.shutdown.is_cancelled() {
+        return Err(ApiError::bad("The server is shutting down"));
+    }
     let (ip, port, host) = validate_target(&state, &request.target).await?;
     if request.username.is_empty()
         || request.username.len() > 128
@@ -799,6 +811,18 @@ pub async fn install(
             .bind(now())
             .execute(&state.0.db)
             .await?;
+        // Shutdown may have begun since the first check; settle only flips rows it can see, and
+        // this row is now visible, so resolve it here instead of spawning work.
+        if state.0.shutdown.is_cancelled() {
+            let outcome = Outcome::interrupted();
+            sqlx::query("UPDATE install_jobs SET status='interrupted',error_code='SERVER_RESTARTED',message=?,finished_at=? WHERE id=?")
+                .bind(&outcome.message)
+                .bind(now())
+                .bind(&id)
+                .execute(&state.0.db)
+                .await?;
+            return Err(ApiError::bad("The server is shutting down"));
+        }
         running.insert(id.clone());
     }
     let plan = Arc::new(Plan {
@@ -819,7 +843,7 @@ pub async fn install(
         let hard = limits.total + limits.report_wait + limits.connect + Duration::from_secs(30);
         // The work runs in its own task so a panic surfaces here as a JoinError instead of
         // leaving the job running and its concurrency slot occupied forever.
-        let worker = {
+        let mut worker = {
             let (state, plan, exec_started) =
                 (task_state.clone(), plan.clone(), exec_started.clone());
             tokio::spawn(async move {
@@ -831,11 +855,21 @@ pub async fn install(
             })
         };
         let started = exec_started.clone();
-        let outcome = match worker.await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) if started.load(Ordering::SeqCst) => Outcome::code("TOTAL_TIMEOUT"),
-            Ok(Err(_)) => Outcome::code("CONNECT_FAILED"),
-            Err(_) => {
+        let joined = tokio::select! {
+            joined = &mut worker => Some(joined),
+            _ = task_state.0.shutdown.cancelled() => {
+                // Dropping the task closes the SSH session; the remote installer's own
+                // transaction decides what remains on the host.
+                worker.abort();
+                None
+            }
+        };
+        let outcome = match joined {
+            None => Outcome::interrupted(),
+            Some(Ok(Ok(outcome))) => outcome,
+            Some(Ok(Err(_))) if started.load(Ordering::SeqCst) => Outcome::code("TOTAL_TIMEOUT"),
+            Some(Ok(Err(_))) => Outcome::code("CONNECT_FAILED"),
+            Some(Err(_)) => {
                 tracing::error!(job=%plan.id, "SSH installation task failed unexpectedly");
                 Outcome::code("INTERNAL_ERROR")
             }

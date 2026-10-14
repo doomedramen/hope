@@ -34,8 +34,10 @@ class Proxy(http.server.BaseHTTPRequestHandler):
                     self.send_header(key, value)
             self.send_header('Connection', 'close')
             self.end_headers()
-            while chunk := response.read(65536):
+            # read1 returns available bytes, so server-sent events are relayed as they arrive.
+            while chunk := response.read1(65536):
                 self.wfile.write(chunk)
+                self.wfile.flush()
             connection.close()
             self.close_connection = True
         except (OSError, ValueError, http.client.HTTPException):
