@@ -198,7 +198,16 @@ mod tests {
         let first = lock(directory.path()).await.expect("first owner");
         assert!(lock(directory.path()).await.is_err());
         drop(first);
-        let _next = lock(directory.path()).await.expect("next owner");
+        // A concurrent test may fork between our open and its exec, briefly sharing the flock.
+        let mut next = lock(directory.path()).await;
+        for _ in 0..50 {
+            if next.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            next = lock(directory.path()).await;
+        }
+        let _next = next.expect("next owner");
         let path = directory.path().join("sample.json");
         write_private(&path, b"first").await.expect("first write");
         write_private(&path, b"second").await.expect("replacement");

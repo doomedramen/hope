@@ -12,6 +12,7 @@
 #   HOPE_PURGE_IDENTITY=1               (uninstall: also delete the enrolled identity; revoke it in H.O.P.E)
 #   HOPE_FIRST_REPORT_TIMEOUT=120       (seconds to wait for the service's first accepted report)
 #   HOPE_POLL_INTERVAL=2                (seconds between acceptance checks; test knob)
+#   HOPE_ALLOW_DOWNGRADE=1              (permit installing a release older than the installed agent)
 #   HOPE_INSTALL_ROOT                   (TEST ONLY: prefix for absolute system paths)
 #
 # Output: progress lines "hope-install: phase=NAME" and failures "hope-install: error=CODE message"
@@ -228,6 +229,7 @@ export HOPE_INSTALL_PID
 paths_for "$mode"
 state=${HOPE_AGENT_DIR:-$state_default}
 case "$state" in /*) ;; *) fail PATH_UNWRITABLE 'HOPE_AGENT_DIR must be an absolute path.';; esac
+# shellcheck disable=SC1003 # the backslash pattern is intentional
 case "$state$binary$unit" in *'%'*|*'"'*|*'\'*|*'
 '*) fail PATH_UNWRITABLE 'Installation paths cannot contain percent signs, quotes, backslashes, or newlines.';; esac
 export HOPE_AGENT_DIR="$state"
@@ -291,7 +293,7 @@ if [ "$operation" = uninstall ]; then
         state_safe || fail PATH_UNWRITABLE 'Refusing to purge through a symbolic link.'
         # Remove only files the agent creates; never the whole (possibly shared) directory.
         for name in config.json spool.json last-acceptance.json previous.json sample.json last-report agent.lock agent.log bootstrap-ca.pem .install-transaction; do
-            rm -rf "$state/$name"
+            rm -rf "${state:?}/$name"
         done
         rm -f "$state"/.hope-*.tmp
         rmdir "$state" 2>/dev/null || note "warning=$state contains other files and was kept"
@@ -329,6 +331,7 @@ cat > "$temporary/release-public.pem" <<'HOPE_PUBLIC_KEY'
 HOPE_PUBLIC_KEY
 first_line=$(sed -n '1p' "$temporary/release-public.pem")
 last_line=$(sed -n '$p' "$temporary/release-public.pem")
+# shellcheck disable=SC2015 # fail exits, so A && B || fail is intended
 [ "$first_line" = '-----BEGIN PUBLIC KEY-----' ] && [ "$last_line" = '-----END PUBLIC KEY-----' ] \
     && ! grep -q '@@' "$temporary/release-public.pem" \
     && openssl pkey -pubin -in "$temporary/release-public.pem" -noout >/dev/null 2>&1 \
@@ -342,25 +345,88 @@ fetch() {
     fi
 }
 artifact="hope-agent-$platform-$architecture"
-# The availability API needs a login, so confirm the public artifacts exist before stopping anything.
-for name in "$artifact" "$artifact.sig"; do
+# The availability API needs a login, so confirm the public files exist before stopping anything.
+for name in manifest.json manifest.json.sig "$artifact" "$artifact.sig"; do
     code=$(fetch --head -o /dev/null --write-out '%{http_code}' "$HOPE_SERVER/agent/releases/$name" 2>/dev/null || true)
     case "$code" in
         2??) ;;
-        404) fail RELEASE_UNAVAILABLE "No signed agent is packaged for $platform/$architecture on this server." ;;
+        404)
+            case "$name" in
+                manifest.json*) fail RELEASE_UNAVAILABLE "This server publishes no signed release manifest ($name). An administrator must publish a release with scripts/assemble-release.sh." ;;
+                *) fail RELEASE_UNAVAILABLE "No signed agent is packaged for $platform/$architecture on this server." ;;
+            esac ;;
         *) fail DOWNLOAD_FAILED "Cannot check $name on $HOPE_SERVER (HTTP status ${code:-none}). Check the URL, network, and HOPE_CA_CERT." ;;
     esac
 done
 
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d ' ' -f 1
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d ' ' -f 1
+    else openssl dgst -sha256 -r "$1" | cut -d ' ' -f 1; fi
+}
+# Dotted numeric versions ("v1", "0.1.0", "1.2.3-rc1" compares as 1.2.3). version_lt: true when $1 < $2.
+version_ok() { case "$1" in v[0-9]*|[0-9]*) return 0;; esac; return 1; }
+version_lt() {
+    awk -v a="$1" -v b="$2" 'function norm(s) { sub(/^v/, "", s); sub(/[^0-9.].*$/, "", s); return s }
+        BEGIN { n = split(norm(a), x, "."); m = split(norm(b), y, "."); k = (n > m) ? n : m
+            for (i = 1; i <= k; i++) { if (x[i] + 0 < y[i] + 0) exit 0; if (x[i] + 0 > y[i] + 0) exit 1 }
+            exit 1 }'
+}
+single() { # single NAME VALUE: exactly one non-empty line, else MANIFEST_INVALID
+    [ -n "$2" ] && [ "$(printf '%s\n' "$2" | wc -l | tr -d ' ')" = 1 ] || fail MANIFEST_INVALID "The release manifest has no single valid $1."
+}
+
 # =================================== phase: stage =============================================
 phase stage
 echo "Downloading signed $platform/$architecture agent."
-fetch -o "$temporary/hope-agent" "$HOPE_SERVER/agent/releases/$artifact" || fail DOWNLOAD_FAILED 'Downloading the agent binary failed.'
-fetch -o "$temporary/hope-agent.sig" "$HOPE_SERVER/agent/releases/$artifact.sig" || fail DOWNLOAD_FAILED 'Downloading the agent signature failed.'
+manifest="$temporary/manifest.json"
+fetch --max-filesize 65536 -o "$manifest" "$HOPE_SERVER/agent/releases/manifest.json" || fail DOWNLOAD_FAILED 'Downloading the release manifest failed.'
+fetch --max-filesize 16384 -o "$manifest.sig" "$HOPE_SERVER/agent/releases/manifest.json.sig" || fail DOWNLOAD_FAILED 'Downloading the release manifest signature failed.'
+[ "$(wc -c < "$manifest" | tr -d ' ')" -le 65536 ] || fail MANIFEST_INVALID 'The release manifest is implausibly large.'
+openssl dgst -sha256 -verify "$temporary/release-public.pem" -signature "$manifest.sig" "$manifest" >/dev/null 2>&1 \
+    || fail MANIFEST_INVALID 'Release manifest signature verification failed. Nothing was installed.'
+m_format=$(sed -n 's/^ *"format": *\([0-9][0-9]*\),\{0,1\} *$/\1/p' "$manifest")
+m_version=$(sed -n 's/^ *"version": *"\([A-Za-z0-9._+-]\{1,64\}\)",\{0,1\} *$/\1/p' "$manifest")
+single 'format' "$m_format"
+single 'version' "$m_version"
+[ "$m_format" = 1 ] || fail MANIFEST_INVALID "Unsupported release manifest format $m_format."
+version_ok "$m_version" || fail MANIFEST_INVALID "Release version '$m_version' is not a dotted number."
+entries=$(grep -F "\"platform\":\"$platform\",\"arch\":\"$architecture\"," "$manifest" || true)
+[ -n "$entries" ] || fail RELEASE_UNAVAILABLE "The signed manifest (version $m_version) lists no agent for $platform/$architecture."
+[ "$(printf '%s\n' "$entries" | wc -l | tr -d ' ')" = 1 ] || fail MANIFEST_INVALID "The manifest lists $platform/$architecture more than once."
+m_file=$(printf '%s\n' "$entries" | sed -n 's/.*"file":"\([^"]*\)".*/\1/p')
+m_sha=$(printf '%s\n' "$entries" | sed -n 's/.*"sha256":"\([0-9a-f]\{64\}\)".*/\1/p')
+m_size=$(printf '%s\n' "$entries" | sed -n 's/.*"size":\([0-9]\{1,12\}\)[,}].*/\1/p')
+[ "$m_file" = "$artifact" ] && [ -n "$m_sha" ] && [ -n "$m_size" ] \
+    || fail MANIFEST_INVALID "The manifest entry for $platform/$architecture is malformed."
+
+# Refuse to replace a newer installed agent with an older release. This compares only with the agent
+# installed on this host: a fresh install, or a host whose agent is already old, can still receive any
+# older release the server's key signed. Rely on the server publishing only the intended release.
+if [ -x "$binary" ]; then
+    installed_version=$("$binary" --version 2>/dev/null | sed -n 's/^hope-agent //p' | head -n 1 || true)
+    if version_ok "$installed_version" && version_lt "$m_version" "$installed_version"; then
+        if [ "${HOPE_ALLOW_DOWNGRADE:-}" = 1 ]; then
+            note "warning=Downgrading hope-agent $installed_version to $m_version (HOPE_ALLOW_DOWNGRADE=1)."
+        else
+            fail DOWNGRADE_REFUSED "The server offers hope-agent $m_version but $installed_version is installed. Set HOPE_ALLOW_DOWNGRADE=1 to downgrade deliberately."
+        fi
+    fi
+fi
+
+fetch --max-filesize "$m_size" -o "$temporary/hope-agent" "$HOPE_SERVER/agent/releases/$artifact" || fail DOWNLOAD_FAILED 'Downloading the agent binary failed.'
+fetch --max-filesize 16384 -o "$temporary/hope-agent.sig" "$HOPE_SERVER/agent/releases/$artifact.sig" || fail DOWNLOAD_FAILED 'Downloading the agent signature failed.'
+[ "$(wc -c < "$temporary/hope-agent" | tr -d ' ')" = "$m_size" ] \
+    || fail CHECKSUM_MISMATCH "The downloaded agent size differs from the signed manifest ($m_size bytes). Nothing was installed."
+[ "$(sha256_of "$temporary/hope-agent")" = "$m_sha" ] \
+    || fail CHECKSUM_MISMATCH 'The downloaded agent checksum differs from the signed manifest. Nothing was installed.'
 openssl dgst -sha256 -verify "$temporary/release-public.pem" -signature "$temporary/hope-agent.sig" "$temporary/hope-agent" >/dev/null 2>&1 \
     || fail BAD_SIGNATURE 'Release signature verification failed. Nothing was installed.'
 chmod 755 "$temporary/hope-agent"
-"$temporary/hope-agent" --version || fail BINARY_NOT_EXECUTABLE 'The verified agent cannot run from the temporary directory (noexec mount or wrong platform?). Set TMPDIR to an executable directory.'
+reported=$("$temporary/hope-agent" --version) || fail BINARY_NOT_EXECUTABLE 'The verified agent cannot run from the temporary directory (noexec mount or wrong platform?). Set TMPDIR to an executable directory.'
+printf '%s\n' "$reported"
+[ "${reported#hope-agent }" = "$m_version" ] \
+    || fail MANIFEST_INVALID "The agent reports version '${reported#hope-agent }' but the signed manifest says $m_version."
 
 if is_system; then
     if is_linux; then
@@ -428,7 +494,7 @@ if is_system; then
 fi
 
 gen_uuid() {
-    if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr 'A-Z' 'a-z'
+    if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr '[:upper:]' '[:lower:]'
     elif [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid
     else
         raw=$(openssl rand -hex 16)

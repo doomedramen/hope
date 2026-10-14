@@ -192,8 +192,8 @@ const REMOTE_CODES: &[CodeInfo] = &[
     info(
         "RELEASE_UNAVAILABLE",
         false,
-        "No signed agent package is available on the server for this host's platform.",
-        "Ask the administrator to package a signed release for this operating system and architecture, then retry.",
+        "The server has no signed release manifest listing an agent for this host's platform.",
+        "Ask the administrator to publish a signed release (scripts/assemble-release.sh, or scripts/package-agent.sh for development) that includes this operating system and architecture, then retry.",
     ),
     info(
         "DOWNLOAD_FAILED",
@@ -206,6 +206,24 @@ const REMOTE_CODES: &[CodeInfo] = &[
         false,
         "The downloaded agent failed signature verification and was not run.",
         "Do not retry until an administrator confirms the release signing key and packages.",
+    ),
+    info(
+        "MANIFEST_INVALID",
+        false,
+        "The signed release manifest failed verification or does not match the downloaded agent, so nothing was run.",
+        "Do not retry until an administrator re-publishes the release with scripts/assemble-release.sh and confirms the signing key.",
+    ),
+    info(
+        "CHECKSUM_MISMATCH",
+        false,
+        "The downloaded agent does not match the checksum or size in the signed manifest and was not run.",
+        "Retry once in case of a damaged download; if it repeats, ask the administrator to re-publish the release.",
+    ),
+    info(
+        "DOWNGRADE_REFUSED",
+        false,
+        "The server's release is older than the agent already installed on the host.",
+        "Publish a newer release, or run the installer with HOPE_ALLOW_DOWNGRADE=1 on the host if a downgrade is intended.",
     ),
     info(
         "BINARY_INVALID",

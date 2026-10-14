@@ -13,3 +13,4 @@ web/*.tsbuildinfo
 *.key
 __pycache__/
 *.pyc
+/dist/

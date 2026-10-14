@@ -803,12 +803,12 @@ async fn progress_errors_map_to_vetted_messages_and_untrusted_lines_are_dropped(
     assert_eq!(job["status"], "failed", "{job}");
     assert_eq!(job["error_code"], "RELEASE_UNAVAILABLE");
     let message = job["message"].as_str().unwrap();
-    assert!(message.contains("No signed agent package is available on the server"));
+    assert!(message.contains("no signed release manifest listing an agent"));
     assert!(
         job["guidance"]
             .as_str()
             .unwrap()
-            .contains("package a signed release")
+            .contains("publish a signed release")
     );
     let stages: Vec<_> = job["stages"]
         .as_array()

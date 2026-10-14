@@ -79,3 +79,51 @@ The server logs a warning once if an untrusted peer sends `X-Forwarded-For`, and
 Rejected request bodies (malformed JSON, wrong content type, oversize) receive fixed messages that never quote the submitted data.
 
 Container capability note: the `hope-server` binary has a file capability (`cap_net_raw`), so the container's bounding set must contain `NET_RAW` (compose `cap_add`); without it the binary fails to execute. Do not enable `no-new-privileges`. Run backups with `docker compose exec hope hope-server backup /var/lib/hope/<name>.db`: the root filesystem is read-only, so the destination must be on the data volume or another writable mount, and the file is fsynced (with its directory) before the command reports success.
+
+## Signed agent releases
+
+`$HOPE_RELEASE_DIR` (`./releases` in compose) is a root directory written only by `scripts/assemble-release.sh`. It holds versioned release directories `<version>-<random>/` and the symlink `current` pointing at the live one (plus `previous`). The server resolves `current` on every request, so a publish takes effect immediately, without a restart. If there is no `current`, the directory itself is treated as the release (tests, hand-built trees). Each release directory contains:
+
+```
+hope-agent-{linux,macos}-{x86_64,aarch64}   four binaries
+hope-agent-….sig                            per-artifact RSA/SHA-256 signature
+manifest.json, manifest.json.sig            signed version / key id / sha256 / size / minimum OS per artifact
+release-public.pem                          the public key embedded into /agent/install
+```
+
+The installer downloads `manifest.json`, verifies its signature against the key embedded in the installer it was served by, picks its platform entry, then checks the artifact's size, SHA-256 and own signature, and finally that `--version` equals the manifest version. Any mismatch aborts before the service is touched (`MANIFEST_INVALID`, `CHECKSUM_MISMATCH`, `BAD_SIGNATURE`, `RELEASE_UNAVAILABLE`). An upgrade to an older version than the installed agent is refused (`DOWNGRADE_REFUSED`) unless the host runs the installer with `HOPE_ALLOW_DOWNGRADE=1`. The server lists a platform as available only if the manifest is well formed, its `key_id` equals the SHA-256 of the SPKI DER of `release-public.pem`, it lists the platform, and the artifact and signature exist with the listed size. With no manifest nothing is available (no per-file fallback); the console and SSH jobs then report that no signed release manifest is published. The downgrade check compares only with the agent installed on that host: a fresh install, or a host whose agent is already old, can receive any older release the server's key signed, so publish only intended releases (rollback is a deliberate act, see below).
+
+### Platforms
+
+| Platform | Target | Minimum |
+| --- | --- | --- |
+| Linux x86_64, aarch64 | `*-unknown-linux-musl` | Static binary, no glibc; any distribution. Kernel 3.2 (x86_64) / 4.1 (aarch64), as documented by Rust |
+| macOS x86_64, aarch64 | `*-apple-darwin` | macOS 11.0 (`MACOSX_DEPLOYMENT_TARGET`, checked against the binary's `minos`) |
+
+Support is not claimed for any platform until the installation matrix in `docs/validation.md` is evidenced for it.
+
+### The signing key
+
+One RSA key (at least 2048 bits; use 3072), generated and stored **outside the repository and outside the container image**:
+
+```sh
+umask 077
+openssl genrsa -out ~/secure/hope-release-signing.pem 3072
+```
+
+`assemble-release.sh` refuses a key path inside the repository. Keep an offline backup; losing the key means every host must be re-installed from a new installer. In CI the key is the `HOPE_SIGNING_KEY` secret of the protected `release` GitHub environment, available only to the `publish` job of `release.yml` (tag pushes `v*`); pull-request workflows reference no secrets. Configure required reviewers and restrict the environment to `v*` tags.
+
+### Publishing
+
+1. Set the workspace version in `Cargo.toml`, merge, tag `vX.Y.Z` (the tag must equal the crate version). `release.yml` builds the four targets on matching runners, uploads them, and the `publish` job assembles, signs and verifies; it fails if any platform is missing.
+2. To publish to a server by hand: download the four `agent-*` artifacts into one directory and run
+   `HOPE_SIGNING_KEY=~/secure/hope-release-signing.pem scripts/assemble-release.sh --staging DIR --version X.Y.Z --out releases`.
+   It checks that all artifacts share the version and git commit and that each ELF/Mach-O header matches its platform label, builds `releases/X.Y.Z-<random>/`, verifies every signature, checksum, size and the key id there, then atomically repoints `releases/current` (a temporary symlink renamed over it with `mv -T`/`mv -h`). A failure leaves `current` untouched. The two newest older releases, always including the one just replaced, are kept; the live one is never deleted. Version must be plain `X.Y.Z` or `X.Y.Z-pre` (no leading `v`).
+3. Mount the **root** (`./releases:/opt/hope/releases:ro`, as the compose files do), never a versioned directory: the root keeps its identity, and the relative `current` symlink resolves inside the container, so no restart is needed after publishing.
+4. Roll back by repointing: `ln -s <older-dir> releases/.c && mv -fh releases/.c releases/current` (BSD/macOS; use `mv -fT` on GNU). Hosts that already upgraded keep the newer agent; re-running the installer on them will refuse to downgrade unless `HOPE_ALLOW_DOWNGRADE=1`. Re-publishing with `--allow-downgrade` also works.
+
+Local development: `HOPE_SIGNING_KEY=… scripts/package-agent.sh` builds this machine's target and publishes a **partial** release (manifest `partial:true`, one platform) into `./releases`. Its staging directory must be under `./dist` or the temp directory. To change development key, delete `./releases` first; `--rotate-key` requires a complete release. Linux targets on a Mac: `scripts/build-agent-docker.sh <triple> --out DIR`.
+
+### Rotation and revocation
+
+Publishing a different public key next to old artifacts would break verification for some hosts, so the script refuses it. To rotate: `assemble-release.sh … --rotate-key` with the new key and all four artifacts (it cannot be combined with `--allow-partial`); every artifact and the manifest are signed with the new key in that run and the old release stays available as `previous`. Installers already fetched embed the old public key and will reject the new release with `MANIFEST_INVALID`; hosts must fetch `/agent/install` again from the server. Rotation does not revoke agent credentials; revoke those in the console. A compromised signing key requires rotating, restarting the server, and re-installing from freshly fetched installers; there is no automatic revocation of binaries already installed.

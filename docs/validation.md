@@ -150,3 +150,52 @@ Rate limits redesigned so attackers cannot lock out the administrator or agents:
 | Container smoke on rebuilt `hope:t09` (desktop compose, project `hopet09r`) | OrbStack | 2026-10-14 | acdf128 | Healthy, 12 consecutive successful logins from one client, `docker stop` exit 0 in 0.15 s; project removed |
 
 New tests: 4 limiter unit tests (failure-only budgets, eviction with legitimate keys surviving, IPv6 /64 + v4-mapped, loopback default), and in `hardening.rs` distributed failures vs. administrator and free successes, hashing saturation 503, valid agents under distributed bad credentials, normalized Origin, startup reconciliation of running scans, and refusal after shutdown begins. Not tested: the exact interleaving of a scan/SSH-job insert racing `settle` (a deterministic test needs injected delays); the post-insert recheck is simple and covered only by the refusal path.
+
+## Signed release matrix and CI (Ticket 10) — 2026-10-14
+
+Base commit `f29f38e` plus the uncommitted Ticket 10 working tree. Host: macOS ARM64 (Rust 1.96.0); Linux targets built in OrbStack Docker (`rust:1.96-bookworm`, `musl-tools`) through `scripts/build-agent-docker.sh`. The signing key was a throwaway 3072-bit RSA key generated in a scratch directory outside the repository; no production key exists or was used. The repository `releases/` directory was not touched.
+
+### Artifacts built (all `0.1.0`, `--locked`, release profile)
+
+| Platform | Target | Size (bytes) | SHA-256 | Minimum OS / libc (measured unless noted) | Run here |
+| --- | --- | --- | --- | --- | --- |
+| linux-x86_64 | `x86_64-unknown-linux-musl` | 4,339,720 | `7c74763aaafa69ff4b78b41a168d7473cf39a94ff81776c1651763a36620f067` | static-pie, no `NEEDED`, no `INTERP`: no glibc or loader required. Kernel floor 3.2 is Rust's documented minimum for the target, not measured | `--version` under `linux/amd64` emulation: `hope-agent 0.1.0` |
+| linux-aarch64 | `aarch64-unknown-linux-musl` | 3,741,168 | `5ef11c0284c3c879d18f3492d05863749eae77017ed6dc2deb05d2537334ec99` | statically linked, no `NEEDED`. Kernel floor 4.1 is Rust's documented minimum, not measured | `--version` in a native `linux/arm64` container: `hope-agent 0.1.0` |
+| macos-x86_64 | `x86_64-apple-darwin` | 3,803,616 | `52cd2c18b2ca06efd427f524fd5141674267227b3d8c77db819eb2fd59ef1fc0` | `LC_BUILD_VERSION minos 11.0` (`MACOSX_DEPLOYMENT_TARGET=11.0`) | Not run: no Rosetta on this Mac (`arch -x86_64` fails) |
+| macos-aarch64 | `aarch64-apple-darwin` | 3,545,360 | `57d54a62115c5415dd4ab97c7e57a72f186b20eb940ba0a6c143f26d59630ccd` | `LC_BUILD_VERSION minos 11.0`; links only `libSystem`, `libobjc`, `libiconv`, CoreFoundation, IOKit | `--version`: `hope-agent 0.1.0` |
+
+Linux libc decision: static musl. The agent uses `reqwest` with rustls (ring); `cargo tree` shows no `openssl-sys`/`native-tls`, so musl links cleanly, the binary has no glibc floor, and one artifact runs on any distribution including Alpine. The `-gnu` triples still build (`build-agent.sh` reads the required glibc from `objdump -T`) but are not in the matrix. Not measured: behaviour of musl's resolver on hosts with unusual `nsswitch`/`resolv.conf` setups (musl does not use NSS) and the earlier agent resource measurements predate the musl artifact and have not been repeated with it.
+
+### Commands
+
+| Command / procedure | Environment | Date | Base | Result |
+| --- | --- | --- | --- | --- |
+| `scripts/build-agent.sh aarch64-apple-darwin` / `x86_64-apple-darwin` | macOS ARM64 | 2026-10-14 | f29f38e | Pass; minos 11.0 verified against the pinned target; arm64 smoke test passes, x86_64 not executable here |
+| `scripts/build-agent-docker.sh aarch64-unknown-linux-musl` / `x86_64-unknown-linux-musl` | OrbStack (native arm64; amd64 emulated) | 2026-10-14 | f29f38e | Pass; static check and `--version` smoke test pass |
+| `scripts/assemble-release.sh` with the four artifacts and a throwaway key, then `openssl dgst -sha256 -verify` of the manifest and every artifact, `shasum -a 256` against the manifest | macOS | 2026-10-14 | f29f38e | Pass; `manifest.json` lists 4 artifacts, `partial:false`; all signatures verify |
+| Refusals observed: key inside the repo, missing platforms, mixed versions, different key without `--rotate-key`, `--rotate-key --allow-partial`, older version; rotation re-signed all four artifacts and kept the old release as `releases.prev` | macOS | 2026-10-14 | f29f38e | Pass (also covered by `tests/release`, 6 tests) |
+| `python3 -I -m unittest discover -s tests/installer` | macOS | 2026-10-14 | f29f38e | Pass, 71 tests (56 existing plus 15 manifest/checksum/downgrade tests) |
+| `python3 -I -m unittest discover -s tests/release` | macOS | 2026-10-14 | f29f38e | Pass, 6 tests |
+| `cargo fmt --all -- --check`; clippy `--workspace --all-targets --all-features -- -D warnings`; `cargo test --workspace --locked` | macOS | 2026-10-14 | f29f38e | Pass; 104 tests (6 new `releases` unit tests, 2 new `tests/releases.rs`) |
+| `make types` | macOS | 2026-10-14 | f29f38e | Pass; `web/lib/protocol.ts` unchanged |
+| `npm --prefix web run typecheck`, `lint`, `build` | macOS | 2026-10-14 | f29f38e | Pass (no web source changed; e2e not rerun) |
+| `sh -n scripts/*.sh`; `shellcheck -s sh scripts/*.sh` (0.11.0, brew) | macOS | 2026-10-14 | f29f38e | Pass after fixing 4 findings in `install-agent.sh` and 1 in the new scripts |
+| `actionlint` 1.7.12 on `.github/workflows/*.yml` | macOS | 2026-10-14 | f29f38e | Pass |
+
+### Unverified or limited
+
+- **Real installation matrix is UNVERIFIED for every cell.** No systemd or launchd service was installed, upgraded, interrupted or uninstalled with a real artifact on any OS/architecture, in system or user mode, with default or custom CA. The installer harness uses fake service managers; cross-compilation and `--version` do not count. The `install-matrix-privileged` job in `ci.yml` is dispatch-only and intentionally fails until those tests exist. Do not claim platform support from this document. This step needs the user's authorization and disposable hosts.
+- `x86_64-apple-darwin` was never executed (no Rosetta here). Its minos and size were inspected only.
+- The GitHub workflows were linted with `actionlint` but never run. Runner labels (`ubuntu-24.04-arm`, `macos-14`, `macos-15-intel`; `macos-13` named in the ticket has been retired by GitHub), Node 24 and action versions are unverified. Actions are pinned to major version tags, not commit SHAs, because SHAs could not be verified offline; pin them before first use.
+- The `release` environment, required reviewers, the tag restriction and the `HOPE_SIGNING_KEY` secret are repository settings that do not exist yet.
+- The Linux discovery fixture and Playwright jobs in CI are copies of the local procedures and have not run on GitHub runners.
+- Server serving of the real manifest was tested with generated fixtures in temp directories, not by pointing a live server at the assembled directory. The installer's manifest parser was tested against harness-generated manifests in the same layout as `assemble-release.sh` (and its `sed` expressions were run by hand against the real `manifest.json`), not by running the installer end to end against the real artifacts.
+- Publishing swaps a `current` symlink (see review follow-up below). The GNU `mv -T` branch was only checked by hand in a Debian container; the macOS `mv -h` branch is covered by `tests/release`.
+
+### Ticket 10 review follow-up — 2026-10-14
+
+- `assemble-release.sh`: the validated absolute key path is now what signs (it was a caller-relative path after `cd`); `--staging`/`--out` resolve against the caller's directory; the in-repo check is case-insensitive and also catches a hard link via `find -samefile` (the build `target`/`node_modules` trees are skipped). Versions must be plain semver without `v`. Artifacts must share one git commit (`unknown` only with `--allow-partial`), the manifest records `commit` and per-artifact `target`, and ELF `e_machine` / Mach-O `cputype` must match the platform label.
+- Publishing is now `releases/<version>-<random>/` plus an atomically renamed `current` symlink (and `previous`); retention is current plus two older. The server resolves `current` per request; no `current` means the directory is the release. INT/TERM/HUP clean up the temporary directory and exit 1.
+- Server: no manifest means no platforms (legacy fallback removed); `key_id` must equal the SHA-256 of the PEM's SPKI DER.
+- Installer: `curl --max-filesize` on manifest (64 KiB), signatures (16 KiB) and artifact (manifest size). `release.yml`: tag pushes only, a `guard` job (tag on a commit on main, tag equals crate version), build provenance attestation. `build-agent-docker.sh` passes the host commit and chowns outputs to the invoking user (the container still runs as root to `apt-get install musl-tools`). `package-agent.sh` restricts its staging directory and no longer implies `--allow-downgrade`. `build-agent.sh` tries Rosetta only for x86_64.
+- Results (macOS): `tests/release` 13 tests, installer harness 71, `cargo test --workspace --locked` pass (releases unit tests 8, `tests/releases.rs` 3; 107 workspace tests), fmt/clippy/shellcheck/actionlint/`sh -n`/`git diff --check` clean.

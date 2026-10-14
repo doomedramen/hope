@@ -1,4 +1,4 @@
-.PHONY: check build run types test installer-tests
+.PHONY: check build run types test installer-tests release-tests shell-checks
 types:
 	./scripts/generate-types.sh
 check:
@@ -6,9 +6,14 @@ check:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo test --workspace
 	cd web && npm run typecheck && npm run lint
+shell-checks:
+	for f in scripts/*.sh; do sh -n $$f || exit 1; done
+	shellcheck -s sh scripts/*.sh
 installer-tests:
-	sh -n scripts/install-agent.sh
+	for f in scripts/*.sh; do sh -n $$f || exit 1; done
 	python3 -I -m unittest discover -s tests/installer -v
+release-tests:
+	python3 -I -m unittest discover -s tests/release -v
 build: types
 	cd web && npm ci && npm run build
 	cargo build --release --locked --workspace

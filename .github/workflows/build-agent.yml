@@ -1,0 +1,43 @@
+# Reusable: build the unsigned agent for all four release targets on matching runners.
+# Called by ci.yml (smoke) and release.yml (artifacts for signing). Holds no secrets and signs nothing.
+name: build-agent
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-latest, linux: true }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, linux: true }
+          # macos-13 (Intel) is retired by GitHub; macos-15-intel is the remaining Intel image.
+          - { target: x86_64-apple-darwin, runner: macos-15-intel, linux: false }
+          - { target: aarch64-apple-darwin, runner: macos-14, linux: false }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install musl toolchain
+        if: matrix.linux
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends musl-tools binutils
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+      - name: Build, inspect and smoke-test
+        run: sh scripts/build-agent.sh "${{ matrix.target }}" --out dist/agents
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.target }}
+          path: dist/agents/
+          if-no-files-found: error
+          retention-days: 7

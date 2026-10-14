@@ -1,0 +1,180 @@
+# Continuous integration. Untrusted pull-request code runs here, so this workflow has read-only
+# permissions and references no secrets. Signing exists only in release.yml.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      privileged:
+        description: "Run the privileged service-installation job (disposable runners only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.96.0"
+
+jobs:
+  rust-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal -c rustfmt -c clippy
+          rustup default "$RUST_VERSION"
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  rust-test:
+    name: rust-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - run: cargo test --workspace --locked
+
+  protocol-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - run: make types
+      - name: Generated protocol must match the committed file
+        run: git diff --exit-code -- web/lib/protocol.ts
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - run: npm --prefix web ci
+      - run: npm --prefix web run typecheck
+      - run: npm --prefix web run lint
+      - run: npm --prefix web run build
+      - run: cargo build --locked -p hope-server
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: npm --prefix web run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report/
+            web/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Syntax check (sh -n)
+        run: |
+          for f in scripts/*.sh; do echo "sh -n $f"; sh -n "$f"; done
+      - name: ShellCheck
+        run: shellcheck -s sh scripts/*.sh
+      - name: Installer harness
+        run: make installer-tests
+      - name: Release assembly tests
+        run: make release-tests
+
+  discovery-fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - run: docker build -t hope:ci .
+      - name: Linux discovery fixture (one on-link run)
+        run: python3 scripts/benchmark-discovery.py --image hope:ci --runs 1 --on-link --output target/discovery-ci.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: discovery-ci
+          path: target/discovery-ci.json
+          retention-days: 7
+
+  release-build-smoke:
+    uses: ./.github/workflows/build-agent.yml
+
+  verify-signing-flow:
+    # Exercises assemble-release.sh with a throwaway key generated on the runner, from the smoke
+    # build's artifacts. Four platforms are required, so this also proves the full matrix built.
+    needs: release-build-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agent-*
+          path: dist/agents
+          merge-multiple: true
+      - name: Assemble and verify with an ephemeral key
+        run: |
+          key="$RUNNER_TEMP/ci-signing-key.pem"
+          openssl genrsa -out "$key" 3072
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          HOPE_SIGNING_KEY="$key" sh scripts/assemble-release.sh --staging dist/agents --version "$version" --out "$RUNNER_TEMP/release"
+          cat "$RUNNER_TEMP/release/current/manifest.json"
+
+  install-matrix-privileged:
+    # NOT part of pull-request CI. Manually dispatched only, and only on a disposable runner:
+    # real service-manager installation changes the machine. The service tests are not written yet,
+    # so this job deliberately fails after preparing artifacts; a green run must never be read as
+    # installation evidence. See docs/validation.md.
+    if: github.event_name == 'workflow_dispatch' && inputs.privileged
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - run: echo "Disposable runner ${{ runner.os }} ${{ runner.arch }}"
+      - name: Real installation matrix
+        run: |
+          echo "::error::Service installation tests (systemd/launchd, system and user mode, upgrade, interrupted activation) are not implemented."
+          exit 1

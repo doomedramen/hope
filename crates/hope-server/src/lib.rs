@@ -61,7 +61,13 @@ pub fn router(state: State, web_dir: &str) -> Router {
             get(|| async { axum::Json(serde_json::json!({"status":"ok"})) }),
         )
         .route("/agent/install", get(releases::installer))
-        .nest_service("/agent/releases", ServeDir::new(&state.0.release_dir))
+        .nest_service(
+            "/agent/releases",
+            Router::new()
+                .fallback(releases::serve)
+                .with_state(state.clone())
+                .layer(middleware::from_fn(releases::cache_headers)),
+        )
         .fallback_service(ServeDir::new(web_dir).append_index_html_on_directories(true))
         .layer(DefaultBodyLimit::max(256 * 1024))
         .layer(middleware::from_fn_with_state(

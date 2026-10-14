@@ -19,6 +19,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 axum = { version = "0.8", features = ["macros"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "limit"] }
 argon2 = "0.5"
 ipnet = "2"
@@ -35,7 +36,6 @@ zeroize = "1"
 pnet_datalink = "0.35"
 
 [dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
 tracing-log = "0.2"

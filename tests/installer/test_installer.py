@@ -501,6 +501,118 @@ class Linux(Base):
         self.assertNotIn(harness.CREDENTIAL, self.env.paths('system')['unit'].read_text())
 
 
+class Manifest(Base):
+    """The signed manifest binds version, size and checksum to each artifact."""
+
+    def refused(self, code):
+        result = self.env.run()
+        self.failed(result, code)
+        self.assertNotIn('agent[', self.env.log())  # nothing downloaded was executed
+        self.untouched(self.env)
+        return result
+
+    def test_manifest_is_fetched_and_verified_before_the_artifact(self):
+        self.ok(self.env.run())
+        curls = [line for line in self.env.log().splitlines() if line.startswith('curl ') and '-o ' in line and '--head' not in line]
+        self.assertIn('manifest.json', curls[0])
+        self.assertTrue(any('manifest.json.sig' in line for line in curls))
+
+    def test_manifest_signed_by_another_key_is_rejected(self):
+        self.env.publish('v1', manifest_key='other')
+        self.refused('MANIFEST_INVALID')
+
+    def test_tampered_manifest_is_rejected(self):
+        manifest = self.env.rel / 'manifest.json'
+        manifest.write_text(manifest.read_text().replace('"size":', '"size": ', 1))
+        self.refused('MANIFEST_INVALID')
+
+    def test_missing_manifest_is_unavailable(self):
+        (self.env.rel / 'manifest.json').unlink()
+        self.failed(self.env.run(), 'RELEASE_UNAVAILABLE')
+        self.untouched(self.env)
+
+    def test_checksum_mismatch(self):
+        self.env.publish('v1', tamper=lambda entry: entry.update(sha256='0' * 64))
+        self.refused('CHECKSUM_MISMATCH')
+
+    def test_size_mismatch(self):
+        self.env.publish('v1', tamper=lambda entry: entry.update(size=entry['size'] + 1))
+        self.refused('CHECKSUM_MISMATCH')
+
+    def test_artifact_replaced_after_manifest_is_a_checksum_mismatch(self):
+        self.env.replace_artifact('v2')  # validly signed, but not the artifact the manifest describes
+        self.refused('CHECKSUM_MISMATCH')
+
+    def test_manifest_without_this_platform(self):
+        paths = self.env.preinstall()
+        self.env.publish('v1', platform='macos', arch='aarch64')
+        self.env.entries.pop(('linux', 'x86_64'))
+        self.env.write_manifest('v1')
+        result = self.env.run('upgrade', token=None)
+        self.failed(result, 'RELEASE_UNAVAILABLE')
+        self.assertIn('linux/x86_64', result.err)
+        self.assertTrue(paths['binary'].exists())
+        self.assertNotIn('systemctl[system] stop', self.env.log())
+
+    def test_artifact_version_must_match_manifest_version(self):
+        self.env.publish('v1', manifest_version='v2')  # v1 binary, correct checksum, manifest says v2
+        self.refused_after_run('MANIFEST_INVALID')
+
+    def refused_after_run(self, code):
+        # the binary is run once (--version) from the temporary directory, but nothing is installed
+        result = self.env.run()
+        self.failed(result, code)
+        log = self.env.log()
+        self.assertEqual(['agent[v1] --version'], [line for line in log.splitlines() if line.startswith('agent[')])
+        self.untouched(self.env)
+
+    def test_malformed_entry_is_rejected(self):
+        self.env.publish('v1', tamper=lambda entry: entry.update(file='hope-agent-linux-aarch64'))
+        self.refused('MANIFEST_INVALID')
+
+    def test_duplicate_entry_is_rejected(self):
+        manifest = self.env.rel / 'manifest.json'
+        lines = manifest.read_text().splitlines()
+        row = next(line for line in lines if '"platform":"linux"' in line)
+        lines.insert(lines.index(row) + 1, row)
+        manifest.write_text('\n'.join(lines) + '\n')
+        import subprocess
+        subprocess.run(['openssl', 'dgst', '-sha256', '-sign', str(harness.keys()['good'][0]), '-out', str(manifest) + '.sig', str(manifest)], check=True, capture_output=True)
+        self.refused('MANIFEST_INVALID')
+
+    def test_downgrade_is_refused_on_upgrade(self):
+        paths = self.env.preinstall(version='v2')
+        self.env.publish('v1')
+        result = self.env.run('upgrade', token=None)
+        self.failed(result, 'DOWNGRADE_REFUSED')
+        self.assertEqual('v2', self.version(paths['binary']))
+        self.assertNotIn('systemctl[system] stop', self.env.log())
+        self.assertNotIn('agent[v1]', self.env.log())
+
+    def test_downgrade_is_allowed_explicitly(self):
+        paths = self.env.preinstall(version='v2')
+        self.env.publish('v1')
+        result = self.env.run('upgrade', token=None, HOPE_ALLOW_DOWNGRADE=1)
+        self.ok(result)
+        self.assertEqual('v1', self.version(paths['binary']))
+        self.assertIn('Downgrading', result.err)
+
+    def test_same_and_newer_versions_install(self):
+        paths = self.env.preinstall(version='v1')
+        self.ok(self.env.run('upgrade', token=None))
+        self.env.publish('v10')
+        self.ok(self.env.run('upgrade', token=None))
+        self.assertEqual('v10', self.version(paths['binary']))
+
+    def test_version_comparison_is_numeric_not_lexical(self):
+        paths = self.env.preinstall(version='0.9.0')
+        self.env.publish('0.10.0')
+        self.ok(self.env.run('upgrade', token=None))
+        self.assertEqual('0.10.0', self.version(paths['binary']))
+        self.env.publish('0.9.5')
+        self.failed(self.env.run('upgrade', token=None), 'DOWNGRADE_REFUSED')
+
+
 class MacOS(Base):
     def setUp(self):
         self.env = self.new_env('Darwin', 'arm64')

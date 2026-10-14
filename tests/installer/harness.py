@@ -4,6 +4,7 @@ Everything runs inside a temporary root. Service managers, sudo, curl, account t
 agent binary are fakes on a stub PATH; openssl is real and signatures are verified with real RSA
 keys generated per run (package-agent.sh signs with `openssl dgst -sha256 -sign`, as done here).
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -256,7 +257,9 @@ cfg=${HOPE_AGENT_DIR:-/nonexistent}/config.json
 case "${1:-}" in
 --version)
     [ -e "$R/fault/version-fail" ] && exit 126
-    case "$0" in */usr/local/bin/hope-agent|*/.local/bin/hope-agent) hook place-binary;; esac
+    # place-binary fires only inside a transaction; the stage-phase version probe must not trigger it.
+    case "$0" in */usr/local/bin/hope-agent|*/.local/bin/hope-agent)
+        [ -n "$(find "$R/root" "$R/home" -name journal 2>/dev/null | head -n 1)" ] && hook place-binary;; esac
     echo "hope-agent $VERSION";;
 check-config)
     [ -f "$cfg" ] || { echo 'Agent is not enrolled' >&2; exit 1; }
@@ -331,6 +334,8 @@ class Env:
         self.os_name = os_name
         self.platform = 'linux' if os_name == 'Linux' else 'macos'
         self.arch_name = 'aarch64' if arch in ('arm64', 'aarch64') else 'x86_64'
+        self.entries = {}
+        self.manifest_version = 'v1'
         self.publish('v1')
         installer = INSTALLER.read_text().replace('@@HOPE_PUBLIC_KEY@@', keys()['good'][1])
         self.installer = self.base / 'install-agent.sh'
@@ -345,15 +350,46 @@ class Env:
     def fault(self, name):
         (self.base / 'fault' / name).write_text('')
 
-    def publish(self, version, key='good', platform=None, arch=None):
+    def publish(self, version, key='good', platform=None, arch=None, manifest_key='good', manifest_version=None, tamper=None):
+        """Write a signed artifact and re-issue the signed manifest listing every published artifact.
+
+        key signs the artifact, manifest_key the manifest; manifest_version lets a test issue a
+        manifest whose version differs from the artifact's (a mixed release). tamper(entry) may
+        alter a manifest entry before the manifest is signed.
+        """
         platform, arch = platform or self.platform, arch or self.arch_name
         artifact = self.rel / f'hope-agent-{platform}-{arch}'
         artifact.write_text(AGENT.replace('@VERSION@', version).replace('@CREDENTIAL@', CREDENTIAL))
         subprocess.run(['openssl', 'dgst', '-sha256', '-sign', str(keys()[key][0]), '-out', str(artifact) + '.sig', str(artifact)], check=True, capture_output=True)
+        data = artifact.read_bytes()
+        entry = dict(platform=platform, arch=arch, file=artifact.name, sha256=hashlib.sha256(data).hexdigest(), size=len(data), min_os='test')
+        if tamper:
+            tamper(entry)
+        self.entries[(platform, arch)] = entry
+        self.write_manifest(manifest_version or version, manifest_key)
+
+    def write_manifest(self, version, key='good'):
+        """Same layout as scripts/assemble-release.sh: one top-level key per line, one artifact per line."""
+        self.manifest_version = version
+        lines = ['{', '  "format": 1,', f'  "version": "{version}",', '  "created": "2026-10-14T00:00:00Z",', '  "key_id": "test",', '  "partial": true,', '  "artifacts": [']
+        rows = [json.dumps(entry, separators=(',', ':')) for entry in self.entries.values()]
+        lines += ['    ' + row + (',' if index < len(rows) - 1 else '') for index, row in enumerate(rows)]
+        lines += ['  ]', '}']
+        manifest = self.rel / 'manifest.json'
+        manifest.write_text('\n'.join(lines) + '\n')
+        subprocess.run(['openssl', 'dgst', '-sha256', '-sign', str(keys()[key][0]), '-out', str(manifest) + '.sig', str(manifest)], check=True, capture_output=True)
+
+    def replace_artifact(self, version, platform=None, arch=None):
+        """Swap the served binary for another version without touching the manifest."""
+        artifact = self.rel / f'hope-agent-{platform or self.platform}-{arch or self.arch_name}'
+        artifact.write_text(AGENT.replace('@VERSION@', version).replace('@CREDENTIAL@', CREDENTIAL))
+        subprocess.run(['openssl', 'dgst', '-sha256', '-sign', str(keys()['good'][0]), '-out', str(artifact) + '.sig', str(artifact)], check=True, capture_output=True)
 
     def unpublish(self, platform=None, arch=None):
-        artifact = self.rel / f'hope-agent-{platform or self.platform}-{arch or self.arch_name}'
-        artifact.unlink()
+        platform, arch = platform or self.platform, arch or self.arch_name
+        (self.rel / f'hope-agent-{platform}-{arch}').unlink()
+        self.entries.pop((platform, arch), None)
+        self.write_manifest(self.manifest_version)
 
     def txn(self, mode='system'):
         if mode == 'system':
