@@ -3,6 +3,8 @@ export type ScanStatus = "queued" | "running" | "completed" | "cancelled" | "fai
 export type EnrichmentStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type AgentStatus = "reporting" | "stale" | "revoked" | "unenrolled";
 export type InstallStatus = "running" | "completed" | "failed" | "interrupted" | "uncertain";
+export type InstallStage = "connecting" | "authenticating" | "preflight" | "recover" | "uninstall" | "stage" | "verify" | "stop" | "place_binary" | "configure" | "write_unit" | "activate" | "wait_report" | "rollback" | "complete" | "confirming_report";
+export type InstallMode = "install" | "reinstall";
 export type LoginRequest = { password: string, setup_token: string | null, };
 export type AuthStatus = { setup_required: boolean, authenticated: boolean, };
 export type OkResponse = { ok: boolean, };
@@ -47,4 +49,32 @@ export type MapEdit = { "operation": "set_position", position: Position, } | { "
 export type ReleaseAvailability = { packaged_platforms: Array<string>, };
 export type Capabilities = { platform: string, discovery_mode: string, arp: boolean, icmp: boolean, limitations: Array<string>, };
 export type Bootstrap = { networks: Array<Network>, hosts: Array<Host>, scans: Array<ScanJob>, map: MapState, capabilities: Capabilities, server_url: string, };
-export type InstallJob = { id: string, host: string, status: InstallStatus, messages: Array<string>, created_at: number, };
+export type InstallJob = { id: string,
+/**
+ * Selected SSH address.
+ */
+host: string, host_id: string, port: number,
+/**
+ * Host-key fingerprint the user confirmed; the connection is refused if it differs.
+ */
+fingerprint: string, username: string, mode: InstallMode, status: InstallStatus, stage: InstallStage | null, stages: Array<InstallStage>,
+/**
+ * Stable code from the installer allowlist or the server (never remote text).
+ */
+error_code: string | null,
+/**
+ * Server-vetted description of the outcome.
+ */
+message: string | null,
+/**
+ * Server-vetted retry guidance for the error code.
+ */
+guidance: string | null,
+/**
+ * Server-vetted installer notice (for example the user-service fallback).
+ */
+notice: string | null,
+/**
+ * Agent identity bound to or created by this job.
+ */
+agent_id: string | null, created_at: number, finished_at: number | null, };

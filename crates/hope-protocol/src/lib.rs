@@ -42,6 +42,36 @@ pub enum InstallStatus {
     Uncertain,
 }
 
+/// Allowlisted installer phase (or server-side connection step) reached by an SSH job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallStage {
+    Connecting,
+    Authenticating,
+    Preflight,
+    Recover,
+    Uninstall,
+    Stage,
+    Verify,
+    Stop,
+    PlaceBinary,
+    Configure,
+    WriteUnit,
+    Activate,
+    WaitReport,
+    Rollback,
+    Complete,
+    ConfirmingReport,
+}
+
+/// A fresh install enrolls with the job's token; a reinstall is bound to the host's existing agent identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallMode {
+    Install,
+    Reinstall,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct LoginRequest {
     pub password: String,
@@ -102,7 +132,7 @@ pub struct SshTarget {
     pub address: String,
     pub port: Option<u16>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize, TS)]
 pub struct SshInstallRequest {
     #[serde(flatten)]
     pub target: SshTarget,
@@ -111,6 +141,20 @@ pub struct SshInstallRequest {
     pub password: Option<String>,
     pub private_key: Option<String>,
     pub passphrase: Option<String>,
+}
+/// Credentials never appear in debug output.
+impl std::fmt::Debug for SshInstallRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |value: &Option<String>| value.as_ref().map(|_| "[redacted]");
+        f.debug_struct("SshInstallRequest")
+            .field("target", &self.target)
+            .field("username", &self.username)
+            .field("fingerprint", &self.fingerprint)
+            .field("password", &redact(&self.password))
+            .field("private_key", &redact(&self.private_key))
+            .field("passphrase", &redact(&self.passphrase))
+            .finish()
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct FingerprintResponse {
@@ -339,10 +383,29 @@ pub struct Bootstrap {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct InstallJob {
     pub id: String,
+    /// Selected SSH address.
     pub host: String,
+    pub host_id: String,
+    pub port: u16,
+    /// Host-key fingerprint the user confirmed; the connection is refused if it differs.
+    pub fingerprint: String,
+    pub username: String,
+    pub mode: InstallMode,
     pub status: InstallStatus,
-    pub messages: Vec<String>,
+    pub stage: Option<InstallStage>,
+    pub stages: Vec<InstallStage>,
+    /// Stable code from the installer allowlist or the server (never remote text).
+    pub error_code: Option<String>,
+    /// Server-vetted description of the outcome.
+    pub message: Option<String>,
+    /// Server-vetted retry guidance for the error code.
+    pub guidance: Option<String>,
+    /// Server-vetted installer notice (for example the user-service fallback).
+    pub notice: Option<String>,
+    /// Agent identity bound to or created by this job.
+    pub agent_id: Option<String>,
     pub created_at: f64,
+    pub finished_at: Option<f64>,
 }
 
 /// Generate declarations from the same types used by the Rust HTTP handlers.
@@ -352,6 +415,8 @@ pub fn typescript() -> String {
         EnrichmentStatus::decl(),
         AgentStatus::decl(),
         InstallStatus::decl(),
+        InstallStage::decl(),
+        InstallMode::decl(),
         LoginRequest::decl(),
         AuthStatus::decl(),
         OkResponse::decl(),
@@ -406,6 +471,26 @@ pub fn typescript() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ssh_request_debug_redacts_credentials() {
+        let request = SshInstallRequest {
+            target: SshTarget {
+                host_id: "h".into(),
+                address: "127.0.0.1".into(),
+                port: Some(22),
+            },
+            username: "root".into(),
+            fingerprint: "SHA256:x".into(),
+            password: Some("pw-secret-1".into()),
+            private_key: Some("key-secret-2".into()),
+            passphrase: Some("phrase-secret-3".into()),
+        };
+        let shown = format!("{request:?}");
+        for secret in ["pw-secret-1", "key-secret-2", "phrase-secret-3"] {
+            assert!(!shown.contains(secret));
+        }
+        assert!(shown.contains("[redacted]") && shown.contains("root"));
+    }
     #[test]
     fn legacy_host_defaults_new_metadata() {
         let host: Host = serde_json::from_str(r#"{"id":"host","agent_id":null,"name":"host","addresses":[],"macs":[],"network_ids":[],"last_seen":0,"last_report":null,"discovery_method":"tcp","inventory":null,"metrics":null,"collectors":[],"services":[]}"#).expect("legacy host");

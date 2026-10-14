@@ -38,6 +38,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/ssh/fingerprint", post(ssh::fingerprint))
         .route("/ssh/install", post(ssh::install))
         .route("/ssh/jobs", get(ssh::jobs))
+        .route("/ssh/jobs/{id}", get(ssh::job))
         .route("/releases", get(releases::availability))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

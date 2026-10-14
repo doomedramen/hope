@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use hope_protocol::{Capabilities, Host, InstallJob};
+use hope_protocol::{Capabilities, Host};
 use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -7,7 +7,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,7 +22,9 @@ pub struct Inner {
     pub events: broadcast::Sender<String>,
     pub writes: Mutex<()>,
     pub scans: Mutex<HashMap<String, CancellationToken>>,
-    pub installs: Mutex<HashMap<String, InstallJob>>,
+    /// Identifiers of SSH jobs whose tasks are running in this process.
+    pub installs: Mutex<HashSet<String>>,
+    pub ssh_limits: std::sync::Mutex<crate::ssh::Limits>,
     pub server_url: String,
     pub secure_cookie: bool,
     pub capabilities: Capabilities,
@@ -57,6 +59,22 @@ impl State {
     ) -> Result<Self> {
         Self::open_with_scheduler(path, server_url, release_dir, capabilities, None).await
     }
+    /// Like `open`, with an explicit custom CA path for agents instead of `HOPE_AGENT_CA`.
+    pub async fn open_with_agent_ca(
+        path: &str,
+        server_url: String,
+        release_dir: String,
+        capabilities: Capabilities,
+        agent_ca: Option<String>,
+    ) -> Result<Self> {
+        let state =
+            Self::open_with_scheduler(path, server_url, release_dir, capabilities, None).await?;
+        // Nothing else holds the state yet, so the override is applied before sharing.
+        let mut inner =
+            Arc::try_unwrap(state.0).map_err(|_| anyhow::anyhow!("state already shared"))?;
+        inner.enrollment_ca = agent_ca.filter(|s| !s.trim().is_empty());
+        Ok(Self(Arc::new(inner)))
+    }
     pub(crate) async fn open_with_scheduler(
         path: &str,
         server_url: String,
@@ -76,6 +94,8 @@ impl State {
         crate::migrations::run(&db).await?;
         sqlx::query("UPDATE scans SET status='interrupted', finished_at=?, error='Server restarted; start a new scan' WHERE status IN ('queued','running')")
             .bind(now()).execute(&db).await?;
+        sqlx::query("UPDATE install_jobs SET status='interrupted', finished_at=?, error_code='SERVER_RESTARTED', message=? WHERE status='running'")
+            .bind(now()).bind(crate::ssh::SERVER_RESTARTED_MESSAGE).execute(&db).await?;
         let (events, _) = broadcast::channel(256);
         let scheduler =
             scheduler.unwrap_or_else(|| crate::scanner::Scheduler::native(capabilities.arp));
@@ -91,7 +111,8 @@ impl State {
             events,
             writes: Mutex::new(()),
             scans: Mutex::new(HashMap::new()),
-            installs: Mutex::new(HashMap::new()),
+            installs: Mutex::new(HashSet::new()),
+            ssh_limits: std::sync::Mutex::new(crate::ssh::Limits::default()),
             secure_cookie: server_url.starts_with("https://"),
             server_url,
             capabilities,

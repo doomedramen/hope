@@ -1035,6 +1035,7 @@ dependencies = [
  "hope-protocol",
  "http-body-util",
  "ipnet",
+ "log",
  "pnet_datalink",
  "rand 0.8.8",
  "russh",
@@ -1051,9 +1052,11 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

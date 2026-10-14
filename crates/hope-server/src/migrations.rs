@@ -10,8 +10,9 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
     let migrations = [
         (1, include_str!("schema.sql")),
         (2, include_str!("migrations/0002_statistics_and_reset.sql")),
+        (3, include_str!("migrations/0003_install_jobs.sql")),
     ];
-    ensure!(version <= 2, "Database version is newer than this server");
+    ensure!(version <= 3, "Database version is newer than this server");
     for (target, source) in migrations {
         if version < target {
             sqlx::raw_sql(source).execute(&mut *tx).await?;

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Copy, Check, KeyRound } from "lucide-react";
 import {
   Dialog,
@@ -9,6 +9,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -34,6 +35,8 @@ import type {
   FingerprintResponse,
   Host,
   InstallJob,
+  InstallStage,
+  InstallStatus,
 } from "@/lib/protocol";
 import { api, post } from "@/lib/api";
 
@@ -202,6 +205,121 @@ export function InstallDialog({
   );
 }
 
+const STAGE_LABELS: Record<InstallStage, string> = {
+  connecting: "Connecting to the verified host key",
+  authenticating: "Authenticating",
+  preflight: "Checking the host",
+  recover: "Recovering an interrupted install",
+  uninstall: "Removing the agent",
+  stage: "Downloading the agent",
+  verify: "Verifying the signature",
+  stop: "Stopping the previous service",
+  place_binary: "Installing the agent binary",
+  configure: "Configuring and enrolling",
+  write_unit: "Writing the service definition",
+  activate: "Starting the service",
+  wait_report: "Installer waiting for the first report",
+  rollback: "Restoring the previous installation",
+  complete: "Installer finished",
+  confirming_report: "Waiting for the server to accept a report",
+};
+const STATUS_LABELS: Record<InstallStatus, string> = {
+  running: "Running",
+  completed: "Completed",
+  failed: "Failed",
+  interrupted: "Interrupted",
+  uncertain: "Remote state unknown",
+};
+function statusVariant(status: InstallStatus) {
+  if (status === "completed") return "secondary" as const;
+  if (status === "running") return "outline" as const;
+  return "destructive" as const;
+}
+
+function JobView({
+  job,
+  onRetry,
+  onBack,
+}: {
+  job: InstallJob;
+  onRetry: () => void;
+  onBack: () => void;
+}) {
+  const needsGuidance = job.status !== "running" && job.status !== "completed";
+  return (
+    <div className="flex flex-col gap-3" data-testid="ssh-job">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="font-medium">
+          {job.mode === "reinstall" ? "Reinstall" : "Install"} on {job.host}:
+          {job.port}
+        </h3>
+        <Badge variant={statusVariant(job.status)}>
+          {STATUS_LABELS[job.status]}
+        </Badge>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {job.username}@{job.host} · started{" "}
+        {new Date(job.created_at * 1000).toLocaleString()}
+        {job.error_code && <> · code {job.error_code}</>}
+      </p>
+      <ol
+        className="flex list-decimal flex-col gap-1 pl-5 text-sm"
+        aria-label="Installation stages"
+      >
+        {job.stages.map((stage) => (
+          <li
+            key={stage}
+            aria-current={
+              job.status === "running" && stage === job.stage
+                ? "step"
+                : undefined
+            }
+            className={
+              stage === job.stage && job.status === "running"
+                ? "font-medium"
+                : "text-muted-foreground"
+            }
+          >
+            {STAGE_LABELS[stage]}
+          </li>
+        ))}
+      </ol>
+      {job.notice && (
+        <Alert>
+          <AlertDescription>{job.notice}</AlertDescription>
+        </Alert>
+      )}
+      {job.message && job.status !== "running" && (
+        <Alert variant={job.status === "completed" ? "default" : "destructive"}>
+          <AlertDescription>{job.message}</AlertDescription>
+        </Alert>
+      )}
+      {needsGuidance && job.guidance && (
+        <p className="text-sm">
+          <span className="font-medium">What to do: </span>
+          {job.guidance}
+        </p>
+      )}
+      {job.status === "running" && (
+        <p className="text-xs text-muted-foreground">
+          Closing this dialog does not stop the installation. Reopen it to
+          follow progress.
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {needsGuidance && (
+          <Button variant="outline" onClick={onRetry}>
+            Retry with a new job
+          </Button>
+        )}
+        <Button variant="ghost" onClick={onBack}>
+          {job.status === "running" ? "Installation history" : "Back"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function SshInstall({ host }: { host: Host }) {
   const [address, setAddress] = useState(
     host.addresses.find((a) => !a.includes(":")) ?? host.addresses[0] ?? "",
@@ -211,34 +329,96 @@ function SshInstall({ host }: { host: Host }) {
   const [password, setPassword] = useState("");
   const [key, setKey] = useState("");
   const [passphrase, setPassphrase] = useState("");
-  const [fingerprint, setFingerprint] = useState("");
-  const [verified, setVerified] = useState(false);
+  // A fingerprint is only shown, confirmed or used for the exact address and port it was
+  // inspected for; a late response for an earlier target is therefore never applied.
+  const [inspected, setInspected] = useState<{
+    address: string;
+    port: number;
+    fingerprint: string;
+  } | null>(null);
+  const [confirmed, setConfirmed] = useState("");
   const [job, setJob] = useState<InstallJob | null>(null);
+  const [history, setHistory] = useState<InstallJob[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const target = { host_id: host.id, address, port: Number(port) };
+  const hostId = host.id;
+  const target = { host_id: hostId, address, port: Number(port) };
+  const fingerprint =
+    inspected &&
+    inspected.address === target.address &&
+    inspected.port === target.port
+      ? inspected.fingerprint
+      : "";
+  const confirmationKey = `${address}|${target.port}|${fingerprint}`;
+  const verified = fingerprint !== "" && confirmed === confirmationKey;
+  const loadHistory = useCallback(async () => {
+    try {
+      const jobs = await api<InstallJob[]>("/ssh/jobs");
+      const mine = jobs.filter((j) => j.host_id === host.id);
+      setHistory(mine);
+      return mine;
+    } catch (e) {
+      setError((e as Error).message);
+      return [];
+    }
+  }, [host.id]);
+  // Reopen a job that is still running; otherwise show the form with history.
   useEffect(() => {
-    if (!job || job.status !== "running") return;
+    let alive = true;
+    api<InstallJob[]>("/ssh/jobs")
+      .then((jobs) => {
+        if (!alive) return;
+        const mine = jobs.filter((j) => j.host_id === hostId);
+        setHistory(mine);
+        const running = mine.find((j) => j.status === "running");
+        if (running) setJob(running);
+      })
+      .catch((e) => {
+        if (alive) setError(e.message);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [hostId]);
+  const jobId = job?.id;
+  const running = job?.status === "running";
+  useEffect(() => {
+    if (!jobId || !running) return;
     const timer = setInterval(() => {
-      api<InstallJob[]>("/ssh/jobs")
-        .then((jobs) => {
-          const current = jobs.find((j) => j.id === job.id);
-          if (current) setJob(current);
+      api<InstallJob>(`/ssh/jobs/${jobId}`)
+        .then((current) => {
+          setJob(current);
+          if (current.status !== "running") void loadHistory();
         })
         .catch((e) => setError(e.message));
     }, 2000);
     return () => clearInterval(timer);
-  }, [job]);
+  }, [jobId, running, loadHistory]);
+  function retry(previous: InstallJob) {
+    // Credentials are never kept, and the host key must be inspected and confirmed again.
+    setAddress(previous.host);
+    setPort(String(previous.port));
+    setUsername(previous.username);
+    setInspected(null);
+    setConfirmed("");
+    setJob(null);
+    setError("");
+  }
   async function inspect() {
     setBusy(true);
     setError("");
-    setVerified(false);
+    setConfirmed("");
+    const requested = target;
     try {
       const result = await post<FingerprintResponse>(
         "/ssh/fingerprint",
-        target,
+        requested,
       );
-      setFingerprint(result.fingerprint);
+      setInspected({
+        address: requested.address,
+        port: requested.port,
+        fingerprint: result.fingerprint,
+      });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -276,32 +456,24 @@ function SshInstall({ host }: { host: Host }) {
         </Alert>
       )}
       {job ? (
-        <div className="flex flex-col gap-3">
-          <h3 className="font-medium">Installation {job.status}</h3>
-          <ol className="flex list-decimal flex-col gap-2 pl-5 text-sm">
-            {job.messages.map((m, i) => (
-              <li key={i}>{m}</li>
-            ))}
-          </ol>
-          {job.status === "failed" && (
-            <Button variant="outline" onClick={() => setJob(null)}>
-              Retry installation
-            </Button>
-          )}
-        </div>
+        <JobView
+          job={job}
+          onRetry={() => retry(job)}
+          onBack={() => {
+            setJob(null);
+            void loadHistory();
+          }}
+        />
       ) : (
         <>
           <FieldGroup>
             <Field>
               <FieldLabel>Host address</FieldLabel>
               <Select
+                disabled={busy}
                 value={address}
                 onValueChange={(v) => {
-                  if (v) {
-                    setAddress(v);
-                    setFingerprint("");
-                    setVerified(false);
-                  }
+                  if (v) setAddress(v);
                 }}
               >
                 <SelectTrigger className="w-full">
@@ -326,11 +498,8 @@ function SshInstall({ host }: { host: Host }) {
                 min={1}
                 max={65535}
                 value={port}
-                onChange={(e) => {
-                  setPort(e.target.value);
-                  setFingerprint("");
-                  setVerified(false);
-                }}
+                disabled={busy}
+                onChange={(e) => setPort(e.target.value)}
               />
             </Field>
           </FieldGroup>
@@ -353,7 +522,7 @@ function SshInstall({ host }: { host: Host }) {
                   className="mt-3"
                   size="sm"
                   variant={verified ? "secondary" : "outline"}
-                  onClick={() => setVerified((v) => !v)}
+                  onClick={() => setConfirmed(verified ? "" : confirmationKey)}
                 >
                   {verified
                     ? "Fingerprint verified"
@@ -419,6 +588,31 @@ function SshInstall({ host }: { host: Host }) {
           >
             Install on {host.name}
           </Button>
+          {history.length > 0 && (
+            <div className="flex flex-col gap-2" data-testid="ssh-history">
+              <h3 className="text-sm font-medium">Previous installations</h3>
+              <ul className="flex flex-col gap-1">
+                {history.map((entry) => (
+                  <li key={entry.id}>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-auto w-full justify-between gap-2 py-1.5"
+                      onClick={() => setJob(entry)}
+                    >
+                      <span className="text-left">
+                        {new Date(entry.created_at * 1000).toLocaleString()} ·{" "}
+                        {entry.username}@{entry.host}
+                      </span>
+                      <Badge variant={statusVariant(entry.status)}>
+                        {STATUS_LABELS[entry.status]}
+                      </Badge>
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </>
       )}
     </div>
