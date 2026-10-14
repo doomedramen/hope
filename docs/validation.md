@@ -34,6 +34,8 @@ Before tuning, all five directly attached runs published responders in 0.77–0.
 
 ## Gates still open
 
+This list is historical. The current consolidated state is the [Release gate status](#release-gate-status) table at the end of this file.
+
 - Discovery frame/cost measurements; completion targets passed in both controlled fixtures.
 - Remaining report/retention boundary, restart, association, and 250-host retention load checks.
 - Agent delivery fault tests and 30-minute RSS/CPU measurements.
@@ -199,3 +201,79 @@ Linux libc decision: static musl. The agent uses `reqwest` with rustls (ring); `
 - Server: no manifest means no platforms (legacy fallback removed); `key_id` must equal the SHA-256 of the PEM's SPKI DER.
 - Installer: `curl --max-filesize` on manifest (64 KiB), signatures (16 KiB) and artifact (manifest size). `release.yml`: tag pushes only, a `guard` job (tag on a commit on main, tag equals crate version), build provenance attestation. `build-agent-docker.sh` passes the host commit and chowns outputs to the invoking user (the container still runs as root to `apt-get install musl-tools`). `package-agent.sh` restricts its staging directory and no longer implies `--allow-downgrade`. `build-agent.sh` tries Rosetta only for x86_64.
 - Results (macOS): `tests/release` 13 tests, installer harness 71, `cargo test --workspace --locked` pass (releases unit tests 8, `tests/releases.rs` 3; 107 workspace tests), fmt/clippy/shellcheck/actionlint/`sh -n`/`git diff --check` clean.
+
+## Agent resource benchmarks (Ticket 11)
+
+Date 2026-10-14, base commit `d0af28e` (Rust sources clean; the new scripts and documents are uncommitted). Procedure: `scripts/bench-agent.sh` (builds `--release --locked`, then `scripts/bench-agent.py`). It starts a throwaway `hope-server` (temporary data directory, free loopback ports, empty release and web directories) behind a TLS proxy that counts bytes (private test CA, strict verification), enrolls a foreground `hope-agent run` with a temporary `HOPE_AGENT_DIR`, warms up 60 s, samples the agent once per second for 1800 s, then SIGKILLs the server for 300 s and restarts it, sampling until the spool is empty. Nothing in `./releases`, `./data` or any running server is touched.
+
+Method and its limits (also recorded in the JSON):
+
+- CPU is the agent's user plus system time from the OS (`proc_pid_rusage`), divided by wall time; waited collector children are reported separately and included in the headline figure. The timebase conversion was checked against a 2 s busy loop (2.02 s read).
+- Memory is the agent's resident set (RSS) once per second. On macOS RSS includes shared library pages; the physical footprint (private memory) is reported next to it. Child RSS is sampled only once per second, so short-lived collector children are mostly missed (the peak sampled child RSS was 0 during measurement).
+- Sampler overhead is this script's own CPU, reported separately (0.025% of one core). The proxy and server are separate processes and are charged to neither.
+- Bytes are plaintext HTTP bytes counted after TLS termination: TLS handshake and record overhead are **not** included. The agent itself performs the TLS work, so its CPU/RSS include it. Everything is on loopback; network latency effects are absent.
+- Per-report byte figures are approximate: the proxy counts `POST /api/v1/agent/report` occurrences in read chunks (a request line split across two reads would be missed) and counts retried attempts as requests, and the byte totals include HTTP headers and keep-alive reuse. Totals per window are exact for the bytes seen; only the per-request division is approximate.
+- `--recovery-max` (default 300 s) bounds how long the script waits for the spool to empty. The agent's backoff can reach 900 s after repeated failures, so a longer outage may exceed the wait: the JSON then records `spool_drained: false` rather than a recovery time. The 300 s outage here recovered in 148 s.
+- Collector duration distribution comes from `hope-agent benchmark 120` in a separate process before the window.
+- The binary measured is the plain `cargo build --release` output of this tree, not the signed `aarch64-apple-darwin` artifact built with `MACOSX_DEPLOYMENT_TARGET=11.0`.
+
+### macOS arm64 result
+
+Machine: Apple M4 Pro (12 logical CPUs, 24 GiB), macOS 27.0.1 (26A434), Rust 1.96.0. Agent SHA-256 `2d0f2e98b98ee8c268f3ed2662d50f6cc012d167f565b90e80cbbfe2041c0d04`, `hope-agent 0.1.0`. Raw data, per-second samples and the exact method: [agent-macos-arm64-apple-m4-pro.json](benchmarks/agent-macos-arm64-apple-m4-pro.json).
+
+| Metric (1800 s steady window after 60 s warmup) | Result | Target | Verdict |
+| --- | --- | --- | --- |
+| RSS median / p95 / peak | 14.20 MB / 14.34 MB / 14.39 MB (13.5 / 13.7 / 13.7 MiB) | below 30 MB | Pass |
+| Physical footprint median / peak | 5.28 MB / 5.46 MB | informational | |
+| CPU, agent only | 0.140% of one core (2.52 CPU-s in 1800 s) | below 0.5% | Pass |
+| CPU, including waited collector children | 0.146% of one core | below 0.5% | Pass |
+| Sampler overhead (separate) | 0.025% of one core | n/a | |
+| Application bytes per report (client to server / server to client) | 5,230 / 644 | informational | |
+| Application bytes per hour (both directions, extrapolated from 60 reports) | 705 kB | informational | |
+
+Warmup window (includes startup, enrollment follow-up, the one-off GPU inventory probe): 0.63% of one core including children, RSS 13.5 MB. This window is not part of the headline figure.
+
+Collector costs (120 samples, one process, `hope-agent benchmark`): whole collection median 29.5 ms, p95 63.3 ms, max 385 ms. The dominant recurring cost is `filesystems` (median 25.8 ms, p95 54.3 ms, max 89.8 ms), about 88% of a sample; `gateway` median 2.0 ms and `network_refresh` 1.4 ms follow; CPU, memory, network counters and `inventory` (the per-sample inventory rebuild, which includes the change check input) are each below 0.6 ms at p95. `gpu_inventory` runs once per hour through a child process (`system_profiler`): 289 ms in the one sample where it ran, and it is the cause of the 385 ms maximum and of the extra warmup CPU. If the CPU target were ever missed, `filesystems` is the first place to look; it is not close to being missed here.
+
+GPU: macOS exposes inventory only (name `Apple M4 Pro`); `gpu_metrics` is reported unavailable (`GPU driver metrics are unavailable; inventory remains visible`) and `disk_io` is reported unavailable on this platform. No supported GPU collector backend was available on this machine, so "with and without GPU collectors" could not be compared; the figures above are for a machine where GPU metrics are unavailable.
+
+Disconnected-server phase (server SIGKILLed for 300 s, then restarted):
+
+| Observation | Result |
+| --- | --- |
+| Agent kept sampling and stayed up | Yes (same process, no restart) |
+| RSS median during outage vs steady median | 13.06 MB vs 14.20 MB (no growth); physical footprint 5.75 MB vs 5.28 MB (+0.47 MB) |
+| CPU during outage | 0.126% of one core including children |
+| Spool at peak | 15 reports, 77,524 bytes (limits are 120 reports, 4 MiB, 1 h; the limits are exercised by unit tests, not by this outage length) |
+| Connection attempts during the 300 s outage | 3 (exponential backoff of 60 s, 120 s, ... plus jitter) |
+| Recovery after restart | First accepted report and empty spool 148 s after the server was back, all 15 reports delivered; 0.19% of one core during recovery |
+
+Recovery time is therefore dominated by the agent's backoff timer (it grows to 900 s after repeated failures), not by the server's startup. This is by design; it is noted here because an operator restarting a server after a long outage should expect agents to reconnect over the following minutes.
+
+Not measured: Linux ARM64, macOS x86_64, GPU-collector comparison, the musl Linux artifact, and the server's own resource use. The Linux x86_64 LXC result earlier in this file remains the only Linux figure and predates the transactional installer.
+
+## Documentation checks (Ticket 11)
+
+| Command | Environment | Date | Base | Result |
+| --- | --- | --- | --- | --- |
+| `python3 -I -m unittest discover -s tests/docs` | macOS | 2026-10-14 | d0af28e | Pass, 6 tests: every `fail`/`err` code in `scripts/install-agent.sh` and every code in the `ssh.rs` catalog has a row in `docs/operations.md` (checked to fail when a row is removed), no stale rows, README/docs relative links and anchors resolve |
+| `python3 -I -m unittest discover -s tests/installer` | macOS | 2026-10-14 | d0af28e | Pass, 71 tests (unchanged) |
+| `python3 -I -m unittest discover -s tests/release` | macOS | 2026-10-14 | d0af28e | Pass, 13 tests |
+| `sh -n scripts/*.sh`; `shellcheck -s sh scripts/*.sh` (includes new `bench-agent.sh`) | macOS | 2026-10-14 | d0af28e | Pass |
+| `scripts/bench-agent.sh` smoke run (5 s warmup, 70 s measure, 40 s outage) before the full run | macOS | 2026-10-14 | d0af28e | Pass; full run above |
+| `git diff --check` | macOS | 2026-10-14 | d0af28e | Pass |
+| `cargo fmt`, Clippy, `cargo test` | n/a | 2026-10-14 | d0af28e | Not rerun: no Rust or web source changed in this ticket |
+
+## Release gate status
+
+A release is complete only when all five product stages are evidenced. **Status today: not complete.** Verified means evidenced by a command and result recorded in this file; unverified means no real-environment evidence exists, whatever local tests say.
+
+| # | Stage | Verified (evidence) | Unverified |
+| --- | --- | --- | --- |
+| 1 | Discovery and hosts | Fair concurrent scanning, cancellation, enrichment and ARP frame validation tests; Linux ARM64 fixtures, five runs per mode in Ticket 03 ([routed](benchmarks/discovery-routed.json), [on-link](benchmarks/discovery-on-link.json)) and one run each in Ticket 09 (see [Operational hardening](#operational-hardening-ticket-09--2026-10-14)); capabilities banner on Docker Desktop mode | Physical LAN with `network_mode: host` and ARP; Docker Engine on a physical Linux host; Docker Desktop on Windows; absolute frame counts; Ticket 09's five-run protocol |
+| 2 | Map modes | 10 Chromium tests: modes, drag persistence per mode, manual links, filters, selection across map/list, session expiry, history gaps; screenshots inspected ([Console/map/history](#consolemaphistory-milestone--2026-10-09), [Ticket 09](#operational-hardening-ticket-09--2026-10-14)) | Real discovery data on the map (tests use synthetic inventory) |
+| 3 | Agent and history | 250-host retention load ([Retention](#retention-and-association--2026-10-09)); delivery fault tests ([Agent delivery](#agent-delivery-milestone--2026-10-09)); [Linux x86_64 LXC measurement](benchmarks/agent-linux-x86_64-lxc.json); [macOS arm64 measurement and outage test](#agent-resource-benchmarks-ticket-11) (targets met) | Installed service reports on any OS through the production installer; Linux ARM64 and macOS x86_64 measurements; GPU-collector comparison; musl artifact measurement |
+| 4 | Manual installation | Transactional installer with rollback: 71 harness tests with stubbed service managers and real signatures ([Ticket 07 notes](IMPLEMENTATION_HANDOFF.md#ticket-07-installer-rewrite-and-harness)); signed manifest verification ([Ticket 10](#signed-release-matrix-and-ci-ticket-10--2026-10-14)) | **Every cell of the real install/upgrade/rollback/uninstall matrix** (systemd and launchd, system and user mode, default and custom CA, four platforms): requires disposable hosts and authorization |
+| 5 | SSH and release hardening | In-process SSH server suite (host-key binding, progress grammar, timeouts, secrecy); four artifacts built, signed, assembled and verified with a throwaway key; headers, limits, shutdown, backup tests ([Ticket 09](#operational-hardening-ticket-09--2026-10-14)); `actionlint` clean workflows | Real `sshd` behavior; GitHub workflows have never run (runner labels, SHA pinning, `release` environment, signing secret); a production signing key does not exist; real reverse proxy; `rsa` advisory RUSTSEC-2023-0071 open |
+
+Documentation and benchmark deliverables of Ticket 11 are complete; they add no stage verification beyond stage 3's macOS measurement. Licensing: no `LICENSE` file exists and the owner has not decided one (see README).

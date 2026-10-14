@@ -1,4 +1,4 @@
-.PHONY: check build run types test installer-tests release-tests shell-checks
+.PHONY: check build run types test installer-tests release-tests docs-tests bench-agent shell-checks
 types:
 	./scripts/generate-types.sh
 check:
@@ -12,6 +12,10 @@ shell-checks:
 installer-tests:
 	for f in scripts/*.sh; do sh -n $$f || exit 1; done
 	python3 -I -m unittest discover -s tests/installer -v
+docs-tests:
+	python3 -I -m unittest discover -s tests/docs -v
+bench-agent:
+	./scripts/bench-agent.sh
 release-tests:
 	python3 -I -m unittest discover -s tests/release -v
 build: types

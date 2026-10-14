@@ -1,6 +1,163 @@
-# Operations notes
+# Operations
 
-Full operator documentation is tracked separately (Ticket 11). This file records the operational behavior that is already implemented and tested: shutdown, backup/restore, response headers, and request limits.
+Operator guide for H.O.P.E. It documents behavior that is implemented and tested in this repository; where a deployment path has not been exercised, the text says so. The evidence behind each claim is in [validation.md](validation.md), and the design is in [architecture.md](architecture.md). Release status: pre-release, see the gate table in `validation.md`.
+
+Contents: [Installing the server](#installing-the-server), [Canonical URL and reverse proxy](#canonical-url-and-reverse-proxy), [First-run setup](#first-run-setup), [Custom CA](#custom-ca-server-agent-and-ssh-destination), [Discovery](#discovery-initial-scans-and-monitoring), [Capability limits](#capability-limitations), [Probe traffic](#probe-traffic), [Identity reconciliation](#identity-reconciliation), [Installing agents](#installing-agents), [Upgrade, rollback, uninstall](#agent-upgrade-rollback-and-uninstall), [Revocation](#revocation), [Shutdown](#shutdown), [Backup and restore](#backup-and-restore), [Headers](#response-headers), [Limits and proxies](#request-limits-and-reverse-proxies), [Signed releases](#signed-agent-releases), [Troubleshooting by error code](#troubleshooting-by-error-code).
+
+## Installing the server
+
+The supported server deployment is the Docker image on a **Linux host with host networking**, because layer-2 discovery (ARP, MAC addresses) needs to see the LAN.
+
+```sh
+cp .env.example .env            # set HOPE_SERVER_URL to your public https:// origin
+docker compose up -d --build    # compose.yaml: network_mode: host, cap_drop ALL + NET_RAW, read-only root
+docker compose logs hope | grep 'setup token'
+```
+
+`compose.desktop.yaml` is for Docker Desktop (macOS/Windows): it publishes `127.0.0.1:8080` and runs `HOPE_DISCOVERY_MODE=limited`, which reports reduced capabilities (no ARP/MAC/physical topology, probes only reach what the container network routes). Use it to try the console, not for discovery of a real LAN.
+
+Without Docker: `make build` (type generation, static web export, `cargo build --release --locked --workspace`), then run `target/release/hope-server` from the repository root (it serves `web/out`). The binary needs `CAP_NET_RAW` for ICMP and ARP (on Linux `setcap cap_net_raw=ep`; the image does this), otherwise TCP probing remains and the console shows the limitation.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HOPE_SERVER_URL` | `http://localhost:8080` | Canonical origin (scheme and authority only, no path/query/credentials). `https` is required except for `localhost`/`127.0.0.1`/`[::1]` development |
+| `HOPE_BIND` | `127.0.0.1:8080` (image: `0.0.0.0:8080`) | Listen address. `compose.yaml` and `.env.example` default it to `127.0.0.1:8080`, overriding the image's `0.0.0.0`, so a same-host proxy is trusted automatically in the documented host-network setup; `compose.desktop.yaml` keeps the image's `0.0.0.0` (published only on host loopback), so there nothing is trusted unless `HOPE_TRUSTED_PROXIES` is set; any other bind also needs it |
+| `HOPE_DATA_DIR` | `data` (image: `/var/lib/hope`) | Holds `hope.db` |
+| `HOPE_WEB_DIR` | `web/out` (image: `/opt/hope/web`) | Static console export served by the Rust server |
+| `HOPE_RELEASE_DIR` | `releases` (image: `/opt/hope/releases`) | Signed agent releases, see [Signed agent releases](#signed-agent-releases) |
+| `HOPE_SETUP_TOKEN` | random, printed at start | First-run token (at least 24 characters) |
+| `HOPE_DISCOVERY_MODE` | `native` on Linux, `limited` elsewhere | `limited` disables ARP |
+| `HOPE_AGENT_CA` | empty | Path **on agent hosts** of a private CA, embedded in install commands (see below) |
+| `HOPE_RESET_CREDENTIAL` | unset | Agent/installer: `1` makes `enroll`/`configure` replace the credential (requires an enrollment token; the console sets it for revoked agents) |
+| `HOPE_SIGNING_KEY` | none | `assemble-release.sh` / `package-agent.sh`: RSA private key outside the repository |
+| `HOPE_STAGING_DIR` | `dist/agents-dev` | `package-agent.sh` staging directory; must be under `./dist` or the temp directory |
+| `HOPE_TRUSTED_PROXIES` | empty | Reverse proxies whose `X-Forwarded-For` is believed |
+| `RUST_LOG` | `hope_server=info` | Log filter |
+
+Capacity: up to 250 agent identities (enrollment beyond that is refused) and one administrator.
+
+## Canonical URL and reverse proxy
+
+The server does not terminate TLS. Put it behind an existing HTTPS reverse proxy and set `HOPE_SERVER_URL` to the exact public origin users and agents will use, for example `https://hope.example.com`. This single value is used for:
+
+- the origin check on state-changing requests (a mismatching `Origin` is rejected with 403),
+- the `Secure` cookie flag and HSTS (only when the scheme is `https`),
+- the install commands shown in the console and sent over SSH (the installer refuses `http://`, `INSECURE_URL`).
+
+Proxy requirements: forward `Host` and `Origin` unchanged, pass `X-Forwarded-For`, do not buffer or time out the `/api/v1/events` server-sent-event stream (the console also polls every 15 s as a fallback), and do not override the response headers. Set `HOPE_TRUSTED_PROXIES` to the proxy's address as the server sees it (see [Request limits](#request-limits-and-reverse-proxies)); with the default loopback bind and a same-host proxy this is automatic.
+
+A minimal Caddy site, `hope.example.com { reverse_proxy 127.0.0.1:8080 }`, is the intended shape. **No real Caddy, nginx or Traefik instance has been tested against H.O.P.E.**; the HTTPS path was validated only with the Python test proxy in `tests/agent/https_proxy.py` (see `validation.md`, "Unverified or limited").
+
+## First-run setup
+
+While no administrator exists, every start prints `H.O.P.E first-run setup token: <token>` to standard error (`docker compose logs hope`). A new random token is generated on each start unless `HOPE_SETUP_TOKEN` is set; only its SHA-256 is stored. The console asks for this token plus a password of 12 to 256 characters (hashed with Argon2). Failed attempts are rate limited per client. Setup can run only once.
+
+There is no password-reset command. If the password is lost, restore a database backup taken when the password was known, or accept re-creating the database (which discards all history and enrollments). Sessions last 24 hours (`hope_session` cookie, `HttpOnly`, `SameSite=Strict`).
+
+## Custom CA: server, agent and SSH destination
+
+Agents and the installer always verify the server's certificate; there is no insecure mode. If the proxy certificate is issued by a private CA, the CA is needed in different places for different parties:
+
+| Party | Needs the CA? | Where |
+| --- | --- | --- |
+| `hope-server` | No. It serves plain HTTP behind the proxy and has no TLS client | None |
+| Reverse proxy | Holds its own certificate and key | Proxy configuration |
+| Agent hosts (manual install) | Yes | A PEM file at the same path on every host, set as `HOPE_AGENT_CA` on the **server**; the generated command passes it as `curl --cacert PATH` and `HOPE_CA_CERT=PATH`. The agent reads the file once at enrollment and stores the PEM in its own configuration |
+| SSH destination | Yes, the same path | The server does **not** copy the file. If it is missing the job fails with `CA_UNREADABLE` |
+| Browsers | Normal trust store | Not H.O.P.E specific |
+
+The bundle must contain valid PEM certificates and be at most 64 KiB. Replacing the CA on an enrolled agent means re-running the installer (`upgrade`) or `hope-agent configure` with `HOPE_CA_CERT` set; the installer's configure step passes it through, but this replacement was not separately validated on a real host.
+
+## Discovery: initial scans and monitoring
+
+Adding a range (IPv4 CIDR, `/20` or smaller: a shorter prefix such as `/16` is rejected, so add several `/20`-or-smaller ranges instead) starts a scan. A range's `enabled` flag controls **monitoring**: every 300 seconds the server starts a new scan of each enabled range (the first monitoring pass runs 300 s after start). Disabled ranges are scanned only when you press scan. A range with an active scan is never queued twice.
+
+All ranges share one scheduler: up to 64 concurrent host probes, taken round-robin per range so a silent range does not delay a responsive one, plus an independent bounded enrichment queue (eight workers) for service and name lookup. Scans can be cancelled and show progress. A host that does not answer is **not** declared offline; discovery only records what it observed and when.
+
+Measured completion on the Linux fixtures (two `/24`s, one HTTP responder each, one run per mode in Ticket 09, five in Ticket 03): first responder in 0.77 to 0.82 s, both ranges complete in 25.397 to 25.437 s (second range routed) and 26.392 to 26.464 s (both on-link). Raw data: [discovery-routed.json](benchmarks/discovery-routed.json), [discovery-on-link.json](benchmarks/discovery-on-link.json). These numbers come from OrbStack bridges on one Mac, not a physical LAN; no timing is claimed for real networks.
+
+## Capability limitations
+
+The console shows these as a banner when they apply.
+
+| Limitation | Effect |
+| --- | --- |
+| Docker Desktop / `HOPE_DISCOVERY_MODE=limited` | No ARP, no MAC addresses, no physical topology; only routable probing from inside the container network |
+| macOS server host | `limited` by default (ARP is Linux-only) |
+| No `CAP_NET_RAW` or ICMP socket access | No ICMP ping; TCP probing continues (a refused connection still proves a host is alive) |
+| ARP applies to on-link subnets only | Routed ranges get ICMP/TCP only; MAC addresses are unknown for them |
+| Agents | Report only their own machine, never remote networks. CPU, memory, network and filesystem metrics are collected on Linux and macOS; GPU utilisation, memory and temperature are unavailable unless a native interface exposes them (not on macOS Apple GPUs: inventory only), and disk I/O counters are unavailable on some platforms. Unavailable values are shown as unavailable, never as zero |
+| Map | Links are labelled observed, inferred or manual. Physical switch connections are never invented |
+| Platforms | Linux and macOS agents only; Windows, distributed discovery, switch integrations, notifications and multiple accounts are out of scope |
+
+## Probe traffic
+
+For each address in a scanned range the server may send: one ICMP echo request (payload `HOPE`, 750 ms deadline), TCP connection attempts to ports 22, 80 and 443 (750 ms deadline each; connect-only, no payload), and, for on-link addresses on Linux with ARP enabled, one ARP request (250 ms deadline). Hosts that answer then get an enrichment pass: TCP connects to ports 22, 80, 443, 445, 3389 and 8080, and one reverse-DNS lookup through the system resolver (`getent hosts` / `dscacheutil`, killed at its deadline, output capped). A per-host budget of six seconds applies. No UDP scanning, banner grabbing or authentication attempts happen.
+
+Probe starts are limited to 200 per second shared by all ranges, with at most 64 sockets in flight. This limits scheduled probe operations, not frames: TCP handshakes, retransmitted SYNs and kernel neighbour resolution produce extra packets, and **no absolute packet-rate or per-scan frame count has been measured**. Only scan networks you are authorised to probe.
+
+Agent traffic is one HTTPS `POST /api/v1/agent/report` about every 30 seconds (28 to 32 s jitter) with a Bearer credential; inventory is attached on enrollment, when it changes, and at least hourly. Measured on macOS arm64 over 30 minutes (application bytes, TLS overhead excluded): about 5.2 kB up and 0.64 kB down per report, roughly 0.7 MB per hour per agent; agent resident memory 14 MB (physical footprint 5 MB) and 0.15% of one core. Evidence: [agent-macos-arm64-apple-m4-pro.json](benchmarks/agent-macos-arm64-apple-m4-pro.json), summary in [validation.md](validation.md#agent-resource-benchmarks-ticket-11). If the server is unreachable, an agent queues reports on disk (bounded to 120 reports, 4 MiB, one hour) and retries with exponential backoff up to 15 minutes, so reconnection after a long outage can take minutes (measured: 148 s after a 300 s outage).
+
+## Identity reconciliation
+
+A discovered host (observed by address/MAC) and an enrolled agent are joined as follows:
+
+- At enrollment the agent's interface MAC addresses are compared with **unassigned** discovered hosts. Exactly one match: the agent takes over that host record and its history. Zero or several matches: a new host is created; IP address alone is never used because DHCP may have reassigned it.
+- Repeated discovery of an ambiguous MAC does not create more duplicates.
+- If two records are the same machine, merge them in the console (host details, merge). The merge keeps history and removes the source's map positions in every map mode.
+- A revoked identity keeps its host and history. Reinstalling with an administrator-issued, identity-bound token (the console offers this for revoked agents) replaces only its credential; the old credential stays rejected.
+- Agent identity (UUID) is created by the agent at first enrollment and kept in its state directory. A host reinstalled with a wiped state directory enrolls as a new identity and must be merged by hand.
+
+## Installing agents
+
+Agents are installed from the console (a command that fetches the server-embedded installer over HTTPS) or through an SSH job started from the console.
+
+Manual command (copy from the console; the token lasts 15 minutes, is single use and is stored only hashed):
+
+```sh
+( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f "$installer"' EXIT
+  curl --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https' \
+    https://hope.example.com/agent/install -o "$installer" \
+  && HOPE_SERVER=https://hope.example.com HOPE_ENROLLMENT_TOKEN=... sh "$installer" )
+```
+
+The installer runs the phases `preflight`, `stage`, `verify`, then a journaled transaction (`stop`, `place-binary`, `configure`, `write-unit`, `activate`, `wait-report`) and `complete`, printing `hope-install: phase=NAME` and `hope-install: error=CODE message` on standard error. Success is declared only after the installed service's own accepted report is seen (exact process and activation identifier), by default within 120 s (`HOPE_FIRST_REPORT_TIMEOUT`). It verifies the signed manifest, the artifact size, SHA-256 and signature, and the binary's version before touching the existing service.
+
+Installer modes (`HOPE_INSTALL_MODE=auto|user|system`, default `auto`): as root, or with passwordless sudo, a system service is installed; otherwise a user service. Mixed existing installs are refused (`EXISTING_INSTALL_MODE`).
+
+| | Linux system | Linux user | macOS system | macOS user |
+| --- | --- | --- | --- | --- |
+| Binary | `/usr/local/bin/hope-agent` | `~/.local/bin/hope-agent` | `/usr/local/bin/hope-agent` | `~/.local/bin/hope-agent` |
+| State and credential | `/var/lib/hope-agent` | `~/.local/state/hope-agent` | `/var/lib/hope-agent` | `~/.local/state/hope-agent` |
+| Service definition | `/etc/systemd/system/hope-agent.service` | `~/.config/systemd/user/hope-agent.service` | `/Library/LaunchDaemons/io.hope.agent.plist` | `~/Library/LaunchAgents/io.hope.agent.plist` |
+
+System services run as the dedicated no-login account `hope-agent` (Linux) or `_hopeagent` (macOS); the systemd unit adds `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp` and an empty capability set. User services stop at logout on Linux unless an administrator runs `loginctl enable-linger USER`, and a macOS LaunchAgent runs only during that user's GUI session. A noexec `TMPDIR` is reported as `BINARY_NOT_EXECUTABLE`, not worked around.
+
+SSH jobs: the console first reads the host key fingerprint **without authenticating**; you must confirm it. The job is bound to the confirmed key (a different key aborts before any credential is sent, `HOST_KEY_MISMATCH`), runs the same command through `sh -s`, uses only non-interactive `sudo -n`, and parses only the known progress grammar. Passwords and keys are not stored. Default limits: connect 15 s, inactivity 5 minutes, total 20 minutes, first report 2 minutes; output beyond 1 MiB ends the job. Outcomes are `completed`, `failed` (meaning known), `uncertain` (the remote state could not be determined: inspect the host) or `interrupted` (server restarted). History keeps 100 jobs or 30 days, with at most four running at once.
+
+**Verification status of installation:** the installer is tested with stubbed service managers (71 harness tests) and the SSH path against an in-process SSH server. A real systemd/launchd installation matrix with the signed artifacts has **not** been run for any cell; one hand-built service on a Debian 13 x86_64 LXC was run in earlier tickets (not through the production installer). See the gate table in `validation.md`.
+
+## Agent upgrade, rollback and uninstall
+
+Fetch the installer from the server (as above) and run it with an operation argument:
+
+```sh
+HOPE_SERVER=https://hope.example.com sh installer upgrade      # existing identity is kept; no token needed
+sh installer uninstall                                          # service and binary removed, identity kept
+HOPE_PURGE_IDENTITY=1 sh installer uninstall                    # also deletes the enrolled identity and spool
+```
+
+`upgrade` requires an existing installation (`NOT_INSTALLED` otherwise). It refuses a release older than the installed agent (`DOWNGRADE_REFUSED`; override with `HOPE_ALLOW_DOWNGRADE=1` on the host). Everything from `stop` onward is journaled: on any failure, signal or leftover transaction from an interrupted run, the previous binary, service definition and settings are restored and the previous service is restarted (`ROLLED_BACK`; if restoration itself fails, `ROLLBACK_INCOMPLETE` and the backup is kept for the next run). The enrolled credential is never discarded by a rollback. Signals are handled only after the current foreground command (for example a slow download) returns.
+
+Uninstall does not revoke the agent. Revoke it in the console too (otherwise the credential remains valid). `HOPE_PURGE_IDENTITY=1` deletes only known agent files; created service accounts are kept. Reinstalling after a purge creates a new identity.
+
+Server upgrade: back up (below), pull or rebuild the image, `docker compose up -d`. Migrations run forward on open; a database from a newer server is refused rather than modified. There is no downgrade migration: roll the server back by restoring the pre-upgrade backup with the older image.
+
+Agent release rollback (publishing an older signed release) is described under [Publishing](#publishing).
+
+## Revocation
+
+In the console, open the host and choose **Revoke credential**. The agent's credential hash is marked revoked in the same transaction as the host flag; a report already queued behind the write lock cannot commit after revocation. A revoked agent's reports are rejected and it exits with status 0, so systemd `Restart=on-failure` does not restart it; its history stays. To reconnect it, issue the identity-bound reset token from the console and reinstall. Signing-key compromise is a separate event, see [Rotation and revocation](#rotation-and-revocation).
 
 ## Shutdown
 
@@ -11,7 +168,7 @@ Full operator documentation is tracked separately (Ticket 11). This file records
 3. waits for connections to drain, then persists unfinished work: scans become `interrupted`, SSH jobs become `interrupted` with code `SERVER_RESTARTED` (the remote host may be partly installed; inspect it before retrying);
 4. checkpoints and truncates the SQLite write-ahead log and closes the database.
 
-The internal deadline is 8 seconds from the signal, inside Docker's default 10 second stop grace period. If connections do not close in time the server logs a warning and exits anyway; unfinished rows are still marked interrupted. A hard kill (SIGKILL, power loss) skips this; the next start marks any `queued`/`running` scans and jobs as interrupted, so no state is left claiming to run.
+The internal deadline is 8 seconds from the signal, inside the compose stop grace periods (`compose.yaml`: 15 s; `compose.desktop.yaml`: 10 s, also Docker's default). If connections do not close in time the server logs a warning and exits anyway; unfinished rows are still marked interrupted. A hard kill (SIGKILL, power loss) skips this; the next start marks any `queued`/`running` scans and jobs as interrupted, so no state is left claiming to run.
 
 ## Backup and restore
 
@@ -36,14 +193,21 @@ Restore:
 3. Ensure the file is owned by the service user (uid 10001 in the image).
 4. Start the server. Migrations run on open; a backup from a newer server version is refused rather than modified.
 
-In Docker the data lives in the `hope-data` volume; for example, with the server stopped:
+In Docker the data lives in the `hope-data` volume (its real name is prefixed with the compose project name; find it with `docker volume ls`). With the server stopped:
 
 ```sh
+docker volume ls   # the volume is named <compose-project>_hope-data, e.g. hope_hope-data
 docker run --rm -v hope_hope-data:/data -v "$PWD":/backup debian:bookworm-slim \
   sh -c 'rm -f /data/hope.db-wal /data/hope.db-shm && cp /backup/backup.db /data/hope.db && chown 10001:10001 /data/hope.db'
 ```
 
-Agents keep reporting with their existing credentials after a restore; reports newer than the backup are simply absent from history.
+**What a restore does to agents.** The database holds agent credential hashes and revocation flags as of the backup, and an agent that receives a 401 or 403 on a report concludes it is revoked, exits with status 0 and stays down. Therefore:
+
+- Agents enrolled **after** the backup are unknown to the restored server; their reports are rejected and they stop. Re-enroll each one with a new enrollment token (run the installer again with `HOPE_RESET_CREDENTIAL=1`, which makes the agent replace its credential and enroll again under the same identity). This path is implemented in the agent but has not been rehearsed after a real restore.
+- Credentials revoked **after** the backup are valid again. Re-revoke them in the console immediately after restoring.
+- Reports newer than the backup are absent from history; spooled reports on agents that survive are delivered.
+
+Take backups often (for example daily, and before every upgrade). Restore checklist: stop the server; restore the file and delete the WAL/SHM; start; check the console; re-revoke credentials revoked since the backup; list agents that stopped reporting and re-enroll those enrolled since; confirm `/healthz` and a fresh report from one agent.
 
 ## Response headers
 
@@ -72,7 +236,7 @@ The key table holds 4096 clients. When full it drops expired entries, then the l
 
 - `HOPE_TRUSTED_PROXIES` (comma-separated addresses/CIDRs) sets the list explicitly.
 - When it is unset and `HOPE_BIND` is loopback-only (the default, and the documented same-host proxy setup), loopback (`127.0.0.0/8`, `::1`) is trusted automatically: only local processes can reach such a listener.
-- For any other bind (the Docker image binds `0.0.0.0`) nothing is trusted by default; set the variable to the proxy address as the server sees it.
+- For any other bind (the Docker image and `compose.desktop.yaml` bind `0.0.0.0`; `compose.yaml` defaults to loopback) nothing is trusted by default; set the variable to the proxy address as the server sees it.
 
 The server logs a warning once if an untrusted peer sends `X-Forwarded-For`, and once if a trusted proxy sends an unparseable hop. Without a correct trusted list all clients share one key, so ten failures from anyone would block everyone for a minute.
 
@@ -127,3 +291,68 @@ Local development: `HOPE_SIGNING_KEY=… scripts/package-agent.sh` builds this m
 ### Rotation and revocation
 
 Publishing a different public key next to old artifacts would break verification for some hosts, so the script refuses it. To rotate: `assemble-release.sh … --rotate-key` with the new key and all four artifacts (it cannot be combined with `--allow-partial`); every artifact and the manifest are signed with the new key in that run and the old release stays available as `previous`. Installers already fetched embed the old public key and will reject the new release with `MANIFEST_INVALID`; hosts must fetch `/agent/install` again from the server. Rotation does not revoke agent credentials; revoke those in the console. A compromised signing key requires rotating, restarting the server, and re-installing from freshly fetched installers; there is no automatic revocation of binaries already installed.
+
+## Troubleshooting by error code
+
+Every installer failure ends with `hope-install: error=CODE message` on the host's standard error. SSH jobs show the same codes with vetted text from a server-side catalog (remote text is never displayed or stored), and the job outcome is `failed` when the meaning is known and `uncertain` when the server cannot know what state the host is in; for `uncertain` codes always inspect the host before retrying. The table lists every code of `scripts/install-agent.sh` and of the SSH catalog in `crates/hope-server/src/ssh.rs`; `tests/docs/test_operations.py` fails if a code is added to either without a row here.
+
+Origin `installer` means the script on the host emits it (so it also appears in manual installs); `server` means only SSH jobs produce it.
+
+| Code | Origin | SSH job outcome | Meaning | Action |
+| --- | --- | --- | --- | --- |
+| `UNSUPPORTED_PLATFORM` | installer | failed | The host operating system is not supported. | Agents run on Linux and macOS. Choose a supported host. |
+| `UNSUPPORTED_ARCH` | installer | failed | The host CPU architecture is not supported. | Agents are packaged for x86_64 and ARM64 only. |
+| `NO_SERVICE_MANAGER` | installer | failed | No usable service manager was found on the host. | Use a host with running systemd (or launchd on macOS). For a user service, log in normally so a user manager exists, then retry. |
+| `SUDO_UNAVAILABLE` | installer | failed | A system installation needs root or passwordless sudo, which is unavailable. | Connect as root, allow passwordless sudo for this account, or retry as an ordinary user to get a user service. |
+| `EXISTING_INSTALL_MODE` | installer | failed | A conflicting system or user installation already exists on the host. | Remove or complete the other installation on the host, then retry. |
+| `NOT_INSTALLED` | installer | failed | No existing installation was found to operate on. | Run a fresh installation instead. |
+| `INVALID_MODE` | installer | failed | The requested installation mode is not allowed for this account. | Retry as a user that can create the intended kind of service. |
+| `INSECURE_URL` | installer | failed | The server URL is not HTTPS, which the installer requires. | Ask the administrator to configure an https:// canonical server URL, then retry. |
+| `MALFORMED_URL` | installer | failed | The server URL is not in a form the installer accepts. | Ask the administrator to correct the canonical server URL, then retry. |
+| `CA_UNREADABLE` | installer | failed | The custom CA certificate is missing or unreadable on the host. | Place the CA certificate at the configured agent CA path on the remote host, make it readable by this account, then retry. |
+| `PATH_UNWRITABLE` | installer | failed | The installer cannot write to a required location on the host. | Check permissions and symbolic links for the agent directories, or retry with a privileged account. |
+| `INVALID_SETTING` | installer | failed | An installer setting was rejected. | Retry; if it persists, ask the administrator to check the installer configuration. |
+| `USAGE` | installer | failed | The installer rejected its invocation. | Ask the administrator to check that the server and installer versions match. |
+| `RELEASE_UNAVAILABLE` | installer | failed | The server has no signed release manifest listing an agent for this host's platform. | Ask the administrator to publish a signed release (scripts/assemble-release.sh, or scripts/package-agent.sh for development) that includes this operating system and architecture, then retry. |
+| `DOWNLOAD_FAILED` | installer | failed | The host could not download from the H.O.P.E server. | Check that the host can reach the server URL over HTTPS and trusts its certificate (or custom CA), then retry. |
+| `BAD_SIGNATURE` | installer | failed | The downloaded agent failed signature verification and was not run. | Do not retry until an administrator confirms the release signing key and packages. |
+| `MANIFEST_INVALID` | installer | failed | The signed release manifest failed verification or does not match the downloaded agent, so nothing was run. | Do not retry until an administrator re-publishes the release with scripts/assemble-release.sh and confirms the signing key. |
+| `CHECKSUM_MISMATCH` | installer | failed | The downloaded agent does not match the checksum or size in the signed manifest and was not run. | Retry once in case of a damaged download; if it repeats, ask the administrator to re-publish the release. |
+| `DOWNGRADE_REFUSED` | installer | failed | The server's release is older than the agent already installed on the host. | Publish a newer release, or run the installer with HOPE_ALLOW_DOWNGRADE=1 on the host if a downgrade is intended. |
+| `BINARY_INVALID` | installer | failed | The installed agent did not run on the host. | Check that the packaged release matches the host's platform and libc, then retry. |
+| `BINARY_NOT_EXECUTABLE` | installer | failed | The host cannot execute programs from its temporary directory. | Remount the temporary directory without noexec, or give this account an executable TMPDIR, then retry. |
+| `EXISTING_IDENTITY_MISMATCH` | installer | failed | The host already runs an agent with a different identity. | Reinstall from the host record that owns that agent, or uninstall the existing agent first. |
+| `SERVICE_ACCOUNT_INVALID` | installer | failed | A pre-existing service account does not meet the installer's safety requirements. | Remove or repair the agent service account on the host, then retry. |
+| `CONFIGURE_FAILED` | installer | failed | The agent could not be configured or enrolled. | Check that the host reaches the server over HTTPS; the enrollment token lasts 15 minutes and is single use, so start a new job. |
+| `SERVICE_START_FAILED` | installer | failed | The agent service did not start on the host. | Inspect the service manager's logs on the host, then retry. |
+| `FIRST_REPORT_TIMEOUT` | installer | failed | The agent started but the server did not receive its first report in time. | Check that the host can reach the server URL, trusts its certificate or custom CA, and that its clock is correct, then retry. |
+| `INTERRUPTED` | installer | uncertain | The installer was interrupted on the host. | Inspect the host to see which installation is active before retrying. |
+| `ROLLED_BACK` | installer | failed | The installer failed and reported restoring the previous installation. | Check the host before retrying; the previous service should be active again. |
+| `ROLLBACK_INCOMPLETE` | installer | uncertain | The installer could not fully restore the previous installation. | Log in to the host and inspect or repair the agent service manually before retrying. |
+| `HOST_KEY_MISMATCH` | server | failed | The host key differs from the fingerprint you confirmed. No credentials were sent. | Inspect the host fingerprint again and verify it through a trusted channel. A changed key can mean a reinstall or an interception. |
+| `CONNECT_FAILED` | server | failed | The server could not establish an SSH session with the host. | Check the address, port and network path, then retry. |
+| `AUTH_FAILED` | server | failed | The host rejected the credentials. Nothing was installed. | Check the username and password or key, then start a new job. |
+| `KEY_INVALID` | server | failed | The private key could not be read or decrypted. No connection was made. | Check the key format and passphrase, then start a new job. |
+| `CONNECTION_LOST` | server | uncertain | The SSH connection ended before the installer reported a result. Remote state is unknown. | Inspect the host to see whether the agent was installed or the previous installation was kept, then retry. |
+| `INACTIVITY_TIMEOUT` | server | uncertain | The installer produced no output for too long. Remote state is unknown. | Inspect the host, which may still be running the installer, before retrying. |
+| `TOTAL_TIMEOUT` | server | uncertain | The installation exceeded its time limit. Remote state is unknown. | Inspect the host, which may still be running the installer, before retrying. |
+| `OUTPUT_LIMIT` | server | uncertain | The host sent more output than the server accepts, so the session was closed. Remote state is unknown. | Inspect the host before retrying. |
+| `INSTALLER_FAILED` | server | uncertain | The installer exited with an error but gave no recognized reason. Remote state is unknown. | Inspect the host, or run the manual installation command there to see the full output. |
+| `INSTALLER_INCOMPLETE` | server | uncertain | The installer ended without confirming completion. Remote state is unknown. | Inspect the host, or run the manual installation command there to see the full output. |
+| `IDENTITY_MISMATCH` | server | failed | The host enrolled with a different identity than the one this job was bound to. | Check which agent runs on the host and reconcile the host records before retrying. |
+| `TOKEN_FAILED` | server | failed | The server could not prepare an enrollment token. | Retry; check the server logs if it persists. |
+| `INTERNAL_ERROR` | server | uncertain | The server hit an internal error while running this job. Remote state is unknown. | Inspect the host before retrying, and check the server logs. |
+| `HOST_ASSOCIATION_UNCONFIRMED` | server | uncertain | An agent enrolled and reported, but it could not be matched to the selected host. The installation may have succeeded. | Check the host list for the new agent and merge it with the selected host if it is the same machine. |
+| `SERVER_RESTARTED` | server | uncertain | The server stopped or restarted while this installation was running. The remote host's state is unknown: it may be partly installed, and its agent may still enroll later. Inspect the host before retrying. | Inspect the host, then start a new installation job. |
+
+### Other symptoms
+
+| Symptom | Likely cause | Action |
+| --- | --- | --- |
+| Console says too many attempts (429) for everyone | The server sees all clients as the proxy's address | Set `HOPE_TRUSTED_PROXIES` to the proxy address as the server sees it |
+| Install command shows `http://` or the installer fails with `INSECURE_URL` | `HOPE_SERVER_URL` is not `https://` | Set the public https origin and restart |
+| Agent never appears | Token older than 15 minutes or already used; certificate not trusted by the host | Create a new token; check `curl https://SERVER/healthz` from the host; see [Custom CA](#custom-ca-server-agent-and-ssh-destination) |
+| Agent running but host shows no recent report | Reports rejected, or the server clock is far from the agent clock | On the host run `HOPE_AGENT_DIR=STATE hope-agent status --json`; system services log to journald (`journalctl -u hope-agent`), macOS services to `STATE/agent.log` |
+| Console shows reduced discovery | `HOPE_DISCOVERY_MODE=limited` or no `NET_RAW` | Use the Linux host-network deployment, see [Capability limitations](#capability-limitations) |
+| Hosts listed twice after enrollment | Several unassigned discovered hosts shared a MAC, or none matched | Merge them, see [Identity reconciliation](#identity-reconciliation) |
+| `exec: operation not permitted` when starting the container | `NET_RAW` dropped (the binary carries a file capability) | Keep `cap_add: [NET_RAW]` and do not set `no-new-privileges` |
