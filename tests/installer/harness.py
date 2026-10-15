@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO = Path(__file__).resolve().parents[2]
 INSTALLER = REPO / 'scripts' / 'install-agent.sh'
@@ -63,6 +64,16 @@ def log(line):
 def flag(n):
     return os.path.exists(os.path.join(R, 'fault', n))
 def hook(n):
+    stall = os.path.join(R, 'fault', 'stall-at-' + n)
+    if os.path.exists(stall):
+        # Park here so a test can close the installer's output pipe while it is mid-transaction.
+        os.unlink(stall)
+        open(os.path.join(R, 'fake', 'stalled'), 'w').close()
+        import time
+        for _ in range(200):
+            if os.path.exists(os.path.join(R, 'fault', 'release')):
+                break
+            time.sleep(0.1)
     for kind, sig in (('signal-at-', signal.SIGTERM), ('sigkill-at-', signal.SIGKILL)):
         path = os.path.join(R, 'fault', kind + n)
         if os.path.exists(path):
@@ -250,6 +261,10 @@ VERSION=@VERSION@
 R=$HOPE_TEST_ROOT
 printf 'agent[%s] %s\n' "$VERSION" "$*" >> "$R/fake/commands.log"
 hook() {
+    if [ -e "$R/fault/stall-at-$1" ]; then
+        rm -f "$R/fault/stall-at-$1"; : > "$R/fake/stalled"; i=0
+        while [ ! -e "$R/fault/release" ] && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i+1)); done
+    fi
     if [ -e "$R/fault/signal-at-$1" ]; then rm -f "$R/fault/signal-at-$1"; kill -TERM "$HOPE_INSTALL_PID"; fi
     if [ -e "$R/fault/sigkill-at-$1" ]; then rm -f "$R/fault/sigkill-at-$1"; kill -KILL "$HOPE_INSTALL_PID"; fi
 }
@@ -422,7 +437,7 @@ class Env:
         return paths
 
     # --- execution ------------------------------------------------------------------------------
-    def run(self, operation='install', uid=0, mode=None, token=TOKEN, server=SERVER, timeout=90, **extra):
+    def _environment(self, uid, mode, token, server, extra):
         env = {
             'PATH': f'{self.bin}:' + os.environ['PATH'],
             'HOME': str(self.home),
@@ -442,8 +457,29 @@ class Env:
             env['HOPE_INSTALL_MODE'] = mode
         env.update({key: str(value) for key, value in extra.items()})
         self.set('fake/uid', str(uid))
+        return env
+
+    def run(self, operation='install', uid=0, mode=None, token=TOKEN, server=SERVER, timeout=90, **extra):
+        env = self._environment(uid, mode, token, server, extra)
         done = subprocess.run([os.environ.get('HOPE_TEST_SHELL', 'sh'), str(self.installer), operation], env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         result = Result(done.returncode, done.stdout, done.stderr)
+        self.runs.append(result)
+        return result
+
+    def run_with_closed_output(self, operation='install', uid=0, mode=None, token=TOKEN, server=SERVER, timeout=90, **extra):
+        """Run the installer, wait until a stub parks at a stall-at-<phase> fault, close the reader of the
+        installer's stderr (a dropped SSH session or a closed pipe), then let it continue."""
+        env = self._environment(uid, mode, token, server, extra)
+        process = subprocess.Popen([os.environ.get('HOPE_TEST_SHELL', 'sh'), str(self.installer), operation], env=env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        stalled = self.base / 'fake' / 'stalled'
+        deadline = time.time() + 30
+        while not stalled.exists() and process.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        process.stderr.close()
+        (self.base / 'fault' / 'release').write_text('')
+        code = process.wait(timeout=timeout)
+        result = Result(code, '', '')
         self.runs.append(result)
         return result
 

@@ -46,9 +46,14 @@ root=${root%/}
 
 # Keep a private copy of stderr so progress/errors survive redirections active when a signal trap runs.
 exec 3>&2
-phase() { printf 'hope-install: phase=%s\n' "$1" >&3; }
-note() { printf 'hope-install: %s\n' "$*" >&3; }
-err() { printf 'hope-install: error=%s %s\n' "$1" "$2" >&3; }
+# Progress goes through cat so that a dropped reader (a closed SSH session or pipe) fails this pipeline, which
+# set -e turns into a normal rollback exit. Writing with the shell's own printf would instead kill the shell with
+# SIGPIPE before its EXIT trap runs, stranding a half-finished transaction (and, on bash 3.2, leave the unflushed
+# line in the buffer of the next command substitution).
+emit() { printf '%s\n' "$1" | cat >&3; }
+phase() { emit "hope-install: phase=$1"; }
+note() { emit "hope-install: $*"; }
+err() { emit "hope-install: error=$1 $2"; }
 fail() { err "$1" "$2"; exit 1; }
 
 journal() { [ -d "$txn" ] && printf '%s\n' "$1" >> "$txn/journal" || true; }

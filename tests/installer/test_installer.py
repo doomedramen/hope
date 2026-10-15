@@ -336,6 +336,22 @@ class Linux(Base):
                 self.assertEqual('v2', self.version(paths['binary']))
                 self.assertFalse(env.txn().exists())
 
+    def test_closed_output_pipe_mid_transaction_rolls_back(self):
+        # A dropped SSH session (or a closed pipe) must not strand the host with the old service stopped:
+        # SIGPIPE on the next progress line used to kill the installer without running its rollback.
+        paths = self.env.preinstall()
+        old_unit = paths['unit'].read_text()
+        self.env.publish('v2')
+        self.env.fault('stall-at-configure')
+        result = self.env.run_with_closed_output('upgrade', token=None)
+        self.assertNotEqual(0, result.code)
+        self.assertEqual('v1', self.version(paths['binary']))
+        self.assertEqual(old_unit, paths['unit'].read_text())
+        self.assertIn('00000000-0000-4000-8000-000000000000', (self.env.base / 'service/system.active').read_text())
+        self.assertFalse(self.env.txn().exists())
+        self.ok(self.env.run('upgrade', token=None))
+        self.assertEqual('v2', self.version(paths['binary']))
+
     def test_signal_during_fresh_install_leaves_nothing_running(self):
         self.env.fault('signal-at-activate')
         result = self.env.run()
