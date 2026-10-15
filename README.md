@@ -87,4 +87,4 @@ Targets: below 30 MB resident memory and below 0.5% of one core on average durin
 
 ## License
 
-**Not yet decided.** `Cargo.toml` declares `license = "MIT"` for the workspace, but the repository contains no `LICENSE` file, and a manifest field alone is not a license grant. Until the owner decides and adds a license file, no permission to use, copy, modify or distribute this code is granted by the repository.
+MIT. See [LICENSE](LICENSE); the workspace `Cargo.toml` declares the same.
