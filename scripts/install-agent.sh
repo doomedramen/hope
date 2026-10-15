@@ -13,6 +13,7 @@
 #   HOPE_FIRST_REPORT_TIMEOUT=120       (seconds to wait for the service's first accepted report)
 #   HOPE_POLL_INTERVAL=2                (seconds between acceptance checks; test knob)
 #   HOPE_ALLOW_DOWNGRADE=1              (permit installing a release older than the installed agent)
+#   HOPE_REQUIRE_PERSISTENT_SERVICE=1   (fail LINGER_REQUIRED instead of installing a Linux user service that stops at logout; set by SSH jobs)
 #   HOPE_INSTALL_ROOT                   (TEST ONLY: prefix for absolute system paths)
 #
 # Output: progress lines "hope-install: phase=NAME" and failures "hope-install: error=CODE message"
@@ -40,7 +41,7 @@ txn=
 txn_active=0
 rb_ok=1
 no_manager=0
-preserve=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR,HOPE_RESET_CREDENTIAL,HOPE_PURGE_IDENTITY,HOPE_FIRST_REPORT_TIMEOUT,HOPE_POLL_INTERVAL,HOPE_INSTALL_ROOT
+preserve=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR,HOPE_RESET_CREDENTIAL,HOPE_PURGE_IDENTITY,HOPE_FIRST_REPORT_TIMEOUT,HOPE_POLL_INTERVAL,HOPE_INSTALL_ROOT,HOPE_REQUIRE_PERSISTENT_SERVICE
 root=${HOPE_INSTALL_ROOT:-}
 root=${root%/}
 
@@ -226,6 +227,17 @@ if [ "$mode" = user ]; then
     case "${HOME:-}" in /*) ;; *) fail PATH_UNWRITABLE 'HOME must be an absolute path for a user service.';; esac
     if [ "$fresh_auto" = 0 ] || [ "$uid" -ne 0 ]; then
         note 'notice=Installing a user service. Reporting may stop after logout (systemd lingering) or outside a macOS GUI session.'
+    fi
+    if is_linux && [ "$operation" != uninstall ]; then
+        linger_user=$(id -un 2>/dev/null || true)
+        linger=$(loginctl show-user "$linger_user" -p Linger --value 2>/dev/null || true)
+        if [ "$linger" != yes ] && [ ! -e "$root/var/lib/systemd/linger/$linger_user" ]; then
+            if [ "${HOPE_REQUIRE_PERSISTENT_SERVICE:-}" = 1 ]; then
+                fail LINGER_REQUIRED "A user service stops soon after the last session of $linger_user ends because lingering is off, so nothing was installed. Run 'sudo loginctl enable-linger $linger_user' (or install with administrator access) and retry."
+            fi
+            note 'notice=USER_SERVICE_NOT_PERSISTENT'
+            emit "Warning: lingering is off for $linger_user, so the user service will stop when the last session ends. An administrator can run 'sudo loginctl enable-linger $linger_user'."
+        fi
     fi
 fi
 HOPE_INSTALL_PID=$$

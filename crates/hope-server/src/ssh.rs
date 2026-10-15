@@ -136,6 +136,12 @@ const REMOTE_CODES: &[CodeInfo] = &[
         "Connect as root, allow passwordless sudo for this account, or retry as an ordinary user to get a user service.",
     ),
     info(
+        "LINGER_REQUIRED",
+        false,
+        "Nothing was installed: without administrator access this would be a user service, which stops shortly after the SSH session ends because lingering is off for this account.",
+        "Ask an administrator to run `sudo loginctl enable-linger <user>` for this account and retry, or retry with an account that has root or passwordless sudo.",
+    ),
+    info(
         "EXISTING_INSTALL_MODE",
         false,
         "A conflicting system or user installation already exists on the host.",
@@ -430,6 +436,10 @@ const NOTICES: &[(&str, &str)] = &[
     (
         "Installing a user service. Reporting may stop after logout (systemd lingering) or outside a macOS GUI session.",
         "Installing a user service. Reporting may stop after logout (systemd lingering) or outside a macOS GUI session.",
+    ),
+    (
+        "USER_SERVICE_NOT_PERSISTENT",
+        "The user service will stop when this account has no login session, because systemd lingering is off. Ask an administrator to run `loginctl enable-linger` for the account.",
     ),
 ];
 /// Interpret one output line. Only `hope-install: phase=<known>`, `hope-install: error=<KNOWN>`
@@ -1002,7 +1012,7 @@ async fn provision(
     else {
         return Outcome::code("TOKEN_FAILED");
     };
-    let command = Zeroizing::new(agents::install_command_with_reset(state, &token, reset));
+    let command = Zeroizing::new(agents::install_command_for(state, &token, reset, true));
     let token_hash = hash(&token);
     drop(token);
     exec_started.store(true, Ordering::SeqCst);

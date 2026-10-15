@@ -98,6 +98,42 @@ class Linux(Base):
         self.assertNotIn('sudo', self.env.log())
         self.assertEqual({}, self.env.snapshot(self.env.root))
 
+    def test_ssh_style_user_service_without_lingering_is_refused_before_any_change(self):
+        for linger in ('no', 'missing'):
+            self.env.set('fake/linger', linger)
+            result = self.env.run(uid=1000, mode='user', HOPE_REQUIRE_PERSISTENT_SERVICE=1)
+            self.failed(result, 'LINGER_REQUIRED')
+            self.assertIn('enable-linger', result.err)
+            paths = self.env.paths('user')
+            self.assertFalse(paths['binary'].exists() or paths['unit'].exists() or paths['state'].exists())
+            self.assertEqual({}, self.env.snapshot(self.env.root))
+            self.assertNotIn('systemctl', self.env.log())
+            self.assertNotIn('curl', self.env.log())
+
+    def test_ssh_style_user_service_with_lingering_installs(self):
+        self.env.set('fake/linger', 'yes')
+        result = self.env.run(uid=1000, mode='user', HOPE_REQUIRE_PERSISTENT_SERVICE=1)
+        self.ok(result)
+        self.assertNotIn('USER_SERVICE_NOT_PERSISTENT', result.err)
+        self.assertTrue(self.env.paths('user')['unit'].exists())
+
+    def test_linger_marker_file_counts_as_persistent(self):
+        self.env.set('fake/linger', 'missing')
+        self.env.set('root/var/lib/systemd/linger/1000')
+        result = self.env.run(uid=1000, mode='user', HOPE_REQUIRE_PERSISTENT_SERVICE=1)
+        self.ok(result)
+
+    def test_manual_user_service_without_lingering_installs_with_notice(self):
+        self.env.set('fake/linger', 'no')
+        result = self.env.run(uid=1000, mode='user')
+        self.ok(result)
+        self.assertIn('hope-install: notice=USER_SERVICE_NOT_PERSISTENT', result.err)
+        self.assertTrue(self.env.paths('user')['unit'].exists())
+
+    def test_require_persistent_does_not_affect_system_service(self):
+        self.env.set('fake/linger', 'no')
+        self.ok(self.env.run(HOPE_REQUIRE_PERSISTENT_SERVICE=1))
+
     def test_no_running_user_manager(self):
         self.env.set('fake/manager-user', 'offline')
         result = self.env.run(uid=1000, mode='user')

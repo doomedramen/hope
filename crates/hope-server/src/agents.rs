@@ -57,6 +57,11 @@ pub fn install_command(state: &State, token: &str) -> String {
     install_command_with_reset(state, token, false)
 }
 pub fn install_command_with_reset(state: &State, token: &str, reset: bool) -> String {
+    install_command_for(state, token, reset, false)
+}
+/// `persistent` adds `HOPE_REQUIRE_PERSISTENT_SERVICE=1` (SSH jobs: nobody is logged in afterwards,
+/// so a user service that stops at logout must be refused before anything is installed).
+pub fn install_command_for(state: &State, token: &str, reset: bool, persistent: bool) -> String {
     let server = shell_quote(&state.0.server_url);
     let ca = state
         .0
@@ -69,6 +74,11 @@ pub fn install_command_with_reset(state: &State, token: &str, reset: bool) -> St
     } else {
         ""
     };
+    let persistent = if persistent {
+        " HOPE_REQUIRE_PERSISTENT_SERVICE=1"
+    } else {
+        ""
+    };
     let curl_ca = state
         .0
         .enrollment_ca
@@ -76,7 +86,7 @@ pub fn install_command_with_reset(state: &State, token: &str, reset: bool) -> St
         .map(|path| format!(" --cacert {}", shell_quote(path)))
         .unwrap_or_default();
     format!(
-        "( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f \"$installer\"' EXIT; curl --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https'{curl_ca} {server}/agent/install -o \"$installer\" && HOPE_SERVER={server} HOPE_ENROLLMENT_TOKEN={}{}{reset} sh \"$installer\" )",
+        "( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f \"$installer\"' EXIT; curl --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https'{curl_ca} {server}/agent/install -o \"$installer\" && HOPE_SERVER={server} HOPE_ENROLLMENT_TOKEN={}{}{reset}{persistent} sh \"$installer\" )",
         shell_quote(token),
         ca
     )

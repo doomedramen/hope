@@ -783,6 +783,41 @@ async fn sudo_denied_user_fallback_and_custom_ca_are_handled() {
 }
 
 #[tokio::test]
+async fn ssh_jobs_require_persistent_service_and_linger_refusal_is_a_vetted_definite_failure() {
+    let f = fixture().await;
+    f.script(vec![
+        err("hope-install: phase=preflight"),
+        err(
+            "hope-install: error=LINGER_REQUIRED lingering is off for hopeplain; token=leak password=hunter2",
+        ),
+        Step::Exit(1),
+    ]);
+    let job = f.run(f.password_request()).await;
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["error_code"], "LINGER_REQUIRED");
+    assert!(
+        job["message"]
+            .as_str()
+            .unwrap()
+            .contains("Nothing was installed")
+    );
+    assert!(job["guidance"].as_str().unwrap().contains("enable-linger"));
+    assert!(!job.to_string().contains("hunter2") && !job.to_string().contains("leak"));
+    let command = &f.commands()[0];
+    assert!(
+        command.contains(" HOPE_REQUIRE_PERSISTENT_SERVICE=1 sh "),
+        "{command}"
+    );
+    assert!(
+        job["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s != "complete")
+    );
+}
+
+#[tokio::test]
 async fn progress_errors_map_to_vetted_messages_and_untrusted_lines_are_dropped() {
     let (logs, _guard) = capture_logs();
     let f = fixture().await;

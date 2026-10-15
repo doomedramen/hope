@@ -28,6 +28,7 @@ Without Docker: `make build` (type generation, static web export, `cargo build -
 | `HOPE_SETUP_TOKEN` | random, printed at start | First-run token (at least 24 characters) |
 | `HOPE_DISCOVERY_MODE` | `native` on Linux, `limited` elsewhere | `limited` disables ARP |
 | `HOPE_AGENT_CA` | empty | Path **on agent hosts** of a private CA, embedded in install commands (see below) |
+| `HOPE_REQUIRE_PERSISTENT_SERVICE` | unset | Installer: `1` refuses (`LINGER_REQUIRED`, before any change) a Linux user service when systemd lingering is off for the account; set by SSH jobs |
 | `HOPE_RESET_CREDENTIAL` | unset | Agent/installer: `1` makes `enroll`/`configure` replace the credential (requires an enrollment token; the console sets it for revoked agents) |
 | `HOPE_SIGNING_KEY` | none | `assemble-release.sh` / `package-agent.sh`: RSA private key outside the repository |
 | `HOPE_STAGING_DIR` | `dist/agents-dev` | `package-agent.sh` staging directory; must be under `./dist` or the temp directory |
@@ -123,7 +124,7 @@ Manual command (copy from the console; the token lasts 15 minutes, is single use
 
 The installer runs the phases `preflight`, `stage`, `verify`, then a journaled transaction (`stop`, `place-binary`, `configure`, `write-unit`, `activate`, `wait-report`) and `complete`, printing `hope-install: phase=NAME` and `hope-install: error=CODE message` on standard error. Success is declared only after the installed service's own accepted report is seen (exact process and activation identifier), by default within 120 s (`HOPE_FIRST_REPORT_TIMEOUT`). It verifies the signed manifest, the artifact size, SHA-256 and signature, and the binary's version before touching the existing service.
 
-Installer modes (`HOPE_INSTALL_MODE=auto|user|system`, default `auto`): as root, or with passwordless sudo, a system service is installed; otherwise a user service. Mixed existing installs are refused (`EXISTING_INSTALL_MODE`).
+Installer modes (`HOPE_INSTALL_MODE=auto|user|system`, default `auto`): as root, or with passwordless sudo, a system service is installed; otherwise a user service. Mixed existing installs are refused (`EXISTING_INSTALL_MODE`). `HOPE_REQUIRE_PERSISTENT_SERVICE=1` (set by SSH jobs, optional for manual runs) makes a Linux user service conditional on systemd lingering for the account: otherwise the installer fails in preflight with `LINGER_REQUIRED` before changing anything, because a user manager without lingering stops about 10 s after the last session ends. Without the variable (a manual, interactive install) the installer proceeds and prints `hope-install: notice=USER_SERVICE_NOT_PERSISTENT`. Over SSH, an account without sudo therefore needs `sudo loginctl enable-linger USER` first.
 
 | | Linux system | Linux user | macOS system | macOS user |
 | --- | --- | --- | --- | --- |
@@ -135,7 +136,7 @@ System services run as the dedicated no-login account `hope-agent` (Linux) or `_
 
 SSH jobs: the console first reads the host key fingerprint **without authenticating**; you must confirm it. The job is bound to the confirmed key (a different key aborts before any credential is sent, `HOST_KEY_MISMATCH`), runs the same command through `sh -s`, uses only non-interactive `sudo -n`, and parses only the known progress grammar. Passwords and keys are not stored. Default limits: connect 15 s, inactivity 5 minutes, total 20 minutes, first report 2 minutes; output beyond 1 MiB ends the job. Outcomes are `completed`, `failed` (meaning known), `uncertain` (the remote state could not be determined: inspect the host) or `interrupted` (server restarted). History keeps 100 jobs or 30 days, with at most four running at once.
 
-**Verification status of installation:** the installer is tested with stubbed service managers (72 harness tests) and, since 2026-10-15, on real Debian 13 hosts with systemd 257 (arm64 native, amd64 emulated): system service as root and as a sudo user, user service with lingering, custom CA, reinstall, interrupted activation (rolled back), upgrade, downgrade refusal, uninstall and purge, and SSH jobs against a real OpenSSH 10.0. **No launchd (macOS) cell, no default-CA run and no other distribution has been run.** Matrix and limits: [validation.md](validation.md#release-gate-fixture--2026-10-15).
+**Verification status of installation:** the installer is tested with stubbed service managers (77 harness tests) and, since 2026-10-15, on real Debian 13 hosts with systemd 257 (arm64 native, amd64 emulated): system service as root and as a sudo user, user service with lingering, custom CA, reinstall, interrupted activation (rolled back), upgrade, downgrade refusal, uninstall and purge, and SSH jobs against a real OpenSSH 10.0. **No launchd (macOS) cell, no default-CA run and no other distribution has been run.** Matrix and limits: [validation.md](validation.md#release-gate-fixture--2026-10-15).
 
 ## Agent upgrade, rollback and uninstall
 
@@ -304,6 +305,7 @@ Origin `installer` means the script on the host emits it (so it also appears in 
 | `UNSUPPORTED_ARCH` | installer | failed | The host CPU architecture is not supported. | Agents are packaged for x86_64 and ARM64 only. |
 | `NO_SERVICE_MANAGER` | installer | failed | No usable service manager was found on the host. | Use a host with running systemd (or launchd on macOS). For a user service, log in normally so a user manager exists, then retry. |
 | `SUDO_UNAVAILABLE` | installer | failed | A system installation needs root or passwordless sudo, which is unavailable. | Connect as root, allow passwordless sudo for this account, or retry as an ordinary user to get a user service. |
+| `LINGER_REQUIRED` | installer | failed | Nothing was installed: without administrator access this would be a user service, which stops shortly after the SSH session ends because lingering is off for this account. | Ask an administrator to run `sudo loginctl enable-linger <user>` for this account and retry, or retry with an account that has root or passwordless sudo. |
 | `EXISTING_INSTALL_MODE` | installer | failed | A conflicting system or user installation already exists on the host. | Remove or complete the other installation on the host, then retry. |
 | `NOT_INSTALLED` | installer | failed | No existing installation was found to operate on. | Run a fresh installation instead. |
 | `INVALID_MODE` | installer | failed | The requested installation mode is not allowed for this account. | Retry as a user that can create the intended kind of service. |

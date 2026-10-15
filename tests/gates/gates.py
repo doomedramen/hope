@@ -847,25 +847,34 @@ def ssh_phase():
         record("ssh same-agent reinstall (key auth)", arch, osn, emu, "real sshd; systemd 257 system", "ssh/system", art,
                j.get("status") == "completed" and j.get("mode") == "reinstall" and ok and (st or {}).get("agent_id") == agent1 and system_state(S)["main_pid"] != pid1,
                "job completed as reinstall, identity kept, new service process; %s" % d)
-        # 5. non-root user without sudo: user-service fallback with a vetted notice.
+        # 5. non-root user without sudo: a user service stops at logout unless lingering is on, so the job
+        #    must refuse (LINGER_REQUIRED, nothing installed) without lingering and succeed with it.
         fpu = fingerprint(ids[ua], ua)
+        j = ssh_job(ids[ua], ua, "hopeplain", fpu, password=sec("hopeplain"))
+        left = dx(U, "ls -A /home/hopeplain/.local/bin /home/hopeplain/.local/state /home/hopeplain/.config/systemd/user 2>/dev/null | wc -l")[1].strip()
+        record("ssh non-root no sudo, no linger -> refused", arch, osn, emu, "real sshd; systemd --user", "ssh/user", art,
+               j.get("status") == "failed" and j.get("error_code") == "LINGER_REQUIRED" and left == "0",
+               "job %s/%s before any change (account files left on host: %s); guidance: %s" % (j.get("status"), j.get("error_code"), left, j.get("guidance")))
+        dx(U, "loginctl enable-linger hopeplain")
+        time.sleep(3)  # let user@UID.service start
         t0 = time.time()
         j = ssh_job(ids[ua], ua, "hopeplain", fpu, password=sec("hopeplain"))
+        t_end = time.time()
         uid = dx(U, "id -u hopeplain")[1].strip()
         rc_s, so = dx(U, "systemctl --user show hope-agent -p MainPID -p ActiveState --value", user="hopeplain", env={"XDG_RUNTIME_DIR": "/run/user/" + uid})
         parts = so.split()
         stu = agent_status(U, "/home/hopeplain/.local/state/hope-agent", "/home/hopeplain/.local/bin/hope-agent", user="hopeplain")
         h = wait_report(stu["agent_id"], t0) if stu else None
-        record("ssh non-root no sudo -> user service", arch, osn, emu, "real sshd; systemd --user", "ssh/user", art,
+        record("ssh non-root no sudo, linger -> user service", arch, osn, emu, "real sshd; systemd --user (linger)", "ssh/user", art,
                j.get("status") == "completed" and bool(j.get("notice")) and len(parts) > 1 and parts[1] == "active" and h is not None,
-               "job %s, notice=%r; user unit %s; server saw a report: %s (no lingering: the service exists only while the login session does, see below)" % (j.get("status"), j.get("notice"), parts[1:2], bool(h)))
-        time.sleep(20)  # logind keeps the user manager for UserStopDelaySec (10 s) after the last session
+               "job %s, notice=%r; user unit %s; server saw a report: %s" % (j.get("status"), j.get("notice"), parts[1:2], bool(h)))
+        time.sleep(45)  # well past logind's 10 s UserStopDelaySec for the closed SSH session
+        h2 = wait_report(stu["agent_id"], t_end + 45) if stu else None
         rc_l, after_logout = dx(U, "systemctl --user is-active hope-agent 2>&1 | head -n 1", user="hopeplain", env={"XDG_RUNTIME_DIR": "/run/user/" + uid})
         state = after_logout.strip()
-        if state.startswith("Failed to connect"):
-            state = "not running (the user manager exited with the last session)"
-        record("ssh user service after logout (no linger)", arch, osn, emu, "real sshd; systemd --user", "ssh/user", art, True,
-               "observation, not a pass/fail gate: about 20 s after the SSH job's session ended, without lingering, the user service is %s" % state)
+        record("ssh user service survives session end (linger)", arch, osn, emu, "real sshd; systemd --user (linger)", "ssh/user", art,
+               h2 is not None and state == "active",
+               "a fresh report accepted after the session ended + 45 s: %s; user unit %s" % (h2 is not None, state))
         # 6. dropped connection mid-transaction on a host that already runs v0.1.0: the sshd session is killed
         #    while the installer replaces the agent. The installer must roll back, so the old agent keeps running.
         publish(V0, "--allow-downgrade")

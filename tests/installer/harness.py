@@ -120,6 +120,12 @@ elif name == 'sudo':
         sys.exit(0)
     env = dict(os.environ, HOPE_TEST_UID='0')
     os.execvpe(rest[0], rest, env)
+elif name == 'loginctl':
+    log('loginctl ' + ' '.join(args))
+    state = read('fake/linger', 'no')
+    if state == 'missing':
+        sys.exit(1)
+    print(state)
 elif name == 'chown':
     log('chown ' + ' '.join(args))
 elif name == 'useradd':
@@ -340,7 +346,7 @@ class Env:
         for path in (self.root, self.home, self.bin, self.tmp, self.rel):
             path.mkdir()
         text = STUB.replace('@PYTHON@', sys.executable)
-        for command in ('uname', 'id', 'sudo', 'chown', 'useradd', 'getent', 'dscl', 'systemctl', 'launchctl', 'curl'):
+        for command in ('uname', 'id', 'sudo', 'chown', 'useradd', 'getent', 'dscl', 'systemctl', 'loginctl', 'launchctl', 'curl'):
             (self.bin / command).write_text(text)
             (self.bin / command).chmod(0o755)
         self.runs = []
