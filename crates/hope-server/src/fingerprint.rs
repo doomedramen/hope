@@ -168,6 +168,8 @@ pub struct Announcement {
     pub mdns_services: BTreeSet<String>,
     pub mdns_model: Option<String>,
     pub mdns_instances: BTreeSet<String>,
+    /// The address sent or was named in an mDNS answer this sweep, so its mDNS fields are current.
+    pub mdns_seen: bool,
     pub ssdp_server: Option<String>,
     pub upnp_device_type: Option<String>,
     pub upnp_friendly_name: Option<String>,
@@ -257,14 +259,18 @@ fn strip_local(name: &str) -> &str {
     name.strip_suffix(".local").unwrap_or(name)
 }
 
-/// Records of one mDNS response, applied to the announcement of the address that sent it (and of
-/// any address its A records name).
+/// Records of one mDNS response, applied to the announcement of the device they describe.
+///
+/// Routers that reflect mDNS between VLANs (UniFi, Avahi's reflector) resend other devices'
+/// answers from their own address, so the sender is not necessarily the owner. Each service is
+/// credited to the address its SRV target resolves to through the A records in the same packet;
+/// only when the packet does not say otherwise does it fall back to the sender.
 pub fn parse_mdns(packet: &[u8], source: Ipv4Addr, found: &mut HashMap<Ipv4Addr, Announcement>) {
     if packet.len() < 12 || packet[2] & 0x80 == 0 {
         return; // not a response
     }
     let count = |i: usize| u16::from_be_bytes([packet[i], packet[i + 1]]) as usize;
-    let (questions, records) = (count(4), count(6) + count(8) + count(10));
+    let (questions, total) = (count(4), count(6) + count(8) + count(10));
     let mut offset = 12;
     for _ in 0..questions.min(64) {
         let Some((_, next)) = read_name(packet, offset) else {
@@ -272,44 +278,97 @@ pub fn parse_mdns(packet: &[u8], source: Ipv4Addr, found: &mut HashMap<Ipv4Addr,
         };
         offset = next + 4;
     }
-    for _ in 0..records.min(256) {
+    // (owner, type, rdata offset, rdata)
+    let mut records: Vec<(String, u16, usize, &[u8])> = Vec::new();
+    for _ in 0..total.min(256) {
         let Some((owner, next)) = read_name(packet, offset) else {
-            return;
+            break;
         };
         let Some(header) = packet.get(next..next + 10) else {
-            return;
+            break;
         };
         let kind = u16::from_be_bytes([header[0], header[1]]);
         let length = u16::from_be_bytes([header[8], header[9]]) as usize;
         let start = next + 10;
         let Some(data) = packet.get(start..start + length) else {
-            return;
+            break;
         };
         offset = start + length;
-        if found.len() >= MAX_DEVICES && !found.contains_key(&source) {
-            return;
-        }
+        records.push((owner, kind, start, data));
+    }
+
+    let mut hosts: HashMap<String, Ipv4Addr> = HashMap::new();
+    let mut targets: HashMap<String, String> = HashMap::new();
+    for (owner, kind, start, data) in &records {
         match kind {
             1 if data.len() == 4 => {
                 let address = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
-                if !address.is_unspecified() && found.len() < MAX_DEVICES
-                    || found.contains_key(&address)
-                {
-                    found.entry(address).or_default().mdns_name = clean(strip_local(&owner), 80);
+                if !address.is_unspecified() {
+                    hosts.insert(owner.to_ascii_lowercase(), address);
+                }
+            }
+            33 if data.len() > 6 => {
+                if let Some((target, _)) = read_name(packet, start + 6) {
+                    targets.insert(owner.to_ascii_lowercase(), target.to_ascii_lowercase());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut addresses: Vec<Ipv4Addr> = hosts.values().copied().collect();
+    addresses.sort();
+    addresses.dedup();
+    // Without an SRV link: the packet's only address, else the sender unless the packet names
+    // other addresses but not the sender's (a reflected answer that cannot be placed).
+    let fallback = match addresses.as_slice() {
+        [only] => Some(*only),
+        [] => Some(source),
+        many => many.contains(&source).then_some(source),
+    };
+    let owner_of = |instance: &str| {
+        targets
+            .get(&instance.to_ascii_lowercase())
+            .and_then(|target| hosts.get(target))
+            .copied()
+            .or(fallback)
+    };
+    let admit = |address: Ipv4Addr, found: &mut HashMap<Ipv4Addr, Announcement>| {
+        (found.len() < MAX_DEVICES || found.contains_key(&address)).then(|| {
+            let entry = found.entry(address).or_default();
+            entry.mdns_seen = true;
+        })
+    };
+    // The sender answered this sweep, so whatever it announced before is now known to be stale.
+    admit(source, found);
+
+    for (owner, kind, start, data) in &records {
+        match kind {
+            1 if data.len() == 4 => {
+                let address = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
+                if !address.is_unspecified() && admit(address, found).is_some() {
+                    found.entry(address).or_default().mdns_name = clean(strip_local(owner), 80);
                 }
             }
             12 => {
-                let Some((target, _)) = read_name(packet, start) else {
+                let Some((target, _)) = read_name(packet, *start) else {
                     continue;
                 };
-                let entry = found.entry(source).or_default();
                 if owner.starts_with("_services._dns-sd._udp") {
+                    let Some(device) = fallback.filter(|d| admit(*d, found).is_some()) else {
+                        continue;
+                    };
+                    let entry = found.entry(device).or_default();
                     if entry.mdns_services.len() < 32
                         && let Some(kind) = clean(strip_local(&target), 60)
                     {
                         entry.mdns_services.insert(kind);
                     }
-                } else if let Some(kind) = clean(strip_local(&owner), 60) {
+                } else if let Some(kind) = clean(strip_local(owner), 60) {
+                    let Some(device) = owner_of(&target).filter(|d| admit(*d, found).is_some())
+                    else {
+                        continue;
+                    };
+                    let entry = found.entry(device).or_default();
                     if entry.mdns_services.len() < 32 {
                         entry.mdns_services.insert(kind.clone());
                     }
@@ -324,7 +383,10 @@ pub fn parse_mdns(packet: &[u8], source: Ipv4Addr, found: &mut HashMap<Ipv4Addr,
                 }
             }
             16 => {
-                let entry = found.entry(source).or_default();
+                let Some(device) = owner_of(owner).filter(|d| admit(*d, found).is_some()) else {
+                    continue;
+                };
+                let entry = found.entry(device).or_default();
                 let mut index = 0;
                 while index < data.len() {
                     let size = data[index] as usize;
@@ -550,6 +612,45 @@ mod tests {
                 .contains("BOSCH-SMV68TX06E-68A40E1234")
         );
         assert_eq!(device.mdns_model.as_deref(), Some("SMV68TX06E"));
+    }
+
+    #[test]
+    fn reflected_mdns_is_credited_to_the_device_not_the_router() {
+        // A UniFi gateway at .1 reflecting a camera's answer from another VLAN.
+        let mut packet = vec![0, 0, 0x84, 0, 0, 0, 0, 4, 0, 0, 0, 0];
+        let mut instance = Vec::new();
+        encode_name("IndoorCam 2K-1711._hap._tcp.local", &mut instance);
+        record("_hap._tcp.local", 12, &instance, &mut packet);
+        let mut srv = vec![0, 0, 0, 0, 0x1F, 0x90];
+        encode_name("indoorcam.local", &mut srv);
+        record("IndoorCam 2K-1711._hap._tcp.local", 33, &srv, &mut packet);
+        record(
+            "IndoorCam 2K-1711._hap._tcp.local",
+            16,
+            b"\x08md=T8400",
+            &mut packet,
+        );
+        record("indoorcam.local", 1, &[192, 168, 20, 7], &mut packet);
+        let mut found = HashMap::new();
+        let router = Ipv4Addr::new(192, 168, 1, 1);
+        let camera = Ipv4Addr::new(192, 168, 20, 7);
+        parse_mdns(&packet, router, &mut found);
+        assert!(found[&router].mdns_seen);
+        assert!(found[&router].mdns_instances.is_empty());
+        assert!(found[&router].mdns_services.is_empty());
+        assert_eq!(found[&router].mdns_model, None);
+        assert!(found[&camera].mdns_instances.contains("IndoorCam 2K-1711"));
+        assert!(found[&camera].mdns_services.contains("_hap._tcp"));
+        assert_eq!(found[&camera].mdns_model.as_deref(), Some("T8400"));
+
+        // A reflected answer naming two devices without SRV links is credited to neither.
+        let mut packet = vec![0, 0, 0x84, 0, 0, 0, 0, 3, 0, 0, 0, 0];
+        record("_hap._tcp.local", 12, &instance, &mut packet);
+        record("a.local", 1, &[192, 168, 20, 8], &mut packet);
+        record("b.local", 1, &[192, 168, 20, 9], &mut packet);
+        let mut found = HashMap::new();
+        parse_mdns(&packet, router, &mut found);
+        assert!(found.values().all(|a| a.mdns_instances.is_empty()));
     }
 
     #[test]

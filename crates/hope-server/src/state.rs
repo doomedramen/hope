@@ -210,18 +210,26 @@ impl State {
         let Ok(sightings) = self.0.sightings.lock() else {
             return;
         };
-        for address in &host.addresses {
+        for address in host.addresses.clone() {
             let Some(seen) = address.parse().ok().and_then(|ip| sightings.get(&ip)) else {
                 continue;
             };
             let e = &mut host.evidence;
             e.mdns_name = seen.mdns_name.clone().or(e.mdns_name.take());
-            if !seen.mdns_services.is_empty() {
+            // An address heard over mDNS this sweep replaces what it announced before, so services
+            // once credited to it by mistake (a router reflecting other devices) fall away.
+            if seen.mdns_seen {
                 e.mdns_services = seen.mdns_services.iter().cloned().collect();
-            }
-            e.mdns_model = seen.mdns_model.clone().or(e.mdns_model.take());
-            if !seen.mdns_instances.is_empty() {
-                e.mdns_instances = seen.mdns_instances.iter().cloned().collect();
+                e.mdns_model = seen.mdns_model.clone();
+                let instances: Vec<String> = seen.mdns_instances.iter().cloned().collect();
+                if host.agent_id.is_none()
+                    && e.mdns_instances.contains(&host.name)
+                    && !instances.contains(&host.name)
+                {
+                    // The name came from an instance it no longer announces; let it be re-derived.
+                    host.name = address.clone();
+                }
+                e.mdns_instances = instances;
             }
             e.ssdp_server = seen.ssdp_server.clone().or(e.ssdp_server.take());
             e.upnp_device_type = seen.upnp_device_type.clone().or(e.upnp_device_type.take());
