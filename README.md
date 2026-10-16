@@ -79,9 +79,12 @@ The Proxmox pair (`ct/hope.sh`, `install/hope-install.sh`, `json/hope.json`) fol
 ```sh
 # from a checkout of this repository
 cp .env.example .env              # set HOPE_SERVER_URL to your public https:// origin
-docker compose up -d --build      # compose.yaml: host networking, NET_RAW only, read-only root
+docker compose pull               # ghcr.io/doomedramen/hope:latest, built by .github/workflows/docker.yml
+docker compose up -d              # compose.yaml: host networking, NET_RAW only, read-only root
 docker compose logs hope | grep 'setup token'
 ```
+
+The image is published for x86_64 and arm64 on every push to `main` (tags `main`, `sha-<commit>`) and every version tag (`<version>`, `<major>.<minor>`, `latest`), with a signed build-provenance attestation and an SBOM. Before the first version tag use `HOPE_IMAGE=ghcr.io/doomedramen/hope:main`; `docker compose up -d --build` builds the image from the checkout instead.
 
 Put an HTTPS reverse proxy in front of `HOPE_BIND` (default `127.0.0.1:8080`), open the canonical URL, and finish setup with the printed token and a password. Agents and the installer require HTTPS; a private CA is supported ([operations](docs/operations.md#custom-ca-server-agent-and-ssh-destination)). Caddy 2.10.2 has been tested in front of it (see the gate fixture); nginx and Traefik have not.
 

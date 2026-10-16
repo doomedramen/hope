@@ -55,9 +55,12 @@ The host installer has been exercised through its stub harness (download, checks
 
 ```sh
 cp .env.example .env            # set HOPE_SERVER_URL to your public https:// origin
-docker compose up -d --build    # compose.yaml: network_mode: host, cap_drop ALL + NET_RAW, read-only root
+docker compose pull             # ghcr.io/doomedramen/hope:latest (HOPE_IMAGE selects another tag)
+docker compose up -d            # compose.yaml: network_mode: host, cap_drop ALL + NET_RAW, read-only root
 docker compose logs hope | grep 'setup token'
 ```
+
+**Published images.** `.github/workflows/docker.yml` builds the Dockerfile's `runtime` stage natively on an x86_64 and an arm64 runner (no QEMU), pushes both by digest and publishes one multi-arch manifest to the GitHub Container Registry as `ghcr.io/doomedramen/hope`. Pushes to `main` publish `main` and `sha-<commit>`; a `v*` tag publishes `<version>`, `<major>.<minor>`, `latest` and `sha-<commit>`. Each image carries a build-provenance attestation (`gh attestation verify oci://ghcr.io/doomedramen/hope:<tag> --owner doomedramen`) and an SBOM. `compose.yaml` defaults to `latest`, which exists from the first version tag; set `HOPE_IMAGE=ghcr.io/doomedramen/hope:main` to follow the branch, or run `docker compose up -d --build` to build from the checkout. The package is created by the first push; if it is private, make it public under the repository's Packages settings. Not yet verified: the first run of the workflow (it needs a push to `main` of this repository).
 
 `compose.desktop.yaml` is for Docker Desktop (macOS/Windows): it publishes `127.0.0.1:8080` and runs `HOPE_DISCOVERY_MODE=limited`, which reports reduced capabilities (no ARP/MAC/physical topology, probes only reach what the container network routes). Use it to try the console, not for discovery of a real LAN.
 

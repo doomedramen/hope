@@ -1,7 +1,9 @@
 services:
   hope:
     build: .
-    image: hope:local
+    # The published multi-arch image (docker.yml); `docker compose pull` fetches it, `--build` builds
+    # this checkout instead. `latest` exists from the first v* tag; `main` tracks the branch.
+    image: ${HOPE_IMAGE:-ghcr.io/doomedramen/hope:latest}
     restart: unless-stopped
     network_mode: host
     cap_drop: [ALL]
