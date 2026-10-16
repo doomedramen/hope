@@ -15,11 +15,14 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 async fn setup() -> (TempDir, State, Router, String) {
+    setup_with("releases".into()).await
+}
+async fn setup_with(release_dir: String) -> (TempDir, State, Router, String) {
     let dir = tempfile::tempdir().expect("temporary database");
     let state = State::open(
         dir.path().join("test.db").to_str().expect("path"),
         "http://localhost:8080".into(),
-        "releases".into(),
+        release_dir,
         Capabilities {
             platform: "test".into(),
             discovery_mode: "limited".into(),
@@ -1571,4 +1574,207 @@ async fn live_reports_update_the_host_and_stream_it_while_history_keeps_its_spac
     .await;
     assert_eq!(bootstrap.1["report_interval_seconds"], 5);
     assert_eq!(state.report_interval(), 5);
+}
+
+const RELEASE_PEM: &str = "-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA2WA6+KWaU2QKPUoNvpE8
+uWs6EqZAlw32jXt3QJ4WB3vQPZMmdrq8qLyt2HMnsCGJ4a4J0qCGZeuAp9GbxdQy
+Nct276PRAZixbaOcEJfJuPKaLziaWsi/UUjHvEv9MoFC8kjYU5XTFcV3ZJeslmkK
+gLFFmNAjA78DTKGOK8jE/3YS4fQOYgpmGOqzFEqcJroJzoCCsMfgWvAIiStS6pFL
+j1O8SL4xOSjA6SMbjBBCbt8iifWHOoiHg/PvjywBr2UC4wfWKyP0Rp8IH9VRR52D
+XvJ24CepV5rzEndRwLDyi7CF1ryFSB8hwiFWmUbGerk1d6YmWQN8t50hxTnhAYZ4
+YYydjBsAO+Uv3g3hSeEsVKGEUJAFc1IeSXkUI+07zMi73yZCI4QC66auJI+pqptc
+DRoUsHNM4hkMBCjhBKvyB1uo19I09MQ9e38VaL++yWp5cLNRiYv2T+2YKqw1kAnv
+LrmW2OY0Z47dqhFZxgYSGmKSGPOX8uIferQ1dBjahj6ZAgMBAAE=
+-----END PUBLIC KEY-----
+";
+const RELEASE_KEY_ID: &str = "be0e49f69d223eabbd7a66c2d5cb91ce7ff9d504c1032b2f480ef85e238f5ae5";
+/// A release directory shaped like assemble-release.sh's output (the server does not check RSA).
+fn publish_release(version: &str) -> TempDir {
+    let dir = tempfile::tempdir().expect("release directory");
+    let put = |name: &str, data: &[u8]| std::fs::write(dir.path().join(name), data).expect("write");
+    put("release-public.pem", RELEASE_PEM.as_bytes());
+    put("hope-agent-linux-x86_64", b"binary");
+    put("hope-agent-linux-x86_64.sig", b"sig");
+    put(
+        "manifest.json",
+        format!(
+            r#"{{"format":1,"version":"{version}","created":"2026-10-14T00:00:00Z","key_id":"{RELEASE_KEY_ID}","partial":true,"artifacts":[{{"platform":"linux","arch":"x86_64","file":"hope-agent-linux-x86_64","sha256":"{}","size":6,"min_os":"x"}}]}}"#,
+            "a".repeat(64)
+        )
+        .as_bytes(),
+    );
+    put("manifest.json.sig", b"sig");
+    dir
+}
+async fn report_as(app: &Router, bearer: &str, agent: &str, version: &str) -> Value {
+    let report = AgentReport {
+        schema_version: 1,
+        report_id: Uuid::new_v4().to_string(),
+        agent_id: agent.into(),
+        collected_at: now(),
+        inventory: None,
+        metrics: Metrics::default(),
+        collectors: vec![],
+    };
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/agent/report")
+                .header("content-type", "application/json")
+                .header("authorization", bearer)
+                .header("user-agent", format!("hope-agent/{version}"))
+                .body(Body::from(json!(report).to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes(),
+    )
+    .expect("json")
+}
+#[tokio::test]
+async fn an_update_request_reaches_the_agent_in_its_next_report_response_and_clears_when_done() {
+    let release = publish_release("0.1.60");
+    let (_dir, state, app, cookie) =
+        setup_with(release.path().to_str().expect("path").into()).await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let host_id = state.hosts().await.expect("hosts")[0].id.clone();
+    let url = format!("/api/v1/hosts/{host_id}/update-agent");
+    let admin = Some(("cookie", cookie.as_str()));
+
+    // Nothing is asked of an agent until an administrator asks.
+    assert_eq!(
+        report_as(&app, &bearer, &agent, "0.1.57").await["update_to"],
+        Value::Null
+    );
+    assert_eq!(
+        request(&app, "POST", &url, json!({}), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let (status, body) = request(&app, "POST", &url, json!({}), admin).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let host = state.host(&host_id).await.expect("host").expect("exists");
+    assert_eq!(host.update_target.as_deref(), Some("0.1.60"));
+    assert!(host.update_requested_at.is_some());
+
+    // It stays on offer in every report response until the agent runs the release.
+    for _ in 0..2 {
+        assert_eq!(
+            report_as(&app, &bearer, &agent, "0.1.57").await["update_to"],
+            "0.1.60"
+        );
+    }
+    let done = report_as(&app, &bearer, &agent, "0.1.60").await;
+    assert_eq!(done["update_to"], Value::Null);
+    let host = state.host(&host_id).await.expect("host").expect("exists");
+    assert_eq!((host.update_target, host.update_requested_at), (None, None));
+    assert_eq!(host.agent_version.as_deref(), Some("0.1.60"));
+
+    // An agent that already runs the release cannot be asked again.
+    let (status, _) = request(&app, "POST", &url, json!({}), admin).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+#[tokio::test]
+async fn update_all_asks_only_agents_that_run_an_older_release() {
+    let release = publish_release("0.1.60");
+    let (_dir, state, app, cookie) =
+        setup_with(release.path().to_str().expect("path").into()).await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let admin = Some(("cookie", cookie.as_str()));
+
+    // Version unknown, then current: nobody to ask.
+    let (_, body) = request(&app, "POST", "/api/v1/agents/update", json!({}), admin).await;
+    assert_eq!(body["requested"], 0);
+    report_as(&app, &bearer, &agent, "0.1.60").await;
+    let (_, body) = request(&app, "POST", "/api/v1/agents/update", json!({}), admin).await;
+    assert_eq!(body["requested"], 0);
+
+    report_as(&app, &bearer, &agent, "0.1.57").await;
+    let (status, body) = request(&app, "POST", "/api/v1/agents/update", json!({}), admin).await;
+    assert_eq!((status, &body["requested"]), (StatusCode::OK, &json!(1)));
+    assert_eq!(
+        report_as(&app, &bearer, &agent, "0.1.57").await["update_to"],
+        "0.1.60"
+    );
+
+    // A revoked agent is never asked.
+    request(
+        &app,
+        "POST",
+        &format!("/api/v1/agents/{agent}/revoke"),
+        json!({}),
+        admin,
+    )
+    .await;
+    let (_, body) = request(&app, "POST", "/api/v1/agents/update", json!({}), admin).await;
+    assert_eq!(body["requested"], 0);
+}
+#[tokio::test]
+async fn nothing_can_be_requested_without_a_published_release() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    report_as(&app, &format!("Bearer {credential}"), &agent, "0.1.57").await;
+    let host_id = state.hosts().await.expect("hosts")[0].id.clone();
+    let admin = Some(("cookie", cookie.as_str()));
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/hosts/{host_id}/update-agent"),
+        json!({}),
+        admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|text| text.contains("no signed agent release")),
+        "{body}"
+    );
+    assert_eq!(
+        request(&app, "POST", "/api/v1/agents/update", json!({}), admin)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn the_upgrade_command_needs_no_token_and_only_upgrades() {
+    let (_dir, _state, app, cookie) = setup().await;
+    let (_, bootstrap) = request(
+        &app,
+        "GET",
+        "/api/v1/bootstrap",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    let command = bootstrap["agent_upgrade_command"]
+        .as_str()
+        .expect("command");
+    assert!(
+        command.contains("http://localhost:8080/agent/install")
+            || command.contains("'http://localhost:8080'/agent/install"),
+        "{command}"
+    );
+    assert!(
+        command.contains("HOPE_ONLY_NEWER=1") && command.trim_end().ends_with("upgrade )"),
+        "{command}"
+    );
+    assert!(!command.contains("HOPE_ENROLLMENT_TOKEN"), "{command}");
+    assert!(command.contains("--proto '=https'"), "{command}");
 }

@@ -30,6 +30,7 @@ export type ReportingSettings = {
  * Seconds between agent samples; one of `REPORT_INTERVALS_SECONDS`.
  */
 interval_seconds: number, };
+export type UpdateRequested = { requested: number, };
 export type DeviceEvidence = {
 /**
  * Name from reverse DNS.
@@ -93,7 +94,12 @@ export type ReportResponse = { accepted: boolean, duplicate: boolean,
 /**
  * Seconds the server asks the agent to wait between samples; older servers omit it.
  */
-report_interval_seconds: number | null, };
+report_interval_seconds: number | null,
+/**
+ * Release version an administrator asked this agent to update to; absent when none is pending.
+ * The agent only passes the request to its local updater, which decides for itself.
+ */
+update_to: string | null, };
 export type ErrorResponse = { code: string, error: string, };
 export type NetworkInput = { name: string, cidr: string, enabled: boolean | null, interval_minutes: number | null, };
 export type NetworkUpdate = { enabled: boolean | null, interval_minutes: number | null, };
@@ -208,7 +214,15 @@ parent_id: string | null, parent_reason: string | null,
 /**
  * Version of the agent, from its `User-Agent` on enrollment and reports.
  */
-agent_version: string | null, };
+agent_version: string | null,
+/**
+ * When an administrator last asked this agent to update; cleared once it runs the release.
+ */
+update_requested_at: number | null,
+/**
+ * The release version the pending request is for.
+ */
+update_target: string | null, };
 export type MetricPoint = { collected_at: number, resolution_seconds: number, metrics: Metrics, };
 export type Position = { id: string, x: number, y: number, };
 export type MapLink = { id: string, source: string, target: string, label: string, };
@@ -228,7 +242,12 @@ agent_release: string | null,
 /**
  * Seconds between agent samples, as agents are currently asked to report.
  */
-report_interval_seconds: number, };
+report_interval_seconds: number,
+/**
+ * Command that updates an installed agent on the host where it runs. It carries no token or
+ * credential: the agent is already enrolled, and the installer checks the release signature.
+ */
+agent_upgrade_command: string, };
 export type InstallJob = { id: string,
 /**
  * Selected SSH address.

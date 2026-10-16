@@ -14,7 +14,7 @@ use hope_protocol::{
 };
 use hope_protocol::{
     EnrollmentTokenRequest, EnrollmentTokenResponse, HISTORY_SAMPLE_SECONDS, OkResponse,
-    ReportResponse,
+    ReportResponse, UPDATE_REQUEST_SECONDS, UpdateRequested, version_newer,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -55,6 +55,27 @@ pub async fn issue_token_for_reset(
     .execute(&state.0.db)
     .await?;
     Ok(token)
+}
+/// Updates an agent that is already installed, with no token: the installer finds the enrolled
+/// identity, verifies the signed release and changes nothing unless the release is newer. Running
+/// it as a full installation also puts the updater in place, so later updates can be one click.
+pub fn upgrade_command(state: &State) -> String {
+    let server = shell_quote(&state.0.server_url);
+    let ca = state
+        .0
+        .enrollment_ca
+        .as_ref()
+        .map(|path| format!(" HOPE_CA_CERT={}", shell_quote(path)))
+        .unwrap_or_default();
+    let curl_ca = state
+        .0
+        .enrollment_ca
+        .as_ref()
+        .map(|path| format!(" --cacert {}", shell_quote(path)))
+        .unwrap_or_default();
+    format!(
+        "( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f \"$installer\"' EXIT; curl --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https'{curl_ca} {server}/agent/install -o \"$installer\" && HOPE_SERVER={server}{ca} HOPE_ONLY_NEWER=1 sh \"$installer\" upgrade )"
+    )
 }
 pub fn install_command(state: &State, token: &str) -> String {
     install_command_with_reset(state, token, false)
@@ -352,10 +373,11 @@ pub async fn report(
             .bind(&report.report_id)
             .fetch_one(&state.0.db)
             .await?;
-    let response = ReportResponse {
+    let mut response = ReportResponse {
         accepted: true,
         duplicate,
         report_interval_seconds: Some(state.report_interval()),
+        update_to: pending_update(&host, now()),
     };
     if duplicate {
         return Ok(Json(response));
@@ -389,6 +411,8 @@ pub async fn report(
     if let Some(version) = agent_version(&headers) {
         host.agent_version = Some(version);
     }
+    settle_update_request(&mut host, now());
+    response.update_to = pending_update(&host, now());
     // A backlog delivered after an outage fills history but never replaces newer live state.
     if report.collected_at >= host.last_collected_at.unwrap_or(0.0) {
         host.last_collected_at = Some(report.collected_at);
@@ -412,6 +436,85 @@ pub async fn report(
     tx.commit().await?;
     state.host_changed(&host);
     Ok(Json(response))
+}
+
+/// The release an agent should be updating to, while an administrator's request is still fresh.
+fn pending_update(host: &Host, at: f64) -> Option<String> {
+    let requested = host.update_requested_at?;
+    let target = host.update_target.as_ref()?;
+    let outdated = host
+        .agent_version
+        .as_deref()
+        .is_none_or(|have| version_newer(target, have));
+    (outdated && at - requested < UPDATE_REQUEST_SECONDS).then(|| target.clone())
+}
+/// Forget a request the agent has satisfied, or that nobody acted on for a day.
+fn settle_update_request(host: &mut Host, at: f64) {
+    if host.update_requested_at.is_some() && pending_update(host, at).is_none() {
+        host.update_requested_at = None;
+        host.update_target = None;
+    }
+}
+/// Whether a host's agent can be asked to update to `release`.
+fn can_update(host: &Host, release: &str) -> bool {
+    host.agent_id.is_some()
+        && !host.agent_revoked
+        && host
+            .agent_version
+            .as_deref()
+            .is_some_and(|have| version_newer(release, have))
+}
+async fn offered_release(state: &State) -> ApiResult<String> {
+    let directory = crate::releases::release_directory(&state.0.release_dir).await;
+    crate::releases::published_version(&directory)
+        .await
+        .ok_or_else(|| ApiError::bad("This server publishes no signed agent release to update to"))
+}
+async fn mark_update_requested(state: &State, host: &mut Host, release: &str) -> ApiResult<()> {
+    host.update_requested_at = Some(now());
+    host.update_target = Some(release.to_string());
+    sqlx::query("UPDATE hosts SET body=? WHERE id=?")
+        .bind(serde_json::to_string(&*host)?)
+        .bind(&host.id)
+        .execute(&state.0.db)
+        .await?;
+    state.host_changed(host);
+    Ok(())
+}
+/// Ask one host's agent to update to the release this server offers. The agent learns of it in
+/// its next report response and passes it to its local updater, which checks the signature itself.
+pub async fn request_update(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<OkResponse>> {
+    let _guard = state.0.writes.lock().await;
+    let mut host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
+    if host.agent_id.is_none() || host.agent_revoked {
+        return Err(ApiError::bad("This host has no active agent to update"));
+    }
+    let release = offered_release(&state).await?;
+    if !can_update(&host, &release) {
+        return Err(ApiError::bad(
+            "This agent already runs the release the server offers, or has not reported its version",
+        ));
+    }
+    mark_update_requested(&state, &mut host, &release).await?;
+    Ok(Json(OkResponse { ok: true }))
+}
+/// Ask every agent that runs an older release than the one on offer to update.
+pub async fn request_all_updates(
+    Extract(state): Extract<State>,
+) -> ApiResult<Json<UpdateRequested>> {
+    let _guard = state.0.writes.lock().await;
+    let release = offered_release(&state).await?;
+    let mut requested = 0;
+    for mut host in state.hosts().await? {
+        if can_update(&host, &release) {
+            mark_update_requested(&state, &mut host, &release).await?;
+            requested += 1;
+        }
+    }
+    Ok(Json(UpdateRequested { requested }))
 }
 
 pub async fn revoke(
@@ -443,6 +546,58 @@ pub async fn revoke(
 mod tests {
     use super::*;
 
+    fn host_at(version: &str, requested: Option<f64>) -> Host {
+        let mut host = Host::new("h".into(), "h".into(), "icmp");
+        host.agent_id = Some("a".into());
+        host.agent_version = Some(version.into());
+        host.update_requested_at = requested;
+        host.update_target = requested.map(|_| "0.1.60".to_string());
+        host
+    }
+    #[test]
+    fn a_request_is_pending_only_while_fresh_and_unsatisfied() {
+        let day = hope_protocol::UPDATE_REQUEST_SECONDS;
+        assert_eq!(
+            pending_update(&host_at("0.1.57", Some(1000.0)), 1100.0).as_deref(),
+            Some("0.1.60")
+        );
+        assert_eq!(pending_update(&host_at("0.1.57", None), 1100.0), None);
+        assert_eq!(
+            pending_update(&host_at("0.1.60", Some(1000.0)), 1100.0),
+            None
+        );
+        assert_eq!(
+            pending_update(&host_at("0.1.61", Some(1000.0)), 1100.0),
+            None
+        );
+        assert_eq!(
+            pending_update(&host_at("0.1.57", Some(1000.0)), 1000.0 + day + 1.0),
+            None
+        );
+        let mut lapsed = host_at("0.1.57", Some(1000.0));
+        settle_update_request(&mut lapsed, 1000.0 + day + 1.0);
+        assert_eq!(
+            (lapsed.update_requested_at, lapsed.update_target),
+            (None, None)
+        );
+        let mut live = host_at("0.1.57", Some(1000.0));
+        settle_update_request(&mut live, 1100.0);
+        assert!(live.update_requested_at.is_some());
+    }
+    #[test]
+    fn only_active_agents_that_report_an_older_version_can_be_asked() {
+        assert!(can_update(&host_at("0.1.57", None), "0.1.60"));
+        assert!(!can_update(&host_at("0.1.60", None), "0.1.60"));
+        let mut revoked = host_at("0.1.57", None);
+        revoked.agent_revoked = true;
+        assert!(!can_update(&revoked, "0.1.60"));
+        let mut unknown = host_at("0.1.57", None);
+        unknown.agent_version = None;
+        assert!(!can_update(&unknown, "0.1.60"));
+        let mut no_agent = host_at("0.1.57", None);
+        no_agent.agent_id = None;
+        assert!(!can_update(&no_agent, "0.1.60"));
+    }
     #[test]
     fn agent_versions_come_only_from_well_formed_user_agents() {
         let headers = |value: &str| {

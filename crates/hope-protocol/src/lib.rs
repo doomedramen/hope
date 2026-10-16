@@ -141,6 +141,41 @@ pub struct ReportResponse {
     /// Seconds the server asks the agent to wait between samples; older servers omit it.
     #[serde(default)]
     pub report_interval_seconds: Option<u32>,
+    /// Release version an administrator asked this agent to update to; absent when none is pending.
+    /// The agent only passes the request to its local updater, which decides for itself.
+    #[serde(default)]
+    pub update_to: Option<String>,
+}
+/// How many agents an "update all" request reached.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct UpdateRequested {
+    pub requested: u32,
+}
+/// How long an update request stays pending before it lapses.
+pub const UPDATE_REQUEST_SECONDS: f64 = 86400.0;
+/// Whether `candidate` is a later release than `installed`. Compares the dotted numbers only
+/// (`0.1.57` against `0.1.9`), ignoring anything after `-` or `+`.
+pub fn version_newer(candidate: &str, installed: &str) -> bool {
+    fn parts(version: &str) -> Vec<u64> {
+        version
+            .split(['-', '+'])
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    }
+    let (candidate, installed) = (parts(candidate), parts(installed));
+    for index in 0..candidate.len().max(installed.len()) {
+        let (a, b) = (
+            candidate.get(index).copied().unwrap_or(0),
+            installed.get(index).copied().unwrap_or(0),
+        );
+        if a != b {
+            return a > b;
+        }
+    }
+    false
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ErrorResponse {
@@ -604,6 +639,12 @@ pub struct Host {
     /// Version of the agent, from its `User-Agent` on enrollment and reports.
     #[serde(default)]
     pub agent_version: Option<String>,
+    /// When an administrator last asked this agent to update; cleared once it runs the release.
+    #[serde(default)]
+    pub update_requested_at: Option<f64>,
+    /// The release version the pending request is for.
+    #[serde(default)]
+    pub update_target: Option<String>,
 }
 
 impl Host {
@@ -633,6 +674,8 @@ impl Host {
             parent_id: None,
             parent_reason: None,
             agent_version: None,
+            update_requested_at: None,
+            update_target: None,
         }
     }
 }
@@ -706,6 +749,9 @@ pub struct Bootstrap {
     pub agent_release: Option<String>,
     /// Seconds between agent samples, as agents are currently asked to report.
     pub report_interval_seconds: u32,
+    /// Command that updates an installed agent on the host where it runs. It carries no token or
+    /// credential: the agent is already enrolled, and the installer checks the release signature.
+    pub agent_upgrade_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -749,6 +795,7 @@ pub fn typescript() -> String {
         PasswordChange::decl(),
         NotificationSettings::decl(),
         ReportingSettings::decl(),
+        UpdateRequested::decl(),
         DeviceEvidence::decl(),
         DeviceGuess::decl(),
         DeviceTypeUpdate::decl(),
@@ -831,6 +878,17 @@ mod tests {
             assert!(!shown.contains(secret));
         }
         assert!(shown.contains("[redacted]") && shown.contains("root"));
+    }
+    #[test]
+    fn versions_compare_by_number_not_text() {
+        assert!(version_newer("0.1.10", "0.1.9"));
+        assert!(version_newer("0.2.0", "0.1.99"));
+        assert!(version_newer("1.0", "0.9.9"));
+        assert!(!version_newer("0.1.9", "0.1.10"));
+        assert!(!version_newer("0.1.57", "0.1.57"));
+        assert!(!version_newer("0.1.57", "0.1.57-rc.1"));
+        assert!(version_newer("0.1.58-rc.1", "0.1.57"));
+        assert!(!version_newer("garbage", "0.1.0"));
     }
     #[test]
     fn guest_storage_is_recognised() {

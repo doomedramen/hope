@@ -100,6 +100,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
     let mut marker_at = 0.0;
     // The server may choose the sample interval in its responses; until then the default holds.
     let mut server_period: Option<Duration> = None;
+    let mut update_requests = crate::updates::Requests::default();
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -107,7 +108,8 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
             _=&mut shutdown => { config::write_private(&dir.join("spool.json"),&spool.encode()?).await?; return Ok(()); }
             _=sleep_until(next_sample) => {
                 let tick=Instant::now();
-                let (inventory,metrics,collectors)=collector.sample().await;
+                let (inventory,metrics,mut collectors)=collector.sample().await;
+                collectors.push(crate::updates::status(dir));
                 let changed=inventory_delivery.changed(&inventory,now())?;
                 let report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),collected_at:now(),inventory:changed.then_some(inventory),metrics,collectors };
                 if first_report.is_none() { first_report=Some(report.report_id.clone()); }
@@ -122,6 +124,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                     Outcome::Accepted(response) => {
                         debug_assert!(response.accepted);
                         spool.remove(&report.report_id); failures=0; retry_at=Instant::now();
+                        if let Some(version)=&response.update_to { update_requests.handle(dir,version,std::time::Instant::now()); }
                         if let Some(seconds)=response.report_interval_seconds { server_period=Some(Duration::from_secs(seconds.clamp(MIN_INTERVAL_SECONDS,MAX_INTERVAL_SECONDS).into())); }
                         inventory_delivery.accept(&report)?;
                         if report.collected_at>=started && report.collected_at>=marker_at {
@@ -428,5 +431,53 @@ mod tests {
         .expect("json");
         assert_eq!(marker["operation"], "once");
         assert_eq!(marker["process_id"], std::process::id());
+    }
+    async fn report_once(directory: &std::path::Path, body: &str) {
+        let (server, task) = server("200 OK", body, Duration::ZERO).await;
+        let mut sampler = FakeSampler {
+            count: 0,
+            stop_after_samples: None,
+        };
+        run(
+            &mut sampler,
+            &configuration(server),
+            Spool::default(),
+            "once",
+            directory,
+            Duration::from_secs(30),
+            std::future::pending(),
+        )
+        .await
+        .expect("accepted");
+        task.abort();
+    }
+    #[tokio::test]
+    async fn an_update_the_server_asks_for_is_left_for_the_updater() {
+        let directory = tempfile::tempdir().expect("temporary");
+        std::fs::create_dir(directory.path().join("update-queue")).expect("queue");
+        report_once(
+            directory.path(),
+            r#"{"accepted":true,"duplicate":false,"update_to":"0.1.60"}"#,
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("update-queue/request"))
+                .expect("request"),
+            "0.1.60\n"
+        );
+    }
+    #[tokio::test]
+    async fn no_request_is_left_when_none_is_asked_or_no_updater_exists() {
+        let asked = tempfile::tempdir().expect("temporary");
+        std::fs::create_dir(asked.path().join("update-queue")).expect("queue");
+        report_once(asked.path(), r#"{"accepted":true,"duplicate":false}"#).await;
+        assert!(!asked.path().join("update-queue/request").exists());
+        let bare = tempfile::tempdir().expect("temporary");
+        report_once(
+            bare.path(),
+            r#"{"accepted":true,"duplicate":false,"update_to":"0.1.60"}"#,
+        )
+        .await;
+        assert!(!bare.path().join("update-queue").exists());
     }
 }

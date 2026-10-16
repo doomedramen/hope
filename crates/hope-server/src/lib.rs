@@ -55,6 +55,8 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/hosts/{id}/metrics", get(metrics::history))
         .route("/enrollment-tokens", post(agents::token))
         .route("/agents/{id}/revoke", post(agents::revoke))
+        .route("/agents/update", post(agents::request_all_updates))
+        .route("/hosts/{id}/update-agent", post(agents::request_update))
         .route("/events", get(api::events))
         .route("/ssh/fingerprint", post(ssh::fingerprint))
         .route("/ssh/install", post(ssh::install))

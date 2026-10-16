@@ -69,6 +69,7 @@ pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstr
         )
         .await,
         report_interval_seconds: state.report_interval(),
+        agent_upgrade_command: crate::agents::upgrade_command(&state),
     }))
 }
 /// Choose how often agents sample and report; they adopt it with their next accepted report.
