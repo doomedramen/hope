@@ -270,24 +270,9 @@ async fn fixture_with(agent: Option<(&str, &str)>, ca: Option<&str>) -> Fixture 
         }
     });
     let host_id = Uuid::new_v4().to_string();
-    let mut host = Host {
-        id: host_id.clone(),
-        agent_id: None,
-        name: "target".into(),
-        addresses: vec!["127.0.0.1".into()],
-        macs: vec!["02:00:00:00:00:77".into()],
-        network_ids: vec![],
-        last_seen: 0.0,
-        last_report: None,
-        last_collected_at: None,
-        agent_revoked: false,
-        enrichment_status: EnrichmentStatus::Pending,
-        discovery_method: "tcp".into(),
-        inventory: None,
-        metrics: None,
-        collectors: vec![],
-        services: vec![],
-    };
+    let mut host = Host::new(host_id.clone(), "target".into(), "tcp");
+    host.addresses = vec!["127.0.0.1".into()];
+    host.macs = vec!["02:00:00:00:00:77".into()];
     if let Some((agent, credential)) = agent {
         sqlx::query("INSERT INTO agents(id,credential_hash) VALUES(?,?)")
             .bind(agent)

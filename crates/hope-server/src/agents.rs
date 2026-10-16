@@ -234,24 +234,7 @@ async fn enroll_inner(
     let mut host = if candidates.len() == 1 {
         candidates[0].clone()
     } else {
-        Host {
-            id: Uuid::new_v4().to_string(),
-            agent_id: None,
-            name: String::new(),
-            addresses: vec![],
-            macs: vec![],
-            network_ids: vec![],
-            last_seen: 0.0,
-            last_report: None,
-            last_collected_at: None,
-            agent_revoked: false,
-            enrichment_status: hope_protocol::EnrichmentStatus::Pending,
-            discovery_method: "agent".into(),
-            inventory: None,
-            metrics: None,
-            collectors: vec![],
-            services: vec![],
-        }
+        Host::new(Uuid::new_v4().to_string(), String::new(), "agent")
     };
     host.agent_id = Some(request.agent_id.clone());
     host.name = request.inventory.hostname.clone();
@@ -259,6 +242,7 @@ async fn enroll_inner(
     host.macs = macs;
     host.inventory = Some(request.inventory);
     host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
+    crate::classify::refresh(&mut host, &state.gateway_set());
     let credential = request.credential;
     let mut tx = state.0.db.begin().await?;
     let changed=sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND used_at IS NULL AND expires_at>? AND reset_agent_id IS NULL")
@@ -377,6 +361,7 @@ pub async fn report(
             host.collectors = report.collectors;
         }
         host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
+        crate::classify::refresh(&mut host, &state.gateway_set());
         sqlx::query("UPDATE hosts SET name=?,body=? WHERE agent_id=?")
             .bind(&host.name)
             .bind(serde_json::to_string(&host)?)

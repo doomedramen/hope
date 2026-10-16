@@ -21,13 +21,17 @@ Home network discovery, host monitoring and a lightweight reporting agent for up
 | --- | --- | --- |
 | ![Hosts](docs/screenshots/hosts.png) | ![Map](docs/screenshots/map-health.png) | ![Host details](docs/screenshots/host-details-dark.png) |
 
+| Router hierarchy (topology mode) | Notifications (ntfy) |
+| --- | --- |
+| ![Router hierarchy](docs/screenshots/map-hierarchy.png) | ![Notifications](docs/screenshots/notifications.png) |
+
 Screenshots are taken by the Playwright suite from synthetic inventory (`web/tests/console.spec.ts`).
 
 ## What is and is not in scope
 
-In scope: discovery of IPv4 ranges (`/20` or smaller) with fair concurrent scanning, cancellation and progress; bounded enrichment; map modes (topology, subnets, health) with provenance for observed, inferred and manual links (physical switch connections are never invented); agents for Linux and macOS (x86_64 and ARM64, systemd and launchd); manual and SSH-assisted agent installation through one signed installer; history (raw 24 hours, five-minute aggregates through day seven); revocable per-agent credentials.
+In scope: discovery of IPv4 ranges (`/20` or smaller) with fair concurrent scanning, cancellation and progress, rescanned in the background on a gentle per-range schedule (every 5 minutes by default); a common-port scan, web-interface titles and mDNS/SSDP announcements for every device; device type guessing with the reasons shown (routers, Proxmox hosts, NAS boxes, phones, printers, cameras, robot vacuums, dishwashers and more) and a manual override; a router hierarchy from the default gateway and traceroutes; notifications through ntfy (new devices, offline agents and infrastructure, full disks, degraded pools, failed services, recoveries); map modes (topology, subnets, health) with provenance for observed, inferred and manual links (physical switch connections are never invented); agents for Linux and macOS (x86_64 and ARM64, systemd and launchd); manual and SSH-assisted agent installation through one signed installer; history (raw 24 hours, five-minute aggregates through day seven); revocable per-agent credentials.
 
-Not in scope and not planned for this release: Windows agents, distributed discovery, switch integrations, notifications, multiple user accounts. Agents report only their own machine, never remote networks, and an unanswered probe does not prove a host is offline.
+Not in scope and not planned for this release: Windows agents, distributed discovery, switch integrations (so which switch port or access point a device uses is not inferred), notification channels other than ntfy, multiple user accounts. Agents report only their own machine, never remote networks, and an unanswered probe does not prove a host is offline.
 
 ## Release gates: five product stages
 

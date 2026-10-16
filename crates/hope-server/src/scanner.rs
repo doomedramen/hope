@@ -25,7 +25,15 @@ struct Batch {
     job: ScanJob,
     ips: VecDeque<Ipv4Addr>,
     cancel: CancellationToken,
+    /// Scheduled background scan: paced well below a scan someone started by hand.
+    gentle: bool,
 }
+
+/// Addresses a scheduled scan probes at once, and the minimum gap between starting two of them.
+/// Each address costs about five probes, so this caps background discovery near 80 probes per
+/// second; a /24 takes about 15 seconds, a /20 under four minutes.
+const GENTLE_PARALLEL: usize = 4;
+const GENTLE_SPACING: Duration = Duration::from_millis(60);
 
 #[derive(Clone, Default)]
 pub(crate) struct Observation {
@@ -124,14 +132,34 @@ impl Scheduler {
             let mut work = FuturesUnordered::new();
             let mut tick = tokio::time::interval(Duration::from_millis(5));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let gentle_live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut gentle_next = Instant::now();
             loop {
                 tokio::select! {
                     batch = receiver.recv() => match batch { Some(batch) => queue.push_back(batch), None => break },
                     Some(()) = work.next(), if !work.is_empty() => {},
                     _ = tick.tick(), if !queue.is_empty() && work.len() < 64 => {
-                        if let Some(mut batch) = queue.pop_front() && !batch.cancel.is_cancelled() && let Some(ip) = batch.ips.pop_front() {
-                            work.push(run_probe(batch.state.clone(), batch.job.clone(), ip, batch.cancel.clone(), backend.clone()));
-                            if !batch.ips.is_empty() { queue.push_back(batch); }
+                        let gentle_ready = gentle_live.load(std::sync::atomic::Ordering::SeqCst) < GENTLE_PARALLEL
+                            && Instant::now() >= gentle_next;
+                        // Round-robin across batches; a paced batch waits its turn without blocking others.
+                        for _ in 0..queue.len() {
+                            let Some(mut batch) = queue.pop_front() else { break };
+                            if batch.cancel.is_cancelled() { continue; }
+                            if batch.gentle && !gentle_ready { queue.push_back(batch); continue; }
+                            if let Some(ip) = batch.ips.pop_front() {
+                                let gentle = batch.gentle.then(|| gentle_live.clone());
+                                if let Some(live) = &gentle {
+                                    live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    gentle_next = Instant::now() + GENTLE_SPACING;
+                                }
+                                let probe = run_probe(batch.state.clone(), batch.job.clone(), ip, batch.cancel.clone(), backend.clone());
+                                work.push(async move {
+                                    probe.await;
+                                    if let Some(live) = gentle { live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
+                                });
+                                if !batch.ips.is_empty() { queue.push_back(batch); }
+                            }
+                            break;
                         }
                     }
                 }
@@ -183,7 +211,17 @@ pub fn parse_range(cidr: &str) -> ApiResult<Ipv4Net> {
     Ok(net.trunc())
 }
 
+/// Scan a range at full speed (someone asked for it).
 pub async fn start(state: &State, network: &Network) -> ApiResult<ScanJob> {
+    begin(state, network, false).await
+}
+
+/// Scan a range as a scheduled, gently paced background scan.
+pub async fn start_scheduled(state: &State, network: &Network) -> ApiResult<ScanJob> {
+    begin(state, network, true).await
+}
+
+async fn begin(state: &State, network: &Network, gentle: bool) -> ApiResult<ScanJob> {
     if state.0.shutdown.is_cancelled() {
         return Err(ApiError::bad("The server is shutting down"));
     }
@@ -245,6 +283,7 @@ pub async fn start(state: &State, network: &Network) -> ApiResult<ScanJob> {
             job: job.clone(),
             ips,
             cancel,
+            gentle,
         })
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -391,26 +430,15 @@ async fn persist_observation(
     if candidates.len() > 1 {
         return Ok(());
     }
+    let is_new = candidates.is_empty();
     let mut host = candidates
         .first()
         .map(|host| (*host).clone())
-        .unwrap_or_else(|| Host {
-            id: Uuid::new_v4().to_string(),
-            agent_id: None,
-            name: address.clone(),
-            addresses: vec![address],
-            macs: vec![],
-            network_ids: vec![],
-            last_seen: now(),
-            last_report: None,
-            last_collected_at: None,
-            agent_revoked: false,
-            enrichment_status: hope_protocol::EnrichmentStatus::Pending,
-            discovery_method: String::new(),
-            inventory: None,
-            metrics: None,
-            collectors: vec![],
-            services: vec![],
+        .unwrap_or_else(|| {
+            let mut host = Host::new(Uuid::new_v4().to_string(), address.clone(), "");
+            host.addresses = vec![address];
+            host.last_seen = now();
+            host
         });
     host.last_seen = now();
     host.discovery_method = observation.method.into();
@@ -426,15 +454,27 @@ async fn persist_observation(
         host.services.retain(|old| old.port != service.port);
         host.services.push(service);
     }
-    host.enrichment_status = hope_protocol::EnrichmentStatus::Pending;
+    state.apply_sightings(&mut host);
+    crate::classify::refresh(&mut host, &state.gateway_set());
+    // Probing every known device again on each scheduled scan would be the heaviest part of
+    // discovery; only new devices, unfinished ones and day-old port scans are enriched.
+    let enrich = crate::enrichment::due(&host);
+    if enrich {
+        host.enrichment_status = hope_protocol::EnrichmentStatus::Pending;
+    }
     state.save_host(&host).await?;
     state.changed();
     drop(_guard);
-    state
-        .0
-        .enrichment
-        .enqueue(state.clone(), host.id, ip, cancel.clone())
-        .await;
+    if is_new {
+        crate::notify::new_device(state, &host, &job.network_id).await;
+    }
+    if enrich {
+        state
+            .0
+            .enrichment
+            .enqueue(state.clone(), host.id, ip, cancel.clone())
+            .await;
+    }
     Ok(())
 }
 
@@ -557,6 +597,7 @@ mod tests {
                 name: "First".into(),
                 cidr: "192.168.1.0/24".into(),
                 enabled: false,
+                interval_minutes: 5,
             },
         )
         .await
@@ -568,6 +609,7 @@ mod tests {
                 name: "Second".into(),
                 cidr: "192.168.30.0/24".into(),
                 enabled: false,
+                interval_minutes: 5,
             },
         )
         .await
@@ -610,6 +652,81 @@ mod tests {
         .expect("both completed");
         assert_eq!(calls.lock().await.len(), 508);
     }
+    struct PacedProbe {
+        live: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+        starts: Arc<Mutex<Vec<Instant>>>,
+    }
+    impl Probe for PacedProbe {
+        fn probe(&self, _: Ipv4Addr) -> BoxFuture<'_, Observation> {
+            Box::pin(async move {
+                use std::sync::atomic::Ordering;
+                self.starts.lock().await.push(Instant::now());
+                let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                self.live.fetch_sub(1, Ordering::SeqCst);
+                Observation::default()
+            })
+        }
+    }
+    #[tokio::test]
+    async fn scheduled_scans_are_paced_and_manual_scans_are_not() {
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let starts = Arc::new(Mutex::new(vec![]));
+        let directory = tempfile::tempdir().expect("temporary");
+        let scheduler = Scheduler::with_backend(
+            Arc::new(PacedProbe {
+                live: Default::default(),
+                peak: peak.clone(),
+                starts: starts.clone(),
+            }),
+            Arc::new(ProbeLimiter::new()),
+            crate::arp::Arp::new(false),
+        );
+        let state = State::open_with_scheduler(
+            directory.path().join("test.db").to_str().expect("path"),
+            "http://localhost:8080".into(),
+            "releases".into(),
+            Capabilities {
+                platform: "test".into(),
+                discovery_mode: "limited".into(),
+                arp: false,
+                icmp: false,
+                limitations: vec![],
+            },
+            Some(scheduler),
+        )
+        .await
+        .expect("state");
+        let network = |id: &str, cidr: &str| Network {
+            id: id.into(),
+            name: id.into(),
+            cidr: cidr.into(),
+            enabled: true,
+            interval_minutes: 5,
+        };
+        start_scheduled(&state, &network("gentle", "192.168.1.0/28"))
+            .await
+            .expect("scheduled");
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let gentle_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(gentle_peak <= GENTLE_PARALLEL, "peak {gentle_peak}");
+        let times = starts.lock().await.clone();
+        assert!(times.len() >= 2);
+        assert!(
+            times
+                .windows(2)
+                .all(|w| w[1].duration_since(w[0]) >= GENTLE_SPACING - Duration::from_millis(10))
+        );
+        // A manual scan of another range is not held to the pace.
+        peak.store(0, std::sync::atomic::Ordering::SeqCst);
+        start(&state, &network("manual", "192.168.2.0/27"))
+            .await
+            .expect("manual");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(peak.load(std::sync::atomic::Ordering::SeqCst) > GENTLE_PARALLEL);
+    }
     #[tokio::test]
     async fn cancellation_stops_dispatch_and_persists_status() {
         let (_directory, state, calls) = fixture().await;
@@ -620,6 +737,7 @@ mod tests {
                 name: "Network".into(),
                 cidr: "192.168.0.0/20".into(),
                 enabled: false,
+                interval_minutes: 5,
             },
         )
         .await

@@ -1,15 +1,6 @@
 "use client";
-import { useMemo, useState } from "react";
-import {
-  ArrowDown,
-  ArrowUp,
-  ArrowUpDown,
-  Bot,
-  Laptop,
-  Monitor,
-  Router,
-  Server,
-} from "lucide-react";
+import { createElement, useMemo, useState } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -31,15 +22,15 @@ import {
   type SortKey,
 } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
+import { deviceIcon, deviceLabel } from "@/lib/devices";
 
-/** A glyph for what the host most likely is, from its OS, agent and observed services. */
+/** A glyph for what the host most likely is (the server's device guess). */
 export function HostIcon({ host, size }: { host: Host; size: number }) {
-  const os = host.inventory?.os.toLowerCase() ?? "";
-  if (os.includes("mac")) return <Laptop size={size} />;
-  if (host.agent_id) return <Server size={size} />;
-  if (host.services.some((s) => s.port === 80 || s.port === 443))
-    return <Router size={size} />;
-  return <Monitor size={size} />;
+  // The icons are module-level components; only the choice between them depends on the host.
+  return createElement(deviceIcon(host), {
+    size,
+    "aria-label": deviceLabel(host) ?? undefined,
+  });
 }
 
 export function HostTable({
@@ -134,8 +125,9 @@ export function HostTable({
                         <Bot size={12} aria-label="Agent installed" />
                       )}
                       <span className="truncate">
-                        {h.inventory?.os ??
-                          `Discovered by ${h.discovery_method}`}
+                        {[deviceLabel(h), h.inventory?.os ?? h.vendor ?? null]
+                          .filter(Boolean)
+                          .join(" · ") || `Discovered by ${h.discovery_method}`}
                       </span>
                     </div>
                   </div>

@@ -22,6 +22,7 @@ import type { Host, MapEdit, MapState, Network } from "@/lib/protocol";
 import { percent0 } from "@/lib/api";
 import { Meter } from "@/components/ui/meter";
 import { HostIcon } from "@/components/host-table";
+import { deviceLabel } from "@/lib/devices";
 import {
   cpuPercent,
   hostState,
@@ -50,6 +51,7 @@ type HopeNode = Node<Data, "hope"> | Node<SubnetData, "subnet">;
 function SubnetNode({ data }: NodeProps<Node<SubnetData, "subnet">>) {
   return (
     <div className="subnet-group" data-testid="subnet-group">
+      <Handle type="target" position={Position.Top} isConnectable={false} />
       <header>
         <NetworkIcon size={14} />
         <strong>{data.label}</strong>
@@ -156,6 +158,11 @@ function InitialViewport() {
   return null;
 }
 
+/** Saved-position key: devices inside a range are relative to it; routers above ranges are not. */
+function positionKey(mode: string, node: HopeNode) {
+  return node.parentId ? `${mode}:${node.id}` : `${mode}:router:${node.id}`;
+}
+
 const TONE_COLORS: Record<Tone, string> = {
   good: "var(--status-good)",
   warning: "var(--status-warning)",
@@ -224,11 +231,68 @@ export function NetworkMap({
         cidr: "outside configured ranges",
       },
     ];
+    // Outside "subnets" mode the map is a hierarchy: a device's parent is the gateway or upstream
+    // router the server inferred (or, for an agent, its reported default gateway). Routers that
+    // have children are lifted out of their range and drawn above the ranges they serve, so one
+    // edge per range replaces a line to every device.
+    const hierarchical = mode !== "subnets";
+    const byId = new Map(hosts.map((h) => [h.id, h]));
+    const parentOf = (host: Host): string | null => {
+      if (
+        host.parent_id &&
+        byId.has(host.parent_id) &&
+        host.parent_id !== host.id
+      )
+        return host.parent_id;
+      const gateway = host.inventory?.interfaces.find(
+        (i) => i.gateway,
+      )?.gateway;
+      const gatewayHost = gateway
+        ? hosts.find((h) => h.addresses.includes(gateway))
+        : undefined;
+      return gatewayHost && gatewayHost.id !== host.id ? gatewayHost.id : null;
+    };
+    const routers = new Set<string>();
+    if (hierarchical)
+      for (const host of hosts) {
+        const parent = parentOf(host);
+        if (parent) routers.add(parent);
+      }
+    const node = (
+      host: Host,
+      extra: Partial<Node<Data, "hope">>,
+    ): Node<Data, "hope"> => {
+      const label = deviceLabel(host);
+      const address = host.addresses[0];
+      return {
+        id: host.id,
+        type: "hope",
+        position: { x: 0, y: 0 },
+        selected: selected === host.id,
+        data: {
+          label: host.name,
+          subtitle:
+            host.name === address
+              ? (label ?? describe(host))
+              : [label, host.addresses.join(", ")].filter(Boolean).join(" · "),
+          host,
+          kind: "host",
+          health: mode === "health",
+          tone: hostState(host).tone,
+        },
+        ...extra,
+      };
+    };
+    // Range id (or "ungrouped") → centre x, for placing the routers that serve it.
+    const centres = new Map<string, number>();
+    // Range id → the parent most of its devices sit behind.
+    const feeds = new Map<string, string>();
     let offset = 0;
     for (const group of groups) {
       const members = hosts
         .filter(
           (h) =>
+            !routers.has(h.id) &&
             (networks.find((n) => h.network_ids.includes(n.id))?.id ??
               "ungrouped") === group.id,
         )
@@ -263,7 +327,18 @@ export function NetworkMap({
       );
       const x = offset;
       offset += width + 80;
+      centres.set(group.id, x + width / 2);
       const root = `network-${group.id}`;
+      const counts = new Map<string, number>();
+      if (hierarchical)
+        for (const host of members) {
+          const parent = parentOf(host);
+          if (parent) counts.set(parent, (counts.get(parent) ?? 0) + 1);
+        }
+      const dominant = [...counts.entries()].sort(
+        (a, b) => b[1] - a[1],
+      )[0]?.[0];
+      if (dominant) feeds.set(group.id, dominant);
       nodes.push({
         id: root,
         type: "subnet",
@@ -280,60 +355,89 @@ export function NetworkMap({
         selectable: false,
         connectable: false,
       });
-      members.forEach((host, index) => {
-        nodes.push({
-          id: host.id,
-          type: "hope",
-          parentId: root,
-          extent: "parent",
-          position: placed[index],
-          selected: selected === host.id,
-          data: {
-            label: host.name,
-            subtitle:
-              host.name === host.addresses[0]
-                ? describe(host)
-                : host.addresses.join(", "),
-            host,
-            kind: "host",
-            health: mode === "health",
-            tone: hostState(host).tone,
-          },
+      if (dominant)
+        edges.push({
+          id: `feeds-${dominant}-${group.id}`,
+          source: dominant,
+          target: root,
+          type: "smoothstep",
+          className: "gateway-edge",
         });
-        if (mode === "subnets") return;
-        // The only automatic relationship an agent can vouch for: its default gateway.
-        const gateway = host.inventory?.interfaces.find(
-          (i) => i.gateway,
-        )?.gateway;
-        if (!gateway) return;
-        const gatewayHost = hosts.find((h) => h.addresses.includes(gateway));
-        const source = gatewayHost?.id ?? `gateway-${group.id}-${gateway}`;
-        if (!gatewayHost && !nodes.some((n) => n.id === source))
-          nodes.push({
-            id: source,
-            type: "hope",
-            position: position(source, {
-              x: x + width / 2 - NODE_WIDTH / 2,
-              y: -150,
-            }),
-            data: {
-              label: gateway,
-              subtitle: "Reported default gateway",
-              kind: "gateway",
-              health: false,
-              tone: "neutral",
-            },
-            connectable: false,
-          });
-        if (source !== host.id)
+      members.forEach((host, index) => {
+        nodes.push(
+          node(host, {
+            parentId: root,
+            extent: "parent",
+            position: placed[index],
+          }),
+        );
+        const parent = hierarchical ? parentOf(host) : null;
+        // A device behind a different router than the rest of its range gets its own edge.
+        if (parent && parent !== dominant)
           edges.push({
-            id: `gateway-${source}-${host.id}`,
-            source,
+            id: `parent-${parent}-${host.id}`,
+            source: parent,
             target: host.id,
             type: "smoothstep",
             className: "gateway-edge",
           });
       });
+    }
+    if (hierarchical && routers.size) {
+      // Depth 0 is the top of the chain (a router with no router above it).
+      const depth = (id: string, seen = new Set<string>()): number => {
+        const host = byId.get(id);
+        const parent = host ? parentOf(host) : null;
+        if (!parent || seen.has(parent) || !routers.has(parent)) return 0;
+        seen.add(id);
+        return 1 + depth(parent, seen);
+      };
+      const levels = [...routers].map((id) => ({ id, depth: depth(id) }));
+      const deepest = Math.max(...levels.map((l) => l.depth));
+      const xOf = new Map<string, number>();
+      // Bottom-up: a router sits over the ranges it feeds, an upstream router over its routers.
+      for (let level = deepest; level >= 0; level--) {
+        let free = offset;
+        for (const { id } of levels.filter((l) => l.depth === level)) {
+          const below = [
+            ...[...feeds.entries()]
+              .filter(([, parent]) => parent === id)
+              .map(([group]) => centres.get(group) ?? 0),
+            ...[...routers]
+              .filter((r) => {
+                const host = byId.get(r);
+                return host && parentOf(host) === id && xOf.has(r);
+              })
+              .map((r) => (xOf.get(r) ?? 0) + NODE_WIDTH / 2),
+          ];
+          const centre = below.length
+            ? below.reduce((a, b) => a + b, 0) / below.length
+            : (free += COLUMN_PITCH) - COLUMN_PITCH / 2;
+          xOf.set(id, centre - NODE_WIDTH / 2);
+        }
+      }
+      for (const { id, depth: level } of levels) {
+        const host = byId.get(id);
+        if (!host) continue;
+        nodes.push(
+          node(host, {
+            // Saved apart from its position inside a range: the coordinates mean different things.
+            position: position(`router:${id}`, {
+              x: xOf.get(id) ?? 0,
+              y: -(deepest - level + 1) * (rowPitch + 60),
+            }),
+          }),
+        );
+        const parent = parentOf(host);
+        if (parent && routers.has(parent))
+          edges.push({
+            id: `upstream-${parent}-${id}`,
+            source: parent,
+            target: id,
+            type: "smoothstep",
+            className: "gateway-edge",
+          });
+      }
     }
     if (mode !== "subnets")
       for (const link of layout.links)
@@ -392,11 +496,11 @@ export function NetworkMap({
         onNodeDrag={(_, node) =>
           setMoving((previous) => ({
             ...previous,
-            [`${mode}:${node.id}`]: node.position,
+            [positionKey(mode, node)]: node.position,
           }))
         }
         onNodeDragStop={(_, node) => {
-          const key = `${mode}:${node.id}`;
+          const key = positionKey(mode, node);
           const position = node.position;
           void onSave({
             operation: "set_position",
@@ -456,7 +560,7 @@ export function NetworkMap({
           <>
             <span>
               <i className="legend-line" />
-              Reported gateway
+              Gateway or upstream router
             </span>
             <span>
               <i className="legend-line manual" />

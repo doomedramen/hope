@@ -49,6 +49,14 @@ pub struct Inner {
     pub report_denied: crate::limits::Limiter,
     /// Reports per authenticated agent identity (no global ceiling).
     pub report_limit: crate::limits::Limiter,
+    /// Client for reading device web pages and UPnP descriptions (LAN only, never proxied).
+    pub http: reqwest::Client,
+    /// Client for notification services (honours the usual proxy variables).
+    pub notifier: reqwest::Client,
+    /// What devices announced in the latest mDNS and SSDP sweeps, by address.
+    pub sightings: std::sync::Mutex<HashMap<std::net::Ipv4Addr, crate::fingerprint::Announcement>>,
+    /// Addresses known to route traffic: the server's default gateway and traceroute hops.
+    pub gateways: std::sync::Mutex<HashSet<String>>,
 }
 
 /// Serialized origin of an absolute URL (lowercase host, default port omitted), or None.
@@ -143,7 +151,7 @@ impl State {
         capabilities.arp = capabilities.arp && scheduler.arp.available();
         if !capabilities.arp && capabilities.limitations.is_empty() {
             capabilities.limitations.push(
-                "Active ARP is unavailable on this interface; physical topology may be incomplete."
+                "Active ARP is unavailable: the server could not open a raw packet socket on any network interface, which needs the CAP_NET_RAW capability. Devices are still found by ping and TCP, but MAC addresses, manufacturers and most device types are missing. The server log says why for each interface (journalctl -u hope | grep ARP)."
                     .into(),
             );
         }
@@ -172,6 +180,14 @@ impl State {
             enroll_limit: crate::limits::Limiter::new(60.0, 20),
             report_denied: crate::limits::Limiter::new(60.0, 30),
             report_limit: crate::limits::Limiter::new(60.0, 120),
+            http: crate::fingerprint::http_client(),
+            notifier: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .user_agent("H.O.P.E notifications")
+                .build()
+                .unwrap_or_default(),
+            sightings: std::sync::Mutex::new(HashMap::new()),
+            gateways: std::sync::Mutex::new(HashSet::new()),
         }));
         Ok(state)
     }
@@ -180,6 +196,45 @@ impl State {
             .active_tasks
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         TaskGuard(self.clone())
+    }
+    /// Snapshot of the known gateway addresses.
+    pub fn gateway_set(&self) -> HashSet<String> {
+        self.0
+            .gateways
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+    /// Merge what the latest sweeps saw at any of the host's addresses into its evidence.
+    pub fn apply_sightings(&self, host: &mut Host) {
+        let Ok(sightings) = self.0.sightings.lock() else {
+            return;
+        };
+        for address in &host.addresses {
+            let Some(seen) = address.parse().ok().and_then(|ip| sightings.get(&ip)) else {
+                continue;
+            };
+            let e = &mut host.evidence;
+            e.mdns_name = seen.mdns_name.clone().or(e.mdns_name.take());
+            if !seen.mdns_services.is_empty() {
+                e.mdns_services = seen.mdns_services.iter().cloned().collect();
+            }
+            e.mdns_model = seen.mdns_model.clone().or(e.mdns_model.take());
+            if !seen.mdns_instances.is_empty() {
+                e.mdns_instances = seen.mdns_instances.iter().cloned().collect();
+            }
+            e.ssdp_server = seen.ssdp_server.clone().or(e.ssdp_server.take());
+            e.upnp_device_type = seen.upnp_device_type.clone().or(e.upnp_device_type.take());
+            e.upnp_friendly_name = seen
+                .upnp_friendly_name
+                .clone()
+                .or(e.upnp_friendly_name.take());
+            e.upnp_manufacturer = seen
+                .upnp_manufacturer
+                .clone()
+                .or(e.upnp_manufacturer.take());
+            e.upnp_model = seen.upnp_model.clone().or(e.upnp_model.take());
+        }
     }
     pub fn changed(&self) {
         let _ = self.0.events.send("refresh".into());

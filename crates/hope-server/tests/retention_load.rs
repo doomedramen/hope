@@ -40,24 +40,14 @@ async fn seven_days_for_250_hosts_keep_reports_and_discovery_writes_responsive()
     for index in 0..250 {
         let id = Uuid::new_v4().to_string();
         let credential = secret();
-        let host = Host {
-            id: Uuid::new_v4().to_string(),
-            agent_id: Some(id.clone()),
-            name: format!("load-{index:03}"),
-            addresses: vec![],
-            macs: vec![],
-            network_ids: vec![],
-            last_seen: now(),
-            last_report: None,
-            last_collected_at: None,
-            agent_revoked: false,
-            enrichment_status: EnrichmentStatus::Completed,
-            discovery_method: "agent".into(),
-            inventory: None,
-            metrics: None,
-            collectors: vec![],
-            services: vec![],
-        };
+        let mut host = Host::new(
+            Uuid::new_v4().to_string(),
+            format!("load-{index:03}"),
+            "agent",
+        );
+        host.agent_id = Some(id.clone());
+        host.last_seen = now();
+        host.enrichment_status = EnrichmentStatus::Completed;
         sqlx::query("INSERT INTO agents(id,credential_hash) VALUES(?,?)")
             .bind(&id)
             .bind(hash(&credential))

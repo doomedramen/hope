@@ -78,6 +78,17 @@ async fn status(state: &State, id: &str, status: EnrichmentStatus) {
         state.changed();
     }
 }
+/// How often a known device's common ports are scanned again.
+pub const PORT_RESCAN_SECONDS: f64 = 24.0 * 3600.0;
+
+/// Whether a host needs enrichment: never finished, or its port scan is older than a day.
+pub fn due(host: &hope_protocol::Host) -> bool {
+    !matches!(host.enrichment_status, EnrichmentStatus::Completed)
+        || host
+            .ports_scanned_at
+            .is_none_or(|at| now() - at > PORT_RESCAN_SECONDS)
+}
+
 async fn enrich(work: Work) {
     let Work {
         state,
@@ -86,19 +97,34 @@ async fn enrich(work: Work) {
         cancel,
     } = work;
     status(&state, &id, EnrichmentStatus::Running).await;
+    let rescan = state.host(&id).await.ok().flatten().is_some_and(|h| {
+        h.ports_scanned_at
+            .is_none_or(|at| now() - at > PORT_RESCAN_SECONDS)
+    });
     let result = tokio::select! {
         _ = cancel.cancelled() => { status(&state, &id, EnrichmentStatus::Cancelled).await; return; }
-        result = timeout(Duration::from_secs(12), async {
-            let mut services = vec![];
-            for (port, name) in [(22, "SSH"), (80, "HTTP"), (443, "HTTPS"), (445, "SMB"), (3389, "RDP"), (8080, "HTTP alternate")] {
-                if crate::scanner::tcp(ip, port, &state.0.scheduler.limiter).await {
-                    services.push(Service { port, name: name.into(), observed_at: now() });
+        result = timeout(Duration::from_secs(30), async {
+            let services = if rescan {
+                let limiter = &state.0.scheduler.limiter;
+                let probes = crate::fingerprint::COMMON_PORTS.iter().map(|(port, name)| async move {
+                    crate::scanner::tcp(ip, *port, limiter).await.then(|| Service { port: *port, name: (*name).into(), observed_at: now() })
+                });
+                Some(futures::future::join_all(probes).await.into_iter().flatten().collect::<Vec<_>>())
+            } else {
+                None
+            };
+            let banner = match &services {
+                Some(open) if !open.is_empty() => {
+                    let ports: Vec<u16> = open.iter().map(|s| s.port).collect();
+                    Some(crate::fingerprint::http_banner(&state.0.http, ip, &ports).await)
                 }
-            }
-            (services, reverse_dns(ip).await)
+                Some(_) => Some((None, None)),
+                None => None,
+            };
+            (services, banner, reverse_dns(ip).await)
         }) => result,
     };
-    let Ok((services, hostname)) = result else {
+    let Ok((services, banner, hostname)) = result else {
         status(&state, &id, EnrichmentStatus::Failed).await;
         return;
     };
@@ -109,10 +135,21 @@ async fn enrich(work: Work) {
         return;
     }
     if let Ok(Some(mut host)) = state.host(&id).await {
-        // Keep previous service observations when the current probe is unanswered.
-        for service in services {
-            host.services.retain(|old| old.port != service.port);
-            host.services.push(service);
+        if let Some(open) = services {
+            // A full scan is authoritative for the common ports; anything else (seen by an agent or
+            // a quick probe outside the list) is kept.
+            host.services
+                .retain(|old| crate::fingerprint::port_name(old.port).is_none());
+            host.services.extend(open);
+            host.services.sort_by_key(|s| s.port);
+            host.ports_scanned_at = Some(now());
+        }
+        if let Some((title, server)) = banner {
+            host.evidence.http_title = title;
+            host.evidence.http_server = server;
+        }
+        if hostname.is_some() {
+            host.evidence.dns_name = hostname.clone();
         }
         host.enrichment_status = EnrichmentStatus::Completed;
         if host.agent_id.is_none()
@@ -120,6 +157,8 @@ async fn enrich(work: Work) {
         {
             host.name = name;
         }
+        state.apply_sightings(&mut host);
+        crate::classify::refresh(&mut host, &state.gateway_set());
         if let Err(error) = state.save_host(&host).await {
             tracing::warn!(%error, "enrichment could not be saved");
         }

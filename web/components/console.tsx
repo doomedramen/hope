@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import {
   ArrowDownToLine,
+  BellRing,
   CircleHelp,
   LayoutDashboard,
   LayoutList,
@@ -45,8 +46,9 @@ import { HostDetails } from "@/components/host-details";
 import { HostTable } from "@/components/host-table";
 import { Overview } from "@/components/overview";
 import { NetworkDialog } from "@/components/network-dialog";
-import { NetworksDialog } from "@/components/networks-dialog";
+import { INTERVALS, NetworksDialog } from "@/components/networks-dialog";
 import { AccountDialog } from "@/components/account-dialog";
+import { NotificationsDialog } from "@/components/notifications-dialog";
 import { ScanProgress } from "@/components/scan-progress";
 import { Brand, SignIn } from "@/components/sign-in";
 import {
@@ -185,6 +187,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const [installOpen, setInstallOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -454,6 +457,13 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       run: () => setSettingsOpen(true),
     },
     {
+      id: "notifications",
+      label: "Notifications",
+      hint: "action",
+      icon: commandIcons.notifications,
+      run: () => setNotificationsOpen(true),
+    },
+    {
       id: "password",
       label: "Change password",
       hint: "account",
@@ -507,6 +517,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           >
             <Settings2 />
             <span>Networks</span>
+          </button>
+          <button
+            type="button"
+            className="nav-item"
+            onClick={() => setNotificationsOpen(true)}
+          >
+            <BellRing />
+            <span>Notifications</span>
           </button>
         </nav>
         <div className="sidebar-section">
@@ -964,7 +982,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                       ` · ${hosts.filter((h) => hostState(h).tone === "good").length} responding`}
                   </span>
                   <span>
-                    Discovery runs every five minutes for enabled ranges.
+                    Enabled ranges are rescanned in the background (every five
+                    minutes unless you change it), gently enough not to load the
+                    network.
                   </span>
                 </footer>
               </section>
@@ -1005,6 +1025,11 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           host={host}
         />
       )}
+      <NotificationsDialog
+        open={notificationsOpen}
+        onOpenChange={setNotificationsOpen}
+        notify={toast}
+      />
       <AccountDialog
         open={accountOpen}
         onOpenChange={setAccountOpen}
@@ -1018,6 +1043,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
         data={data}
         busy={busy}
         onAddNetwork={() => setNetworkOpen(true)}
+        onSetInterval={(n, minutes) => {
+          void action(async () => {
+            await put(`/networks/${n.id}`, { interval_minutes: minutes });
+            toast(
+              `${n.name} is now scanned ${INTERVALS.find(([m]) => m === minutes)?.[1].toLowerCase() ?? `every ${minutes} minutes`}.`,
+            );
+          });
+        }}
         onScanNetwork={(n) => discover(n)}
         onToggleNetwork={(n) => {
           void action(async () => {

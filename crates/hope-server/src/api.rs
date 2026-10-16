@@ -28,6 +28,7 @@ pub async fn networks(state: &State) -> ApiResult<Vec<Network>> {
             name: r.get("name"),
             cidr: r.get("cidr"),
             enabled: r.get("enabled"),
+            interval_minutes: r.get::<i64, _>("interval_minutes") as u32,
         })
         .collect())
 }
@@ -66,6 +67,17 @@ pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstr
     }))
 }
 pub use hope_protocol::NetworkInput;
+/// A supported scheduled-scan interval, defaulting to five minutes.
+fn interval(minutes: Option<u32>) -> ApiResult<u32> {
+    let minutes = minutes.unwrap_or(hope_protocol::DEFAULT_SCAN_INTERVAL_MINUTES);
+    if hope_protocol::SCAN_INTERVALS_MINUTES.contains(&minutes) {
+        Ok(minutes)
+    } else {
+        Err(ApiError::bad(
+            "Choose a scan interval of 5, 15 or 30 minutes, or 1, 6 or 24 hours",
+        ))
+    }
+}
 pub async fn add_network(
     Extract(state): Extract<State>,
     Json(body): Json<NetworkInput>,
@@ -90,12 +102,14 @@ pub async fn add_network(
         name: body.name.trim().into(),
         cidr,
         enabled: body.enabled.unwrap_or(true),
+        interval_minutes: interval(body.interval_minutes)?,
     };
-    sqlx::query("INSERT INTO networks(id,name,cidr,enabled) VALUES(?,?,?,?)")
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES(?,?,?,?,?)")
         .bind(&network.id)
         .bind(&network.name)
         .bind(&network.cidr)
         .bind(network.enabled)
+        .bind(network.interval_minutes)
         .execute(&state.0.db)
         .await?;
     for mut host in state.hosts().await? {
@@ -111,11 +125,23 @@ pub async fn update_network(
     Path(id): Path<String>,
     Json(body): Json<NetworkUpdate>,
 ) -> ApiResult<Json<OkResponse>> {
-    sqlx::query("UPDATE networks SET enabled=? WHERE id=?")
-        .bind(body.enabled)
-        .bind(id)
-        .execute(&state.0.db)
-        .await?;
+    if !networks(&state).await?.iter().any(|n| n.id == id) {
+        return Err(ApiError::not_found());
+    }
+    if let Some(enabled) = body.enabled {
+        sqlx::query("UPDATE networks SET enabled=? WHERE id=?")
+            .bind(enabled)
+            .bind(&id)
+            .execute(&state.0.db)
+            .await?;
+    }
+    if body.interval_minutes.is_some() {
+        sqlx::query("UPDATE networks SET interval_minutes=? WHERE id=?")
+            .bind(interval(body.interval_minutes)?)
+            .bind(&id)
+            .execute(&state.0.db)
+            .await?;
+    }
     state.changed();
     Ok(Json(OkResponse { ok: true }))
 }
@@ -383,4 +409,29 @@ pub async fn events(
         .take_until(tokio::time::sleep(std::time::Duration::from_secs(600)))
         .take_until(state.0.shutdown.clone().cancelled_owned());
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Set a device's type by hand, or (with `kind: null`) return it to automatic detection.
+pub async fn set_device_type(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+    Json(body): Json<hope_protocol::DeviceTypeUpdate>,
+) -> ApiResult<Json<Host>> {
+    let _guard = state.0.writes.lock().await;
+    let mut host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
+    match body.kind.as_deref() {
+        Some(kind) => {
+            host.device = Some(
+                crate::classify::manual(kind)
+                    .ok_or_else(|| ApiError::bad("Unknown device type"))?,
+            );
+        }
+        None => {
+            host.device = None;
+            crate::classify::refresh(&mut host, &state.gateway_set());
+        }
+    }
+    state.save_host(&host).await?;
+    state.changed();
+    Ok(Json(host))
 }

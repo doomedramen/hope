@@ -82,6 +82,49 @@ pub struct PasswordChange {
     pub current_password: String,
     pub new_password: String,
 }
+/// ntfy notification settings. `ntfy_token` is write-only: responses never contain it and report
+/// `ntfy_token_set` instead; on update, null keeps the stored token and "" removes it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+pub struct NotificationSettings {
+    pub ntfy_enabled: bool,
+    pub ntfy_server: String,
+    pub ntfy_topic: String,
+    #[serde(default)]
+    pub ntfy_token: Option<String>,
+    #[serde(default)]
+    pub ntfy_token_set: bool,
+    /// A device the server has never seen joins a monitored range.
+    pub notify_new_devices: bool,
+    /// An agent stops reporting, or infrastructure (router, switch, access point, server, NAS,
+    /// hypervisor) stops answering scans.
+    pub notify_offline: bool,
+    /// Full disks or pools, degraded pools, hot sensors, failed services, failing monitors.
+    pub notify_resources: bool,
+    /// Send a follow-up when a problem clears.
+    pub notify_recovery: bool,
+    #[serde(default)]
+    pub last_sent_at: Option<f64>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            ntfy_enabled: false,
+            ntfy_server: "https://ntfy.sh".into(),
+            ntfy_topic: String::new(),
+            ntfy_token: None,
+            ntfy_token_set: false,
+            notify_new_devices: true,
+            notify_offline: true,
+            notify_resources: true,
+            notify_recovery: true,
+            last_sent_at: None,
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct AuthStatus {
     pub setup_required: bool,
@@ -106,10 +149,16 @@ pub struct NetworkInput {
     pub name: String,
     pub cidr: String,
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub interval_minutes: Option<u32>,
 }
+/// Partial update: omitted fields keep their value.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct NetworkUpdate {
-    pub enabled: bool,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub interval_minutes: Option<u32>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct MergeRequest {
@@ -380,6 +429,15 @@ pub struct Network {
     pub name: String,
     pub cidr: String,
     pub enabled: bool,
+    /// Minutes between scheduled background scans of this range.
+    #[serde(default = "default_scan_interval")]
+    pub interval_minutes: u32,
+}
+pub const DEFAULT_SCAN_INTERVAL_MINUTES: u32 = 5;
+/// Scheduled scan intervals the server accepts, in minutes.
+pub const SCAN_INTERVALS_MINUTES: [u32; 6] = [5, 15, 30, 60, 360, 1440];
+fn default_scan_interval() -> u32 {
+    DEFAULT_SCAN_INTERVAL_MINUTES
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -403,6 +461,66 @@ pub struct Service {
     pub observed_at: f64,
 }
 
+/// What the server could learn about a device without an agent. Every field is optional evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, Default, PartialEq)]
+pub struct DeviceEvidence {
+    /// Name from reverse DNS.
+    #[serde(default)]
+    pub dns_name: Option<String>,
+    /// Host name the device announces over mDNS (without `.local`).
+    #[serde(default)]
+    pub mdns_name: Option<String>,
+    /// mDNS service types, for example `_googlecast._tcp`.
+    #[serde(default)]
+    pub mdns_services: Vec<String>,
+    /// Model from mDNS TXT records (`model=`, `md=`, `ty=`).
+    #[serde(default)]
+    pub mdns_model: Option<String>,
+    /// Service instance names the device announces, for example "Living Room TV".
+    #[serde(default)]
+    pub mdns_instances: Vec<String>,
+    #[serde(default)]
+    pub ssdp_server: Option<String>,
+    #[serde(default)]
+    pub upnp_device_type: Option<String>,
+    #[serde(default)]
+    pub upnp_friendly_name: Option<String>,
+    #[serde(default)]
+    pub upnp_manufacturer: Option<String>,
+    #[serde(default)]
+    pub upnp_model: Option<String>,
+    /// `<title>` of the device's web interface.
+    #[serde(default)]
+    pub http_title: Option<String>,
+    /// `Server` header of the device's web interface.
+    #[serde(default)]
+    pub http_server: Option<String>,
+}
+
+/// The server's best guess at what a device is, with the evidence behind it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, Default, PartialEq)]
+pub struct DeviceGuess {
+    /// Stable identifier: `router`, `switch`, `access_point`, `hypervisor`, `nas`, `server`, `vm`,
+    /// `computer`, `phone`, `tablet`, `tv`, `streamer`, `speaker`, `printer`, `camera`, `vacuum`,
+    /// `appliance`, `game_console`, `smart_home` or `unknown`.
+    pub kind: String,
+    /// Specific name when known (for example "Proxmox VE" or "Dishwasher"), else the kind's name.
+    pub label: String,
+    /// 0 to 100.
+    pub confidence: u8,
+    /// Human-readable evidence, strongest first.
+    pub reasons: Vec<String>,
+    /// True when the administrator set the type; guesses then never replace it.
+    #[serde(default)]
+    pub manual: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct DeviceTypeUpdate {
+    /// A `DeviceGuess::kind`, or null to return to automatic detection.
+    pub kind: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Host {
     pub id: String,
@@ -424,6 +542,51 @@ pub struct Host {
     pub metrics: Option<Metrics>,
     pub collectors: Vec<CollectorStatus>,
     pub services: Vec<Service>,
+    /// Manufacturer registered for the MAC address prefix (IEEE OUI).
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub device: Option<DeviceGuess>,
+    #[serde(default)]
+    pub evidence: DeviceEvidence,
+    /// When the common-port scan last completed.
+    #[serde(default)]
+    pub ports_scanned_at: Option<f64>,
+    /// The device this one sits behind (its gateway or upstream router), when inferred.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub parent_reason: Option<String>,
+}
+
+impl Host {
+    /// A host with no observations yet.
+    pub fn new(id: String, name: String, discovery_method: &str) -> Self {
+        Self {
+            id,
+            agent_id: None,
+            name,
+            addresses: vec![],
+            macs: vec![],
+            network_ids: vec![],
+            last_seen: 0.0,
+            last_report: None,
+            last_collected_at: None,
+            agent_revoked: false,
+            enrichment_status: EnrichmentStatus::Pending,
+            discovery_method: discovery_method.into(),
+            inventory: None,
+            metrics: None,
+            collectors: vec![],
+            services: vec![],
+            vendor: None,
+            device: None,
+            evidence: DeviceEvidence::default(),
+            ports_scanned_at: None,
+            parent_id: None,
+            parent_reason: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -528,6 +691,10 @@ pub fn typescript() -> String {
         InstallMode::decl(),
         LoginRequest::decl(),
         PasswordChange::decl(),
+        NotificationSettings::decl(),
+        DeviceEvidence::decl(),
+        DeviceGuess::decl(),
+        DeviceTypeUpdate::decl(),
         AuthStatus::decl(),
         OkResponse::decl(),
         ReportResponse::decl(),

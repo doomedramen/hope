@@ -776,6 +776,162 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(page.getByText("Removed Workshop.")).toBeVisible();
   });
 
+  test("devices show their type and evidence, and the type can be corrected", async ({
+    page,
+  }) => {
+    await page.goto("/?view=hosts");
+    await page
+      .getByRole("table")
+      .getByText("atlas-nas", { exact: true })
+      .click();
+    const device = page.getByTestId("device");
+    // Its name says what it is.
+    await expect(device).toContainText("NAS");
+    await expect(device.getByLabel("Why this type")).toContainText(
+      'Named "atlas-nas"',
+    );
+    await page.getByRole("combobox", { name: "Device type" }).click();
+    await page.getByRole("option", { name: "Server", exact: true }).click();
+    await expect(
+      page.getByText("atlas-nas is now marked as server."),
+    ).toBeVisible();
+    await expect(device).toContainText("set by you");
+    await expect(
+      page.getByRole("row").filter({ hasText: "atlas-nas" }),
+    ).toContainText("Server");
+    await page.screenshot({ path: "test-results/hope-device.png" });
+    await page.getByRole("combobox", { name: "Device type" }).click();
+    await page
+      .getByRole("option", { name: "Automatic detection", exact: true })
+      .click();
+    await expect(
+      page.getByText("atlas-nas is back to automatic detection."),
+    ).toBeVisible();
+    await expect(device).not.toContainText("set by you");
+  });
+  test("each range chooses how often it is scanned in the background", async ({
+    page,
+    request,
+  }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Networks", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Networks" });
+    await expect(dialog).toContainText("Every 5 minutes");
+    await dialog
+      .getByRole("combobox", { name: "Scan interval for Home network" })
+      .click();
+    await page.getByRole("option", { name: "Every hour", exact: true }).click();
+    await expect(
+      page.getByText("Home network is now scanned every hour."),
+    ).toBeVisible();
+    const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+    expect(
+      bootstrap.networks.find(
+        (n: { name: string }) => n.name === "Home network",
+      ).interval_minutes,
+    ).toBe(60);
+  });
+  test("notifications are configured once and reach an ntfy server", async ({
+    page,
+  }) => {
+    const { createServer } = await import("node:http");
+    const received: { auth?: string; body: Record<string, unknown> }[] = [];
+    const ntfy = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        received.push({
+          auth: req.headers.authorization,
+          body: JSON.parse(body),
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{}");
+      });
+    });
+    await new Promise<void>((resolve) => ntfy.listen(0, "127.0.0.1", resolve));
+    const port = (ntfy.address() as { port: number }).port;
+    try {
+      await page.goto("/");
+      await page
+        .getByRole("button", { name: "Notifications", exact: true })
+        .click();
+      const form = page.getByRole("form", { name: "Notification settings" });
+      await form.getByLabel("Send notifications").check();
+      await form.getByLabel("ntfy server").fill(`http://127.0.0.1:${port}`);
+      await form.getByLabel("Topic").fill("hope-browser");
+      await form.getByLabel("Access token (optional)").fill("tk_browser");
+      await expect(form.getByLabel("New devices")).toBeChecked();
+      await page.screenshot({ path: "test-results/hope-notifications.png" });
+      await form.getByRole("button", { name: "Send test" }).click();
+      await expect(
+        page.getByText("Test notification sent. Check your ntfy app."),
+      ).toBeVisible();
+      expect(received).toHaveLength(1);
+      expect(received[0].auth).toBe("Bearer tk_browser");
+      expect(received[0].body.topic).toBe("hope-browser");
+      expect(received[0].body.title).toBe("H.O.P.E test notification");
+      await expect(form.getByTestId("ntfy-status")).toContainText(
+        "Last notification sent",
+      );
+      await page.keyboard.press("Escape");
+      await page
+        .getByRole("button", { name: "Notifications", exact: true })
+        .click();
+      await expect(form.getByLabel("Access token (optional)")).toHaveAttribute(
+        "placeholder",
+        "Stored; type to replace",
+      );
+      await expect(form.getByLabel("Topic")).toHaveValue("hope-browser");
+      // Turn them off again so later tests never post to a closed server.
+      await form.getByLabel("Send notifications").uncheck();
+      await form.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(
+        page.getByText("Notification settings saved."),
+      ).toBeVisible();
+    } finally {
+      ntfy.close();
+    }
+  });
+  test("the map draws routers above the ranges they serve", async ({
+    page,
+  }) => {
+    let router = "";
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const atlas = body.hosts.find(
+        (h: { name: string }) => h.name === "atlas-nas",
+      );
+      router = atlas.id;
+      const home = body.networks.find(
+        (n: { name: string }) => n.name === "Home network",
+      );
+      for (const host of body.hosts)
+        if (host.id !== atlas.id && host.network_ids.includes(home.id))
+          host.parent_id = atlas.id;
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto("/?view=map");
+    await expect(page.getByTestId("network-map")).toBeVisible();
+    await expect(
+      page.locator(`.react-flow__edge[data-id^="feeds-${router}-"]`),
+    ).toHaveCount(1);
+    const node = await page
+      .locator(".react-flow__node")
+      .filter({ hasText: "atlas-nas" })
+      .boundingBox();
+    const range = await page
+      .getByTestId("subnet-group")
+      .filter({ hasText: "Home network" })
+      .boundingBox();
+    expect(node && range && node.y + node.height <= range.y).toBeTruthy();
+    await page.screenshot({
+      path: "test-results/hope-hierarchy.png",
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Subnets", exact: true }).click();
+    await expect(page.locator(".react-flow__edge")).toHaveCount(0);
+  });
   test("the administrator changes the password and other browsers are signed out", async ({
     page,
     playwright,

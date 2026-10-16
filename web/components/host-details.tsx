@@ -11,6 +11,7 @@ import {
   Network,
   Radio,
   ShieldOff,
+  Tag,
   Waypoints,
   Wifi,
   X,
@@ -35,7 +36,13 @@ import {
   useHistory,
   type HistoryWindow,
 } from "@/components/metric-history";
-import { age, bytes, post, rate } from "@/lib/api";
+import { age, bytes, post, put, rate } from "@/lib/api";
+import {
+  DEVICE_KINDS,
+  confidenceLabel,
+  deviceLabel,
+  kindLabel,
+} from "@/lib/devices";
 import { hostIssues, hostState, type Tone } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
 
@@ -74,6 +81,21 @@ export function HostDetails({
       await post(`/agents/${host.agent_id}/revoke`);
       setConfirmRevoke(false);
       notify(`Revoked the agent credential for ${host.name}.`, "warning");
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  async function setType(value: string) {
+    const kind = value === "auto" ? null : value;
+    try {
+      await put(`/hosts/${host.id}/type`, { kind });
+      notify(
+        kind
+          ? `${host.name} is now marked as ${kindLabel(kind).toLowerCase()}.`
+          : `${host.name} is back to automatic detection.`,
+        "good",
+      );
       refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -204,6 +226,11 @@ export function HostDetails({
             </AlertDescription>
           </Alert>
         )}
+        <DeviceSection
+          host={host}
+          hosts={hosts}
+          onType={(value) => void setType(value)}
+        />
         {host.agent_id && (
           <section className="history">
             <h3 className="detail-heading">
@@ -390,7 +417,15 @@ export function HostDetails({
         <section>
           <h3 className="detail-heading">
             <Radio />
-            Observed services
+            Open ports
+            <span className="spacer" />
+            <span className="text-xs font-normal text-muted-foreground">
+              {host.ports_scanned_at
+                ? `Common ports scanned ${age(host.ports_scanned_at).toLowerCase()}`
+                : host.agent_id
+                  ? ""
+                  : "Port scan pending"}
+            </span>
           </h3>
           {host.services.length ? (
             <div className="flex flex-wrap gap-1.5">
@@ -405,7 +440,7 @@ export function HostDetails({
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">
-              No open services observed yet.
+              No open ports found.
             </p>
           )}
         </section>
@@ -523,5 +558,123 @@ export function HostDetails({
         )}
       </div>
     </aside>
+  );
+}
+
+/** What the device is, why the server thinks so, and a way to correct it. */
+function DeviceSection({
+  host,
+  hosts,
+  onType,
+}: {
+  host: Host;
+  hosts: Host[];
+  onType: (value: string) => void;
+}) {
+  const device = host.device;
+  const label = deviceLabel(host) ?? "Unknown device";
+  const parent = host.parent_id
+    ? hosts.find((h) => h.id === host.parent_id)
+    : undefined;
+  const e = host.evidence;
+  const announced = [e.mdns_name, ...e.mdns_instances, e.upnp_friendly_name]
+    .filter((v): v is string => !!v)
+    .filter((v, i, all) => all.indexOf(v) === i);
+  const model = [e.upnp_manufacturer, e.upnp_model ?? e.mdns_model]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <section data-testid="device">
+      <h3 className="detail-heading">
+        <Tag />
+        Device
+      </h3>
+      <dl className="detail-list">
+        <dt>Type</dt>
+        <dd>
+          {label}
+          {device && device.kind !== "unknown" && (
+            <span className="ml-1.5 text-muted-foreground">
+              ·{" "}
+              {device.manual
+                ? "set by you"
+                : confidenceLabel(device.confidence).toLowerCase()}
+            </span>
+          )}
+        </dd>
+        {host.vendor && (
+          <>
+            <dt>Manufacturer</dt>
+            <dd>{host.vendor}</dd>
+          </>
+        )}
+        {parent && (
+          <>
+            <dt>Behind</dt>
+            <dd title={host.parent_reason ?? undefined}>
+              {parent.name}
+              {parent.name !== parent.addresses[0] && (
+                <span className="mono ml-1.5 text-muted-foreground">
+                  {parent.addresses[0]}
+                </span>
+              )}
+            </dd>
+          </>
+        )}
+        {announced.length > 0 && (
+          <>
+            <dt>Announces</dt>
+            <dd>{announced.slice(0, 3).join(" · ")}</dd>
+          </>
+        )}
+        {model && (
+          <>
+            <dt>Model</dt>
+            <dd>{model}</dd>
+          </>
+        )}
+        {e.http_title && (
+          <>
+            <dt>Web interface</dt>
+            <dd>{e.http_title}</dd>
+          </>
+        )}
+      </dl>
+      {device && !device.manual && device.reasons.length > 0 && (
+        <ul className="device-reasons" aria-label="Why this type">
+          {device.reasons.map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      )}
+      {device?.kind === "unknown" && !host.agent_id && (
+        <p className="text-xs text-muted-foreground">
+          Nothing identifies this device yet. Types come from its manufacturer,
+          open ports, web interface and what it announces on the network.
+        </p>
+      )}
+      <Select
+        value={device?.manual ? device.kind : "auto"}
+        onValueChange={(value) => value && onType(value)}
+      >
+        <SelectTrigger aria-label="Device type" className="w-full">
+          <SelectValue>
+            {(value: string) =>
+              value === "auto" ? "Automatic detection" : kindLabel(value)
+            }
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectItem value="auto">Automatic detection</SelectItem>
+            {DEVICE_KINDS.filter((k) => k.kind !== "unknown").map((k) => (
+              <SelectItem key={k.kind} value={k.kind}>
+                {k.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    </section>
   );
 }

@@ -3,18 +3,24 @@ pub mod api;
 pub mod arp;
 pub mod auth;
 pub mod backup;
+pub mod classify;
+pub mod discovery;
 pub mod enrichment;
 pub mod error;
+pub mod fingerprint;
 pub mod headers;
 pub mod lifecycle;
 pub mod limits;
 pub mod metrics;
 pub mod migrations;
+pub mod notify;
 pub mod releases;
 pub mod scanner;
 pub mod ssh;
 pub mod state;
+pub mod topology;
 pub mod validation;
+pub mod vendor;
 
 use axum::{
     Router,
@@ -29,6 +35,12 @@ pub fn router(state: State, web_dir: &str) -> Router {
     let private = Router::new()
         .route("/bootstrap", get(api::bootstrap))
         .route("/account/password", post(auth::change_password))
+        .route(
+            "/notifications",
+            get(notify::get_settings).put(notify::put_settings),
+        )
+        .route("/notifications/test", post(notify::test))
+        .route("/hosts/{id}/type", put(api::set_device_type))
         .route("/logout", post(auth::logout))
         .route("/networks", post(api::add_network))
         .route(

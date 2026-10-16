@@ -1491,6 +1491,31 @@ kbd.key {
 .detail-list dd {
   overflow-wrap: anywhere;
 }
+.device-reasons {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.device-reasons li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.device-reasons li::before {
+  content: "";
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.6;
+  transform: translateY(-2px);
+}
 .tile-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

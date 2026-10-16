@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use hope_server::{
-    api, metrics, scanner,
+    metrics, scanner,
     state::{State, hash, secret},
 };
 
@@ -79,25 +79,7 @@ async fn main() -> Result<()> {
             }
         }
     });
-    let monitoring = state.clone();
-    tokio::spawn(async move {
-        let mut timer = tokio::time::interval(std::time::Duration::from_secs(300));
-        timer.tick().await;
-        loop {
-            tokio::select! {
-                _ = monitoring.0.shutdown.cancelled() => break,
-                _ = timer.tick() => {}
-            }
-            if let Ok(networks) = api::networks(&monitoring).await {
-                for network in networks.into_iter().filter(|n| n.enabled) {
-                    if monitoring.0.shutdown.is_cancelled() {
-                        break;
-                    }
-                    let _ = scanner::start(&monitoring, &network).await;
-                }
-            }
-        }
-    });
+    hope_server::discovery::spawn(state.clone());
     let bind = std::env::var("HOPE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind,"H.O.P.E is listening");

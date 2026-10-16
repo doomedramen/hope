@@ -31,6 +31,8 @@ url = "2"
 subtle = "2"
 russh = "0.60"
 zeroize = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+socket2 = { version = "0.6", features = ["all"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pnet_datalink = "0.35"

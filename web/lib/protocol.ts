@@ -7,12 +7,87 @@ export type InstallStage = "connecting" | "authenticating" | "preflight" | "reco
 export type InstallMode = "install" | "reinstall";
 export type LoginRequest = { password: string, setup_token: string | null, };
 export type PasswordChange = { current_password: string, new_password: string, };
+export type NotificationSettings = { ntfy_enabled: boolean, ntfy_server: string, ntfy_topic: string, ntfy_token: string | null, ntfy_token_set: boolean,
+/**
+ * A device the server has never seen joins a monitored range.
+ */
+notify_new_devices: boolean,
+/**
+ * An agent stops reporting, or infrastructure (router, switch, access point, server, NAS,
+ * hypervisor) stops answering scans.
+ */
+notify_offline: boolean,
+/**
+ * Full disks or pools, degraded pools, hot sensors, failed services, failing monitors.
+ */
+notify_resources: boolean,
+/**
+ * Send a follow-up when a problem clears.
+ */
+notify_recovery: boolean, last_sent_at: number | null, last_error: string | null, };
+export type DeviceEvidence = {
+/**
+ * Name from reverse DNS.
+ */
+dns_name: string | null,
+/**
+ * Host name the device announces over mDNS (without `.local`).
+ */
+mdns_name: string | null,
+/**
+ * mDNS service types, for example `_googlecast._tcp`.
+ */
+mdns_services: Array<string>,
+/**
+ * Model from mDNS TXT records (`model=`, `md=`, `ty=`).
+ */
+mdns_model: string | null,
+/**
+ * Service instance names the device announces, for example "Living Room TV".
+ */
+mdns_instances: Array<string>, ssdp_server: string | null, upnp_device_type: string | null, upnp_friendly_name: string | null, upnp_manufacturer: string | null, upnp_model: string | null,
+/**
+ * `<title>` of the device's web interface.
+ */
+http_title: string | null,
+/**
+ * `Server` header of the device's web interface.
+ */
+http_server: string | null, };
+export type DeviceGuess = {
+/**
+ * Stable identifier: `router`, `switch`, `access_point`, `hypervisor`, `nas`, `server`, `vm`,
+ * `computer`, `phone`, `tablet`, `tv`, `streamer`, `speaker`, `printer`, `camera`, `vacuum`,
+ * `appliance`, `game_console`, `smart_home` or `unknown`.
+ */
+kind: string,
+/**
+ * Specific name when known (for example "Proxmox VE" or "Dishwasher"), else the kind's name.
+ */
+label: string,
+/**
+ * 0 to 100.
+ */
+confidence: number,
+/**
+ * Human-readable evidence, strongest first.
+ */
+reasons: Array<string>,
+/**
+ * True when the administrator set the type; guesses then never replace it.
+ */
+manual: boolean, };
+export type DeviceTypeUpdate = {
+/**
+ * A `DeviceGuess::kind`, or null to return to automatic detection.
+ */
+kind: string | null, };
 export type AuthStatus = { setup_required: boolean, authenticated: boolean, };
 export type OkResponse = { ok: boolean, };
 export type ReportResponse = { accepted: boolean, duplicate: boolean, };
 export type ErrorResponse = { code: string, error: string, };
-export type NetworkInput = { name: string, cidr: string, enabled: boolean | null, };
-export type NetworkUpdate = { enabled: boolean, };
+export type NetworkInput = { name: string, cidr: string, enabled: boolean | null, interval_minutes: number | null, };
+export type NetworkUpdate = { enabled: boolean | null, interval_minutes: number | null, };
 export type MergeRequest = { source_id: string, };
 export type MetricWindow = { hours: number | null, };
 export type EnrollmentTokenRequest = { reset_agent_id: string | null, };
@@ -101,10 +176,26 @@ export type EnrollmentRequest = { schema_version: number, token: string, agent_i
  */
 credential: string, inventory: Inventory, };
 export type EnrollmentResponse = { credential: string, report_interval_seconds: number, };
-export type Network = { id: string, name: string, cidr: string, enabled: boolean, };
+export type Network = { id: string, name: string, cidr: string, enabled: boolean,
+/**
+ * Minutes between scheduled background scans of this range.
+ */
+interval_minutes: number, };
 export type ScanJob = { id: string, network_id: string, cidr: string, status: ScanStatus, scanned: number, total: number, discovered: number, started_at: number, finished_at: number | null, error: string | null, };
 export type Service = { port: number, name: string, observed_at: number, };
-export type Host = { id: string, agent_id: string | null, name: string, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>, };
+export type Host = { id: string, agent_id: string | null, name: string, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>,
+/**
+ * Manufacturer registered for the MAC address prefix (IEEE OUI).
+ */
+vendor: string | null, device: DeviceGuess | null, evidence: DeviceEvidence,
+/**
+ * When the common-port scan last completed.
+ */
+ports_scanned_at: number | null,
+/**
+ * The device this one sits behind (its gateway or upstream router), when inferred.
+ */
+parent_id: string | null, parent_reason: string | null, };
 export type MetricPoint = { collected_at: number, resolution_seconds: number, metrics: Metrics, };
 export type Position = { id: string, x: number, y: number, };
 export type MapLink = { id: string, source: string, target: string, label: string, };

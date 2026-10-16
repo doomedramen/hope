@@ -10,7 +10,27 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import type { Bootstrap, Network } from "@/lib/protocol";
+
+/** Scheduled scan intervals the server accepts, in minutes. */
+export const INTERVALS: [number, string][] = [
+  [5, "Every 5 minutes"],
+  [15, "Every 15 minutes"],
+  [30, "Every 30 minutes"],
+  [60, "Every hour"],
+  [360, "Every 6 hours"],
+  [1440, "Once a day"],
+];
+const intervalLabel = (minutes: number) =>
+  INTERVALS.find(([m]) => m === minutes)?.[1] ?? `Every ${minutes} minutes`;
 
 export function NetworksDialog({
   open,
@@ -20,6 +40,7 @@ export function NetworksDialog({
   onScanNetwork,
   onDeleteNetwork,
   onAddNetwork,
+  onSetInterval,
   busy,
 }: {
   open: boolean;
@@ -29,6 +50,7 @@ export function NetworksDialog({
   onScanNetwork: (network: Network) => void;
   onDeleteNetwork: (network: Network) => Promise<void>;
   onAddNetwork: () => void;
+  onSetInterval: (network: Network, minutes: number) => void;
   busy: boolean;
 }) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -73,7 +95,9 @@ export function NetworksDialog({
                     </div>
                     <p className="mono mt-0.5 text-muted-foreground">
                       {n.cidr} ·{" "}
-                      {n.enabled ? "scanned every 5 minutes" : "paused"}
+                      {n.enabled
+                        ? intervalLabel(n.interval_minutes).toLowerCase()
+                        : "paused"}
                     </p>
                   </div>
                   <div className="flex shrink-0 gap-1">
@@ -112,6 +136,34 @@ export function NetworksDialog({
                       <Trash2 />
                     </Button>
                   </div>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="shrink-0">Background scan</span>
+                  <Select
+                    value={String(n.interval_minutes)}
+                    onValueChange={(value) =>
+                      value && onSetInterval(n, Number(value))
+                    }
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      aria-label={`Scan interval for ${n.name}`}
+                      className="min-w-0 flex-1"
+                    >
+                      <SelectValue>
+                        {(value: string) => intervalLabel(Number(value))}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {INTERVALS.map(([minutes, label]) => (
+                          <SelectItem key={minutes} value={String(minutes)}>
+                            {label}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
                 {confirmDelete === n.id && (
                   <Alert>

@@ -1155,3 +1155,296 @@ async fn independent_map_edits_are_atomic_and_retryable() {
         StatusCode::BAD_REQUEST
     );
 }
+
+type Seen = std::sync::Arc<tokio::sync::Mutex<Vec<(Option<String>, Value)>>>;
+/// A stand-in ntfy server that records each publish (authorization header and JSON body).
+async fn fake_ntfy(status: u16) -> (String, Seen) {
+    let seen: Seen = Default::default();
+    let record = seen.clone();
+    let app = Router::new().route(
+        "/",
+        axum::routing::post(move |headers: axum::http::HeaderMap, body: String| {
+            let record = record.clone();
+            async move {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                record
+                    .lock()
+                    .await
+                    .push((auth, serde_json::from_str(&body).unwrap_or(Value::Null)));
+                StatusCode::from_u16(status).expect("status")
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{address}"), seen)
+}
+
+fn settings(server: &str, token: Value) -> Value {
+    json!({"ntfy_enabled":true,"ntfy_server":server,"ntfy_topic":"hope-alerts","ntfy_token":token,
+        "ntfy_token_set":false,"notify_new_devices":true,"notify_offline":true,"notify_resources":true,
+        "notify_recovery":true,"last_sent_at":null,"last_error":null})
+}
+
+#[tokio::test]
+async fn notification_settings_keep_the_token_secret_and_test_messages_reach_ntfy() {
+    let (_dir, _state, app, cookie) = setup().await;
+    let auth = Some(("cookie", cookie.as_str()));
+    let (server, seen) = fake_ntfy(200).await;
+    let (status, saved) = request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        settings(&server, json!("tk_secret")),
+        auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["ntfy_token"], Value::Null);
+    assert_eq!(saved["ntfy_token_set"], true);
+    let (_, read) = request(&app, "GET", "/api/v1/notifications", Value::Null, auth).await;
+    assert_eq!(
+        (read["ntfy_token"].clone(), read["ntfy_topic"].clone()),
+        (Value::Null, json!("hope-alerts"))
+    );
+
+    let (status, _) = request(&app, "POST", "/api/v1/notifications/test", json!({}), auth).await;
+    assert_eq!(status, StatusCode::OK);
+    let published = seen.lock().await.clone();
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].0.as_deref(), Some("Bearer tk_secret"));
+    assert_eq!(published[0].1["topic"], "hope-alerts");
+    assert_eq!(published[0].1["title"], "H.O.P.E test notification");
+    let (_, read) = request(&app, "GET", "/api/v1/notifications", Value::Null, auth).await;
+    assert!(read["last_sent_at"].is_number());
+
+    // null keeps the stored token, "" removes it; invalid input changes nothing.
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        settings(&server, Value::Null),
+        auth,
+    )
+    .await;
+    let (_, read) = request(&app, "GET", "/api/v1/notifications", Value::Null, auth).await;
+    assert_eq!(read["ntfy_token_set"], true);
+    let mut bad = settings(&server, Value::Null);
+    bad["ntfy_topic"] = json!("not a topic");
+    assert_eq!(
+        request(&app, "PUT", "/api/v1/notifications", bad, auth)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        settings(&server, json!("")),
+        auth,
+    )
+    .await;
+    let (_, read) = request(&app, "GET", "/api/v1/notifications", Value::Null, auth).await;
+    assert_eq!(
+        (read["ntfy_token_set"].clone(), read["ntfy_topic"].clone()),
+        (json!(false), json!("hope-alerts"))
+    );
+    assert_eq!(
+        request(&app, "GET", "/api/v1/notifications", Value::Null, None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // A refusing server is reported, and recorded for the console.
+    let (refusing, _) = fake_ntfy(403).await;
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        settings(&refusing, Value::Null),
+        auth,
+    )
+    .await;
+    let (status, body) = request(&app, "POST", "/api/v1/notifications/test", json!({}), auth).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("403"),
+        "{body}"
+    );
+    let (_, read) = request(&app, "GET", "/api/v1/notifications", Value::Null, auth).await;
+    assert!(
+        read["last_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("403")
+    );
+}
+
+#[tokio::test]
+async fn alerts_notify_once_when_they_open_and_again_when_they_clear() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (server, seen) = fake_ntfy(200).await;
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        settings(&server, Value::Null),
+        Some(("cookie", cookie.as_str())),
+    )
+    .await;
+    let mut host = Host::new("pve".into(), "pve1".into(), "agent");
+    host.agent_id = Some("agent-1".into());
+    host.last_report = Some(now() - 900.0);
+    state.save_host(&host).await.expect("host");
+    hope_server::notify::evaluate(&state)
+        .await
+        .expect("evaluate");
+    hope_server::notify::evaluate(&state)
+        .await
+        .expect("evaluate again");
+    {
+        let published = seen.lock().await;
+        assert_eq!(published.len(), 1, "an open alert is sent once");
+        assert_eq!(
+            published[0].1["title"],
+            "The agent on pve1 stopped reporting"
+        );
+        assert_eq!(published[0].1["priority"], 4);
+        assert!(
+            published[0].1["click"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("/?host=pve")
+        );
+    }
+    host.last_report = Some(now());
+    state.save_host(&host).await.expect("host");
+    hope_server::notify::evaluate(&state)
+        .await
+        .expect("evaluate");
+    let published = seen.lock().await;
+    assert_eq!(published.len(), 2);
+    assert_eq!(
+        published[1].1["title"],
+        "Resolved: The agent on pve1 stopped reporting"
+    );
+    let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alerts")
+        .fetch_one(&state.0.db)
+        .await
+        .expect("alerts");
+    assert_eq!(open, 0);
+}
+
+#[tokio::test]
+async fn device_types_can_be_set_by_hand_and_scan_intervals_are_validated() {
+    let (_dir, state, app, cookie) = setup().await;
+    let auth = Some(("cookie", cookie.as_str()));
+    let mut host = Host::new("box".into(), "192.168.1.9".into(), "icmp");
+    host.addresses = vec!["192.168.1.9".into()];
+    host.services = vec![Service {
+        port: 8006,
+        name: "Proxmox VE".into(),
+        observed_at: now(),
+    }];
+    state.save_host(&host).await.expect("host");
+    let (status, set) = request(
+        &app,
+        "PUT",
+        "/api/v1/hosts/box/type",
+        json!({"kind":"nas"}),
+        auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        (
+            set["device"]["kind"].clone(),
+            set["device"]["manual"].clone()
+        ),
+        (json!("nas"), json!(true))
+    );
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/api/v1/hosts/box/type",
+            json!({"kind":"toaster"}),
+            auth
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, automatic) = request(
+        &app,
+        "PUT",
+        "/api/v1/hosts/box/type",
+        json!({"kind":null}),
+        auth,
+    )
+    .await;
+    assert_eq!(automatic["device"]["kind"], "hypervisor");
+    assert_eq!(automatic["device"]["manual"], false);
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/api/v1/hosts/missing/type",
+            json!({"kind":"nas"}),
+            auth
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+
+    let (status, network) = request(
+        &app,
+        "POST",
+        "/api/v1/networks",
+        json!({"name":"IoT","cidr":"192.168.30.0/24","enabled":false,"interval_minutes":15}),
+        auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{network}");
+    assert_eq!(network["interval_minutes"], 15);
+    let id = network["id"].as_str().expect("id").to_string();
+    let path = format!("/api/v1/networks/{id}");
+    assert_eq!(
+        request(&app, "PUT", &path, json!({"interval_minutes":7}), auth)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request(&app, "PUT", &path, json!({"interval_minutes":60}), auth)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (_, bootstrap) = request(&app, "GET", "/api/v1/bootstrap", Value::Null, auth).await;
+    let saved = &bootstrap["networks"][0];
+    assert_eq!(
+        (saved["interval_minutes"].clone(), saved["enabled"].clone()),
+        (json!(60), json!(false))
+    );
+    let (_, default) = request(
+        &app,
+        "POST",
+        "/api/v1/networks",
+        json!({"name":"LAN","cidr":"10.9.0.0/24","enabled":false}),
+        auth,
+    )
+    .await;
+    assert_eq!(default["interval_minutes"], 5);
+}

@@ -130,7 +130,9 @@ The bundle must contain valid PEM certificates and be at most 64 KiB. Replacing 
 
 ## Discovery: initial scans and monitoring
 
-Adding a range (IPv4 CIDR, `/20` or smaller: a shorter prefix such as `/16` is rejected, so add several `/20`-or-smaller ranges instead) starts a scan. A range's `enabled` flag controls **monitoring**: every 300 seconds the server starts a new scan of each enabled range (the first monitoring pass runs 300 s after start). Disabled ranges are scanned only when you press scan. A range with an active scan is never queued twice.
+Adding a range (IPv4 CIDR, `/20` or smaller: a shorter prefix such as `/16` is rejected, so add several `/20`-or-smaller ranges instead) starts a scan. A range's `enabled` flag controls **monitoring**: the background loop (`discovery.rs`) checks every minute, starting 20 s after the server starts, and begins a new scan of each enabled range whose interval has passed since its last scan. The interval is per range, every 5 minutes by default; Networks in the console (or `PUT /api/v1/networks/{id}` with `interval_minutes`) offers 5, 15 or 30 minutes, 1 or 6 hours, or once a day. Disabled ranges are scanned only when you press scan. A range with an active scan is never queued twice.
+
+**Scheduled scans are gentle.** A scan you start by hand runs at full speed (below). A scheduled scan probes at most four addresses at once and starts a new address at most every 60 ms: about 80 probe operations per second at peak, so a `/24` takes about 15 seconds and a `/20` under four minutes. The expensive part of discovery, the common-port scan, runs only for new devices and then once a day per device, not on every pass; a scheduled pass otherwise re-checks only liveness (ICMP, ports 22/80/443 and ARP).
 
 Removing a range (Networks in the sidebar, or `DELETE /api/v1/networks/{id}`) cancels its active scan, deletes its scan history and drops the membership from hosts that were in it; the hosts themselves, their agents and their history stay.
 
@@ -150,11 +152,66 @@ The console shows these as a banner when they apply.
 | ARP applies to on-link subnets only | Routed ranges get ICMP/TCP only; MAC addresses are unknown for them |
 | Agents | Report only their own machine, never remote networks. CPU, memory, network and filesystem metrics are collected on Linux and macOS; GPU utilisation, memory and temperature are unavailable unless a native interface exposes them (not on macOS Apple GPUs: inventory only), and disk I/O counters are unavailable on some platforms. Unavailable values are shown as unavailable, never as zero |
 | Map | Links are labelled observed, inferred or manual. Physical switch connections are never invented |
-| Platforms | Linux and macOS agents only; Windows, distributed discovery, switch integrations, notifications and multiple accounts are out of scope |
+| Active ARP unavailable | Shown as "Active ARP is unavailable: the server could not open a raw packet socket on any network interface…". Devices are still found by ping and TCP, but without MAC addresses there are no manufacturers, most device types stay unknown, and agents cannot be matched to discovered hosts by MAC. See below |
+| Platforms | Linux and macOS agents only; Windows, distributed discovery, switch integrations (SNMP, LLDP, controller APIs) and multiple accounts are out of scope |
+
+### "Active ARP is unavailable"
+
+Active ARP means the server sends its own ARP requests on the local network and reads the replies, which is how it learns each device's MAC address. It needs a raw packet socket (`AF_PACKET`) on an IPv4 Ethernet interface, which requires the `CAP_NET_RAW` capability on Linux. When no interface can be opened, the server falls back to ICMP and TCP and the console shows this message. At startup the server now logs one line per interface (`journalctl -u hope | grep ARP`): `active ARP enabled` for each interface it opened, or the error for each it could not open.
+
+Fixes, by cause:
+
+- **Missing capability** (the log shows `Operation not permitted`). Give the process `CAP_NET_RAW`: the community-scripts container runs the service as root, which has it; the host installer's unit sets `AmbientCapabilities=CAP_NET_RAW`; with Docker add `cap_add: [NET_RAW]` (as `compose.yaml` does). Do not add `RestrictAddressFamilies` without `AF_PACKET` to the unit.
+- **No interface on the scanned LAN.** ARP only works for ranges the server is directly attached to. A routed range (a VLAN reached through a router) never gets ARP; put the server, or a second network interface of its container, on that VLAN.
+- **Docker Desktop or `HOPE_DISCOVERY_MODE=limited`.** Containers there cannot see the LAN's layer 2 at all; run the Linux host-network deployment.
+
+## Device types
+
+Every device gets a type (router, switch, access point, hypervisor, NAS, server, virtual machine, computer, phone, tablet, TV, media streamer, smart speaker, printer, camera, robot vacuum, home appliance, game console, smart home device or unknown), a specific label when one is known (for example "Proxmox VE", "Dishwasher", "Chromecast", "Synology NAS"), a confidence and the reasons behind it. `classify.rs` scores every piece of evidence:
+
+- the manufacturer of the MAC address, from the IEEE registry embedded in the server (`crates/hope-server/data/oui.tsv`, regenerated with `scripts/update-oui.py`; see `data/OUI-NOTICE`). Proxmox, QEMU and Docker virtual NICs mark virtual machines, and a private (randomised) MAC, as phones use on Wi-Fi, counts towards a phone;
+- open ports (8006 Proxmox VE, 8007 Proxmox Backup Server, 9100/631/515 printing, 554 cameras, 62078 Apple devices, 8009 Google Cast, 8123 Home Assistant, 8291 MikroTik, 3389 Windows and so on);
+- names from reverse DNS, mDNS and UPnP (iphone, roborock, dishwasher, diskstation, pve, opnsense, …), the web interface title, mDNS service types and TXT models (for example `_homeconnect._tcp` with a Bosch or Siemens model code identifies the appliance family: SMV… is a dishwasher, WAX… a washing machine), UPnP device types (an internet gateway device is a router);
+- being the server's default gateway or a traceroute hop (a router), and what an agent reports.
+
+Short keywords only match whole words ("nas" matches "nas-01", not "jonas-iphone"). A host still named after its address takes the name the device announces. The type can be corrected in host details (Device, `PUT /api/v1/hosts/{id}/type` with a kind, or `null` for automatic detection); a type set by hand is never replaced by a guess. Most of this evidence needs active ARP (manufacturer) or a device on the same link (mDNS, SSDP); routed ranges get ports and web titles only.
+
+## Network hierarchy
+
+Each device gets the device it sits behind (`parent_id`, with the reason), recomputed every minute:
+
+- A range the server is directly attached to sits behind the server's default gateway (from the kernel routing table) when the gateway lies inside the range.
+- A routed range is traced; the last hop before the destination is its gateway, and earlier hops chain the routers up to the server. Routers found this way that are not in a monitored range are added as hosts (discovery method `traceroute`).
+- An agent's own default gateway is used when nothing else applies.
+
+In Topology and Health mode the map draws each router above the ranges it serves, with one edge per range (and per router hop), instead of a line to every device; a device behind a different router than the rest of its range gets its own edge. Routers keep a saved position of their own. Switches and access points forward frames without appearing in routing tables or traceroutes, so which switch port or access point a device hangs off is not inferred: that needs the switches' own tables (SNMP bridge MIB, LLDP) or a controller API, which H.O.P.E does not integrate. Manual links remain available for those.
+
+## Notifications
+
+Notifications go through [ntfy](https://ntfy.sh), hosted or self-hosted. In the console open Notifications in the sidebar: turn them on, enter the server (default `https://ntfy.sh`), a topic and optionally an access token, choose the events, and use Send test. Subscribe to the same topic in the ntfy app. On a public server anyone who knows a topic can read it, so pick one that is hard to guess, or use a self-hosted server with access control and a token. The token is stored in the server database, is never returned by the API (`ntfy_token_set` says whether one is stored) and is sent as a Bearer token. `GET`/`PUT /api/v1/notifications` and `POST /api/v1/notifications/test` are the API.
+
+Events:
+
+| Setting | Sent when | Priority |
+| --- | --- | --- |
+| New devices | A device the server has never seen joins a monitored range (not during a range's first scan, which would announce the whole network) | 3 |
+| Offline | An agent has not reported for 120 s; or a router, switch, access point, server, NAS or hypervisor without an agent was not seen by a scan that finished after it was last seen, for at least two scan intervals and 15 minutes (phones and other devices that come and go never alert) | 4 |
+| Problems | A filesystem or pool 90% full (critical from 97%), a pool not ONLINE, a sensor at 85 °C or more, failed systemd units, failing monitors. CPU and memory spikes are left to the console | 3 or 4 |
+| Recoveries | A follow-up when one of the above clears | 2 |
+
+Problems are evaluated every minute into the `alerts` table whether or not notifications are on, so turning them on later never replays problems that were already open, and each problem is sent once when it opens and once when it clears. Each message links to the host in the console (`HOPE_SERVER_URL/?host=…`). The last delivery time or error is shown in the dialog.
 
 ## Probe traffic
 
-For each address in a scanned range the server may send: one ICMP echo request (payload `HOPE`, 750 ms deadline), TCP connection attempts to ports 22, 80 and 443 (750 ms deadline each; connect-only, no payload), and, for on-link addresses on Linux with ARP enabled, one ARP request (250 ms deadline). Hosts that answer then get an enrichment pass: TCP connects to ports 22, 80, 443, 445, 3389 and 8080, and one reverse-DNS lookup through the system resolver (`getent hosts` / `dscacheutil`, killed at its deadline, output capped). A per-host budget of six seconds applies. No UDP scanning, banner grabbing or authentication attempts happen.
+For each address in a scanned range the server may send: one ICMP echo request (payload `HOPE`, 750 ms deadline), TCP connection attempts to ports 22, 80 and 443 (750 ms deadline each; connect-only, no payload), and, for on-link addresses on Linux with ARP enabled, one ARP request (250 ms deadline). A per-host budget of six seconds applies.
+
+A device seen for the first time, and every device once a day after that, gets an enrichment pass (30 s budget):
+
+- **Common ports.** TCP connects (connect-only, no payload, 750 ms each, through the same rate limit) to 40 ports chosen to tell device types apart: 21, 22, 23, 25, 53, 80, 111, 139, 143, 443, 445, 515, 548, 554, 631, 1883, 2049, 3000, 3306, 3389, 5000, 5001, 5432, 5900, 6443, 7000, 8006, 8007, 8008, 8009, 8080, 8123, 8291, 8443, 8883, 9000, 9090, 9100, 32400 and 62078 (the list and the names shown are `COMMON_PORTS` in `fingerprint.rs`). The result replaces the previous result for these ports; ports outside the list that agents or quick probes recorded are kept.
+- **Web interface.** If one of the web ports (8006, 443, 80, 8443, 8080, 5001, 5000, 8123, 8007, 9000, 3000) is open, one `GET /` to the first that answers, reading at most 64 KiB to record the page `<title>` and the `Server` header. Certificates are not verified (LAN devices almost always use self-signed ones); no credentials or cookies are sent, and these requests never use a proxy.
+- **Reverse DNS**, through the system resolver (`getent hosts` / `dscacheutil`, killed at its deadline, output capped).
+
+Every five minutes the server also listens for what devices announce: one mDNS query (DNS-SD enumeration plus 29 common service types, unicast-response bit set, sent twice) to `224.0.0.251:5353`, and one SSDP `M-SEARCH` (sent twice) to `239.255.255.250:1900`, each collecting answers for three seconds. For each SSDP answer whose `LOCATION` is a plain-HTTP URL on the answering address itself, one `GET` reads the UPnP description (64 KiB at most). Once an hour, ranges the server is not directly attached to are traced: ICMP echo requests with TTL 1 to 8, one per hop, one second each. All responses are parsed with bounded sizes, counts and string lengths. No authentication attempts happen, and no UDP ports are scanned.
 
 Probe starts are limited to 200 per second shared by all ranges, with at most 64 sockets in flight. This limits scheduled probe operations, not frames: TCP handshakes, retransmitted SYNs and kernel neighbour resolution produce extra packets, and **no absolute packet-rate or per-scan frame count has been measured**. Only scan networks you are authorised to probe.
 

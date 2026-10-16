@@ -13,6 +13,7 @@ import {
   Search,
   Server,
   Settings2,
+  BellRing,
   UserRound,
   Sun,
 } from "lucide-react";
@@ -41,6 +42,7 @@ const ICONS = {
   themeDark: Moon,
   logout: LogOut,
   account: UserRound,
+  notifications: BellRing,
 };
 
 export function CommandPalette({

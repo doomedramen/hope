@@ -84,11 +84,24 @@ mod platform {
                     write_buffer_size: 4096,
                     ..Default::default()
                 };
-                let Ok(pnet_datalink::Channel::Ethernet(sender, mut receiver)) =
-                    pnet_datalink::channel(&interface, config)
-                else {
-                    continue;
+                let (sender, mut receiver) = match pnet_datalink::channel(&interface, config) {
+                    Ok(pnet_datalink::Channel::Ethernet(sender, receiver)) => (sender, receiver),
+                    Ok(_) => {
+                        tracing::warn!(interface = %interface.name, "active ARP unavailable: not an Ethernet channel");
+                        continue;
+                    }
+                    Err(error) => {
+                        // Almost always EPERM: the process lacks CAP_NET_RAW (or a sandbox such as a
+                        // container profile or systemd's RestrictAddressFamilies blocks AF_PACKET).
+                        tracing::warn!(
+                            interface = %interface.name,
+                            %error,
+                            "active ARP unavailable on this interface: a raw packet socket could not be opened (needs CAP_NET_RAW)"
+                        );
+                        continue;
+                    }
                 };
+                tracing::info!(interface = %interface.name, networks = ?networks, "active ARP enabled");
                 let state = Arc::new(Interface {
                     sender: Mutex::new(sender),
                     pending: Mutex::new(HashMap::new()),
@@ -120,7 +133,8 @@ mod platform {
                                         | std::io::ErrorKind::WouldBlock
                                         | std::io::ErrorKind::Interrupted
                                 ) => {}
-                            Err(_) => {
+                            Err(error) => {
+                                tracing::warn!(%error, "active ARP stopped: the raw packet socket failed");
                                 state.active.store(false, Ordering::Relaxed);
                                 break;
                             }
@@ -134,6 +148,11 @@ mod platform {
                     }
                 });
                 interfaces.push(state);
+            }
+            if interfaces.is_empty() {
+                tracing::warn!(
+                    "active ARP unavailable: no IPv4 Ethernet interface could be opened for raw packets"
+                );
             }
             Self { interfaces }
         }
