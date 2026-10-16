@@ -7,6 +7,7 @@ import {
   hostState,
   matchesFilter,
   matchesSearch,
+  worstDisk,
 } from "../lib/fleet";
 import type { Host, Metrics } from "../lib/protocol";
 
@@ -246,6 +247,41 @@ test("fleet summary sums only reporting agents and never invents missing values"
   expect(summary.issues.map((i) => i.host.id)).toEqual(["a", "c"]);
   expect(fleetSummary([partial], [], now).cpuAverage).toBeNull();
   expect(fleetSummary([partial], [], now).rx).toBeNull();
+});
+
+test("guest volumes on a hypervisor never stand in for the host's own disks", () => {
+  const disk = (name: string, mount: string, available_bytes: number) => ({
+    name,
+    mount,
+    filesystem: "zfs",
+    total_bytes: 100,
+    available_bytes,
+  });
+  const proxmox = host({
+    agent_id: "pve",
+    last_report: now,
+    metrics: {
+      ...metrics,
+      disks: [
+        disk("rpool/ROOT/pve-1", "/", 60),
+        disk(
+          "rpool/data/subvol-123-disk-0",
+          "/rpool/data/subvol-123-disk-0",
+          1,
+        ),
+        disk(
+          "rpool/data/basevol-900-disk-0",
+          "/rpool/data/basevol-900-disk-0",
+          1,
+        ),
+        disk("/dev/sdb1", "/var/lib/lxc/101/rootfs", 1),
+      ],
+    },
+  });
+  expect(worstDisk(proxmox)?.disk.mount).toBe("/");
+  expect(worstDisk(proxmox)?.percent).toBe(40);
+  expect(hostIssues(proxmox, now).some((i) => i.kind === "disk")).toBe(false);
+  expect(fleetSummary([proxmox], [], now).diskTotal).toBe(100);
 });
 
 test("filters, search and sorting", () => {

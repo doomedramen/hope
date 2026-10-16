@@ -233,6 +233,34 @@ pub struct Disk {
     pub available_bytes: f64,
 }
 
+impl Disk {
+    /// Whether this mount is a guest's root filesystem exposed on its hypervisor,
+    /// such as a Proxmox LXC subvolume (`rpool/data/subvol-123-disk-0`). Its
+    /// usage belongs to the guest, not the host's own storage.
+    pub fn is_guest_storage(&self) -> bool {
+        fn guest_volume(path: &str) -> bool {
+            let leaf = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+            let Some(rest) = leaf
+                .strip_prefix("subvol-")
+                .or_else(|| leaf.strip_prefix("basevol-"))
+            else {
+                return false;
+            };
+            let mut parts = rest.split('-');
+            let numeric = |part: Option<&str>| {
+                part.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            };
+            numeric(parts.next())
+                && parts.next() == Some("disk")
+                && numeric(parts.next())
+                && parts.next().is_none()
+        }
+        let lxc_rootfs = self.mount.starts_with("/var/lib/lxc/")
+            && self.mount.trim_end_matches('/').ends_with("/rootfs");
+        guest_volume(&self.mount) || guest_volume(&self.name) || lxc_rootfs
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Gpu {
     /// Driver UUID or device path; absent when the platform cannot identify the adapter.
@@ -784,6 +812,35 @@ mod tests {
             assert!(!shown.contains(secret));
         }
         assert!(shown.contains("[redacted]") && shown.contains("root"));
+    }
+    #[test]
+    fn guest_storage_is_recognised() {
+        let disk = |name: &str, mount: &str| Disk {
+            name: name.into(),
+            mount: mount.into(),
+            filesystem: "zfs".into(),
+            total_bytes: 1.0,
+            available_bytes: 0.0,
+        };
+        for (name, mount) in [
+            (
+                "rpool/data/subvol-123-disk-0",
+                "/rpool/data/subvol-123-disk-0",
+            ),
+            ("tank/basevol-9000-disk-1", "/tank/basevol-9000-disk-1"),
+            ("rpool/data/subvol-108-disk-0", "/mnt/elsewhere"),
+            ("/dev/mapper/x", "/var/lib/lxc/101/rootfs"),
+        ] {
+            assert!(disk(name, mount).is_guest_storage(), "{mount}");
+        }
+        for (name, mount) in [
+            ("rpool/ROOT/pve-1", "/"),
+            ("rpool/data", "/rpool/data"),
+            ("tank/subvol-backups", "/tank/subvol-backups"),
+            ("tank/subvol-1-disk-0-old", "/tank/subvol-1-disk-0-old"),
+        ] {
+            assert!(!disk(name, mount).is_guest_storage(), "{mount}");
+        }
     }
     #[test]
     fn legacy_host_defaults_new_metadata() {

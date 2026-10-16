@@ -45,6 +45,21 @@ export function diskPercent(disk: Disk): number | null {
     : null;
 }
 
+const GUEST_VOLUME = /(?:^|\/)(?:subvol|basevol)-\d+-disk-\d+\/?$/;
+
+/**
+ * Whether a mount is a guest's root filesystem exposed on its hypervisor, such
+ * as a Proxmox LXC subvolume. Its usage belongs to the guest, not the host.
+ * Mirrors `Disk::is_guest_storage` in hope-protocol.
+ */
+export function isGuestStorage(disk: Disk): boolean {
+  return (
+    GUEST_VOLUME.test(disk.mount) ||
+    GUEST_VOLUME.test(disk.name) ||
+    /^\/var\/lib\/lxc\/.+\/rootfs\/?$/.test(disk.mount)
+  );
+}
+
 /** The fullest filesystem a host reports, or null without any usable mount. */
 export function worstDisk(host: Host): { disk: Disk; percent: number } | null {
   const disks = host.metrics?.disks.length
@@ -52,6 +67,7 @@ export function worstDisk(host: Host): { disk: Disk; percent: number } | null {
     : (host.inventory?.disks ?? []);
   let worst: { disk: Disk; percent: number } | null = null;
   for (const disk of disks) {
+    if (isGuestStorage(disk)) continue;
     const percent = diskPercent(disk);
     if (percent != null && (!worst || percent > worst.percent))
       worst = { disk, percent };
@@ -259,7 +275,7 @@ export function fleetSummary(
       memoryTotal += metrics.memory_total_bytes;
     }
     for (const disk of metrics?.disks ?? [])
-      if (disk.total_bytes > 0) {
+      if (disk.total_bytes > 0 && !isGuestStorage(disk)) {
         diskUsed += disk.total_bytes - disk.available_bytes;
         diskTotal += disk.total_bytes;
       }

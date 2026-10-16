@@ -262,7 +262,7 @@ pub fn problems(host: &Host, now: f64, last_scan: &HashMap<String, (f64, u32)>) 
         }
         if let Some(metrics) = host.metrics.as_ref().filter(|_| !silent) {
             for disk in &metrics.disks {
-                if disk.total_bytes > 0.0 {
+                if disk.total_bytes > 0.0 && !disk.is_guest_storage() {
                     let used = 100.0 * (1.0 - disk.available_bytes / disk.total_bytes);
                     if used >= 90.0 {
                         push(
