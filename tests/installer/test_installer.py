@@ -759,5 +759,265 @@ class MacOS(Base):
         self.assertTrue((self.env.base / 'service/launchd.active').exists())
 
 
+class Updater(Base):
+    """The root-owned updater that lets the console update an installed agent without a new token."""
+
+    def installed(self, env=None):
+        env = env or self.env
+        self.ok(env.run())
+        return env.paths('system')
+
+    def request(self, env=None):
+        """What the agent does when the server asks for an update: leave a request file."""
+        env = env or self.env
+        queue = env.paths('system')['state'] / 'update-queue'
+        (queue / 'request').write_text('v2')
+        return queue / 'request'
+
+    def result_of(self, env=None):
+        env = env or self.env
+        text = (env.paths('system')['state'] / 'update-result').read_text()
+        return dict(line.split('=', 1) for line in text.splitlines())
+
+    def test_a_system_install_keeps_a_pinned_installer_and_an_updater(self):
+        paths = self.installed()
+        root = self.env.root
+        wrapper = root / 'usr/local/sbin/hope-agent-update'
+        self.assertTrue(wrapper.stat().st_mode & 0o111)
+        directory = root / 'var/lib/hope-agent-update'
+        pinned = (directory / 'install-agent.sh').read_text()
+        self.assertIn(harness.keys()['good'][1], pinned)
+        self.assertNotIn('@@HOPE_PUBLIC_KEY@@', pinned)
+        self.assertEqual(harness.SERVER, (directory / 'server').read_text().strip())
+        self.assertTrue((paths['state'] / 'update-queue').is_dir())
+        path_unit = (root / 'etc/systemd/system/hope-agent-update.path').read_text()
+        self.assertIn(f"PathExists={paths['state']}/update-queue/request", path_unit)
+        service_unit = (root / 'etc/systemd/system/hope-agent-update.service').read_text()
+        self.assertIn('Type=oneshot', service_unit)
+        self.assertIn(f'ExecStart="{wrapper}"', service_unit)
+        self.assertIn('systemctl[system] enable --now hope-agent-update.path', self.env.log())
+
+    def test_the_updater_holds_no_secret(self):
+        self.installed()
+        for path in (self.env.root / 'var/lib/hope-agent-update').rglob('*'):
+            if path.is_file():
+                self.assertNotIn(harness.TOKEN, path.read_text())
+                self.assertNotIn(harness.CREDENTIAL, path.read_text())
+        self.assertNotIn(harness.TOKEN, (self.env.root / 'usr/local/sbin/hope-agent-update').read_text())
+
+    def test_a_user_service_gets_no_updater(self):
+        self.ok(self.env.run(uid=1000, mode='user'))
+        self.assertFalse((self.env.root / 'usr/local/sbin/hope-agent-update').exists())
+        self.assertNotIn('hope-agent-update', self.env.log())
+        self.assertFalse((self.env.paths('user')['state'] / 'update-queue').exists())
+
+    def test_a_request_updates_the_agent_without_a_token_and_reports_the_outcome(self):
+        paths = self.installed()
+        self.env.publish('v2')
+        request = self.request()
+        result = self.env.updater()
+        self.ok(result)
+        self.assertEqual('v2', self.version(paths['binary']))
+        self.assertFalse(request.exists())
+        self.assertEqual({'status': 'updated', 'version': 'v2'}, {k: v for k, v in self.result_of().items() if k != 'at'})
+        config = (paths['state'] / 'config.json').read_text()
+        self.assertIn('credential=' + harness.CREDENTIAL, config)
+        self.assertIn('hope-install: result=updated v2', result.err)
+        self.assertFalse(self.env.txn().exists())
+        self.assertEqual('644', oct((paths['state'] / 'update-result').stat().st_mode)[-3:])
+
+    def test_nothing_changes_when_the_agent_is_already_current(self):
+        paths = self.installed()
+        before = self.env.log()
+        self.ok(self.env.updater())
+        self.assertEqual('current', self.result_of()['status'])
+        self.assertEqual('v1', self.result_of()['version'])
+        added = self.env.log()[len(before):]
+        self.assertNotIn('systemctl[system] stop', added)
+        self.assertEqual('v1', self.version(paths['binary']))
+
+    def test_an_older_offer_is_ignored_rather_than_refused(self):
+        paths = self.installed()
+        self.env.publish('v0')
+        self.ok(self.env.updater())
+        self.assertEqual('current', self.result_of()['status'])
+        self.assertEqual('v1', self.version(paths['binary']))
+
+    def test_a_server_that_changes_its_signing_key_cannot_push_an_update(self):
+        paths = self.installed()
+        self.env.publish('v2', key='other', manifest_key='other')
+        before = len(self.env.log())
+        result = self.env.updater()
+        self.assertNotEqual(0, result.code)
+        self.assertEqual({'status': 'failed', 'code': 'MANIFEST_INVALID'}, {k: v for k, v in self.result_of().items() if k != 'at'})
+        self.assertEqual('v1', self.version(paths['binary']))
+        attempt = self.env.log()[before:]
+        self.assertNotIn('systemctl[system] stop', attempt)
+        self.assertNotIn('hope-agent.sig', attempt)
+
+    def test_a_tampered_binary_is_never_installed(self):
+        paths = self.installed()
+        self.env.publish('v2')
+        self.env.replace_artifact('v3')
+        result = self.env.updater()
+        self.assertNotEqual(0, result.code)
+        self.assertEqual('failed', self.result_of()['status'])
+        self.assertIn(self.result_of()['code'], ('CHECKSUM_MISMATCH', 'BAD_SIGNATURE'))
+        self.assertEqual('v1', self.version(paths['binary']))
+
+    def test_a_failed_update_rolls_back_and_says_why(self):
+        paths = self.installed()
+        self.env.publish('v2')
+        self.env.fault('no-report')
+        result = self.env.updater(HOPE_FIRST_REPORT_TIMEOUT=2)
+        self.assertNotEqual(0, result.code)
+        self.assertEqual({'status': 'failed', 'code': 'FIRST_REPORT_TIMEOUT'}, {k: v for k, v in self.result_of().items() if k != 'at'})
+        self.assertEqual('v1', self.version(paths['binary']))
+        self.assertTrue((self.env.base / 'service/system.active').exists())
+
+    def test_the_request_file_is_removed_before_the_update_so_it_cannot_loop(self):
+        self.installed()
+        self.env.publish('v2')
+        self.env.fault('no-report')
+        request = self.request()
+        self.env.updater(HOPE_FIRST_REPORT_TIMEOUT=2)
+        self.assertFalse(request.exists())
+
+    def test_a_linked_queue_directory_is_not_followed(self):
+        paths = self.installed()
+        victim = self.env.base / 'victim'
+        victim.mkdir()
+        (victim / 'request').write_text('keep me')
+        queue = paths['state'] / 'update-queue'
+        queue.rmdir()
+        queue.symlink_to(victim)
+        self.ok(self.env.updater())
+        self.assertEqual('keep me', (victim / 'request').read_text())
+
+    def test_a_link_left_at_the_result_path_is_replaced_not_followed(self):
+        paths = self.installed()
+        victim = self.env.base / 'victim.txt'
+        victim.write_text('keep me')
+        (paths['state'] / 'update-result').symlink_to(victim)
+        self.ok(self.env.updater())
+        self.assertEqual('keep me', victim.read_text())
+        self.assertFalse((paths['state'] / 'update-result').is_symlink())
+        self.assertEqual('current', self.result_of()['status'])
+
+    def test_a_linked_state_directory_gets_no_result(self):
+        paths = self.installed()
+        real = self.env.base / 'elsewhere'
+        paths['state'].rename(real)
+        paths['state'].symlink_to(real)
+        self.env.updater()
+        self.assertEqual([], [p.name for p in real.iterdir() if p.name == 'update-result'])
+
+    def test_two_updates_do_not_run_at_once(self):
+        self.installed()
+        self.env.publish('v2')
+        (self.env.root / 'var/lib/hope-agent-update/lock').mkdir()
+        result = self.env.updater()
+        self.ok(result)
+        self.assertIn('already running', result.err)
+        self.assertEqual('v1', self.version(self.env.paths('system')['binary']))
+
+    def test_the_updater_uses_the_pinned_server_and_ca(self):
+        ca = self.env.base / 'ca.pem'
+        ca.write_text('CA')
+        self.ok(self.env.run(HOPE_CA_CERT=ca))
+        self.assertEqual(str(ca), (self.env.root / 'var/lib/hope-agent-update/ca').read_text().strip())
+        self.env.publish('v2')
+        before = len(self.env.log())
+        self.ok(self.env.updater())
+        curls = [line for line in self.env.log()[before:].splitlines() if line.startswith('curl ')]
+        self.assertTrue(curls)
+        for line in curls:
+            self.assertIn('--cacert ' + str(ca), line)
+            self.assertIn(harness.SERVER, line)
+
+    def test_an_update_does_not_replace_the_pinned_installer(self):
+        self.installed()
+        pinned = self.env.root / 'var/lib/hope-agent-update/install-agent.sh'
+        before = pinned.read_text()
+        self.env.publish('v2')
+        self.ok(self.env.updater())
+        self.assertEqual(before, pinned.read_text())
+
+    def test_a_full_installation_again_refreshes_the_pinned_key(self):
+        self.installed()
+        pinned = self.env.root / 'var/lib/hope-agent-update/install-agent.sh'
+        newer = harness.keys()['other'][1]
+        self.env.installer.write_text(harness.INSTALLER.read_text().replace('@@HOPE_PUBLIC_KEY@@', newer))
+        self.env.publish('v2', key='other', manifest_key='other')
+        self.ok(self.env.run())
+        self.assertIn(newer, pinned.read_text())
+
+    def test_only_newer_needs_an_installed_agent(self):
+        result = self.env.run('upgrade', token=None, HOPE_ONLY_NEWER=1)
+        self.failed(result, 'NOT_INSTALLED')
+
+    def test_updater_setup_failure_is_a_warning_not_a_failed_install(self):
+        self.env.fault('updater-units-fail')
+        result = self.env.run()
+        self.ok(result)
+        self.assertIn('warning=UPDATER_NOT_INSTALLED', result.err)
+        self.assertTrue(self.env.paths('system')['binary'].exists())
+        self.assertIn('accepted report', result.out)
+
+    def test_an_update_by_the_updater_leaves_the_updater_alone(self):
+        self.installed()
+        self.env.publish('v2')
+        before = self.env.log()
+        self.ok(self.env.updater())
+        self.assertNotIn('enable --now hope-agent-update', self.env.log()[len(before):])
+
+    def test_uninstall_removes_the_updater(self):
+        paths = self.installed()
+        result = self.env.run('uninstall', token=None, server=None)
+        self.ok(result)
+        root = self.env.root
+        for gone in ('usr/local/sbin/hope-agent-update', 'var/lib/hope-agent-update',
+                     'etc/systemd/system/hope-agent-update.path', 'etc/systemd/system/hope-agent-update.service'):
+            self.assertFalse((root / gone).exists(), gone)
+        self.assertIn('systemctl[system] disable --now hope-agent-update.path', self.env.log())
+        self.assertTrue((paths['state'] / 'config.json').exists())
+
+    def test_purge_removes_the_queue_and_the_result(self):
+        paths = self.installed()
+        self.env.publish('v2')
+        self.ok(self.env.updater())
+        self.ok(self.env.run('uninstall', token=None, server=None, HOPE_PURGE_IDENTITY=1))
+        self.assertFalse(paths['state'].exists())
+
+
+class UpdaterMacOS(Base):
+    def setUp(self):
+        self.env = self.new_env('Darwin', 'arm64')
+
+    def test_a_system_daemon_watches_a_queue_directory(self):
+        self.ok(self.env.run())
+        root = self.env.root
+        plist = (root / 'Library/LaunchDaemons/io.hope.agent.update.plist').read_text()
+        state = self.env.paths('system')['state']
+        self.assertIn('<key>Label</key><string>io.hope.agent.update</string>', plist)
+        self.assertIn(f'<key>QueueDirectories</key><array><string>{state}/update-queue</string>', plist)
+        self.assertTrue((root / 'usr/local/sbin/hope-agent-update').exists())
+        self.assertTrue((root / 'Library/Application Support/hope-agent-update/install-agent.sh').exists())
+        self.assertIn('launchctl bootstrap system', self.env.log())
+
+    def test_a_request_updates_the_agent(self):
+        self.ok(self.env.run())
+        self.env.publish('v2')
+        self.ok(self.env.updater())
+        self.assertEqual('v2', self.version(self.env.paths('system')['binary']))
+
+    def test_uninstall_removes_the_updater(self):
+        self.ok(self.env.run())
+        self.ok(self.env.run('uninstall', token=None, server=None))
+        self.assertFalse((self.env.root / 'Library/LaunchDaemons/io.hope.agent.update.plist').exists())
+        self.assertFalse((self.env.root / 'usr/local/sbin/hope-agent-update').exists())
+        self.assertIn('launchctl bootout system/io.hope.agent.update', self.env.log())
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -14,10 +14,21 @@
 #   HOPE_POLL_INTERVAL=2                (seconds between acceptance checks; test knob)
 #   HOPE_ALLOW_DOWNGRADE=1              (permit installing a release older than the installed agent)
 #   HOPE_REQUIRE_PERSISTENT_SERVICE=1   (fail LINGER_REQUIRED instead of installing a Linux user service that stops at logout; set by SSH jobs)
+#   HOPE_ONLY_NEWER=1                   (change nothing unless the server offers a newer agent than the installed one)
+#   HOPE_UPDATER=1                      (set by hope-agent-update: leave the installed updater as it is)
 #   HOPE_INSTALL_ROOT                   (TEST ONLY: prefix for absolute system paths)
 #
 # Output: progress lines "hope-install: phase=NAME" and failures "hope-install: error=CODE message"
-# on stderr. Enrollment tokens and credentials are never printed.
+# on stderr, and on success "hope-install: result=updated VERSION" (or "result=current VERSION" when
+# HOPE_ONLY_NEWER found nothing newer). Enrollment tokens and credentials are never printed.
+#
+# Updater (system services only): after a successful install the installer keeps a root-owned copy
+# of itself, whose embedded key is the one this host now trusts, and installs hope-agent-update, which
+# runs that copy in upgrade mode. The agent, which cannot write its own binary, asks for an update by
+# creating update-request in its state directory when the server says one is wanted; a systemd path
+# unit (launchd WatchPaths on macOS) then starts hope-agent-update as root. A later release is
+# therefore checked against the key pinned here, never against one the server sends at update time.
+# An administrator can also run it by hand: sudo hope-agent-update
 #
 # Phases: preflight -> stage -> verify -> stop -> place-binary -> configure -> write-unit
 #         -> activate -> wait-report -> complete. Everything from "stop" onward is journaled in
@@ -41,7 +52,7 @@ txn=
 txn_active=0
 rb_ok=1
 no_manager=0
-preserve=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR,HOPE_RESET_CREDENTIAL,HOPE_PURGE_IDENTITY,HOPE_FIRST_REPORT_TIMEOUT,HOPE_POLL_INTERVAL,HOPE_INSTALL_ROOT,HOPE_REQUIRE_PERSISTENT_SERVICE
+preserve=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR,HOPE_RESET_CREDENTIAL,HOPE_PURGE_IDENTITY,HOPE_FIRST_REPORT_TIMEOUT,HOPE_POLL_INTERVAL,HOPE_INSTALL_ROOT,HOPE_REQUIRE_PERSISTENT_SERVICE,HOPE_ONLY_NEWER,HOPE_UPDATER
 root=${HOPE_INSTALL_ROOT:-}
 root=${root%/}
 
@@ -86,6 +97,18 @@ txn_for() {
 present_for() {
     paths_for "$1"
     [ -e "$unit" ] || [ -e "$binary" ] || [ -e "$state_default/config.json" ] || [ -d "$(txn_for "$1")" ]
+}
+# The updater lives outside the service-writable state directory, owned by root.
+updater_paths() {
+    updater_bin=$root/usr/local/sbin/hope-agent-update
+    if [ "$platform" = linux ]; then
+        updater_dir=$root/var/lib/hope-agent-update
+        updater_path_unit=$root/etc/systemd/system/hope-agent-update.path
+        updater_service_unit=$root/etc/systemd/system/hope-agent-update.service
+    else
+        updater_dir="$root/Library/Application Support/hope-agent-update"
+        updater_plist=$root/Library/LaunchDaemons/io.hope.agent.update.plist
+    fi
 }
 mkdir_public() { ( umask 022; mkdir -p "$1" ); }
 state_safe() { [ ! -L "$state" ] && [ ! -L "$state/config.json" ]; }
@@ -171,6 +194,129 @@ on_exit() {
 on_signal() { trap '' HUP INT TERM QUIT; err INTERRUPTED 'The installer was interrupted.'; exit 1; }
 trap on_exit EXIT
 trap on_signal HUP INT TERM QUIT
+
+# --- updater (system services only) --------------------------------------------------------
+# Each step returns 1 on failure: the callers run these as `f || note warning`, where set -e is off.
+install_updater() {
+    updater_paths
+    [ -f "$0" ] || { note 'warning=UPDATER_NOT_INSTALLED The installer was not run from a file, so it cannot be kept for updates.'; return 1; }
+    pinned_ca=
+    if [ -n "${HOPE_CA_CERT:-}" ]; then
+        case "$HOPE_CA_CERT" in
+            /*) pinned_ca=$HOPE_CA_CERT;;
+            *) pinned_ca=$(cd "$(dirname "$HOPE_CA_CERT")" 2>/dev/null && pwd)/$(basename "$HOPE_CA_CERT") || return 1;;
+        esac
+    fi
+    mkdir_public "$(dirname "$updater_bin")" && mkdir_public "$updater_dir" || return 1
+    # The installer text carries the verification key this host now trusts. It is replaced only by
+    # an administrator running a full installation again, never by an update.
+    cp "$0" "$updater_dir/install-agent.sh.new" && chmod 755 "$updater_dir/install-agent.sh.new" \
+        && mv -f "$updater_dir/install-agent.sh.new" "$updater_dir/install-agent.sh" || return 1
+    printf '%s\n' "$HOPE_SERVER" > "$updater_dir/server.new" && mv -f "$updater_dir/server.new" "$updater_dir/server" || return 1
+    if [ -n "$pinned_ca" ]; then
+        printf '%s\n' "$pinned_ca" > "$updater_dir/ca.new" && mv -f "$updater_dir/ca.new" "$updater_dir/ca" || return 1
+    else rm -f "$updater_dir/ca"; fi
+    {
+        printf '#!/bin/sh\n# H.O.P.E agent updater, written by install-agent.sh and owned by root.\n'
+        printf "dir='%s'\nstate='%s'\nroot='%s'\n" "$updater_dir" "$state" "$root"
+        cat <<'HOPE_UPDATER_BODY'
+# Runs the installer kept in $dir in upgrade mode when the server offers a newer agent. Started as
+# root by the service manager when the agent leaves a request, or by an administrator: sudo hope-agent-update
+set -eu
+umask 077
+PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+queue=$state/update-queue
+# The request only wakes this script; nothing in it is read. The agent owns the directory, so it is
+# never followed through a symbolic link.
+if [ -d "$queue" ] && [ ! -L "$queue" ] && [ ! -L "$state" ]; then rm -f "$queue/request"; fi
+lock=$dir/lock
+if ! mkdir "$lock" 2>/dev/null; then
+    find "$lock" -maxdepth 0 -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+    mkdir "$lock" 2>/dev/null || { echo 'hope-agent-update: another update is already running' >&2; exit 0; }
+fi
+log=$(mktemp)
+trap 'rm -rf "$lock" "$log"' EXIT
+HOPE_SERVER=$(cat "$dir/server")
+HOPE_AGENT_DIR=$state
+HOPE_INSTALL_MODE=system
+HOPE_ONLY_NEWER=1
+HOPE_UPDATER=1
+export HOPE_SERVER HOPE_AGENT_DIR HOPE_INSTALL_MODE HOPE_ONLY_NEWER HOPE_UPDATER
+if [ -f "$dir/ca" ]; then HOPE_CA_CERT=$(cat "$dir/ca"); export HOPE_CA_CERT; fi
+if [ -n "$root" ]; then HOPE_INSTALL_ROOT=$root; export HOPE_INSTALL_ROOT; fi
+rc=0
+sh "$dir/install-agent.sh" upgrade 2>"$log" || rc=$?
+cat "$log" >&2
+outcome=$(sed -n 's/^hope-install: result=\(updated\|current\) \([A-Za-z0-9._+-]\{1,64\}\)$/\1 \2/p' "$log" | tail -n 1)
+code=$(sed -n 's/^hope-install: error=\([A-Z_]\{1,40\}\) .*/\1/p' "$log" | head -n 1)
+if [ "$rc" -eq 0 ] && [ -n "$outcome" ]; then
+    status="status=${outcome%% *}
+version=${outcome#* }"
+else
+    status="status=failed
+code=${code:-UNKNOWN}"
+fi
+# Tell the agent what happened; it reports this to the server. A new file in a private name, so a
+# link left by the agent cannot redirect the write.
+if [ -d "$state" ] && [ ! -L "$state" ]; then
+    out=$(mktemp "$state/.update-result.XXXXXX") && {
+        printf '%s\nat=%s\n' "$status" "$(date +%s)" > "$out"
+        chmod 644 "$out"
+        mv -f "$out" "$state/update-result"
+    } || true
+fi
+exit "$rc"
+HOPE_UPDATER_BODY
+    } > "$updater_bin.new" && chmod 755 "$updater_bin.new" && mv -f "$updater_bin.new" "$updater_bin" || return 1
+    if is_linux; then
+        cat > "$updater_path_unit.new" <<EOF
+[Unit]
+Description=H.O.P.E agent update requests
+[Path]
+PathExists=$state/update-queue/request
+Unit=hope-agent-update.service
+[Install]
+WantedBy=multi-user.target
+EOF
+        cat > "$updater_service_unit.new" <<EOF
+[Unit]
+Description=H.O.P.E agent update
+[Service]
+Type=oneshot
+ExecStart="$updater_bin"
+TimeoutStartSec=1800
+EOF
+        mv -f "$updater_path_unit.new" "$updater_path_unit" && mv -f "$updater_service_unit.new" "$updater_service_unit" || return 1
+        [ "$no_manager" = 0 ] || return 0
+        sc daemon-reload && sc enable --now hope-agent-update.path || return 1
+    else
+        xml_text() { printf '%s' "$1" | sed 's/\&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
+        cat > "$updater_plist.new" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>io.hope.agent.update</string>
+<key>ProgramArguments</key><array><string>$(xml_text "$updater_bin")</string></array>
+<key>QueueDirectories</key><array><string>$(xml_text "$state/update-queue")</string></array>
+</dict></plist>
+EOF
+        mv -f "$updater_plist.new" "$updater_plist" || return 1
+        launchctl bootout system/io.hope.agent.update >/dev/null 2>&1 || true
+        launchctl bootstrap system "$updater_plist" || return 1
+    fi
+}
+remove_updater() {
+    updater_paths
+    if [ "$no_manager" = 0 ]; then
+        if is_linux; then sc disable --now hope-agent-update.path >/dev/null 2>&1 || true
+        else launchctl bootout system/io.hope.agent.update >/dev/null 2>&1 || true; fi
+    fi
+    if is_linux; then rm -f "$updater_path_unit" "$updater_service_unit"; else rm -f "$updater_plist"; fi
+    rm -f "$updater_bin" "$updater_bin.new"
+    rm -rf "${updater_dir:?}"
+    if is_linux; then svc_reload || true; fi
+}
 
 # =================================== phase: preflight =========================================
 phase preflight
@@ -305,14 +451,15 @@ if [ "$operation" = uninstall ]; then
     svc_stop
     svc_disable
     rm -f "$unit" "$binary" "$binary.new"
+    if is_system; then remove_updater; fi
     svc_reload || true
     if [ "${HOPE_PURGE_IDENTITY:-}" = 1 ]; then
         state_safe || fail PATH_UNWRITABLE 'Refusing to purge through a symbolic link.'
         # Remove only files the agent creates; never the whole (possibly shared) directory.
-        for name in config.json spool.json last-acceptance.json previous.json sample.json last-report agent.lock agent.log bootstrap-ca.pem .install-transaction; do
+        for name in config.json spool.json last-acceptance.json previous.json sample.json last-report agent.lock agent.log bootstrap-ca.pem update-queue update-result .install-transaction; do
             rm -rf "${state:?}/$name"
         done
-        rm -f "$state"/.hope-*.tmp
+        rm -f "$state"/.hope-*.tmp "$state"/.update-result.*
         rmdir "$state" 2>/dev/null || note "warning=$state contains other files and was kept"
         echo "Service removed and identity deleted from $state. Revoke its credential in H.O.P.E."
     else
@@ -417,6 +564,16 @@ m_size=$(printf '%s\n' "$entries" | sed -n 's/.*"size":\([0-9]\{1,12\}\)[,}].*/\
 { [ "$m_file" = "$artifact" ] && [ -n "$m_sha" ] && [ -n "$m_size" ]; } \
     || fail MANIFEST_INVALID "The manifest entry for $platform/$architecture is malformed."
 
+if [ "${HOPE_ONLY_NEWER:-}" = 1 ]; then
+    [ -x "$binary" ] || fail NOT_INSTALLED 'No installed agent was found to update.'
+    installed_version=$("$binary" --version 2>/dev/null | sed -n 's/^hope-agent //p' | head -n 1 || true)
+    if version_ok "$installed_version" && ! version_lt "$installed_version" "$m_version"; then
+        echo "hope-agent $installed_version is current; the server offers $m_version."
+        note "result=current $installed_version"
+        phase complete
+        exit 0
+    fi
+fi
 # Refuse to replace a newer installed agent with an older release. This compares only with the agent
 # installed on this host: a fresh install, or a host whose agent is already old, can still receive any
 # older release the server's key signed. Rely on the server publishing only the intended release.
@@ -583,6 +740,14 @@ mkdir_public "$(dirname "$unit")"
 mkdir_public "$(dirname "$state")"
 mkdir -p "$state"
 chmod 700 "$state"
+# Where the agent leaves an update request for the updater (system services only).
+if is_system; then
+    # The service account owns the state directory, so a link may have been left here; replace it
+    # rather than change the mode of whatever it points at.
+    [ ! -L "$state/update-queue" ] || rm -f "$state/update-queue"
+    mkdir -p "$state/update-queue"
+    chmod 700 "$state/update-queue"
+fi
 mkdir_public "$(dirname "$txn")"
 rm -rf "$txn.tmp"
 mkdir "$txn.tmp"
@@ -648,6 +813,10 @@ done
 txn_active=0
 rm -rf "$txn"
 phase complete
+if [ "$operation" = upgrade ]; then note "result=updated $m_version"; else note "result=installed $m_version"; fi
+if is_system && [ "${HOPE_UPDATER:-}" != 1 ]; then
+    install_updater || note 'warning=UPDATER_NOT_INSTALLED The agent is installed and reporting, but updates from the console need a new installation command.'
+fi
 if ! is_system; then
     if is_linux; then echo 'To report after logout, ask an administrator to enable lingering for your account (loginctl enable-linger).'
     else echo 'This LaunchAgent reports only while you are logged in to a graphical session.'; fi

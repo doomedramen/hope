@@ -176,6 +176,10 @@ elif name == 'systemctl':
     scope = 'user' if '--user' in args else 'system'
     rest = [a for a in args if a != '--user']
     log('systemctl[%s] %s' % (scope, ' '.join(rest)))
+    if any('hope-agent-update' in a for a in rest):
+        if flag('updater-units-fail') and rest[0] == 'enable':
+            sys.exit(1)
+        sys.exit(0)
     marker = os.path.join(R, 'service', scope + '.active')
     unit = (INST + '/etc/systemd/system/hope-agent.service') if scope == 'system' else (os.environ['HOME'] + '/.config/systemd/user/hope-agent.service')
     command = rest[0]
@@ -207,6 +211,8 @@ elif name == 'systemctl':
         print(content.split()[1] if '--value' in rest else 'MainPID=' + content.split()[1])
 elif name == 'launchctl':
     log('launchctl ' + ' '.join(args))
+    if any('io.hope.agent.update' in a for a in args):
+        sys.exit(1 if flag('updater-units-fail') and args[0] == 'bootstrap' else 0)
     marker = os.path.join(R, 'service', 'launchd.active')
     if args[0] == 'print' and '/io.hope.agent' in args[1]:
         if not os.path.exists(marker):
@@ -468,6 +474,15 @@ class Env:
     def run(self, operation='install', uid=0, mode=None, token=TOKEN, server=SERVER, timeout=90, **extra):
         env = self._environment(uid, mode, token, server, extra)
         done = subprocess.run([os.environ.get('HOPE_TEST_SHELL', 'sh'), str(self.installer), operation], env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        result = Result(done.returncode, done.stdout, done.stderr)
+        self.runs.append(result)
+        return result
+
+    def updater(self, **extra):
+        """Run the hope-agent-update the installer left behind, as root."""
+        wrapper = self.root / 'usr/local/sbin/hope-agent-update'
+        env = self._environment(0, None, None, None, extra)
+        done = subprocess.run([os.environ.get('HOPE_TEST_SHELL', 'sh'), str(wrapper)], env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
         result = Result(done.returncode, done.stdout, done.stderr)
         self.runs.append(result)
         return result
