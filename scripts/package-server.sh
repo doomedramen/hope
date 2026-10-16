@@ -28,7 +28,9 @@ if [ "$build" = 1 ]; then
 fi
 [ -x target/release/hope-server ] || { echo "package-server: target/release/hope-server is missing" >&2; exit 1; }
 [ -f web/out/index.html ] || { echo "package-server: web/out/index.html is missing" >&2; exit 1; }
-version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+# CI names each build (HOPE_BUILD_VERSION); the agents in the same release carry that version, and
+# the installer signs them with --version "$(cat VERSION)", so the two must agree.
+version=${HOPE_BUILD_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)}
 staging=$(mktemp -d "${TMPDIR:-/tmp}/hope-server-package.XXXXXX")
 trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/hope-server-$version" "$out"

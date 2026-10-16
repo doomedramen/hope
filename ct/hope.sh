@@ -92,17 +92,6 @@ EOF
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"
     install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" "/opt/hope-agents" "hope-agents.tar.gz"
-
-    # Installed agents trust this key, so an existing one is kept; a server without one gets one.
-    msg_info "Signing agent packages"
-    [[ -f /etc/hope/release-signing.pem ]] || (umask 077 && $STD openssl genrsa -out /etc/hope/release-signing.pem 3072)
-    mkdir -p /var/lib/hope/releases
-    if HOPE_SIGNING_KEY=/etc/hope/release-signing.pem $STD sh /opt/hope/tools/assemble-release.sh --staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases; then
-      msg_ok "Signed agent packages"
-    else
-      msg_warn "Agent packages were not signed; the previous ones stay published. Details: /var/log or run the update in verbose mode"
-    fi
 
     # Re-sign the release's agents with this server's key (created here for containers installed
     # before agents were signed, unless a release signed elsewhere is already published). A failure
