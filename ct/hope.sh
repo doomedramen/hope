@@ -11,6 +11,20 @@
 # var_cpu, var_ram, var_disk, var_brg, var_net, var_unprivileged.
 COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.com/doomedramen/hope/main}"
 export COMMUNITY_SCRIPTS_URL
+# Banners live in the engine's own repository and are generated only for merged apps, so the engine
+# would 404 (visibly) looking for ours. Seed its header cache with the same slant-font banner the
+# generator would produce; the engine reads the cache before fetching anything.
+_hope_header_cache="${COMMUNITY_SCRIPTS_HEADER_CACHE:-/usr/local/community-scripts}/headers/ct/hope"
+if [[ ! -s "$_hope_header_cache" ]] && mkdir -p "$(dirname "$_hope_header_cache")" 2>/dev/null; then
+  cat >"$_hope_header_cache" <<'HOPE_BANNER' || rm -f "$_hope_header_cache"
+    __  ______  ____  ______
+   / / / / __ \/ __ \/ ____/
+  / /_/ / / / / /_/ / __/
+ / __  / /_/ / ____/ /___
+/_/ /_/\____/_/   /_____/
+HOPE_BANNER
+fi
+unset _hope_header_cache
 _cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
 source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
