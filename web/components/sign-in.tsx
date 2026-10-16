@@ -1,13 +1,6 @@
 "use client";
 import { useState } from "react";
-import {
-  Activity,
-  HardDrive,
-  Network,
-  Radar,
-  ShieldCheck,
-  Waypoints,
-} from "lucide-react";
+import { Eye, EyeOff, Loader2, Network, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -16,6 +9,7 @@ import {
   FieldGroup,
   FieldLabel,
   FieldDescription,
+  FieldError,
 } from "@/components/ui/field";
 import { post } from "@/lib/api";
 
@@ -41,12 +35,17 @@ export function SignIn({
 }) {
   const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
+  const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  // A refusal belongs to the field that caused it; anything else is shown above the form.
+  const [error, setError] = useState<{
+    field?: "token" | "password";
+    message: string;
+  } | null>(null);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
-    setError("");
+    setError(null);
     try {
       await post(setup ? "/auth/setup" : "/auth/login", {
         password,
@@ -54,66 +53,55 @@ export function SignIn({
       });
       await onComplete();
     } catch (e) {
-      setError((e as Error).message);
+      const failure = e as Error & { status?: number };
+      if (failure.status === 401)
+        setError(
+          setup
+            ? {
+                field: "token",
+                message:
+                  "This setup token does not match the one in the server log.",
+              }
+            : {
+                field: "password",
+                message: "That password is not correct.",
+              },
+        );
+      else setError({ message: failure.message });
     } finally {
       setBusy(false);
     }
   }
+  const tokenError = error?.field === "token" ? error.message : "";
+  const passwordError = error?.field === "password" ? error.message : "";
   return (
     <main className="auth-shell">
-      <section className="auth-art" aria-hidden="true">
-        <div className="auth-grid" />
-        <Brand />
-        <div>
-          <h2>Every device on your network, understood.</h2>
-          <p>
-            H.O.P.E discovers what is on your LAN, maps how it connects, and
-            watches CPU, memory, storage and traffic on the machines you care
-            about. Self-hosted, on one small server.
-          </p>
-          <div className="auth-features">
-            <div>
-              <Radar size={16} />
-              <span>Fair, bounded discovery across every range you add</span>
-            </div>
-            <div>
-              <Waypoints size={16} />
-              <span>Topology, subnet and health maps with provenance</span>
-            </div>
-            <div>
-              <Activity size={16} />
-              <span>A 30-second agent with seven days of history</span>
-            </div>
-            <div>
-              <HardDrive size={16} />
-              <span>Storage, GPU and interface counters per host</span>
-            </div>
+      <div className="auth-backdrop" aria-hidden="true" />
+      <div className="auth-column">
+        <div className="auth-brand">
+          <div className="brand-mark">
+            <Network size={22} />
           </div>
+          <span>H.O.P.E</span>
         </div>
-        <div className="flex items-center gap-2 text-xs opacity-70">
-          <ShieldCheck size={14} />
-          Your devices. Your data. Your server.
-        </div>
-      </section>
-      <section className="auth-form">
-        <div className="auth-panel">
-          <div>
+        <section className="auth-card">
+          <header>
             <h1>{setup ? "Meet your network." : "Welcome back."}</h1>
-            <p className="mt-2 text-sm text-muted-foreground">
+            <p>
               {setup
                 ? "Create the administrator account to start discovering devices."
-                : "Sign in to your H.O.P.E observatory."}
+                : "Sign in to your network observatory."}
             </p>
-          </div>
+          </header>
           <form onSubmit={submit} className="flex flex-col gap-6">
-            {error && (
+            {error && !error.field && (
               <Alert variant="destructive">
-                <AlertDescription>{error}</AlertDescription>
+                <AlertDescription>{error.message}</AlertDescription>
               </Alert>
             )}
             <FieldGroup>
               {setup && (
-                <Field>
+                <Field data-invalid={!!tokenError || undefined}>
                   <FieldLabel htmlFor="setup-token">Setup token</FieldLabel>
                   <Input
                     id="setup-token"
@@ -121,42 +109,78 @@ export function SignIn({
                     autoComplete="off"
                     required
                     value={token}
+                    aria-invalid={!!tokenError || undefined}
+                    aria-describedby="setup-token-help"
                     onChange={(e) => setToken(e.target.value)}
                   />
-                  <FieldDescription>
-                    Printed in the server log at first start, after &ldquo;setup
-                    token:&rdquo;.
-                  </FieldDescription>
+                  {tokenError ? (
+                    <FieldError id="setup-token-help">{tokenError}</FieldError>
+                  ) : (
+                    <FieldDescription id="setup-token-help">
+                      Printed in the server log at first start, after
+                      &ldquo;setup token:&rdquo;.
+                    </FieldDescription>
+                  )}
                 </Field>
               )}
-              <Field>
+              <Field data-invalid={!!passwordError || undefined}>
                 <FieldLabel htmlFor="password">
                   Administrator password
                 </FieldLabel>
-                <Input
-                  id="password"
-                  type="password"
-                  required
-                  minLength={setup ? 8 : undefined}
-                  maxLength={256}
-                  autoComplete={setup ? "new-password" : "current-password"}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-                {setup && (
-                  <FieldDescription>
-                    Use at least 8 characters. There is one account; keep it
-                    safe.
-                  </FieldDescription>
+                <div className="auth-password">
+                  <Input
+                    id="password"
+                    type={visible ? "text" : "password"}
+                    required
+                    autoFocus={!setup}
+                    minLength={setup ? 8 : undefined}
+                    maxLength={256}
+                    autoComplete={setup ? "new-password" : "current-password"}
+                    value={password}
+                    aria-invalid={!!passwordError || undefined}
+                    aria-describedby={
+                      passwordError || setup ? "password-help" : undefined
+                    }
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="auth-reveal"
+                    aria-label={visible ? "Hide password" : "Show password"}
+                    aria-pressed={visible}
+                    onClick={() => setVisible((v) => !v)}
+                  >
+                    {visible ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+                {passwordError ? (
+                  <FieldError id="password-help">{passwordError}</FieldError>
+                ) : (
+                  setup && (
+                    <FieldDescription id="password-help">
+                      Use at least 8 characters. There is one account; keep it
+                      safe.
+                    </FieldDescription>
+                  )
                 )}
               </Field>
             </FieldGroup>
-            <Button type="submit" size="lg" disabled={busy}>
+            <Button
+              type="submit"
+              size="lg"
+              className="auth-submit"
+              disabled={busy}
+            >
+              {busy && <Loader2 className="animate-spin" aria-hidden="true" />}
               {busy ? "Connecting…" : setup ? "Create account" : "Sign in"}
             </Button>
           </form>
-        </div>
-      </section>
+        </section>
+        <p className="auth-footnote">
+          <ShieldCheck size={14} aria-hidden="true" />
+          Self-hosted. Your devices and data stay on this server.
+        </p>
+      </div>
     </main>
   );
 }

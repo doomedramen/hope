@@ -1763,104 +1763,148 @@ kbd.key {
 
 /* ---------- Auth ---------- */
 .auth-shell {
+  position: relative;
+  isolation: isolate;
   min-height: 100vh;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  place-items: center;
+  padding: 48px 16px;
+  background: var(--background);
 }
-.auth-art {
-  position: relative;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 44px 48px;
-  color: #fff;
-  background:
-    radial-gradient(
-      900px 520px at 20% 0%,
-      rgb(84 160 255 / 0.55),
-      transparent 60%
-    ),
-    radial-gradient(
-      700px 500px at 100% 100%,
-      rgb(27 175 122 / 0.35),
-      transparent 60%
-    ),
-    linear-gradient(160deg, #10213f 0%, #0b1527 60%, #0a1120 100%);
-}
-.auth-art .brand {
-  color: #fff;
-}
-.auth-art .brand-subtitle {
-  color: rgb(255 255 255 / 0.6);
-}
-.auth-art h2 {
-  font-size: 34px;
-  font-weight: 700;
-  letter-spacing: -1px;
-  line-height: 1.1;
-  max-width: 14ch;
-}
-.auth-art p {
-  margin-top: 14px;
-  color: rgb(255 255 255 / 0.72);
-  font-size: 14px;
-  max-width: 46ch;
-  line-height: 1.6;
-}
-.auth-features {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 30px;
-}
-.auth-features div {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: rgb(255 255 255 / 0.06);
-  border: 1px solid rgb(255 255 255 / 0.1);
-  font-size: 12.5px;
-  line-height: 1.45;
-  color: rgb(255 255 255 / 0.85);
-}
-.auth-features svg {
-  flex-shrink: 0;
-  color: #8dc0ff;
-  margin-top: 1px;
-}
-.auth-grid {
+/* A faint survey grid with one soft glow behind the card. */
+.auth-backdrop {
   position: absolute;
   inset: 0;
-  background-image:
-    linear-gradient(rgb(255 255 255 / 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgb(255 255 255 / 0.05) 1px, transparent 1px);
-  background-size: 36px 36px;
-  mask-image: radial-gradient(
-    600px 500px at 30% 30%,
-    #000 20%,
-    transparent 80%
-  );
+  z-index: -1;
+  overflow: hidden;
   pointer-events: none;
+  background:
+    radial-gradient(
+      560px 360px at 50% 32%,
+      color-mix(in oklab, var(--primary) 16%, transparent),
+      transparent 70%
+    ),
+    linear-gradient(
+        color-mix(in oklab, var(--foreground) 6%, transparent) 1px,
+        transparent 1px
+      )
+      0 0 / 32px 32px,
+    linear-gradient(
+        90deg,
+        color-mix(in oklab, var(--foreground) 6%, transparent) 1px,
+        transparent 1px
+      )
+      0 0 / 32px 32px;
+  mask-image: radial-gradient(
+    640px 480px at 50% 38%,
+    #000 30%,
+    transparent 75%
+  );
 }
-.auth-form {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 40px 24px;
-}
-.auth-panel {
+.auth-column {
   width: min(400px, 100%);
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  align-items: center;
+  gap: 24px;
+  animation: auth-enter 320ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
-.auth-panel h1 {
-  font-size: 26px;
+@keyframes auth-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .auth-column {
+    animation: none;
+  }
+}
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 20px;
   font-weight: 700;
-  letter-spacing: -0.7px;
+  letter-spacing: -0.4px;
+}
+.auth-brand .brand-mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+}
+.auth-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 28px;
+  border-radius: calc(var(--radius) * 1.6);
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 1px 2px rgb(16 24 40 / 0.05),
+    0 12px 32px -8px rgb(16 24 40 / 0.14);
+}
+.dark .auth-card {
+  box-shadow:
+    0 1px 0 rgb(255 255 255 / 0.04) inset,
+    0 16px 40px -12px rgb(0 0 0 / 0.6);
+}
+.auth-card h1 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  line-height: 1.2;
+}
+.auth-card header p {
+  margin-top: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+.auth-card input {
+  height: 40px;
+  font-size: 15px;
+  padding-inline: 12px;
+}
+.auth-password {
+  position: relative;
+}
+.auth-password input {
+  padding-right: 44px;
+}
+.auth-reveal {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  transition: color 150ms ease;
+}
+.auth-reveal:hover {
+  color: var(--foreground);
+}
+.auth-reveal:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -4px;
+}
+.auth-submit {
+  width: 100%;
+  height: 40px;
+  font-size: 15px;
+}
+.auth-footnote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--muted-foreground);
 }
 .auth-center {
   min-height: 100vh;
@@ -2179,21 +2223,8 @@ kbd.key {
   .search-box input {
     width: 130px;
   }
-  .auth-shell {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .auth-art {
-    padding: 28px 22px;
-    min-height: 0;
-  }
-  .auth-art h2 {
-    font-size: 24px;
-  }
-  .auth-features {
-    display: none;
-  }
-  .auth-form {
-    padding: 28px 18px;
+  .auth-card {
+    padding: 22px;
   }
   .leader-row {
     grid-template-columns: minmax(0, 110px) minmax(0, 1fr) 50px;

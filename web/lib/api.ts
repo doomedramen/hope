@@ -16,7 +16,10 @@ export async function api<T>(
     const body = await response
       .json()
       .catch(() => ({ error: `Request failed (${response.status})` }));
-    throw new Error(body.error || `Request failed (${response.status})`);
+    throw Object.assign(
+      new Error(body.error || `Request failed (${response.status})`),
+      { status: response.status },
+    );
   }
   return response.json();
 }
