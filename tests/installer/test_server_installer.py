@@ -2,10 +2,13 @@
 
 Package managers, systemd, journald, account tools, setcap and curl are stubs on a private PATH;
 the release archive comes from a local directory through the HOPE_INSTALL_RELEASE_URL override, so
-the download, checksum verification and extraction paths are the real ones.
+the download, checksum verification and extraction paths are the real ones. The release also carries
+hope-agents.tar.gz (fake agent binaries with the right headers) and the package carries the real
+scripts/assemble-release.sh behind a wrapper that logs its call, so agent signing is the real one too.
 Run: python3 -I -m unittest discover -s tests/installer -v
 """
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -17,6 +20,22 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[2]
 INSTALLER = REPO / 'scripts' / 'install-hope.sh'
+ASSEMBLE = REPO / 'scripts' / 'assemble-release.sh'
+PLATFORMS = ['linux-x86_64', 'linux-aarch64', 'macos-x86_64', 'macos-aarch64']
+# Logs the signing call, then runs the real script from the package (its repository check sees the package).
+ASSEMBLE_WRAPPER = """#!/bin/sh
+printf 'assemble-release HOPE_SIGNING_KEY=%s %s\\n' "$HOPE_SIGNING_KEY" "$*" >> "$HOPE_INSTALL_ROOT/commands.log"
+exec sh "$(dirname "$0")/assemble-release-real.sh" "$@"
+"""
+
+
+def agent_header(platform):
+    """Smallest ELF/Mach-O header that carries the machine/cputype assemble-release.sh checks."""
+    if platform.startswith('linux'):
+        machine = b'\x3e\x00' if platform.endswith('x86_64') else b'\xb7\x00'
+        return b'\x7fELF\x02\x01\x01\x00' + bytes(8) + b'\x02\x00' + machine
+    cpu = b'\x07\x00\x00\x01' if platform.endswith('x86_64') else b'\x0c\x00\x00\x01'
+    return b'\xcf\xfa\xed\xfe' + cpu + bytes(12)
 
 STUB = r'''#!@PYTHON@
 import os, shutil, sys
@@ -88,22 +107,40 @@ class ServerInstaller(unittest.TestCase):
         self.release.mkdir()
         self.make_release()
 
-    def make_release(self, corrupt=False):
+    def make_release(self, corrupt=False, version='0.9.0', agents=True, agent_version=None, corrupt_agents=False):
         arch = {'x86_64': 'x86_64', 'amd64': 'x86_64', 'aarch64': 'aarch64', 'arm64': 'aarch64'}[os.uname().machine]
         tree = self.root / 'tree'
         shutil.rmtree(tree, ignore_errors=True)
+        for path in self.release.iterdir():
+            path.unlink()
         (tree / 'web').mkdir(parents=True)
+        (tree / 'tools').mkdir()
         (tree / 'hope-server').write_text('#!/bin/sh\necho fake hope-server\n')
         (tree / 'hope-server').chmod(0o755)
         (tree / 'web/index.html').write_text('<html>console</html>')
+        (tree / 'VERSION').write_text(version + '\n')
+        (tree / 'tools/assemble-release.sh').write_text(ASSEMBLE_WRAPPER)
+        shutil.copyfile(ASSEMBLE, tree / 'tools/assemble-release-real.sh')
         name = f'hope-server-{arch}-linux.tar.gz'
         with tarfile.open(self.release / name, 'w:gz') as archive:
-            archive.add(tree / 'hope-server', arcname='hope-server')
-            archive.add(tree / 'web', arcname='web')
+            for entry in ('hope-server', 'web', 'VERSION', 'tools'):
+                archive.add(tree / entry, arcname=entry)
         digest = hashlib.sha256((self.release / name).read_bytes()).hexdigest()
         if corrupt:
             digest = '0' * 64
-        (self.release / 'SHA256SUMS-server').write_text(f'{digest}  {name}\n')
+        sums = f'{digest}  {name}\n'
+        if agents:
+            built = agent_version or version
+            staged = tree / 'agents' / f'hope-agents-{built}'
+            staged.mkdir(parents=True)
+            for platform in PLATFORMS:
+                (staged / f'hope-agent-{platform}').write_bytes(agent_header(platform) + f'agent {platform} {built}'.encode())
+                (staged / f'hope-agent-{platform}.info').write_text(f'version={built}\ntarget=t-{platform}\nmin_os=Test OS 1.0\ncommit=abcdef012345\n')
+            with tarfile.open(self.release / 'hope-agents.tar.gz', 'w:gz') as archive:
+                archive.add(staged, arcname=staged.name)
+            agent_digest = hashlib.sha256((self.release / 'hope-agents.tar.gz').read_bytes()).hexdigest()
+            sums += f'{"f" * 64 if corrupt_agents else agent_digest}  hope-agents.tar.gz\n'
+        (self.release / 'SHA256SUMS-server').write_text(sums)
 
     def run_installer(self, **extra):
         env = {
@@ -121,6 +158,20 @@ class ServerInstaller(unittest.TestCase):
 
     def commands(self):
         return (self.root / 'commands.log').read_text().splitlines()
+
+    @property
+    def key(self):
+        return self.root / 'etc/hope/release-signing.pem'
+
+    @property
+    def releases(self):
+        return self.root / 'opt/hope/releases'
+
+    def manifest(self):
+        return json.loads((self.releases / 'current/manifest.json').read_text())
+
+    def public_key_of(self, private):
+        return subprocess.run(['openssl', 'pkey', '-in', str(private), '-pubout'], check=True, capture_output=True, text=True).stdout
 
     def test_fresh_install_with_caddy_internal_ca(self):
         done = self.run_installer()
@@ -199,6 +250,96 @@ class ServerInstaller(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIn('must start with https://', done.stderr)
         self.assertFalse((self.root / 'opt').exists())
+
+    def test_agents_are_signed_with_a_new_server_key(self):
+        done = self.run_installer()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.key.stat().st_mode & 0o777, 0o600, 'created under umask 077')
+        text = subprocess.run(['openssl', 'rsa', '-in', str(self.key), '-noout', '-text'], check=True, capture_output=True, text=True).stdout
+        self.assertRegex(text, r'Private-Key: \(3072 bit')
+        signing = [c for c in self.commands() if c.startswith('assemble-release ')]
+        self.assertEqual(list(self.root.glob('hope-install.*')), [], 'the staging directory is removed afterwards')
+        self.assertEqual(len(signing), 1, signing)
+        self.assertRegex(signing[0], rf'^assemble-release HOPE_SIGNING_KEY={self.key} --staging \S+/agents/hope-agents-0\.9\.0 '
+                                     rf'--version 0\.9\.0 --out {self.releases}$')
+        manifest = self.manifest()
+        self.assertEqual((manifest['version'], manifest['partial']), ('0.9.0', False))
+        self.assertEqual(sorted(f"{a['platform']}-{a['arch']}" for a in manifest['artifacts']), sorted(PLATFORMS))
+        current = self.releases / 'current'
+        self.assertEqual((current / 'release-public.pem').read_text(), self.public_key_of(self.key))
+        subprocess.run(['openssl', 'dgst', '-sha256', '-verify', str(current / 'release-public.pem'), '-signature',
+                        str(current / 'manifest.json.sig'), str(current / 'manifest.json')], check=True, capture_output=True)
+        # The hope service account reads the release: every directory 755, every file 644.
+        for path in [self.releases, current.resolve()]:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o755, path)
+        for path in current.resolve().iterdir():
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644, path)
+        self.assertIn('Agent releases: /opt/hope/releases   (0.9.0, signed with /etc/hope/release-signing.pem', done.stdout)
+        self.assertNotIn('publish a signed release', done.stdout)
+
+    def test_rerun_resigns_with_the_existing_key(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        key = self.key.read_bytes()
+        first = (self.releases / 'current').resolve().name
+        (self.root / 'commands.log').unlink()
+        self.make_release(version='0.9.1')
+        done = self.run_installer()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.key.read_bytes(), key, 'the signing key is never replaced')
+        self.assertNotIn('Creating the agent release signing key', done.stderr)
+        self.assertEqual(self.manifest()['version'], '0.9.1')
+        self.assertEqual((self.releases / 'current/release-public.pem').read_text(), self.public_key_of(self.key))
+        self.assertEqual(os.readlink(self.releases / 'previous'), first)
+        signing = [c for c in self.commands() if c.startswith('assemble-release ')]
+        self.assertEqual(len(signing), 1, signing)
+        self.assertIn(f'HOPE_SIGNING_KEY={self.key} ', signing[0])
+        self.assertIn('--version 0.9.1 ', signing[0])
+        self.assertIn('(0.9.1, signed with', done.stdout)
+
+    def test_signing_failure_keeps_the_previous_release(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        current = os.readlink(self.releases / 'current')
+        key = self.key.read_bytes()
+        self.make_release(version='0.9.1', agent_version='0.9.2')
+        done = self.run_installer()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('Signing the agent release failed', done.stderr)
+        self.assertIn('mixed versions refused', done.stderr)
+        self.assertEqual(os.readlink(self.releases / 'current'), current)
+        self.assertEqual(self.manifest()['version'], '0.9.0')
+        self.assertEqual(self.key.read_bytes(), key)
+        self.assertIn('fake hope-server', (self.root / 'opt/hope/bin/hope-server').read_text(), 'the server is still upgraded')
+        self.assertIn('(previous signed release kept)', done.stdout)
+
+    def test_a_release_without_agents_installs_the_server_and_creates_no_key(self):
+        self.make_release(agents=False)
+        done = self.run_installer()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('hope-agents.tar.gz', done.stderr)
+        self.assertFalse(self.key.exists())
+        self.assertFalse((self.releases / 'current').exists())
+        self.assertFalse(any(c.startswith('assemble-release ') for c in self.commands()))
+        self.assertIn('(none signed: publish a signed release before adding agents)', done.stdout)
+
+    def test_a_hand_published_release_is_left_alone(self):
+        # Published earlier with a key kept elsewhere: no second key, no refused publish attempt.
+        (self.releases / '0.8.0-000000000000').mkdir(parents=True)
+        os.symlink('0.8.0-000000000000', self.releases / 'current')
+        done = self.run_installer()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('signed with a key outside /etc/hope', done.stderr)
+        self.assertFalse(self.key.exists())
+        self.assertFalse(any(c.startswith('assemble-release ') for c in self.commands()))
+        self.assertEqual(os.readlink(self.releases / 'current'), '0.8.0-000000000000')
+        self.assertIn('(previous signed release kept)', done.stdout)
+
+    def test_agent_checksum_mismatch_changes_nothing(self):
+        self.make_release(corrupt_agents=True)
+        done = self.run_installer()
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('Checksum mismatch for hope-agents.tar.gz', done.stderr)
+        self.assertFalse((self.root / 'opt').exists())
+        self.assertFalse(self.key.exists())
 
     def test_release_mode_without_an_artifact_fails_clearly(self):
         for path in self.release.iterdir():

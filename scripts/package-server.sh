@@ -1,6 +1,7 @@
 #!/bin/sh
 # Package the server for install-hope.sh: hope-server-<arch>-linux.tar.gz holding the release
-# binary, the static console export and the licence, plus a SHA256SUMS-server line.
+# binary, the static console export, the licence, VERSION and tools/assemble-release.sh, plus a
+# SHA256SUMS-server line.
 #
 #   scripts/package-server.sh --out dist/server          # builds web/out and target/release first
 #   scripts/package-server.sh --out dist/server --no-build
@@ -27,15 +28,14 @@ if [ "$build" = 1 ]; then
 fi
 [ -x target/release/hope-server ] || { echo "package-server: target/release/hope-server is missing" >&2; exit 1; }
 [ -f web/out/index.html ] || { echo "package-server: web/out/index.html is missing" >&2; exit 1; }
-# HOPE_BUILD_VERSION (set by CI for published builds) names the package and its agents.
-version=${HOPE_BUILD_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)}
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
 staging=$(mktemp -d "${TMPDIR:-/tmp}/hope-server-package.XXXXXX")
 trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/hope-server-$version" "$out"
 install -m 755 target/release/hope-server "$staging/hope-server-$version/hope-server"
 cp -R web/out "$staging/hope-server-$version/web"
 cp LICENSE "$staging/hope-server-$version/LICENSE"
-# The signing script, so a server can sign the agent packages it serves (ct/hope.sh does).
+# install-hope.sh signs the release's hope-agents.tar.gz with this, using the server's own key.
 mkdir -p "$staging/hope-server-$version/tools"
 install -m 755 scripts/assemble-release.sh "$staging/hope-server-$version/tools/assemble-release.sh"
 printf '%s\n' "$version" > "$staging/hope-server-$version/VERSION"
