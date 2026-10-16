@@ -60,11 +60,19 @@ Only what is evidenced is claimed. "Supported" in the first release will mean th
 
 ## Install in one command
 
+**Proxmox VE** (a Debian LXC container, built by the [community-scripts](https://github.com/community-scripts/ProxmoxVE) engine with its usual default/advanced settings; `update` inside the container upgrades it):
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct/hope.sh)"
+```
+
+**Any other systemd Linux host** (a dedicated account, a hardened service with `CAP_NET_RAW` for discovery, and Caddy as the HTTPS reverse proxy with automatic public certificates or an internal CA for LAN names whose root is exported for agents; re-run to upgrade):
+
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/scripts/install-hope.sh)"
 ```
 
-On a Proxmox VE host this creates a Debian LXC container and installs H.O.P.E in it (a [community-scripts](https://github.com/community-scripts/ProxmoxVE)-style `ct`/`install` pair lives in [proxmox/](proxmox/) for upstream submission); on any other systemd Linux host it installs directly: a dedicated account, a hardened service with `CAP_NET_RAW` for discovery, and Caddy as the HTTPS reverse proxy (automatic public certificates, or an internal CA for LAN names and IP addresses whose root is exported for agents). It uses the latest GitHub release when one is published and otherwise builds from source. Re-run it to upgrade. Details, every prompt's environment variable and what has and has not been verified: [docs/operations.md](docs/operations.md#one-command-installer).
+Both use the latest GitHub release when one is published and otherwise build from source. Details, environment variables and what has and has not been verified: [docs/operations.md](docs/operations.md#one-command-installer).
 
 ## Quick start (Docker, Linux host networking)
 

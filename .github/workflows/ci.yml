@@ -114,7 +114,7 @@ jobs:
       - name: ShellCheck
         run: |
           shellcheck -s sh scripts/*.sh
-          shellcheck -s bash -e SC1090,SC1091,SC2154 proxmox/ct/*.sh proxmox/install/*.sh
+          shellcheck -s bash -e SC1090,SC1091,SC2154 ct/*.sh install/*.sh
       - name: Installer harness
         run: make installer-tests
       - name: Release assembly tests

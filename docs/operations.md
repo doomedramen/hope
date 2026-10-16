@@ -10,15 +10,23 @@ The supported server deployment is the Docker image on a **Linux host with host 
 
 ### One-command installer
 
+**Proxmox VE**, using the [community-scripts](https://github.com/community-scripts/ProxmoxVE) engine:
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct/hope.sh)"
+```
+
+`ct/hope.sh` is a standard community-scripts `ct` script (`APP`, `var_*` defaults, `update_script`, `start; build_container; description`) that sources `community-scripts/core` `build.func`. The engine does everything a community-scripts install does: the default/advanced settings dialog, container ID, storage and template selection (including arm64 hosts), network, resources, the in-container `update` command and the failure/retry handling. It then runs `install/hope-install.sh` inside the container, which uses the engine's helpers (`fetch_and_deploy_gh_release` for the latest server package, `setup_rust` and `setup_nodejs` for the source-build fallback, `$STD`, `msg_*`) and sets up the `hope` account, `/etc/hope/hope.env`, the hardened unit and Caddy with an internal CA whose root certificate lands in `/etc/hope/ca.crt`; the console URL and setup token are written to `/root/hope.creds`. The engine fetches `install/<app>-install.sh` from the scripts root in `COMMUNITY_SCRIPTS_URL`, which `ct/hope.sh` points at this repository (set it to a fork or branch to test changes; the engine's `var_cpu`, `var_ram`, `var_disk`, `var_brg`, `var_net`, `var_unprivileged` and friends apply as usual). Defaults: 2 cores, 2 GB RAM, 8 GB disk, unprivileged Debian 13, arm64 supported. This pair is shellcheck-clean and uses only documented engine helpers, but has not yet completed a real run; the previous custom container creation (one failed arm64 run) has been removed.
+
+**Any other systemd Linux host**:
+
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/scripts/install-hope.sh)"
 ```
 
-`scripts/install-hope.sh` is interactive (whiptail when present, plain prompts otherwise) and idempotent: re-running upgrades the binary and console and keeps `/etc/hope/hope.env` and the database.
+`scripts/install-hope.sh` is interactive (whiptail when present, plain prompts otherwise) and idempotent: re-running upgrades the binary and console and keeps `/etc/hope/hope.env` and the database. On a Proxmox host it simply hands over to `ct/hope.sh` above.
 
-- **On a Proxmox VE host** it offers to create an unprivileged Debian LXC container (ID, host name, storage, disk, cores, memory, bridge, DHCP or static IPv4, container type) and installs H.O.P.E inside it with the host installer below. Storage and bridge choices are validated first. On x86_64 hosts the newest Debian template from the `pveam` catalogue is used; on arm64 hosts the Debian 13 root filesystem from linuxcontainers.org is downloaded and patched with an empty `/etc/network/interfaces` (as community-scripts does, because catalogue templates are unreliable there), or set `HOPE_INSTALL_CT_TEMPLATE=storage:vztmpl/file` to use one you already have. If the container does not start, the installer prints `pct`'s output, the error lines of `lxc-start -n ID -F -l DEBUG` and `pct config`, offers to retry as a privileged container, and otherwise leaves the container in place for inspection (`pct destroy ID --purge` removes it). Discovery works from an unprivileged container because `CAP_NET_RAW` is available to root inside it.
-- **community-scripts route.** `proxmox/ct/hope.sh` and `proxmox/install/hope-install.sh` follow the [community-scripts/ProxmoxVE](https://github.com/community-scripts/ProxmoxVE) layout: the `ct` script sources their `build.func` (container creation, template handling, resources, the `update` command inside the container) and the install script uses their helpers (`fetch_and_deploy_gh_release`, `setup_rust`, `setup_nodejs`, `$STD`). Their `build.func` only fetches install scripts from their own repository, so this route works once the pair is merged upstream (`bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/hope.sh)"`); until then `install-hope.sh` is the supported one-liner. The pair is shellcheck-clean but has not been executed.
-- **On any other systemd Linux host** (Debian/Ubuntu, Fedora/RHEL or Arch families) it installs packages (`curl`, `ca-certificates`, `tar`, `libcap`), creates the no-login account `hope`, places the binary in `/opt/hope/bin` and the console in `/opt/hope/web`, writes `/etc/hope/hope.env` (mode 640) and a hardened `hope.service` (`User=hope`, `AmbientCapabilities=CAP_NET_RAW` and nothing else, `ProtectSystem=strict`, `ReadWritePaths=/var/lib/hope`), runs `setcap cap_net_raw=ep`, enables the unit and prints the setup token from the journal.
+- It installs packages (`curl`, `ca-certificates`, `tar`, `libcap`) on Debian/Ubuntu, Fedora/RHEL or Arch families, creates the no-login account `hope`, places the binary in `/opt/hope/bin` and the console in `/opt/hope/web`, writes `/etc/hope/hope.env` (mode 640) and a hardened `hope.service` (`User=hope`, `AmbientCapabilities=CAP_NET_RAW` and nothing else, `ProtectSystem=strict`, `ReadWritePaths=/var/lib/hope`), runs `setcap cap_net_raw=ep`, enables the unit and prints the setup token from the journal.
 - **Reverse proxy.** By default it installs the distribution's Caddy package and writes `/etc/caddy/Caddyfile` (an existing file is kept as `Caddyfile.before-hope`). A public host name gets a public certificate; `localhost`, `.local`, `.lan`, `.home`, `.internal`, `.home.arpa` names and bare IP addresses use `tls internal`, and the installer then exports Caddy's root certificate to `/etc/hope/ca.crt` and sets `HOPE_AGENT_CA=/etc/hope/ca.crt`, so generated agent commands expect that file at the same path on every agent host (copy it there). Choose "I run my own reverse proxy" to skip Caddy; the server listens on `127.0.0.1:8080`.
 - **Binary source.** The latest GitHub release asset `hope-server-<arch>-linux.tar.gz` (x86_64 or aarch64, verified against `SHA256SUMS-server`) when one exists; otherwise it offers a source build (rustup and Node.js under `/opt/hope/build`, `git clone`, `npm run build`, `cargo build --release`; 10 to 20 minutes). Release packages are produced by `scripts/package-server.sh` in `release.yml`.
 
@@ -26,7 +34,7 @@ Every prompt has an environment answer for unattended use; unset values prompt (
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `HOPE_INSTALL_TARGET` | `lxc` on Proxmox, else `host` | `host` installs on this machine; `lxc` creates a container (Proxmox only) |
+| `HOPE_INSTALL_TARGET` | `lxc` on Proxmox, else `host` | `host` installs on this machine; `lxc` hands over to the community-scripts engine (Proxmox only) |
 | `HOPE_INSTALL_URL` | `https://<primary IP>` | Canonical HTTPS URL written to `HOPE_SERVER_URL` (never overwritten on re-runs) |
 | `HOPE_INSTALL_PROXY` | `caddy` | `caddy` installs Caddy; `none` leaves the proxy to you |
 | `HOPE_INSTALL_TLS` | `auto` | `internal` or `public` forces Caddy's certificate source |
@@ -36,14 +44,12 @@ Every prompt has an environment answer for unattended use; unset values prompt (
 | `HOPE_INSTALL_REPO` | `doomedramen/hope` | Repository for releases and source |
 | `HOPE_INSTALL_NONINTERACTIVE` | unset | `1` never prompts; defaults apply |
 | `HOPE_INSTALL_PLAIN` | unset | `1` uses plain prompts even when whiptail exists |
-| `HOPE_INSTALL_CT_ID`, `HOPE_INSTALL_CT_HOSTNAME`, `HOPE_INSTALL_CT_STORAGE`, `HOPE_INSTALL_CT_DISK_GB`, `HOPE_INSTALL_CT_CORES`, `HOPE_INSTALL_CT_MEMORY_MB`, `HOPE_INSTALL_CT_BRIDGE`, `HOPE_INSTALL_CT_IP` | next free ID, `hope`, first active rootdir storage, 8, 2, 1024, first `vmbr*` bridge, `dhcp` | LXC settings; `HOPE_INSTALL_CT_IP` is `dhcp` or `CIDR,gateway` |
-| `HOPE_INSTALL_CT_UNPRIVILEGED` | `1` | `0` creates a privileged container |
-| `HOPE_INSTALL_CT_TEMPLATE` | unset | `storage:vztmpl/file` to use an existing template instead of downloading one |
+| `HOPE_INSTALL_CT_SCRIPT_URL` | `ct/hope.sh` of `HOPE_INSTALL_REPO` on `main` | The community-scripts `ct` script a Proxmox host hands over to |
 | `HOPE_INSTALL_NODE_VERSION` | `22.22.0` | Node.js used by source builds |
 | `HOPE_INSTALL_SCRIPT_URL` | raw GitHub URL of the script | Where the container fetches the installer from |
 | `HOPE_INSTALL_RELEASE_URL`, `HOPE_INSTALL_ROOT` | unset | Test knobs: a local base URL holding the package, and a prefix for every absolute path (`tests/installer/test_server_installer.py`) |
 
-The installer has been exercised through its stub harness (host mode: download, checksum, layout, unit, env file, Caddy configuration, re-run; LXC mode: container creation options, start-failure diagnostics, bridge and storage validation, the arm64 template path) and shellcheck. One real run on an arm64 Proxmox host (2026-10-16) created the container but `pct start` failed; that run predates the diagnostics and the arm64 template path, so the cause is not yet known. See [validation.md](validation.md).
+The host installer has been exercised through its stub harness (download, checksum, layout, unit, env file, Caddy configuration, re-run, and the Proxmox hand-over) and shellcheck, not yet on a real Debian VM. See [validation.md](validation.md).
 
 ```sh
 cp .env.example .env            # set HOPE_SERVER_URL to your public https:// origin

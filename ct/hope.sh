@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# H.O.P.E on Proxmox VE, built by the community-scripts engine (community-scripts/core).
+#
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct/hope.sh)"
+#
+# The engine creates and configures the container (defaults or advanced settings, storage,
+# template, network, resources, the in-container `update` command) and runs install/hope-install.sh
+# from the scripts root below inside it. COMMUNITY_SCRIPTS_URL names that root; it defaults to this
+# repository so the pair works without being merged into community-scripts/ProxmoxVE (set it to a
+# branch of your fork to test changes). The engine's own var_* settings apply, for example
+# var_cpu, var_ram, var_disk, var_brg, var_net, var_unprivileged.
+COMMUNITY_SCRIPTS_URL="${COMMUNITY_SCRIPTS_URL:-https://raw.githubusercontent.com/doomedramen/hope/main}"
+export COMMUNITY_SCRIPTS_URL
 _cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
 source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG

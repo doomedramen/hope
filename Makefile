@@ -9,8 +9,8 @@ check:
 shell-checks:
 	for f in scripts/*.sh; do sh -n $$f || exit 1; done
 	shellcheck -s sh scripts/*.sh
-	for f in proxmox/ct/*.sh proxmox/install/*.sh; do bash -n $$f || exit 1; done
-	shellcheck -s bash -e SC1090,SC1091,SC2154 proxmox/ct/*.sh proxmox/install/*.sh
+	for f in ct/*.sh install/*.sh; do bash -n $$f || exit 1; done
+	shellcheck -s bash -e SC1090,SC1091,SC2154 ct/*.sh install/*.sh
 installer-tests:
 	for f in scripts/*.sh; do sh -n $$f || exit 1; done
 	python3 -I -m unittest discover -s tests/installer -v

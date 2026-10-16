@@ -3,12 +3,13 @@
 #
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/scripts/install-hope.sh)"
 #
-# On a Proxmox VE host it creates a Debian LXC container and installs H.O.P.E inside it
-# (community-scripts style). On any other systemd Linux host it installs H.O.P.E directly:
-# a dedicated `hope` account, /opt/hope, /var/lib/hope, /etc/hope/hope.env, a hardened
-# systemd unit with CAP_NET_RAW for discovery, and optionally Caddy as the HTTPS reverse
-# proxy (public certificate for a real domain, or Caddy's internal CA for LAN-only names,
-# whose root certificate is exported for agents at /etc/hope/ca.crt).
+# On a Proxmox VE host it hands over to ct/hope.sh, which the community-scripts engine
+# (community-scripts/core build.func) runs: the engine creates the Debian LXC container with its
+# usual default/advanced settings and executes install/hope-install.sh inside it. On any other
+# systemd Linux host this script installs H.O.P.E directly: a dedicated `hope` account, /opt/hope,
+# /var/lib/hope, /etc/hope/hope.env, a hardened systemd unit with CAP_NET_RAW for discovery, and
+# optionally Caddy as the HTTPS reverse proxy (public certificate for a real domain, or Caddy's
+# internal CA for LAN-only names, whose root certificate is exported for agents at /etc/hope/ca.crt).
 #
 # The server binary comes from the latest GitHub release when one is published for this
 # architecture (checksum verified) and otherwise from a source build (Rust and Node are
@@ -16,17 +17,14 @@
 # Re-running upgrades the binary and console and keeps /etc/hope/hope.env and the database.
 #
 # Non-interactive use (every prompt has an environment answer; unset values prompt):
-#   HOPE_INSTALL_TARGET=host|lxc        where to install (lxc only on a Proxmox host; default lxc there)
+#   HOPE_INSTALL_TARGET=host|lxc        where to install (lxc = community-scripts engine, Proxmox only; default there)
 #   HOPE_INSTALL_URL=https://hope.lan   canonical HTTPS URL (host name or IP; default https://<host IP>)
 #   HOPE_INSTALL_PROXY=caddy|none       install Caddy in front (default caddy)
 #   HOPE_INSTALL_SOURCE=auto|release|source
 #   HOPE_INSTALL_VERSION=vX.Y.Z         pin a release tag (default: latest)
 #   HOPE_INSTALL_REF=main               git ref for source builds
 #   HOPE_INSTALL_NONINTERACTIVE=1       never prompt; missing answers use the defaults above
-#   HOPE_INSTALL_CT_ID / _HOSTNAME / _STORAGE / _BRIDGE / _DISK_GB / _CORES / _MEMORY_MB / _IP
-#                                       LXC settings (IP: dhcp or CIDR,gateway e.g. 192.168.1.50/24,192.168.1.1)
-#   HOPE_INSTALL_CT_UNPRIVILEGED=1|0    container type (default unprivileged)
-#   HOPE_INSTALL_CT_TEMPLATE=storage:vztmpl/file.tar.zst   use an existing template instead of downloading one
+#   HOPE_INSTALL_CT_SCRIPT_URL=...      ct script the Proxmox hand-over runs (default: ct/hope.sh of HOPE_INSTALL_REPO)
 #   HOPE_INSTALL_REPO=owner/repo        (default doomedramen/hope)
 #   HOPE_INSTALL_RELEASE_URL=...        TEST ONLY: base URL holding hope-server-<arch>-linux.tar.gz
 #   HOPE_INSTALL_ROOT=/prefix           TEST ONLY: prefix for every absolute system path
@@ -66,7 +64,6 @@ EOF
 }
 cleanup() {
     [ -n "$staging" ] && rm -rf "$staging"
-    [ -n "$lxc_log" ] && rm -f "$lxc_log" "$lxc_log.lxc"
     return 0
 }
 trap cleanup EXIT HUP INT TERM
@@ -421,154 +418,17 @@ host_install() {
     printf '\n'
 }
 
-# ---------- Proxmox LXC ----------
-lxc_log=
-lxc_fail() {
-    # Show why the container did not come up before giving up: pct's own output, then the
-    # lxc-start debug log, then how to inspect or remove the container.
-    _id=$1
-    [ -s "$lxc_log" ] && { printf '%s--- pct output ---%s\n' "$c_bold" "$c_off"; tail -n 20 "$lxc_log"; }
-    if command -v lxc-start >/dev/null 2>&1; then
-        printf '%s--- lxc-start -n %s -F -l DEBUG (last 25 lines) ---%s\n' "$c_bold" "$_id" "$c_off"
-        timeout 30 lxc-start -n "$_id" -F -l DEBUG -o "$lxc_log.lxc" >/dev/null 2>&1 || true
-        [ -s "$lxc_log.lxc" ] && grep -E 'ERROR|WARN|error' "$lxc_log.lxc" | tail -n 25
-    fi
-    printf '%s--- pct config %s ---%s\n' "$c_bold" "$_id" "$c_off"
-    pct config "$_id" 2>/dev/null || true
-    warn "Inspect with: pct start $_id; journalctl -u pve-container@$_id"
-    warn "Remove with:  pct destroy $_id --purge"
-}
-host_arch() { dpkg --print-architecture 2>/dev/null || uname -m; }
-# Picks the template: HOPE_INSTALL_CT_TEMPLATE (storage:vztmpl/file) wins; arm64 hosts get the
-# linuxcontainers.org Debian rootfs (the pveam catalogue carries no arm64 system templates that
-# pct starts reliably, as community-scripts found); other hosts take the newest Debian from pveam.
-lxc_template() {
-    _storage=$1
-    if [ -n "${HOPE_INSTALL_CT_TEMPLATE:-}" ]; then
-        printf '%s\n' "$HOPE_INSTALL_CT_TEMPLATE"
-        return
-    fi
-    case "$(host_arch)" in
-    arm64|aarch64)
-        _name=debian-13-hope-arm64.tar.xz
-        _path=$(pvesm path "$_storage:vztmpl/$_name" 2>/dev/null) || die "Cannot resolve the template path on $_storage."
-        if [ ! -s "$_path" ]; then
-            info 'Downloading the Debian 13 arm64 root filesystem from linuxcontainers.org'
-            mkdir -p "$(dirname "$_path")"
-            curl -fsSL --max-time 900 -o "$_path.tmp" \
-                'https://jenkins.linuxcontainers.org/job/image-debian/architecture=arm64,release=trixie,variant=default/lastStableBuild/artifact/rootfs.tar.xz' \
-                || die 'Template download failed.'
-            # pct's post-create hook writes /etc/network/interfaces; some builds ship without the directory.
-            if ! tar -tJf "$_path.tmp" 2>/dev/null | grep -q '/etc/network/$'; then
-                _fix=$(mktemp -d "${TMPDIR:-/tmp}/hope-template.XXXXXX")
-                mkdir -p "$_fix/etc/network"
-                : > "$_fix/etc/network/interfaces"
-                if ! { xz -d -f "$_path.tmp" && tar -C "$_fix" --append -f "${_path%.xz}.tmp" ./etc/network \
-                    && xz -1 -f "${_path%.xz}.tmp" && mv "${_path%.xz}.tmp.xz" "$_path.tmp"; }; then
-                    rm -rf "$_fix"
-                    die 'Could not patch the template.'
-                fi
-                rm -rf "$_fix"
-            fi
-            mv -f "$_path.tmp" "$_path"
-        fi
-        printf '%s:vztmpl/%s\n' "$_storage" "$_name" ;;
-    *)
-        info 'Updating the template catalogue'
-        pveam update >/dev/null 2>&1 || true
-        _template=$(pveam available --section system 2>/dev/null | awk '{print $2}' | grep '^debian-1[23]-standard' | sort -V | tail -n 1)
-        [ -n "$_template" ] || die 'No Debian template is available in the Proxmox catalogue (set HOPE_INSTALL_CT_TEMPLATE).'
-        if ! pveam list "$_storage" 2>/dev/null | grep -q "$_template"; then
-            info "Downloading $_template"
-            pveam download "$_storage" "$_template" >/dev/null || die 'Template download failed.'
-        fi
-        printf '%s:vztmpl/%s\n' "$_storage" "$_template" ;;
-    esac
-}
-lxc_install() {
-    [ "$(id -u)" = 0 ] || die 'Run this installer as root on the Proxmox host.'
-    _next=$(pvesh get /cluster/nextid 2>/dev/null || echo 200)
-    ask HOPE_INSTALL_CT_ID 'Container ID' "$_next"
-    pct status "$HOPE_INSTALL_CT_ID" >/dev/null 2>&1 && die "Container $HOPE_INSTALL_CT_ID already exists."
-    ask HOPE_INSTALL_CT_HOSTNAME 'Container host name' hope
-    _storages=$(pvesm status --content rootdir 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}')
-    [ -n "$_storages" ] || die 'No active storage accepts containers (content rootdir).'
-    ask HOPE_INSTALL_CT_STORAGE "Storage for the container disk ($(printf '%s' "$_storages" | tr '\n' ' '))" "$(printf '%s\n' "$_storages" | head -n 1)"
-    printf '%s\n' "$_storages" | grep -qx "$HOPE_INSTALL_CT_STORAGE" || die "Storage $HOPE_INSTALL_CT_STORAGE does not accept containers."
-    ask HOPE_INSTALL_CT_DISK_GB 'Disk size (GB)' 8
-    ask HOPE_INSTALL_CT_CORES 'CPU cores' 2
-    ask HOPE_INSTALL_CT_MEMORY_MB 'Memory (MB)' 1024
-    _bridges=$(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | grep '^vmbr' | head -n 8)
-    ask HOPE_INSTALL_CT_BRIDGE "Network bridge ($(printf '%s' "${_bridges:-vmbr0}" | tr '\n' ' '))" "$(printf '%s\n' "${_bridges:-vmbr0}" | head -n 1)"
-    ip link show "$HOPE_INSTALL_CT_BRIDGE" >/dev/null 2>&1 || die "Bridge $HOPE_INSTALL_CT_BRIDGE does not exist on this host."
-    ask HOPE_INSTALL_CT_IP 'IPv4 (dhcp, or CIDR,gateway such as 192.168.1.50/24,192.168.1.1)' dhcp
-    choose HOPE_INSTALL_CT_UNPRIVILEGED 'Container type' 1 '1|Unprivileged (recommended)' '0|Privileged'
-    choose HOPE_INSTALL_PROXY 'Reverse proxy inside the container' caddy 'caddy|Caddy with automatic HTTPS (recommended)' 'none|I run my own reverse proxy'
-    _tmpl_storage=$(pvesm status --content vztmpl 2>/dev/null | awk 'NR>1 && $3=="active" {print $1}' | head -n 1)
-    [ -n "$_tmpl_storage" ] || die 'No storage accepts container templates (content vztmpl).'
-    _template=$(lxc_template "$_tmpl_storage")
-    case "$HOPE_INSTALL_CT_IP" in
-    dhcp) _net="name=eth0,bridge=$HOPE_INSTALL_CT_BRIDGE,ip=dhcp" ;;
-    *) _net="name=eth0,bridge=$HOPE_INSTALL_CT_BRIDGE,ip=${HOPE_INSTALL_CT_IP%%,*},gw=${HOPE_INSTALL_CT_IP#*,}" ;;
-    esac
-    _features=nesting=1
-    [ "$HOPE_INSTALL_CT_UNPRIVILEGED" = 1 ] && _features="nesting=1,keyctl=1"
-    lxc_log=$(mktemp "${TMPDIR:-/tmp}/hope-lxc.XXXXXX")
-    info "Creating container $HOPE_INSTALL_CT_ID ($HOPE_INSTALL_CT_HOSTNAME) from $_template"
-    if ! pct create "$HOPE_INSTALL_CT_ID" "$_template" \
-        --hostname "$HOPE_INSTALL_CT_HOSTNAME" --cores "$HOPE_INSTALL_CT_CORES" --memory "$HOPE_INSTALL_CT_MEMORY_MB" \
-        --rootfs "$HOPE_INSTALL_CT_STORAGE:$HOPE_INSTALL_CT_DISK_GB" --net0 "$_net" \
-        --unprivileged "$HOPE_INSTALL_CT_UNPRIVILEGED" --features "$_features" --onboot 1 --ostype debian \
-        --timezone host --tags hope --description "H.O.P.E network observatory (install-hope.sh)" >"$lxc_log" 2>&1; then
-        tail -n 20 "$lxc_log"
-        die 'pct create failed.'
-    fi
-    ok 'Container created'
-    _started=0
-    if pct start "$HOPE_INSTALL_CT_ID" >"$lxc_log" 2>&1; then
-        _n=0
-        while [ $_n -lt 15 ]; do
-            pct status "$HOPE_INSTALL_CT_ID" 2>/dev/null | grep -q running && { _started=1; break; }
-            sleep 1; _n=$((_n + 1))
-        done
-    fi
-    if [ "$_started" != 1 ]; then
-        warn "Container $HOPE_INSTALL_CT_ID did not start."
-        lxc_fail "$HOPE_INSTALL_CT_ID"
-        if [ "$HOPE_INSTALL_CT_UNPRIVILEGED" = 1 ] && confirm 'Retry as a privileged container? (some arm64 ports cannot start unprivileged containers)' no; then
-            pct destroy "$HOPE_INSTALL_CT_ID" --purge >/dev/null 2>&1 || true
-            HOPE_INSTALL_CT_UNPRIVILEGED=0
-            export HOPE_INSTALL_CT_UNPRIVILEGED HOPE_INSTALL_CT_ID HOPE_INSTALL_CT_HOSTNAME HOPE_INSTALL_CT_STORAGE HOPE_INSTALL_CT_DISK_GB HOPE_INSTALL_CT_CORES HOPE_INSTALL_CT_MEMORY_MB HOPE_INSTALL_CT_BRIDGE HOPE_INSTALL_CT_IP HOPE_INSTALL_PROXY
-            lxc_install
-            return
-        fi
-        die 'Container start failed; the container was left in place for inspection.'
-    fi
-    ok 'Container running'
-    info 'Waiting for the container network'
-    _n=0; _ip=
-    while [ $_n -lt 60 ]; do
-        _ip=$(pct exec "$HOPE_INSTALL_CT_ID" -- ip -4 addr show dev eth0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1)
-        [ -n "$_ip" ] && break
-        sleep 2; _n=$((_n + 1))
-    done
-    [ -n "$_ip" ] || { lxc_fail "$HOPE_INSTALL_CT_ID"; die "The container did not get an IPv4 address on $HOPE_INSTALL_CT_BRIDGE (DHCP server reachable? bridge connected?)."; }
-    if ! pct exec "$HOPE_INSTALL_CT_ID" -- getent hosts deb.debian.org >/dev/null 2>&1; then
-        warn 'DNS does not resolve inside the container; using public resolvers.'
-        pct exec "$HOPE_INSTALL_CT_ID" -- sh -c 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf' || true
-    fi
-    ask HOPE_INSTALL_URL 'Canonical HTTPS URL for H.O.P.E' "https://$_ip"
-    info 'Installing H.O.P.E inside the container (packages, then the server)'
-    if ! pct exec "$HOPE_INSTALL_CT_ID" -- sh -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null && curl -fsSL '$script_url' -o /root/install-hope.sh"; then
-        die "Could not fetch the installer inside the container; inspect with: pct enter $HOPE_INSTALL_CT_ID"
-    fi
-    pct exec "$HOPE_INSTALL_CT_ID" -- env HOPE_INSTALL_TARGET=host HOPE_INSTALL_NONINTERACTIVE=1 \
-        HOPE_INSTALL_URL="$HOPE_INSTALL_URL" HOPE_INSTALL_PROXY="$HOPE_INSTALL_PROXY" \
-        HOPE_INSTALL_SOURCE="${HOPE_INSTALL_SOURCE:-auto}" HOPE_INSTALL_VERSION="${HOPE_INSTALL_VERSION:-}" \
-        HOPE_INSTALL_REF="${HOPE_INSTALL_REF:-main}" HOPE_INSTALL_REPO="$repo" NO_COLOR=1 \
-        sh /root/install-hope.sh || die "Installation inside the container failed; inspect with: pct enter $HOPE_INSTALL_CT_ID"
-    printf '\n%sContainer %s is running at %s.%s\n' "$c_bold" "$HOPE_INSTALL_CT_ID" "$_ip" "$c_off"
-    printf '  Enter it with: pct enter %s\n\n' "$HOPE_INSTALL_CT_ID"
+# ---------- Proxmox VE ----------
+# Container creation is the community-scripts engine's job: ct/hope.sh in this repository sources
+# community-scripts/core build.func, which builds the container (defaults or advanced settings)
+# and runs install/hope-install.sh inside it. Nothing here duplicates that.
+proxmox_install() {
+    command -v bash >/dev/null 2>&1 || die 'bash is required on the Proxmox host.'
+    _ct=${HOPE_INSTALL_CT_SCRIPT_URL:-https://raw.githubusercontent.com/$repo/main/ct/hope.sh}
+    info "Handing over to the community-scripts engine ($_ct)"
+    _script=$(curl -fsSL --max-time 60 "$_ct") || die "Cannot download $_ct"
+    [ -n "$_script" ] || die "Empty response from $_ct"
+    exec bash -c "$_script"
 }
 
 # ---------- entry ----------
@@ -577,14 +437,14 @@ main() {
     _target=${HOPE_INSTALL_TARGET:-}
     if [ -z "$_target" ]; then
         if is_proxmox; then
-            choose HOPE_INSTALL_TARGET 'This is a Proxmox VE host. Where should H.O.P.E run?' lxc 'lxc|In a new Debian LXC container (recommended)' 'host|Directly on this Proxmox host'
+            choose HOPE_INSTALL_TARGET 'This is a Proxmox VE host. Where should H.O.P.E run?' lxc 'lxc|In a new LXC container via the community-scripts engine (recommended)' 'host|Directly on this Proxmox host'
             _target=$HOPE_INSTALL_TARGET
         else
             _target=host
         fi
     fi
     case "$_target" in
-    lxc) is_proxmox || die 'HOPE_INSTALL_TARGET=lxc needs a Proxmox VE host.'; lxc_install ;;
+    lxc) is_proxmox || die 'HOPE_INSTALL_TARGET=lxc needs a Proxmox VE host.'; proxmox_install ;;
     host) host_install ;;
     *) die 'HOPE_INSTALL_TARGET must be host or lxc.' ;;
     esac

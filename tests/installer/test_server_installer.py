@@ -209,160 +209,32 @@ class ServerInstaller(unittest.TestCase):
         self.assertFalse((self.root / 'opt').exists())
 
 
+
+
+
+class ProxmoxHandover(unittest.TestCase):
+    """On a Proxmox host the installer runs ct/hope.sh (the community-scripts engine), nothing else."""
+
+    def test_proxmox_host_runs_the_ct_script_and_creates_nothing_itself(self):
+        root = Path(tempfile.mkdtemp(prefix='hope-proxmox-'))
+        self.addCleanup(shutil.rmtree, root, True)
+        bin_dir = root / 'stubs'
+        bin_dir.mkdir()
+        python = os.path.realpath(__import__('sys').executable)
+        for name in ('pct', 'pvesh', 'id'):
+            path = bin_dir / name
+            path.write_text(f"#!{python}\nimport sys\nprint('0')\n")
+            path.chmod(0o755)
+        curl = bin_dir / 'curl'
+        curl.write_text(f"#!{python}\nimport sys\nurl=[a for a in sys.argv if '://' in a][-1]\nopen({str(root / 'fetched.log')!r}, 'a').write(url + chr(10))\nprint('echo CT_SCRIPT_RAN')\n")
+        curl.chmod(0o755)
+        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'HOME': str(root), 'HOPE_INSTALL_NONINTERACTIVE': '1', 'NO_COLOR': '1'}
+        done = subprocess.run(['sh', str(INSTALLER)], env=env, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('CT_SCRIPT_RAN', done.stdout)
+        self.assertEqual((root / 'fetched.log').read_text().strip(), 'https://raw.githubusercontent.com/doomedramen/hope/main/ct/hope.sh')
+        self.assertNotIn('pct create', done.stdout + done.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()
-
-
-LXC_STUB = r'''#!@PYTHON@
-import os, sys
-root = os.environ['HOPE_TEST_ROOT']
-name = os.path.basename(sys.argv[0])
-args = sys.argv[1:]
-def log(line):
-    with open(os.path.join(root, 'commands.log'), 'a') as handle:
-        handle.write(line + '\n')
-log(name + ' ' + ' '.join(args))
-fail_start = os.path.exists(os.path.join(root, 'fault-start'))
-if name == 'id':
-    print('0'); sys.exit(0)
-if name == 'dpkg':
-    print(os.environ.get('HOPE_TEST_ARCH', 'amd64')); sys.exit(0)
-if name == 'pvesh':
-    print('132'); sys.exit(0)
-if name == 'pvesm':
-    if args[:1] == ['status']:
-        print('Name Type Status Total Used Available %')
-        print('local dir active 1 1 1 1.00%')
-        print('local-zfs zfspool active 1 1 1 1.00%')
-        sys.exit(0)
-    if args[:1] == ['path']:
-        print(os.path.join(root, 'templates', args[1].split('/')[-1])); sys.exit(0)
-if name == 'pveam':
-    if args[:1] == ['available']:
-        print('system debian-12-standard_12.7-1_amd64.tar.zst')
-        print('system debian-13-standard_13.6-1_amd64.tar.zst')
-    if args[:1] == ['list']:
-        print('local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst 1.00MB')
-    sys.exit(0)
-if name == 'ip':
-    if 'bridge' in args:
-        print('1: vmbr0: <BROADCAST> mtu 1500')
-    elif args[:2] == ['link', 'show']:
-        sys.exit(0 if args[2] == 'vmbr0' else 1)
-    sys.exit(0)
-if name == 'pct':
-    if args[0] == 'status':
-        if not os.path.exists(os.path.join(root, 'ct-created')):
-            sys.exit(2)
-        print('status: running' if os.path.exists(os.path.join(root, 'ct-running')) else 'status: stopped')
-        sys.exit(0)
-    if args[0] == 'create':
-        open(os.path.join(root, 'ct-created'), 'w').close(); sys.exit(0)
-    if args[0] == 'start':
-        if fail_start:
-            sys.stderr.write("startup for container '132' failed\n"); sys.exit(255)
-        open(os.path.join(root, 'ct-running'), 'w').close(); sys.exit(0)
-    if args[0] == 'config':
-        print('arch: amd64\nhostname: hope\nunprivileged: 1'); sys.exit(0)
-    if args[0] == 'destroy':
-        for marker in ('ct-created', 'ct-running'):
-            try: os.unlink(os.path.join(root, marker))
-            except OSError: pass
-        sys.exit(0)
-    if args[0] == 'exec':
-        command = ' '.join(args[3:])
-        if 'addr show' in command:
-            print('    inet 192.168.1.60/24 brd 192.168.1.255 scope global eth0'); sys.exit(0)
-        if 'getent hosts' in command:
-            sys.exit(0)
-        if 'install-hope.sh' in command and 'env' in args:
-            log('inner-install ' + ' '.join(a for a in args if a.startswith('HOPE_INSTALL_')))
-            sys.exit(0)
-        sys.exit(0)
-if name == 'lxc-start':
-    out = args[args.index('-o') + 1]
-    with open(out, 'w') as handle:
-        handle.write('lxc-start 132 ERROR conf - ../src/lxc/conf.c:lxc_map_ids:3701 - newuidmap failed to write mapping\n')
-    sys.exit(1)
-sys.exit(0)
-'''
-
-
-class LxcFlow(unittest.TestCase):
-    """The Proxmox path with pct, pvesm, pveam and lxc-start stubbed."""
-
-    def setUp(self):
-        self.root = Path(tempfile.mkdtemp(prefix='hope-lxc-install-'))
-        self.addCleanup(shutil.rmtree, self.root, True)
-        self.bin = self.root / 'stubs'
-        self.bin.mkdir()
-        (self.root / 'templates').mkdir()
-        stub = LXC_STUB.replace('@PYTHON@', os.path.realpath(__import__('sys').executable))
-        for name in ('id', 'dpkg', 'pvesh', 'pvesm', 'pveam', 'ip', 'pct', 'lxc-start'):
-            path = self.bin / name
-            path.write_text(stub)
-            path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-    def run_installer(self, **extra):
-        env = {
-            'PATH': f'{self.bin}:{os.environ["PATH"]}',
-            'HOME': str(self.root),
-            'TMPDIR': str(self.root),
-            'HOPE_TEST_ROOT': str(self.root),
-            'HOPE_INSTALL_TARGET': 'lxc',
-            'HOPE_INSTALL_NONINTERACTIVE': '1',
-            'HOPE_INSTALL_URL': 'https://192.168.1.60',
-            'NO_COLOR': '1',
-        }
-        env.update(extra)
-        return subprocess.run(['sh', str(INSTALLER)], env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
-
-    def commands(self):
-        return (self.root / 'commands.log').read_text().splitlines()
-
-    def test_creates_an_unprivileged_container_and_installs_inside(self):
-        done = self.run_installer()
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        commands = self.commands()
-        create = next(c for c in commands if c.startswith('pct create 132 '))
-        self.assertIn('local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst', create)
-        self.assertIn('--unprivileged 1', create)
-        self.assertIn('--features nesting=1,keyctl=1', create)
-        self.assertIn('--net0 name=eth0,bridge=vmbr0,ip=dhcp', create)
-        self.assertIn('--rootfs local:8', create)
-        self.assertIn('pct start 132', commands)
-        inner = next(c for c in commands if c.startswith('inner-install'))
-        for setting in ('HOPE_INSTALL_TARGET=host', 'HOPE_INSTALL_NONINTERACTIVE=1', 'HOPE_INSTALL_URL=https://192.168.1.60', 'HOPE_INSTALL_PROXY=caddy'):
-            self.assertIn(setting, inner)
-        self.assertIn('Container 132 is running at 192.168.1.60', done.stdout)
-        self.assertFalse(any(c.startswith('lxc-start') for c in commands))
-
-    def test_start_failure_shows_pct_output_and_lxc_debug_log_and_keeps_the_container(self):
-        (self.root / 'fault-start').write_text('')
-        done = self.run_installer()
-        self.assertNotEqual(done.returncode, 0)
-        output = done.stdout + done.stderr
-        self.assertIn("startup for container '132' failed", output)
-        self.assertIn('newuidmap failed to write mapping', output)
-        self.assertIn('pct destroy 132 --purge', output)
-        self.assertIn('left in place for inspection', output)
-        commands = self.commands()
-        self.assertTrue(any(c.startswith('lxc-start -n 132 -F -l DEBUG') for c in commands))
-        self.assertFalse(any(c.startswith('pct destroy') for c in commands), 'nothing is destroyed without consent')
-        self.assertFalse(any(c.startswith('inner-install') for c in commands))
-
-    def test_invalid_bridge_or_storage_fails_before_creating_anything(self):
-        done = self.run_installer(HOPE_INSTALL_CT_BRIDGE='vmbr9')
-        self.assertNotEqual(done.returncode, 0)
-        self.assertIn('Bridge vmbr9 does not exist', done.stderr)
-        self.assertFalse(any(c.startswith('pct create') for c in self.commands()))
-        done = self.run_installer(HOPE_INSTALL_CT_STORAGE='nope')
-        self.assertNotEqual(done.returncode, 0)
-        self.assertIn('does not accept containers', done.stderr)
-
-    def test_arm64_hosts_use_the_linuxcontainers_image_or_an_explicit_template(self):
-        done = self.run_installer(HOPE_TEST_ARCH='arm64', HOPE_INSTALL_CT_TEMPLATE='local:vztmpl/custom-arm64.tar.zst')
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        create = next(c for c in self.commands() if c.startswith('pct create 132 '))
-        self.assertIn('local:vztmpl/custom-arm64.tar.zst', create)
-        self.assertFalse(any(c.startswith('pveam') for c in self.commands()), 'the catalogue is not consulted on arm64')
