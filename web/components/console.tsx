@@ -4,6 +4,8 @@ import dynamic from "next/dynamic";
 import {
   ArrowDownToLine,
   BellRing,
+  Bot,
+  Network,
   CircleHelp,
   LayoutDashboard,
   LayoutList,
@@ -45,10 +47,11 @@ import { HostTable } from "@/components/host-table";
 import { Overview } from "@/components/overview";
 import { NetworkDialog } from "@/components/network-dialog";
 import {
-  INTERVALS,
-  NetworksDialog,
+  SettingsDialog,
   reportIntervalLabel,
-} from "@/components/networks-dialog";
+} from "@/components/settings-dialog";
+import { NetworksPage, INTERVALS } from "@/components/networks-page";
+import { AgentsPage } from "@/components/agents-page";
 import { AccountDialog } from "@/components/account-dialog";
 import { NotificationsDialog } from "@/components/notifications-dialog";
 import { DiscoveryMenu } from "@/components/discovery-menu";
@@ -84,14 +87,23 @@ const NetworkMap = dynamic(
   { ssr: false, loading: () => <Skeleton className="h-[65vh] w-full" /> },
 );
 
-type View = "overview" | "map" | "hosts" | "host";
+type View = "overview" | "map" | "hosts" | "host" | "networks" | "agents";
 type Mode = "topology" | "subnets" | "health";
-const VIEWS: View[] = ["overview", "map", "hosts", "host"];
+const VIEWS: View[] = [
+  "overview",
+  "map",
+  "hosts",
+  "host",
+  "networks",
+  "agents",
+];
 const TITLES: Record<View, string> = {
   overview: "Overview",
   map: "Devices",
   hosts: "Devices",
   host: "Host",
+  networks: "Networks",
+  agents: "Agents",
 };
 
 function readLocation(): { view: View; host: string | null } {
@@ -315,7 +327,11 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           /* Storage may be unavailable. */
         }
       }
-      go({ view: next });
+      go(
+        next === "networks" || next === "agents"
+          ? { view: next, host: null }
+          : { view: next },
+      );
     },
     [go],
   );
@@ -418,7 +434,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           );
       if (!targets.length)
         throw new Error(
-          "No enabled networks are ready to scan. Check Settings or wait for current scans to finish.",
+          "No enabled networks are ready to scan. Check Networks or wait for current scans to finish.",
         );
       const results = await Promise.allSettled(
         targets.map((n) => post(`/networks/${n.id}/scan`)),
@@ -445,13 +461,19 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     setView(next);
   };
   // The inventory view a host page returns to.
-  const lastInventory = useRef<"map" | "hosts">("hosts");
+  const lastInventory = useRef<"map" | "hosts" | "agents">("hosts");
   useEffect(() => {
-    if (view === "map" || view === "hosts") lastInventory.current = view;
+    if (view === "map" || view === "hosts" || view === "agents")
+      lastInventory.current = view;
   }, [view]);
   const selectHost = useCallback(
     (target: Host) => {
-      if (view === "overview" || view === "host")
+      if (
+        view === "overview" ||
+        view === "host" ||
+        view === "agents" ||
+        view === "networks"
+      )
         go({ view: "host", host: target.id });
       else select(target.id);
     },
@@ -529,6 +551,20 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       run: () => setInstallOpen(true),
     },
     {
+      id: "networks",
+      label: "Go to networks",
+      hint: "view",
+      icon: commandIcons.network,
+      run: () => setView("networks"),
+    },
+    {
+      id: "agents",
+      label: "Go to agents",
+      hint: "view",
+      icon: commandIcons.agent,
+      run: () => setView("agents"),
+    },
+    {
       id: "settings",
       label: "Settings",
       hint: "action",
@@ -574,7 +610,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       type="button"
       className="nav-item"
       aria-label={label}
-      aria-current={view === target ? "page" : undefined}
+      aria-current={
+        view === target ||
+        (target === "agents" &&
+          view === "host" &&
+          lastInventory.current === "agents")
+          ? "page"
+          : undefined
+      }
       onClick={() => setView(target)}
     >
       <Icon />
@@ -593,7 +636,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             className="nav-item"
             aria-label="Devices"
             aria-current={
-              view === "map" || view === "hosts" || view === "host"
+              view === "map" ||
+              view === "hosts" ||
+              (view === "host" && lastInventory.current !== "agents")
                 ? "page"
                 : undefined
             }
@@ -603,6 +648,13 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             <span>Devices</span>
             <span className="count">{hosts.length}</span>
           </button>
+          {navItem("networks", Network, "Networks", networks.length)}
+          {navItem(
+            "agents",
+            Bot,
+            "Agents",
+            hosts.filter((h) => h.agent_id).length,
+          )}
         </nav>
         <div className="sidebar-bottom">
           <div className="theme-switch" role="group" aria-label="Theme">
@@ -787,6 +839,44 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             </div>
             <Skeleton className="h-[50vh] w-full rounded-2xl" />
           </div>
+        ) : view === "networks" ? (
+          <NetworksPage
+            data={data}
+            busy={busy}
+            onAddNetwork={() => setNetworkOpen(true)}
+            onSetInterval={(n, minutes) => {
+              void action(async () => {
+                await put(`/networks/${n.id}`, { interval_minutes: minutes });
+                toast(
+                  `${n.name} is now scanned ${INTERVALS.find(([m]) => m === minutes)?.[1].toLowerCase() ?? `every ${minutes} minutes`}.`,
+                );
+              });
+            }}
+            onScanNetwork={(n) => discover(n)}
+            onToggleNetwork={(n) => {
+              void action(async () => {
+                await put(`/networks/${n.id}`, { enabled: !n.enabled });
+                toast(
+                  n.enabled
+                    ? `Paused discovery on ${n.name}.`
+                    : `Resumed discovery on ${n.name}.`,
+                );
+              });
+            }}
+            onDeleteNetwork={async (n) => {
+              await action(async () => {
+                await del(`/networks/${n.id}`);
+                if (network === n.id) setNetwork("all");
+                toast(`Removed ${n.name}.`);
+              });
+            }}
+          />
+        ) : view === "agents" ? (
+          <AgentsPage
+            hosts={hosts}
+            onSelect={selectHost}
+            onInstall={() => setInstallOpen(true)}
+          />
         ) : view === "host" ? (
           <div className="page">
             {host ? (
@@ -1047,7 +1137,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     {hosts.length > 0 &&
                       ` · ${hosts.filter((h) => hostState(h).tone === "good").length} responding`}
                   </span>
-                  <span>Manage scan schedules in Settings.</span>
+                  <span>Manage scan schedules on the Networks page.</span>
                 </footer>
               </section>
               {host && (
@@ -1101,38 +1191,11 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           toast("Password changed. Other browsers were signed out.", "good")
         }
       />
-      <NetworksDialog
+      <SettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         data={data}
         busy={busy}
-        onAddNetwork={() => setNetworkOpen(true)}
-        onSetInterval={(n, minutes) => {
-          void action(async () => {
-            await put(`/networks/${n.id}`, { interval_minutes: minutes });
-            toast(
-              `${n.name} is now scanned ${INTERVALS.find(([m]) => m === minutes)?.[1].toLowerCase() ?? `every ${minutes} minutes`}.`,
-            );
-          });
-        }}
-        onScanNetwork={(n) => discover(n)}
-        onToggleNetwork={(n) => {
-          void action(async () => {
-            await put(`/networks/${n.id}`, { enabled: !n.enabled });
-            toast(
-              n.enabled
-                ? `Paused discovery on ${n.name}.`
-                : `Resumed discovery on ${n.name}.`,
-            );
-          });
-        }}
-        onDeleteNetwork={async (n) => {
-          await action(async () => {
-            await del(`/networks/${n.id}`);
-            if (network === n.id) setNetwork("all");
-            toast(`Removed ${n.name}.`);
-          });
-        }}
         onSetReportInterval={(seconds) => {
           void action(async () => {
             await put("/settings/reporting", { interval_seconds: seconds });

@@ -574,7 +574,7 @@ test.describe.serial("H.O.P.E console", () => {
       });
     });
     await page.goto("/");
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Networks", exact: true }).click();
     await page
       .getByRole("button", { name: "Add network", exact: true })
       .click();
@@ -795,8 +795,8 @@ test.describe.serial("H.O.P.E console", () => {
   }) => {
     const before = await (await request.get("/api/v1/bootstrap")).json();
     await page.goto("/");
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
-    const dialog = page.getByRole("dialog");
+    await page.getByRole("button", { name: "Networks", exact: true }).click();
+    const dialog = page.locator(".networks-page");
     await dialog.getByRole("button", { name: "Remove Workshop" }).click();
     await dialog.getByRole("button", { name: "Remove range" }).click();
     await expect(dialog).not.toContainText("192.168.30.0/24");
@@ -844,8 +844,8 @@ test.describe.serial("H.O.P.E console", () => {
     request,
   }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await page.getByRole("button", { name: "Networks", exact: true }).click();
+    const dialog = page.locator(".networks-page");
     await expect(dialog).toContainText("Every 5 minutes");
     await dialog
       .getByRole("combobox", { name: "Scan interval for Home network" })
@@ -1155,7 +1155,7 @@ test.describe.serial("H.O.P.E console", () => {
     const navigation = page.getByRole("navigation", {
       name: "Main navigation",
     });
-    await expect(navigation.getByRole("button")).toHaveCount(2);
+    await expect(navigation.getByRole("button")).toHaveCount(4);
     await page.getByRole("button", { name: /^Needs attention/ }).click();
     await page.getByRole("button", { name: "Map", exact: true }).click();
     await expect(
@@ -1258,6 +1258,131 @@ test.describe.serial("H.O.P.E console", () => {
     await page.setViewportSize({ width: 1512, height: 982 });
     await trigger.click();
     await page.screenshot({ path: "test-results/hope-discovery.png" });
+  });
+  test("Networks is a reloadable page and Settings no longer contains network controls", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await page
+      .getByRole("navigation", { name: "Main navigation" })
+      .getByRole("button", { name: "Networks", exact: true })
+      .click();
+    await expect(page).toHaveURL(/view=networks/);
+    await expect(
+      page.getByRole("heading", { name: "Networks", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Scan Home network now" }),
+    ).toBeVisible();
+    await page.reload();
+    await expect(
+      page.getByRole("combobox", { name: "Scan interval for Home network" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(
+      page
+        .getByRole("dialog", { name: "Settings" })
+        .getByText("Monitored ranges"),
+    ).toHaveCount(0);
+    await expect(
+      page
+        .getByRole("dialog", { name: "Settings" })
+        .getByRole("button", { name: "Add network" }),
+    ).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+    await page.screenshot({
+      path: "test-results/hope-networks-mobile.png",
+      fullPage: true,
+    });
+  });
+  test("Agents includes never-reported, stale and revoked records and opens host details", async ({
+    page,
+    request,
+  }) => {
+    const data = await (await request.get("/api/v1/bootstrap")).json();
+    const template = data.hosts.find(
+      (host: { name: string }) => host.name === "atlas-nas",
+    );
+    const revoked = {
+      ...template,
+      id: "ux-revoked-host",
+      agent_id: "ux-revoked-agent",
+      name: "revoked-agent",
+      agent_revoked: true,
+    };
+    const stale = {
+      ...template,
+      id: "ux-stale-host",
+      agent_id: "ux-stale-agent",
+      name: "stale-agent",
+      last_report: 1,
+      agent_revoked: false,
+    };
+    await page.route("**/api/v1/bootstrap", (route) =>
+      route.fulfill({
+        json: { ...data, hosts: [...data.hosts, revoked, stale] },
+      }),
+    );
+    await page.goto("/?view=agents");
+    await expect(
+      page.getByRole("heading", { name: "Agents", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("article", { name: "quiet-node" }),
+    ).toContainText("Never reported");
+    await expect(
+      page.getByRole("article", { name: "revoked-agent" }),
+    ).toContainText("Revoked");
+    await expect(
+      page.getByRole("article", { name: "stale-agent" }),
+    ).toContainText("Not reporting");
+    const filters = page.getByRole("group", { name: "Agent status" });
+    await filters.getByRole("button", { name: /^Never reported/ }).click();
+    await expect(
+      page.getByRole("article", { name: "quiet-node" }),
+    ).toBeVisible();
+    await expect(page.getByRole("article", { name: "atlas-nas" })).toHaveCount(
+      0,
+    );
+    await filters.getByRole("button", { name: /^Revoked/ }).click();
+    await expect(page.getByRole("article")).toHaveCount(1);
+    await filters.getByRole("button", { name: /^All agents/ }).click();
+    await page
+      .getByRole("textbox", { name: "Search agents" })
+      .fill("ux-stale-agent");
+    await expect(page.getByRole("article")).toHaveCount(1);
+    await page.getByRole("textbox", { name: "Search agents" }).fill("");
+    await page.reload();
+    await expect(
+      page.getByRole("article", { name: "quiet-node" }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: "test-results/hope-agents.png",
+      fullPage: true,
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+    await page.screenshot({
+      path: "test-results/hope-agents-mobile.png",
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "quiet-node", exact: true }).click();
+    await expect(page).toHaveURL(/view=host/);
+    await expect(
+      page.getByRole("complementary", { name: "Host details" }),
+    ).toContainText("Agent has never reported");
+    await page.getByRole("button", { name: "Close host details" }).click();
+    await expect(page).toHaveURL(/view=agents/);
   });
   test("the administrator changes the password and other browsers are signed out", async ({
     page,

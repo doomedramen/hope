@@ -45,7 +45,7 @@ export function Overview({
   onDiscover: () => void;
   onAddNetwork: () => void;
   onInstall: () => void;
-  onView: (view: "map" | "hosts", filter?: "attention") => void;
+  onView: (view: "map" | "hosts" | "agents", filter?: "attention") => void;
   /** Asks every agent that can update itself to do so. */
   onUpdateAll: () => void;
   busy?: boolean;
@@ -187,7 +187,7 @@ export function Overview({
               ? "warning"
               : undefined
           }
-          onClick={() => onView("hosts", undefined)}
+          onClick={() => onView("agents")}
           testId="tile-agents"
         />
         <StatTile
