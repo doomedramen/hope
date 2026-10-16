@@ -93,6 +93,24 @@ EOF
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"
     install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server
 
+    # Re-sign the release's agents with this server's key (created here for containers installed
+    # before agents were signed, unless a release signed elsewhere is already published). A failure
+    # keeps the previous agent release and never leaves the service stopped.
+    ensure_dependencies openssl
+    if CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" "/opt/hope-agents" "hope-agents.tar.gz"; then
+      msg_info "Signing Agent Release"
+      if [[ ! -e /etc/hope/release-signing.pem && ! -e /var/lib/hope/releases/current ]]; then
+        (umask 077 && openssl genrsa -out /etc/hope/release-signing.pem 3072 2>/dev/null) || true
+      fi
+      if [[ -f /etc/hope/release-signing.pem ]] && $STD env HOPE_SIGNING_KEY=/etc/hope/release-signing.pem sh /opt/hope/tools/assemble-release.sh --staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases; then
+        msg_ok "Signed Agent Release"
+      else
+        msg_warn "Agent release not signed; the previous one stays published (docs/operations.md, Signed agent releases)"
+      fi
+    else
+      msg_warn "No agent release downloaded; the previous one stays published"
+    fi
+
     msg_info "Starting Service"
     systemctl start hope
     msg_ok "Started Service"

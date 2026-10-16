@@ -3,14 +3,17 @@ name: Server build
 # Publishes the server for every push to main as a GitHub release, so installs and updates download
 # it instead of compiling (compiling needs about 4 GB of RAM; the server runs in far less). The
 # community-scripts container (ct/hope.sh) and scripts/install-hope.sh both take the release GitHub
-# marks as latest and its asset hope-server-<x86_64|aarch64>-linux.tar.gz.
+# marks as latest and its asset hope-server-<x86_64|aarch64>-linux.tar.gz. The release also carries
+# hope-agents.tar.gz, the four unsigned agents (build-agent.yml) at the same version and commit; each
+# server signs them with its own key (install/hope-install.sh, scripts/install-hope.sh), so no
+# signing key is involved here.
 #
 # Tags are v<crate version>-build.<run number>, so every build is newer than the last and the
 # community-scripts update check sees it. Only the newest five builds are kept. Tags created with
 # the workflow token start no other workflow, so release.yml (signed agent releases on v* tags you
 # push yourself) is unaffected.
 #
-# Note: ubuntu-22.04-arm runners are free for public repositories only.
+# Note: ubuntu-22.04-arm, ubuntu-24.04-arm and the macOS runners are free for public repositories only.
 
 on:
   push:
@@ -61,8 +64,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  agents:
+    uses: ./.github/workflows/build-agent.yml
+
   publish:
-    needs: build
+    needs: [build, agents]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -76,6 +82,21 @@ jobs:
           pattern: server-*
           path: dist/server
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agent-*
+          path: dist/agents
+          merge-multiple: true
+      - name: Package the agents
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          # Prove the four agents assemble into a release at the server's version before publishing;
+          # the throwaway key is discarded, servers sign with their own.
+          (umask 077 && openssl genrsa -out "$RUNNER_TEMP/throwaway.pem" 3072 2>/dev/null)
+          HOPE_SIGNING_KEY="$RUNNER_TEMP/throwaway.pem" sh scripts/assemble-release.sh --staging dist/agents --version "$version" --out "$RUNNER_TEMP/check"
+          rm -rf "$RUNNER_TEMP/throwaway.pem" "$RUNNER_TEMP/check"
+          tar -C dist/agents --owner=0 --group=0 --numeric-owner --sort=name -czf dist/server/hope-agents.tar.gz .
+          (cd dist/server && sha256sum hope-agents.tar.gz >> SHA256SUMS-server)
       - name: Merge the per-architecture checksum files
         run: |
           cd dist/server
@@ -91,8 +112,8 @@ jobs:
           tag="v${version}-build.${RUN}"
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
             --title "H.O.P.E ${version} build ${RUN}" \
-            --notes "Automatic build of ${GITHUB_SHA::7} on main: the server and console for x86_64 and aarch64 Linux (glibc 2.35 or newer). Installed and updated by ct/hope.sh and scripts/install-hope.sh." \
-            dist/server/hope-server-*-linux.tar.gz dist/server/SHA256SUMS-server
+            --notes "Automatic build of ${GITHUB_SHA::7} on main: the server and console for x86_64 and aarch64 Linux (glibc 2.35 or newer), and the unsigned agents (hope-agents.tar.gz) each server signs with its own key. Installed and updated by ct/hope.sh and scripts/install-hope.sh." \
+            dist/server/hope-server-*-linux.tar.gz dist/server/hope-agents.tar.gz dist/server/SHA256SUMS-server
       - name: Keep only the newest five builds
         env:
           GH_TOKEN: ${{ github.token }}

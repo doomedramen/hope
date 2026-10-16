@@ -42,6 +42,10 @@
       "type": "info"
     },
     {
+      "text": "Agent packages are signed with this container's own key, /etc/hope/release-signing.pem, which updates reuse. Back it up: agents installed from this server only accept releases signed with it.",
+      "type": "warning"
+    },
+    {
       "text": "Layer-2 discovery sees only the container's own bridge network; put the container on the VLAN or bridge you want to observe.",
       "type": "warning"
     }

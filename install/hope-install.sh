@@ -14,11 +14,12 @@ network_check
 update_os
 
 msg_info "Installing Dependencies"
-$STD apt install -y caddy
+$STD apt install -y caddy openssl
 msg_ok "Installed Dependencies"
 
 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"
 install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server
+fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" "/opt/hope-agents" "hope-agents.tar.gz"
 
 msg_info "Configuring Caddy"
 mkdir -p /etc/hope
@@ -56,6 +57,12 @@ RUST_LOG=hope_server=info
 EOF
 chmod 600 /etc/hope/hope.env
 msg_ok "Configured H.O.P.E"
+
+msg_info "Signing Agent Release"
+# This server's own key: installed agents trust its public key, so updates reuse it and never replace it.
+(umask 077 && openssl genrsa -out /etc/hope/release-signing.pem 3072 2>/dev/null)
+$STD env HOPE_SIGNING_KEY=/etc/hope/release-signing.pem sh /opt/hope/tools/assemble-release.sh --staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases
+msg_ok "Signed Agent Release"
 
 msg_info "Creating Service"
 cat <<EOF >/etc/systemd/system/hope.service

@@ -63,6 +63,23 @@ class CtScript(unittest.TestCase):
         self.assertEqual(CT[CT.index('[Unit]'):CT.index('EOF\n      systemctl daemon-reload')],
                          INSTALL[INSTALL.index('[Unit]'):INSTALL.index('EOF\nsystemctl enable -q --now hope')])
 
+    def test_update_resigns_agents_with_the_kept_key_and_never_aborts(self):
+        body = CT[CT.index('function update_script'):]
+        deploy = body.index('CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" '
+                            '"/opt/hope-agents" "hope-agents.tar.gz"')
+        self.assertLess(body.index('install -m 755 /opt/hope/hope-server'), deploy)
+        self.assertLess(deploy, body.index('systemctl start hope'))
+        self.assertIn('ensure_dependencies openssl', body)
+        # A key is created only when there is none and no release signed elsewhere is published.
+        self.assertIn('if [[ ! -e /etc/hope/release-signing.pem && ! -e /var/lib/hope/releases/current ]]; then\n'
+                      '        (umask 077 && openssl genrsa -out /etc/hope/release-signing.pem 3072 2>/dev/null)', body)
+        self.assertEqual(body.count('openssl genrsa'), 1)
+        # Fetch and signing run as if-conditions, so a failure warns and the service is still started.
+        self.assertRegex(body, r'if CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents"')
+        self.assertIn('&& $STD env HOPE_SIGNING_KEY=/etc/hope/release-signing.pem sh /opt/hope/tools/assemble-release.sh '
+                      '--staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases; then', body)
+        self.assertEqual(body.count('msg_warn '), 2)
+
     def test_the_container_is_small(self):
         resources = META['install_methods'][0]['resources']
         self.assertLessEqual(resources['ram'], 512)
@@ -112,6 +129,31 @@ class InstallScript(unittest.TestCase):
         workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()
         self.assertIn('--latest', workflow)
         self.assertIn('hope-server-*-linux.tar.gz', workflow)
+
+    def test_agents_are_signed_with_a_new_server_key(self):
+        self.assertIn('fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" "/opt/hope-agents" '
+                      '"hope-agents.tar.gz"', INSTALL)
+        self.assertIn('apt install -y caddy openssl', INSTALL)
+        self.assertIn('(umask 077 && openssl genrsa -out /etc/hope/release-signing.pem 3072 2>/dev/null)', INSTALL)
+        self.assertIn('$STD env HOPE_SIGNING_KEY=/etc/hope/release-signing.pem sh /opt/hope/tools/assemble-release.sh '
+                      '--staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases', INSTALL)
+        self.assertLess(INSTALL.index('Configuring H.O.P.E'), INSTALL.index('Signing Agent Release'))
+        self.assertLess(INSTALL.index('Signing Agent Release'), INSTALL.index('Creating Service'))
+        # The package carries what the pair runs.
+        package = (ROOT / 'scripts' / 'package-server.sh').read_text()
+        self.assertIn('scripts/assemble-release.sh "$staging/hope-server-$version/tools/assemble-release.sh"', package)
+        self.assertIn('> "$staging/hope-server-$version/VERSION"', package)
+
+    def test_releases_carry_the_unsigned_agents(self):
+        for name in ('server-build.yml', 'release.yml'):
+            workflow = (ROOT / '.github' / 'workflows' / name).read_text()
+            self.assertIn('-czf dist/server/hope-agents.tar.gz .', workflow, name)
+            self.assertIn('sha256sum hope-agents.tar.gz >> SHA256SUMS-server', workflow, name)
+            self.assertIn('dist/server/hope-agents.tar.gz dist/server/SHA256SUMS-server', workflow, name)
+        workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()
+        self.assertIn('uses: ./.github/workflows/build-agent.yml', workflow)
+        self.assertIn('needs: [build, agents]', workflow)
+        self.assertNotIn('secrets.', workflow, 'server builds hold no signing key')
 
     def test_tls_and_setup_token(self):
         self.assertIn('tls internal', INSTALL)
