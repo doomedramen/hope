@@ -97,7 +97,10 @@ jobs:
           merge-multiple: true
       - name: Merge the per-architecture server checksum files
         run: |
+          # The unsigned agents too, for install-hope.sh and ct/hope.sh, which sign with each server's own key.
+          tar -C dist/agents --owner=0 --group=0 --numeric-owner --sort=name -czf dist/server/hope-agents.tar.gz .
           cd dist/server
+          sha256sum hope-agents.tar.gz >> SHA256SUMS-server
           sort -u -k2 SHA256SUMS-server -o SHA256SUMS-server
           sha256sum -c SHA256SUMS-server
       - name: Assemble, sign and verify (fails unless all four platforms are present)
@@ -121,7 +124,7 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --verify-tag \
             "$RUNNER_TEMP"/publish/hope-agent-* "$RUNNER_TEMP"/publish/manifest.json "$RUNNER_TEMP"/publish/manifest.json.sig "$RUNNER_TEMP"/publish/release-public.pem \
-            dist/server/hope-server-*-linux.tar.gz dist/server/SHA256SUMS-server
+            dist/server/hope-server-*-linux.tar.gz dist/server/hope-agents.tar.gz dist/server/SHA256SUMS-server
       - uses: actions/upload-artifact@v4
         with:
           name: signed-release

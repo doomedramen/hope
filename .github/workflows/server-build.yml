@@ -3,16 +3,17 @@ name: Server build
 # Publishes the server for every push to main as a GitHub release, so installs and updates download
 # it instead of compiling (compiling needs about 4 GB of RAM; the server runs in far less). The
 # community-scripts container (ct/hope.sh) and scripts/install-hope.sh both take the release GitHub
-# marks as latest and its asset hope-server-<x86_64|aarch64>-linux.tar.gz.
+# marks as latest and its asset hope-server-<x86_64|aarch64>-linux.tar.gz. The release also carries
+# hope-agents.tar.gz, the four unsigned agents (build-agent.yml) at the same version and commit; each
+# server signs them with its own key (install/hope-install.sh, scripts/install-hope.sh), so no
+# signing key is involved here.
 #
-# Every build has its own version, <major>.<minor>.<run number> from Cargo.toml and this workflow's
-# run counter (for example 0.1.57). It is compiled into the agents, named in the package and used as
-# the tag (v0.1.57), so both the community-scripts update check and the agent installer see each
-# build as newer than the last. Only the newest five builds are kept. Tags created with the workflow
-# token start no other workflow, so release.yml (signed releases on v* tags you push yourself) is
-# unaffected.
+# Tags are v<crate version>-build.<run number>, so every build is newer than the last and the
+# community-scripts update check sees it. Only the newest five builds are kept. Tags created with
+# the workflow token start no other workflow, so release.yml (signed agent releases on v* tags you
+# push yourself) is unaffected.
 #
-# Note: ubuntu-22.04-arm runners are free for public repositories only.
+# Note: ubuntu-22.04-arm, ubuntu-24.04-arm and the macOS runners are free for public repositories only.
 
 on:
   push:
@@ -27,31 +28,8 @@ permissions:
   contents: read
 
 jobs:
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - id: version
-        env:
-          RUN: ${{ github.run_number }}
-        run: |
-          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          echo "version=${crate%.*}.${RUN}" >> "$GITHUB_OUTPUT"
-
-  agents:
-    # Unsigned agents for Linux and macOS, x86_64 and aarch64. Each server signs them with its own key.
-    needs: version
-    uses: ./.github/workflows/build-agent.yml
-    with:
-      version: ${{ needs.version.outputs.version }}
-
   build:
     name: server ${{ matrix.arch }}
-    needs: version
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -73,8 +51,6 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
       - run: sh scripts/package-server.sh --out dist/server
-        env:
-          HOPE_BUILD_VERSION: ${{ needs.version.outputs.version }}
       - name: Smoke-test the packaged binary
         run: |
           mkdir -p "$RUNNER_TEMP/pkg"
@@ -88,8 +64,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  agents:
+    uses: ./.github/workflows/build-agent.yml
+
   publish:
-    needs: [version, agents, build]
+    needs: [build, agents]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -108,37 +87,39 @@ jobs:
           pattern: agent-*
           path: dist/agents
           merge-multiple: true
-      - name: Prove the agents can be signed as a server will sign them
+      - name: Package the agents
         run: |
-          umask 077
-          openssl genrsa -out "$RUNNER_TEMP/throwaway.pem" 3072 2>/dev/null
-          version="${{ needs.version.outputs.version }}"
-          HOPE_SIGNING_KEY="$RUNNER_TEMP/throwaway.pem" sh scripts/assemble-release.sh \
-            --staging dist/agents --version "$version" --out "$RUNNER_TEMP/signed"
-          test -f "$RUNNER_TEMP/signed/current/manifest.json.sig"
-      - name: Bundle the agents and merge the checksum files
-        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          # Prove the four agents assemble into a release at the server's version before publishing;
+          # the throwaway key is discarded, servers sign with their own.
+          (umask 077 && openssl genrsa -out "$RUNNER_TEMP/throwaway.pem" 3072 2>/dev/null)
+          HOPE_SIGNING_KEY="$RUNNER_TEMP/throwaway.pem" sh scripts/assemble-release.sh --staging dist/agents --version "$version" --out "$RUNNER_TEMP/check"
+          rm -rf "$RUNNER_TEMP/throwaway.pem" "$RUNNER_TEMP/check"
           tar -C dist/agents --owner=0 --group=0 --numeric-owner --sort=name -czf dist/server/hope-agents.tar.gz .
+          (cd dist/server && sha256sum hope-agents.tar.gz >> SHA256SUMS-server)
+      - name: Merge the per-architecture checksum files
+        run: |
           cd dist/server
-          sha256sum hope-agents.tar.gz >> SHA256SUMS-server
           sort -u -k2 SHA256SUMS-server -o SHA256SUMS-server
           sha256sum -c SHA256SUMS-server
           ls -l
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.version.outputs.version }}
+          RUN: ${{ github.run_number }}
         run: |
-          gh release create "v${VERSION}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
-            --title "H.O.P.E build ${VERSION}" \
-            --notes "Automatic build of ${GITHUB_SHA::7} on main: the server and console for x86_64 and aarch64 Linux (glibc 2.35 or newer), and unsigned agents for Linux and macOS (hope-agents.tar.gz) that each server signs with its own key. Installed and updated by ct/hope.sh and scripts/install-hope.sh." \
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          tag="v${version}-build.${RUN}"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "H.O.P.E ${version} build ${RUN}" \
+            --notes "Automatic build of ${GITHUB_SHA::7} on main: the server and console for x86_64 and aarch64 Linux (glibc 2.35 or newer), and the unsigned agents (hope-agents.tar.gz) each server signs with its own key. Installed and updated by ct/hope.sh and scripts/install-hope.sh." \
             dist/server/hope-server-*-linux.tar.gz dist/server/hope-agents.tar.gz dist/server/SHA256SUMS-server
       - name: Keep only the newest five builds
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,name,createdAt \
-            --jq '[.[] | select(.name | startswith("H.O.P.E build "))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("-build\\.[0-9]+$"))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
             while read -r old; do
               gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
             done

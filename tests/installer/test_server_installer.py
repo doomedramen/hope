@@ -107,7 +107,7 @@ class ServerInstaller(unittest.TestCase):
         self.release.mkdir()
         self.make_release()
 
-    def make_release(self, corrupt=False, version='0.9.0', agents=True, agent_version=None, corrupt_agents=False):
+    def make_release(self, corrupt=False, version='0.9.0', agents=True, agent_version=None, corrupt_agents=False, nested=False):
         arch = {'x86_64': 'x86_64', 'amd64': 'x86_64', 'aarch64': 'aarch64', 'arm64': 'aarch64'}[os.uname().machine]
         tree = self.root / 'tree'
         shutil.rmtree(tree, ignore_errors=True)
@@ -133,11 +133,12 @@ class ServerInstaller(unittest.TestCase):
             built = agent_version or version
             staged = tree / 'agents' / f'hope-agents-{built}'
             staged.mkdir(parents=True)
+            # The workflows archive the directory's contents (tar -C dist/agents ... .); nested is a top-level directory.
             for platform in PLATFORMS:
                 (staged / f'hope-agent-{platform}').write_bytes(agent_header(platform) + f'agent {platform} {built}'.encode())
                 (staged / f'hope-agent-{platform}.info').write_text(f'version={built}\ntarget=t-{platform}\nmin_os=Test OS 1.0\ncommit=abcdef012345\n')
             with tarfile.open(self.release / 'hope-agents.tar.gz', 'w:gz') as archive:
-                archive.add(staged, arcname=staged.name)
+                archive.add(staged, arcname=staged.name if nested else '.')
             agent_digest = hashlib.sha256((self.release / 'hope-agents.tar.gz').read_bytes()).hexdigest()
             sums += f'{"f" * 64 if corrupt_agents else agent_digest}  hope-agents.tar.gz\n'
         (self.release / 'SHA256SUMS-server').write_text(sums)
@@ -260,7 +261,7 @@ class ServerInstaller(unittest.TestCase):
         signing = [c for c in self.commands() if c.startswith('assemble-release ')]
         self.assertEqual(list(self.root.glob('hope-install.*')), [], 'the staging directory is removed afterwards')
         self.assertEqual(len(signing), 1, signing)
-        self.assertRegex(signing[0], rf'^assemble-release HOPE_SIGNING_KEY={self.key} --staging \S+/agents/hope-agents-0\.9\.0 '
+        self.assertRegex(signing[0], rf'^assemble-release HOPE_SIGNING_KEY={self.key} --staging \S+/hope-install\.\w+/agents '
                                      rf'--version 0\.9\.0 --out {self.releases}$')
         manifest = self.manifest()
         self.assertEqual((manifest['version'], manifest['partial']), ('0.9.0', False))
@@ -282,7 +283,7 @@ class ServerInstaller(unittest.TestCase):
         key = self.key.read_bytes()
         first = (self.releases / 'current').resolve().name
         (self.root / 'commands.log').unlink()
-        self.make_release(version='0.9.1')
+        self.make_release(version='0.9.1', nested=True)
         done = self.run_installer()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(self.key.read_bytes(), key, 'the signing key is never replaced')
@@ -293,7 +294,7 @@ class ServerInstaller(unittest.TestCase):
         signing = [c for c in self.commands() if c.startswith('assemble-release ')]
         self.assertEqual(len(signing), 1, signing)
         self.assertIn(f'HOPE_SIGNING_KEY={self.key} ', signing[0])
-        self.assertIn('--version 0.9.1 ', signing[0])
+        self.assertIn('/agents/hope-agents-0.9.1 --version 0.9.1 ', signing[0])
         self.assertIn('(0.9.1, signed with', done.stdout)
 
     def test_signing_failure_keeps_the_previous_release(self):
