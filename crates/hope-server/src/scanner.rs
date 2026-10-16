@@ -68,11 +68,7 @@ impl Probe for NativeProbe {
                 }
             );
             Observation {
-                alive: ping
-                    || mac.is_some()
-                    || [ssh, http, https]
-                        .iter()
-                        .any(|result| *result != TcpResult::Unanswered),
+                alive: alive(ping, mac.is_some(), &[ssh, http, https]),
                 method: if ping {
                     "icmp"
                 } else if mac.is_some() {
@@ -329,6 +325,11 @@ enum TcpResult {
     Open,
     Refused,
     Unanswered,
+}
+/// A refused connection is not evidence of a device: firewalls and routers that reject
+/// traffic to a routed range answer with a reset for every address in it.
+fn alive(ping: bool, mac: bool, tcp: &[TcpResult]) -> bool {
+    ping || mac || tcp.contains(&TcpResult::Open)
 }
 async fn tcp_probe(ip: Ipv4Addr, port: u16, limiter: &ProbeLimiter) -> TcpResult {
     let Ok(_permit) = limiter.acquire().await else {
@@ -785,7 +786,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn tcp_refusal_is_liveness_but_not_an_open_service() {
+    async fn tcp_refusal_is_neither_liveness_nor_an_open_service() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener");
@@ -794,5 +795,15 @@ mod tests {
         let limiter = ProbeLimiter::new();
         assert!(tcp_probe(Ipv4Addr::LOCALHOST, port, &limiter).await == TcpResult::Refused);
         assert!(!tcp(Ipv4Addr::LOCALHOST, port, &limiter).await);
+    }
+    #[test]
+    fn only_ping_arp_or_an_open_port_prove_a_device() {
+        use TcpResult::*;
+        let refused = [Refused, Refused, Refused];
+        assert!(!alive(false, false, &refused));
+        assert!(!alive(false, false, &[Unanswered, Refused, Unanswered]));
+        assert!(alive(true, false, &refused));
+        assert!(alive(false, true, &refused));
+        assert!(alive(false, false, &[Refused, Open, Unanswered]));
     }
 }
