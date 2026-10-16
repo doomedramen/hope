@@ -281,6 +281,18 @@ test("filters, search and sorting", () => {
     "a",
     "b",
   ]);
+  const ip = (id: string, addresses: string[]) => host({ id, addresses });
+  expect(
+    [
+      ip("none", []),
+      ip("v6", ["fe80::1"]),
+      ip("hundred", ["10.0.0.100"]),
+      ip("nine", ["10.0.0.9"]),
+      ip("public", ["192.168.1.2"]),
+    ]
+      .sort(compareHosts("address", now))
+      .map((h) => h.id),
+  ).toEqual(["nine", "hundred", "public", "v6", "none"]);
 });
 
 function inventoryOf(os: string) {

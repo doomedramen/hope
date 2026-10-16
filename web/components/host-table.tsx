@@ -83,7 +83,7 @@ export function HostTable({
       <TableHeader>
         <TableRow>
           {header("name", "Host")}
-          <TableHead>Address</TableHead>
+          {header("address", "Address")}
           {header("status", "Status")}
           {header("cpu", "CPU")}
           {header("memory", "Memory")}

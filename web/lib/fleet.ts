@@ -312,7 +312,8 @@ export function matchesFilter(
   return hostState(host, now).key === filter;
 }
 
-export type SortKey = "name" | "status" | "cpu" | "memory" | "disk" | "seen";
+export type SortKey =
+  "name" | "address" | "status" | "cpu" | "memory" | "disk" | "seen";
 export function compareHosts(
   key: SortKey,
   now = Date.now() / 1000,
@@ -329,6 +330,11 @@ export function compareHosts(
     case "name":
       return (a, b) =>
         a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    case "address":
+      return (a, b) =>
+        ipValue(a.addresses[0]) - ipValue(b.addresses[0]) ||
+        (a.addresses[0] ?? "").localeCompare(b.addresses[0] ?? "") ||
+        a.name.localeCompare(b.name);
     case "status":
       return (a, b) =>
         toneRank[hostState(a, now).tone] - toneRank[hostState(b, now).tone] ||
