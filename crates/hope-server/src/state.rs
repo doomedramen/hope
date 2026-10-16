@@ -17,9 +17,20 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 pub struct State(pub Arc<Inner>);
 
+/// A change pushed to open dashboards over server-sent events.
+#[derive(Clone, Debug)]
+pub enum Change {
+    /// Something changed; clients reload everything.
+    Refresh,
+    /// One host's latest state, serialized once for every subscriber.
+    Host(Arc<str>),
+}
+
 pub struct Inner {
     pub db: SqlitePool,
-    pub events: broadcast::Sender<String>,
+    pub events: broadcast::Sender<Change>,
+    /// Seconds between samples that agents are asked to report at.
+    pub report_interval: std::sync::atomic::AtomicU32,
     pub writes: Mutex<()>,
     pub scans: Mutex<HashMap<String, CancellationToken>>,
     /// Identifiers of SSH jobs whose tasks are running in this process.
@@ -155,9 +166,18 @@ impl State {
                     .into(),
             );
         }
+        let report_interval = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM meta WHERE key='report_interval_seconds'",
+        )
+        .fetch_optional(&db)
+        .await?
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|seconds| hope_protocol::REPORT_INTERVALS_SECONDS.contains(seconds))
+        .unwrap_or(hope_protocol::DEFAULT_REPORT_INTERVAL_SECONDS);
         let state = Self(Arc::new(Inner {
             db,
             events,
+            report_interval: std::sync::atomic::AtomicU32::new(report_interval),
             writes: Mutex::new(()),
             scans: Mutex::new(HashMap::new()),
             installs: Mutex::new(HashSet::new()),
@@ -245,7 +265,21 @@ impl State {
         }
     }
     pub fn changed(&self) {
-        let _ = self.0.events.send("refresh".into());
+        let _ = self.0.events.send(Change::Refresh);
+    }
+    /// Push one host's new state, so dashboards update it without reloading everything.
+    pub fn host_changed(&self, host: &Host) {
+        match serde_json::to_string(host) {
+            Ok(body) => {
+                let _ = self.0.events.send(Change::Host(body.into()));
+            }
+            Err(_) => self.changed(),
+        }
+    }
+    pub fn report_interval(&self) -> u32 {
+        self.0
+            .report_interval
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     pub async fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(sqlx::query_scalar("SELECT value FROM meta WHERE key=?")

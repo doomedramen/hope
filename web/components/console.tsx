@@ -46,7 +46,11 @@ import { HostDetails } from "@/components/host-details";
 import { HostTable } from "@/components/host-table";
 import { Overview } from "@/components/overview";
 import { NetworkDialog } from "@/components/network-dialog";
-import { INTERVALS, NetworksDialog } from "@/components/networks-dialog";
+import {
+  INTERVALS,
+  NetworksDialog,
+  reportIntervalLabel,
+} from "@/components/networks-dialog";
 import { AccountDialog } from "@/components/account-dialog";
 import { NotificationsDialog } from "@/components/notifications-dialog";
 import { ScanProgress } from "@/components/scan-progress";
@@ -192,16 +196,34 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const refreshPending = useRef(false);
+  const knownHosts = useRef(new Set<string>());
   const refresh = useCallback(async () => {
     if (refreshPending.current) return;
     refreshPending.current = true;
     try {
       const latest = await api<Bootstrap>("/bootstrap");
-      setData((previous) =>
-        previous && previous.map.revision > latest.map.revision
-          ? { ...latest, map: previous.map }
-          : latest,
-      );
+      knownHosts.current = new Set(latest.hosts.map((host) => host.id));
+      setData((previous) => {
+        if (!previous) return latest;
+        // A live host update may have landed while this snapshot was in flight.
+        const live = new globalThis.Map(
+          previous.hosts.map((host) => [host.id, host]),
+        );
+        const hosts = latest.hosts.map((host) => {
+          const newer = live.get(host.id);
+          return newer && (newer.last_report ?? 0) > (host.last_report ?? 0)
+            ? newer
+            : host;
+        });
+        return {
+          ...latest,
+          hosts,
+          map:
+            previous.map.revision > latest.map.revision
+              ? previous.map
+              : latest.map,
+        };
+      });
       setError("");
     } catch (e) {
       setError((e as Error).message);
@@ -225,6 +247,26 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
         }, 500);
     };
     source.addEventListener("refresh", schedule);
+    // An agent report carries the host's new state: apply it in place.
+    source.addEventListener("host", (event) => {
+      let host: Host;
+      try {
+        host = JSON.parse((event as MessageEvent<string>).data) as Host;
+      } catch {
+        return schedule();
+      }
+      if (!knownHosts.current.has(host.id)) return schedule();
+      setData((previous) =>
+        previous
+          ? {
+              ...previous,
+              hosts: previous.hosts.map((existing) =>
+                existing.id === host.id ? host : existing,
+              ),
+            }
+          : previous,
+      );
+    });
     // The server dropped events for this slow client: reload everything.
     source.addEventListener("resync", schedule);
     const fallback = setInterval(() => {
@@ -1069,6 +1111,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             await del(`/networks/${n.id}`);
             if (network === n.id) setNetwork("all");
             toast(`Removed ${n.name}.`);
+          });
+        }}
+        onSetReportInterval={(seconds) => {
+          void action(async () => {
+            await put("/settings/reporting", { interval_seconds: seconds });
+            toast(
+              `Agents will report ${reportIntervalLabel(seconds).toLowerCase()} from their next report.`,
+            );
           });
         }}
       />

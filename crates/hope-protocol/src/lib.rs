@@ -138,6 +138,9 @@ pub struct OkResponse {
 pub struct ReportResponse {
     pub accepted: bool,
     pub duplicate: bool,
+    /// Seconds the server asks the agent to wait between samples; older servers omit it.
+    #[serde(default)]
+    pub report_interval_seconds: Option<u32>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ErrorResponse {
@@ -467,6 +470,19 @@ pub const SCAN_INTERVALS_MINUTES: [u32; 6] = [5, 15, 30, 60, 360, 1440];
 fn default_scan_interval() -> u32 {
     DEFAULT_SCAN_INTERVAL_MINUTES
 }
+/// Seconds between agent samples unless an administrator chooses otherwise.
+pub const DEFAULT_REPORT_INTERVAL_SECONDS: u32 = 10;
+/// Agent report intervals the server accepts, in seconds.
+pub const REPORT_INTERVALS_SECONDS: [u32; 5] = [5, 10, 15, 30, 60];
+/// Stored metric history keeps at most one raw sample per this many seconds per agent, so a
+/// faster report interval makes live figures fresher without growing history.
+pub const HISTORY_SAMPLE_SECONDS: f64 = 30.0;
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ReportingSettings {
+    /// Seconds between agent samples; one of `REPORT_INTERVALS_SECONDS`.
+    pub interval_seconds: u32,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ScanJob {
@@ -688,6 +704,8 @@ pub struct Bootstrap {
     /// Version of the signed agent release the server offers; agents older than it can be updated.
     #[serde(default)]
     pub agent_release: Option<String>,
+    /// Seconds between agent samples, as agents are currently asked to report.
+    pub report_interval_seconds: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -730,6 +748,7 @@ pub fn typescript() -> String {
         LoginRequest::decl(),
         PasswordChange::decl(),
         NotificationSettings::decl(),
+        ReportingSettings::decl(),
         DeviceEvidence::decl(),
         DeviceGuess::decl(),
         DeviceTypeUpdate::decl(),

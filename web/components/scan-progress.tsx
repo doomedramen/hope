@@ -1,9 +1,9 @@
 "use client";
+import { Age } from "@/components/age";
 import { Square } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { age } from "@/lib/api";
 import type { Network, ScanJob } from "@/lib/protocol";
 
 const STATUS: Record<ScanJob["status"], string> = {
@@ -66,7 +66,9 @@ export function ScanProgress({
                 Cancel
               </Button>
             ) : (
-              <span>{age(scan.finished_at)}</span>
+              <span>
+                <Age value={scan.finished_at} />
+              </span>
             )}
           </div>
           {scan.error && (

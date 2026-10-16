@@ -25,6 +25,11 @@ notify_resources: boolean,
  * Send a follow-up when a problem clears.
  */
 notify_recovery: boolean, last_sent_at: number | null, last_error: string | null, };
+export type ReportingSettings = {
+/**
+ * Seconds between agent samples; one of `REPORT_INTERVALS_SECONDS`.
+ */
+interval_seconds: number, };
 export type DeviceEvidence = {
 /**
  * Name from reverse DNS.
@@ -84,7 +89,11 @@ export type DeviceTypeUpdate = {
 kind: string | null, };
 export type AuthStatus = { setup_required: boolean, authenticated: boolean, };
 export type OkResponse = { ok: boolean, };
-export type ReportResponse = { accepted: boolean, duplicate: boolean, };
+export type ReportResponse = { accepted: boolean, duplicate: boolean,
+/**
+ * Seconds the server asks the agent to wait between samples; older servers omit it.
+ */
+report_interval_seconds: number | null, };
 export type ErrorResponse = { code: string, error: string, };
 export type NetworkInput = { name: string, cidr: string, enabled: boolean | null, interval_minutes: number | null, };
 export type NetworkUpdate = { enabled: boolean | null, interval_minutes: number | null, };
@@ -215,7 +224,11 @@ export type Bootstrap = { networks: Array<Network>, hosts: Array<Host>, scans: A
 /**
  * Version of the signed agent release the server offers; agents older than it can be updated.
  */
-agent_release: string | null, };
+agent_release: string | null,
+/**
+ * Seconds between agent samples, as agents are currently asked to report.
+ */
+report_interval_seconds: number, };
 export type InstallJob = { id: string,
 /**
  * Selected SSH address.

@@ -1,4 +1,5 @@
 "use client";
+import { Age } from "@/components/age";
 import {
   Activity,
   ArrowRight,
@@ -18,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Meter } from "@/components/ui/meter";
 import { StatTile } from "@/components/stat-tile";
 import { ScanProgress } from "@/components/scan-progress";
-import { age, bytes, percent0, rate } from "@/lib/api";
+import { bytes, percent0, rate } from "@/lib/api";
 import {
   cpuPercent,
   fleetSummary,
@@ -79,7 +80,12 @@ export function Overview({
         {summary.lastScan && (
           <p className="text-xs text-muted-foreground">
             Last discovery pass{" "}
-            {age(summary.lastScan.finished_at ?? summary.lastScan.started_at)}
+            <Age
+              value={
+                summary.lastScan.finished_at ?? summary.lastScan.started_at
+              }
+              lower
+            />
           </p>
         )}
       </div>
@@ -183,9 +189,19 @@ export function Overview({
               : `of ${networks.length} ${networks.length === 1 ? "range" : "ranges"} watched`
           }
           hint={
-            summary.lastScan
-              ? `Last pass ${age(summary.lastScan.finished_at ?? summary.lastScan.started_at)}`
-              : "No discovery pass yet"
+            summary.lastScan ? (
+              <>
+                Last pass{" "}
+                <Age
+                  value={
+                    summary.lastScan.finished_at ?? summary.lastScan.started_at
+                  }
+                  lower
+                />
+              </>
+            ) : (
+              "No discovery pass yet"
+            )
           }
           onClick={() => onView("map")}
           testId="tile-discovery"
@@ -511,7 +527,9 @@ function IssueRow({
         <span className="issue-message block">{issue.message}</span>
       </span>
       <span className="issue-when">
-        {age(Math.max(issue.host.last_report ?? 0, issue.host.last_seen))}
+        <Age
+          value={Math.max(issue.host.last_report ?? 0, issue.host.last_seen)}
+        />
       </span>
     </button>
   );

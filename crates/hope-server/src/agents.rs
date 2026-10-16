@@ -12,7 +12,10 @@ use axum::{
 use hope_protocol::{
     AgentReport, EnrollmentRequest, EnrollmentResponse, Host, Inventory, SCHEMA_VERSION,
 };
-use hope_protocol::{EnrollmentTokenRequest, EnrollmentTokenResponse, OkResponse, ReportResponse};
+use hope_protocol::{
+    EnrollmentTokenRequest, EnrollmentTokenResponse, HISTORY_SAMPLE_SECONDS, OkResponse,
+    ReportResponse,
+};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -343,58 +346,72 @@ pub async fn report(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let mut host: Host = serde_json::from_str(row.get("body"))?;
-    let previous: f64 = sqlx::query_scalar::<_, Option<f64>>(
-        "SELECT MAX(collected_at) FROM metrics WHERE agent_id=?",
-    )
-    .bind(&report.agent_id)
-    .fetch_one(&state.0.db)
-    .await?
-    .unwrap_or(0.0);
-    let mut tx = state.0.db.begin().await?;
-    let inserted = sqlx::query(
-        "INSERT OR IGNORE INTO metrics(agent_id,report_id,collected_at,body) VALUES(?,?,?,?)",
-    )
-    .bind(&report.agent_id)
-    .bind(&report.report_id)
-    .bind(report.collected_at)
-    .bind(serde_json::to_string(&report.metrics)?)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if inserted > 0 {
-        host.last_report = Some(now());
-        host.last_seen = now();
-        if let Some(version) = agent_version(&headers) {
-            host.agent_version = Some(version);
-        }
-        if report.collected_at >= previous {
-            host.last_collected_at = Some(report.collected_at);
-            if let Some(inv) = report.inventory {
-                host.name = inv.hostname.clone();
-                host.addresses = inventory_addresses(&inv);
-                host.macs = inventory_macs(&inv);
-                host.inventory = Some(inv);
-            }
-            host.metrics = Some(report.metrics);
-            host.collectors = report.collectors;
-        }
-        host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
-        crate::classify::refresh(&mut host, &state.gateway_set());
-        sqlx::query("UPDATE hosts SET name=?,body=? WHERE agent_id=?")
-            .bind(&host.name)
-            .bind(serde_json::to_string(&host)?)
+    let duplicate: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM metrics WHERE agent_id=? AND report_id=?)")
             .bind(&report.agent_id)
-            .execute(&mut *tx)
+            .bind(&report.report_id)
+            .fetch_one(&state.0.db)
             .await?;
-    }
-    tx.commit().await?;
-    if inserted > 0 {
-        state.changed();
-    }
-    Ok(Json(ReportResponse {
+    let response = ReportResponse {
         accepted: true,
-        duplicate: inserted == 0,
-    }))
+        duplicate,
+        report_interval_seconds: Some(state.report_interval()),
+    };
+    if duplicate {
+        return Ok(Json(response));
+    }
+    // Live figures follow every report, but history keeps one raw sample per
+    // HISTORY_SAMPLE_SECONDS so a short report interval does not multiply stored rows. The
+    // margin absorbs the agent's scheduling jitter.
+    let spacing = HISTORY_SAMPLE_SECONDS - 2.5;
+    let crowded: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM metrics WHERE agent_id=? AND resolution=30 AND collected_at>? AND collected_at<?)",
+    )
+    .bind(&report.agent_id)
+    .bind(report.collected_at - spacing)
+    .bind(report.collected_at + spacing)
+    .fetch_one(&state.0.db)
+    .await?;
+    let mut tx = state.0.db.begin().await?;
+    if !crowded {
+        sqlx::query(
+            "INSERT OR IGNORE INTO metrics(agent_id,report_id,collected_at,body) VALUES(?,?,?,?)",
+        )
+        .bind(&report.agent_id)
+        .bind(&report.report_id)
+        .bind(report.collected_at)
+        .bind(serde_json::to_string(&report.metrics)?)
+        .execute(&mut *tx)
+        .await?;
+    }
+    host.last_report = Some(now());
+    host.last_seen = now();
+    if let Some(version) = agent_version(&headers) {
+        host.agent_version = Some(version);
+    }
+    // A backlog delivered after an outage fills history but never replaces newer live state.
+    if report.collected_at >= host.last_collected_at.unwrap_or(0.0) {
+        host.last_collected_at = Some(report.collected_at);
+        if let Some(inv) = report.inventory {
+            host.name = inv.hostname.clone();
+            host.addresses = inventory_addresses(&inv);
+            host.macs = inventory_macs(&inv);
+            host.inventory = Some(inv);
+        }
+        host.metrics = Some(report.metrics);
+        host.collectors = report.collectors;
+    }
+    host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
+    crate::classify::refresh(&mut host, &state.gateway_set());
+    sqlx::query("UPDATE hosts SET name=?,body=? WHERE agent_id=?")
+        .bind(&host.name)
+        .bind(serde_json::to_string(&host)?)
+        .bind(&report.agent_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    state.host_changed(&host);
+    Ok(Json(response))
 }
 
 pub async fn revoke(

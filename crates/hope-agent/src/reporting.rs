@@ -58,6 +58,19 @@ impl InventoryDelivery {
 type Request = Pin<Box<dyn Future<Output = (AgentReport, Outcome)> + Send>>;
 /// Collection deadlines race the in-flight HTTP request. Network draining cannot
 /// postpone sampling, and this single actor owns every spool write.
+const MIN_INTERVAL_SECONDS: u32 = 5;
+const MAX_INTERVAL_SECONDS: u32 = 300;
+
+/// Spread agents that started together by up to a fifteenth of the interval either side.
+fn jittered(period: Duration) -> Duration {
+    let spread = period.as_millis() as u64 / 15;
+    if period < Duration::from_secs(MIN_INTERVAL_SECONDS.into()) || spread == 0 {
+        return period;
+    }
+    period - Duration::from_millis(spread)
+        + Duration::from_millis(rand::random::<u64>() % (2 * spread + 1))
+}
+
 pub async fn run<C: Sampler, S: Future<Output = ()>>(
     collector: &mut C,
     configuration: &Config,
@@ -85,6 +98,8 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
     let mut first_report: Option<String> = None;
     let mut failures = 0u32;
     let mut marker_at = 0.0;
+    // The server may choose the sample interval in its responses; until then the default holds.
+    let mut server_period: Option<Duration> = None;
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -98,8 +113,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                 if first_report.is_none() { first_report=Some(report.report_id.clone()); }
                 spool.push(report,now())?;
                 config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
-                let jitter=if period==Duration::from_secs(30) { Duration::from_secs(28+rand::random::<u64>()%5) } else { period };
-                next_sample=tick+jitter;
+                next_sample=tick+jittered(server_period.unwrap_or(period));
             }
             result=async { inflight.as_mut().expect("guarded request").await }, if inflight.is_some() => {
                 inflight=None;
@@ -108,6 +122,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                     Outcome::Accepted(response) => {
                         debug_assert!(response.accepted);
                         spool.remove(&report.report_id); failures=0; retry_at=Instant::now();
+                        if let Some(seconds)=response.report_interval_seconds { server_period=Some(Duration::from_secs(seconds.clamp(MIN_INTERVAL_SECONDS,MAX_INTERVAL_SECONDS).into())); }
                         inventory_delivery.accept(&report)?;
                         if report.collected_at>=started && report.collected_at>=marker_at {
                             marker_at=report.collected_at;
@@ -144,6 +159,19 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn jitter_stays_within_a_fifteenth_of_the_interval() {
+        for _ in 0..200 {
+            let thirty = jittered(Duration::from_secs(30));
+            assert!(thirty >= Duration::from_secs(28) && thirty <= Duration::from_secs(32));
+            let ten = jittered(Duration::from_secs(10));
+            assert!(ten >= Duration::from_millis(9334) && ten <= Duration::from_millis(10666));
+        }
+        assert_eq!(
+            jittered(Duration::from_millis(50)),
+            Duration::from_millis(50)
+        );
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     struct FakeSampler {
         count: usize,

@@ -40,6 +40,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
             get(notify::get_settings).put(notify::put_settings),
         )
         .route("/notifications/test", post(notify::test))
+        .route("/settings/reporting", put(api::set_reporting))
         .route("/hosts/{id}/type", put(api::set_device_type))
         .route("/logout", post(auth::logout))
         .route("/networks", post(api::add_network))

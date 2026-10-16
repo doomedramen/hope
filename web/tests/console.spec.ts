@@ -831,6 +831,89 @@ test.describe.serial("H.O.P.E console", () => {
       ).interval_minutes,
     ).toBe(60);
   });
+  test("agent reports appear live and the report interval is configurable", async ({
+    page,
+    request,
+  }) => {
+    const enrollment = await (
+      await request.post("/api/v1/enrollment-tokens", { data: {} })
+    ).json();
+    const agent = randomUUID();
+    const enrolled = await request.post("/api/v1/agent/enroll", {
+      data: {
+        schema_version: 1,
+        token: enrollment.token,
+        agent_id: agent,
+        credential: randomBytes(32).toString("hex"),
+        inventory: {
+          hostname: "live-node",
+          os: "Linux",
+          architecture: "x86_64",
+          cpu_model: "Test CPU",
+          cpu_cores: 4,
+          memory_total_bytes: 8e9,
+          interfaces: [
+            {
+              name: "eth0",
+              mac: "02:00:00:00:00:77",
+              addresses: ["192.168.1.77"],
+              gateway: "192.168.1.1",
+            },
+          ],
+          disks: [],
+          gpus: [],
+          collectors: [],
+        },
+      },
+    });
+    expect(enrolled.ok()).toBeTruthy();
+    const credential = (await enrolled.json()).credential;
+    await page.goto("/?view=hosts");
+    const row = page.getByRole("row", { name: /live-node/ });
+    await expect(row).toBeVisible();
+    for (const cpu of [37, 64]) {
+      const response = await request.post("/api/v1/agent/report", {
+        headers: { authorization: `Bearer ${credential}` },
+        data: {
+          schema_version: 1,
+          report_id: randomUUID(),
+          agent_id: agent,
+          collected_at: Date.now() / 1000,
+          inventory: null,
+          metrics: {
+            cpu_percent: cpu,
+            memory_used_bytes: null,
+            memory_total_bytes: null,
+            network_rx_bytes_per_second: null,
+            network_tx_bytes_per_second: null,
+            disk_read_bytes_per_second: null,
+            disk_write_bytes_per_second: null,
+            disks: [],
+            gpus: [],
+          },
+          collectors: [],
+        },
+      });
+      expect(response.ok()).toBeTruthy();
+      // Well inside the 15-second fallback reload: the event itself carried the figures.
+      await expect(row).toContainText(`${cpu}%`, { timeout: 5000 });
+    }
+    await page.getByRole("button", { name: "Networks", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Networks" });
+    await dialog
+      .getByRole("combobox", { name: "Agent report interval" })
+      .click();
+    await page
+      .getByRole("option", { name: "Every 5 seconds", exact: true })
+      .click();
+    await expect(
+      page.getByText(
+        "Agents will report every 5 seconds from their next report.",
+      ),
+    ).toBeVisible();
+    const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+    expect(bootstrap.report_interval_seconds).toBe(5);
+  });
   test("notifications are configured once and reach an ntfy server", async ({
     page,
   }) => {

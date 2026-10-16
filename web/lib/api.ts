@@ -38,16 +38,21 @@ export function bytes(value: number | null | undefined): string {
 export function rate(value: number | null | undefined): string {
   return value == null || !Number.isFinite(value) ? "—" : `${bytes(value)}/s`;
 }
-export function age(value: number | null | undefined): string {
+export function age(
+  value: number | null | undefined,
+  now = Date.now() / 1000,
+): string {
   if (!value) return "Never";
-  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - value));
-  return seconds < 60
+  const seconds = Math.max(0, Math.floor(now - value));
+  return seconds < 5
     ? "Just now"
-    : seconds < 3600
-      ? `${Math.floor(seconds / 60)}m ago`
-      : seconds < 86400
-        ? `${Math.floor(seconds / 3600)}h ago`
-        : `${Math.floor(seconds / 86400)}d ago`;
+    : seconds < 60
+      ? `${seconds}s ago`
+      : seconds < 3600
+        ? `${Math.floor(seconds / 60)}m ago`
+        : seconds < 86400
+          ? `${Math.floor(seconds / 3600)}h ago`
+          : `${Math.floor(seconds / 86400)}d ago`;
 }
 export function percentage(value: number | null | undefined) {
   return value == null || !Number.isFinite(value)

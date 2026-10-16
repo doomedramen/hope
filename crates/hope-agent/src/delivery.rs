@@ -16,7 +16,8 @@ impl std::fmt::Display for Revoked {
 impl std::error::Error for Revoked {}
 
 pub const MAX_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_REPORTS: usize = 120;
+/// One hour of reports at the shortest interval the server can choose (five seconds).
+pub const MAX_REPORTS: usize = 720;
 pub const MAX_AGE_SECONDS: f64 = 3600.0;
 // Reject a count-overflowing persisted queue while deserializing, before an
 // attacker-controlled small JSON file expands into thousands of report structs.
@@ -184,11 +185,11 @@ mod tests {
     #[test]
     fn count_age_identity_and_corrupt_buffer_are_bounded() {
         let mut spool = Spool::default();
-        for time in 0..200 {
-            spool.push(report(time as f64), 200.0).expect("push");
+        for time in 0..MAX_REPORTS + 80 {
+            spool.push(report(time as f64), 1000.0).expect("push");
         }
-        assert_eq!(spool.reports.len(), 120);
-        spool.trim(4000.0).expect("trim");
+        assert_eq!(spool.reports.len(), MAX_REPORTS);
+        spool.trim(5000.0).expect("trim");
         assert!(spool.reports.is_empty());
         assert!(
             Spool::decode(b"invalid", "identity", 200.0)

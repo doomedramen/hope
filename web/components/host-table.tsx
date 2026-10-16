@@ -1,4 +1,5 @@
 "use client";
+import { Age } from "@/components/age";
 import { createElement, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown, Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,7 @@ import {
 } from "@/components/ui/table";
 import { Meter } from "@/components/ui/meter";
 import { StatusPill } from "@/components/status-pill";
-import { age, percent0 } from "@/lib/api";
+import { percent0 } from "@/lib/api";
 import {
   compareHosts,
   cpuPercent,
@@ -175,7 +176,7 @@ export function HostTable({
                 </span>
               </TableCell>
               <TableCell className="text-right text-muted-foreground">
-                {age(Math.max(h.last_report ?? 0, h.last_seen))}
+                <Age value={Math.max(h.last_report ?? 0, h.last_seen)} />
               </TableCell>
             </TableRow>
           );

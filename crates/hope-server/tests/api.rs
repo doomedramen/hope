@@ -1489,3 +1489,86 @@ async fn reports_record_the_agent_version_and_bootstrap_names_the_release_on_off
     // No signed release in the test release directory, so none is on offer.
     assert_eq!(bootstrap["agent_release"], Value::Null);
 }
+#[tokio::test]
+async fn live_reports_update_the_host_and_stream_it_while_history_keeps_its_spacing() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let host_id = state.hosts().await.expect("hosts")[0].id.clone();
+    let mut events = state.0.events.subscribe();
+    let start = now() - 100.0;
+    // Reports ten seconds apart: every one is live, one in three reaches history.
+    for (step, cpu) in [10.0, 20.0, 30.0, 40.0, 50.0].into_iter().enumerate() {
+        let report = AgentReport {
+            schema_version: 1,
+            report_id: Uuid::new_v4().to_string(),
+            agent_id: agent.clone(),
+            collected_at: start + 10.0 * step as f64,
+            inventory: None,
+            metrics: Metrics {
+                cpu_percent: Some(cpu),
+                ..Default::default()
+            },
+            collectors: vec![],
+        };
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/api/v1/agent/report",
+            json!(report),
+            Some(("authorization", &bearer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["duplicate"], false);
+        assert_eq!(
+            body["report_interval_seconds"],
+            DEFAULT_REPORT_INTERVAL_SECONDS
+        );
+        match events.try_recv().expect("live event") {
+            hope_server::state::Change::Host(body) => {
+                let host: Host = serde_json::from_str(&body).expect("host event");
+                assert_eq!(host.id, host_id);
+                assert_eq!(host.metrics.expect("metrics").cpu_percent, Some(cpu));
+            }
+            other => panic!("expected a host event, got {other:?}"),
+        }
+    }
+    let stored: Vec<f64> = sqlx::query_scalar(
+        "SELECT collected_at FROM metrics WHERE agent_id=? ORDER BY collected_at",
+    )
+    .bind(&agent)
+    .fetch_all(&state.0.db)
+    .await
+    .expect("stored");
+    assert_eq!(stored, vec![start, start + 30.0]);
+
+    let invalid = request(
+        &app,
+        "PUT",
+        "/api/v1/settings/reporting",
+        json!({"interval_seconds": 7}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
+    let saved = request(
+        &app,
+        "PUT",
+        "/api/v1/settings/reporting",
+        json!({"interval_seconds": 5}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(saved.0, StatusCode::OK, "{}", saved.1);
+    let bootstrap = request(
+        &app,
+        "GET",
+        "/api/v1/bootstrap",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(bootstrap.1["report_interval_seconds"], 5);
+    assert_eq!(state.report_interval(), 5);
+}

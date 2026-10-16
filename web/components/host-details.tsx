@@ -1,4 +1,5 @@
 "use client";
+import { Age } from "@/components/age";
 import { useState } from "react";
 import {
   ArrowDownToLine,
@@ -36,7 +37,7 @@ import {
   useHistory,
   type HistoryWindow,
 } from "@/components/metric-history";
-import { age, bytes, post, put, rate } from "@/lib/api";
+import { bytes, post, put, rate } from "@/lib/api";
 import {
   DEVICE_KINDS,
   confidenceLabel,
@@ -176,9 +177,16 @@ export function HostDetails({
             </Badge>
           )}
           <span>
-            {host.agent_id && host.last_report
-              ? `Reported ${age(host.last_report)} · collected ${age(host.last_collected_at)}`
-              : `Seen ${age(host.last_seen)}`}
+            {host.agent_id && host.last_report ? (
+              <>
+                Reported <Age value={host.last_report} lower /> · collected{" "}
+                <Age value={host.last_collected_at} lower />
+              </>
+            ) : (
+              <>
+                Seen <Age value={host.last_seen} lower />
+              </>
+            )}
           </span>
         </div>
       </header>
@@ -437,11 +445,16 @@ export function HostDetails({
             Open ports
             <span className="spacer" />
             <span className="text-xs font-normal text-muted-foreground">
-              {host.ports_scanned_at
-                ? `Common ports scanned ${age(host.ports_scanned_at).toLowerCase()}`
-                : host.agent_id
-                  ? ""
-                  : "Port scan pending"}
+              {host.ports_scanned_at ? (
+                <>
+                  Common ports scanned{" "}
+                  <Age value={host.ports_scanned_at} lower />
+                </>
+              ) : host.agent_id ? (
+                ""
+              ) : (
+                "Port scan pending"
+              )}
             </span>
           </h3>
           {host.services.length ? (

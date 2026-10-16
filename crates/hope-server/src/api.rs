@@ -68,7 +68,32 @@ pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstr
             &crate::releases::release_directory(&state.0.release_dir).await,
         )
         .await,
+        report_interval_seconds: state.report_interval(),
     }))
+}
+/// Choose how often agents sample and report; they adopt it with their next accepted report.
+pub async fn set_reporting(
+    Extract(state): Extract<State>,
+    Json(body): Json<hope_protocol::ReportingSettings>,
+) -> ApiResult<Json<hope_protocol::ReportingSettings>> {
+    if !hope_protocol::REPORT_INTERVALS_SECONDS.contains(&body.interval_seconds) {
+        return Err(ApiError::bad(
+            "Choose a report interval of 5, 10, 15, 30 or 60 seconds",
+        ));
+    }
+    let _guard = state.0.writes.lock().await;
+    state
+        .set_meta(
+            "report_interval_seconds",
+            &body.interval_seconds.to_string(),
+        )
+        .await?;
+    state
+        .0
+        .report_interval
+        .store(body.interval_seconds, std::sync::atomic::Ordering::Relaxed);
+    state.changed();
+    Ok(Json(body))
 }
 pub use hope_protocol::NetworkInput;
 /// A supported scheduled-scan interval, defaulting to five minutes.
@@ -396,7 +421,8 @@ pub async fn merge(
     state.changed();
     Ok(Json(target))
 }
-/// Server-sent change notifications. A receiver that falls behind the broadcast buffer gets a
+/// Server-sent change notifications: `host` carries one host's new state, `refresh` asks the
+/// client to reload everything. A receiver that falls behind the broadcast buffer gets a
 /// `resync` event (the client reloads everything) instead of silently missing changes. The stream
 /// ends when the server shuts down, after ten minutes, or when the client disconnects; dropping
 /// the response drops the broadcast receiver.
@@ -406,7 +432,8 @@ pub async fn events(
     let stream = BroadcastStream::new(state.0.events.subscribe())
         .map(|message| {
             Ok(match message {
-                Ok(_) => Event::default().event("refresh").data("{}"),
+                Ok(crate::state::Change::Refresh) => Event::default().event("refresh").data("{}"),
+                Ok(crate::state::Change::Host(body)) => Event::default().event("host").data(&*body),
                 Err(_) => Event::default().event("resync").data("{}"),
             })
         })
