@@ -1,0 +1,53 @@
+{
+  "name": "H.O.P.E",
+  "slug": "hope",
+  "categories": [9, 4],
+  "date_created": "2026-10-16",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 443,
+  "documentation": "https://github.com/doomedramen/hope/blob/main/docs/operations.md",
+  "website": "https://github.com/doomedramen/hope",
+  "repository": "https://github.com/doomedramen/hope",
+  "architectures": ["amd64", "arm64"],
+  "platforms": ["pve"],
+  "logo": "https://cdn.jsdelivr.net/gh/selfhst/icons@main/webp/proxmox.webp",
+  "description": "H.O.P.E is a self-hosted server and network observatory: a Rust server with a SQLite database discovers the LAN (ARP, ping and port probes), receives reports from signed Rust agents (CPU, memory with cache and ZFS ARC, load, disks and pools, I/O, bandwidth, temperatures, systemd units, network monitors) and serves a static console with a network map and per-host history. This script builds the server and console from the main branch; update rebuilds the current commit.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/hope.sh",
+      "config_path": "/etc/hope/hope.env",
+      "resources": {
+        "cpu": 2,
+        "ram": 4096,
+        "hdd": 12,
+        "os": "Debian",
+        "version": "13"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "The console is served over HTTPS by Caddy with an internal CA; accept the certificate in the browser. The first-run setup token is HOPE_SETUP_TOKEN in /etc/hope/hope.env and stays valid until the first account exists.",
+      "type": "info"
+    },
+    {
+      "text": "Agents must trust the same CA: copy /etc/hope/ca.crt from the container to /etc/hope/ca.crt on every agent host before running the generated install command.",
+      "type": "info"
+    },
+    {
+      "text": "Install and every update compile the server (Rust) and the console (Node.js) from source, which needs the full 4 GB of RAM; the running server needs far less, so the RAM can be lowered afterwards and raised again before an update.",
+      "type": "info"
+    },
+    {
+      "text": "Layer-2 discovery sees only the container's own bridge network; put the container on the VLAN or bridge you want to observe.",
+      "type": "warning"
+    }
+  ]
+}

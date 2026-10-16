@@ -60,7 +60,7 @@ Only what is evidenced is claimed. "Supported" in the first release will mean th
 
 ## Install in one command
 
-**Proxmox VE** (a Debian LXC container, built by the [community-scripts](https://github.com/community-scripts/ProxmoxVE) engine with its usual default/advanced settings; `update` inside the container upgrades it):
+**Proxmox VE** (a Debian LXC container, built by the [community-scripts](https://github.com/community-scripts/ProxmoxVE) engine with its usual default/advanced settings; `update` inside the container rebuilds the current `main` commit, exactly as it does for any community script):
 
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct/hope.sh)"
@@ -72,7 +72,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/scripts/install-hope.sh)"
 ```
 
-Both use the latest GitHub release when one is published and otherwise build from source. Details, environment variables and what has and has not been verified: [docs/operations.md](docs/operations.md#one-command-installer).
+The Proxmox pair (`ct/hope.sh`, `install/hope-install.sh`, `json/hope.json`) follows the community-scripts work instructions to the letter so it can be submitted to DevScripts unchanged; the host script uses the latest GitHub release when one is published and otherwise builds from source. Details, environment variables and what has and has not been verified: [docs/operations.md](docs/operations.md#one-command-installer).
 
 ## Quick start (Docker, Linux host networking)
 
