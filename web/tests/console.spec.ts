@@ -282,6 +282,12 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("button", { name: "List", exact: true }).click();
     await expect(page.getByRole("table")).toContainText("atlas-nas");
     await expect(
+      page.getByRole("row").filter({ hasText: "atlas-nas" }),
+    ).toContainText("Reporting");
+    await expect(
+      page.getByRole("row").filter({ hasText: "atlas-nas" }),
+    ).toContainText(/\d+ issues/);
+    await expect(
       page.getByRole("complementary", { name: "Host details" }),
     ).toBeVisible();
     await page.getByLabel("Search hosts").fill("workshop");
@@ -339,21 +345,40 @@ test.describe.serial("H.O.P.E console", () => {
     request,
   }) => {
     const data = await (await request.get("/api/v1/bootstrap")).json();
+    const host = data.hosts.find(
+      (h: { name: string }) => h.name === "atlas-nas",
+    );
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(`/?view=map&host=${data.hosts[0].id}`);
+    await page.goto("/?view=map");
+    await expectMapFits(page);
+    await page.locator(".map-device").filter({ hasText: "atlas-nas" }).click();
+    await expect(page).toHaveURL(new RegExp(`view=host&host=${host.id}`));
+    const details = page.getByRole("complementary", { name: "Host details" });
     await expect(
-      page.getByRole("complementary", { name: "Host details" }),
-    ).toBeVisible();
+      details.getByRole("heading", { name: "atlas-nas", exact: true }),
+    ).toBeFocused();
+    await expect(page.getByTestId("network-map")).toHaveCount(0);
+    await expect(
+      details.getByRole("tab", { name: "Summary", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+    await expect(
+      details.getByRole("region", { name: "Current readings" }),
+    ).toContainText("20%");
+    await expect(details.getByTestId("chart-CPU")).toHaveCount(0);
     expect(
       await page.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth,
+        () => document.documentElement.scrollWidth <= innerWidth,
       ),
     ).toBeTruthy();
-    await expectMapFits(page);
     await page.screenshot({
       path: "test-results/hope-mobile.png",
       fullPage: true,
     });
+    await page.reload();
+    await expect(details).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(/view=map/);
+    await expectMapFits(page);
   });
   test("positions survive mode switching and reload; selection follows back navigation", async ({
     page,
@@ -657,6 +682,11 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
     const details = page.getByRole("complementary", { name: "Host details" });
     // Current values live on the charts, not in a separate facts list.
+    await expect(
+      details.getByRole("region", { name: "Current readings" }),
+    ).toContainText("20%");
+    await expect(details.getByTestId("chart-CPU")).toHaveCount(0);
+    await details.getByRole("tab", { name: "Metrics", exact: true }).click();
     await expect(details.getByTestId("chart-CPU")).toContainText("20%");
     await expect(details.getByTestId("chart-Load average")).toContainText(
       "1 min1.60",
@@ -682,6 +712,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(details.getByTestId("chart-Monitor latency")).toContainText(
       "7 ms",
     );
+    await details.getByRole("tab", { name: "Services", exact: true }).click();
     await expect(details.getByTestId("service-units")).toContainText(
       "40 active",
     );
@@ -690,6 +721,7 @@ test.describe.serial("H.O.P.E console", () => {
     );
     await expect(details.getByTestId("monitors")).toContainText("timed out");
     await expect(details).not.toContainText("Live usage");
+    await details.getByRole("tab", { name: "Metrics", exact: true }).click();
     await expect(details.getByTestId("chart-Filesystem usage")).toContainText(
       "/ · nvme0 · 372.5 GiB of 931.3 GiB",
     );
@@ -698,6 +730,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("heading", { name: "Host", exact: true }),
     ).toBeVisible();
+    await details.getByRole("tab", { name: "Metrics", exact: true }).click();
     await expect(page.locator(".host-page .charts")).toBeVisible();
     await expect(details.getByTestId("chart-Temperatures")).toBeVisible();
     await expect(details.getByTestId("chart-Temperatures")).toContainText(
@@ -901,6 +934,7 @@ test.describe.serial("H.O.P.E console", () => {
     // History stores one sample per 30 seconds, so these reports seconds apart
     // reach the chart only as live points.
     await row.getByText("live-node", { exact: true }).click();
+    await page.getByRole("tab", { name: "Metrics", exact: true }).click();
     const cpu = page
       .getByRole("complementary", { name: "Host details" })
       .getByTestId("chart-CPU");
@@ -1043,6 +1077,7 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("row").filter({ hasText: "atlas-nas" }).click();
     const details = page.getByRole("complementary", { name: "Host details" });
     await expect(details.getByText("Agent 0.1.57")).toBeVisible();
+    await details.getByRole("tab", { name: "Settings", exact: true }).click();
     const card = details.getByTestId("agent-update");
     await expect(card).toContainText("Agent 0.1.60 is available");
     await expect(card).toContainText("has no updater yet");
@@ -1057,6 +1092,7 @@ test.describe.serial("H.O.P.E console", () => {
 
     // An agent with an updater is asked with one click, then shows as waiting.
     await page.getByRole("row").filter({ hasText: "studio-mac" }).click();
+    await details.getByRole("tab", { name: "Settings", exact: true }).click();
     await expect(card).toContainText("after checking the release's signature");
     await card.getByRole("button", { name: "Update now" }).click();
     await expect(
@@ -1069,6 +1105,7 @@ test.describe.serial("H.O.P.E console", () => {
     // An agent that is up to date has no card at all.
     await page.getByRole("row").filter({ hasText: "compute-node" }).click();
     await expect(details.getByText("Agent 0.1.60")).toBeVisible();
+    await details.getByRole("tab", { name: "Settings", exact: true }).click();
     await expect(details.getByTestId("agent-update")).toHaveCount(0);
   });
   test("the map draws routers above the ranges they serve", async ({

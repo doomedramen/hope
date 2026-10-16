@@ -2290,3 +2290,47 @@ kbd.key {
     margin-left: auto;
   }
 }
+
+/* Host sections separate diagnosis from history and administration. */
+.host-page .details-body {
+  display: flex;
+  gap: 16px;
+}
+.host-page .details-body > * {
+  margin-bottom: 0;
+}
+.host-tabs {
+  min-width: 0;
+  width: 100%;
+}
+.host-tab-list {
+  width: 100%;
+  min-height: 44px;
+}
+.host-tab-content:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding-top: 12px;
+}
+.details-body .host-readings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.host-readings div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.host-readings span {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.host-readings strong {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+.host-readings p {
+  grid-column: 1 / -1;
+}

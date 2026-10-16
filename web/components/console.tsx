@@ -296,7 +296,16 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     },
     [],
   );
-  const select = useCallback((id: string | null) => go({ host: id }), [go]);
+  const select = useCallback(
+    (id: string | null) => {
+      go(
+        id && window.matchMedia("(max-width: 720px)").matches
+          ? { view: "host", host: id }
+          : { host: id },
+      );
+    },
+    [go],
+  );
   const setView = useCallback(
     (next: View) => {
       if (next === "hosts" || next === "map") {

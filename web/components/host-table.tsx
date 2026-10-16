@@ -18,6 +18,7 @@ import {
   compareHosts,
   cpuPercent,
   hostState,
+  hostIssues,
   memoryUsage,
   worstDisk,
   type SortKey,
@@ -96,6 +97,7 @@ export function HostTable({
       <TableBody>
         {sorted.map((h) => {
           const state = hostState(h);
+          const issues = hostIssues(h);
           const cpu = cpuPercent(h);
           const memory = memoryUsage(h);
           const disk = worstDisk(h);
@@ -144,6 +146,14 @@ export function HostTable({
               </TableCell>
               <TableCell>
                 <StatusPill host={h} />
+                {issues.length > 0 && (
+                  <div
+                    className={`mt-1 text-xs font-medium tone-${issues.some((issue) => issue.severity === "critical") ? "critical" : "warning"}`}
+                    title={issues.map((issue) => issue.message).join("\n")}
+                  >
+                    {issues.length} {issues.length === 1 ? "issue" : "issues"}
+                  </div>
+                )}
               </TableCell>
               <TableCell>
                 <div className="metric-cell">
