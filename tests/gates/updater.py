@@ -393,6 +393,11 @@ class Gate:
                 expect(result.get('status') == 'failed' and result.get('code') == 'FIRST_REPORT_TIMEOUT', f'update-result says {result}')
                 journal = self.updater_journal()
                 expect('phase=rollback' in journal, 'the updater journal shows no rollback')
+                # A rollback restarts the agent. It must not ask for the same release again at once
+                # (it used to, which retried a failing release in a loop).
+                attempts = journal.count('phase=wait-report')
+                time.sleep(30)
+                expect(self.updater_journal().count('phase=wait-report') == attempts, 'the updater tried the failing release again right after rolling back')
                 expect(self.installed_version() == V2 and self.installed_sha() == sha, 'the previous agent was not restored')
                 expect(self.must('systemctl is-active hope-agent') == 'active', 'the previous agent is not running')
                 expect(self.dx('test -d /var/lib/hope-agent-install').returncode != 0, 'an install transaction was left behind')

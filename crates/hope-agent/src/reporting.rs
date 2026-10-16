@@ -100,7 +100,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
     let mut marker_at = 0.0;
     // The server may choose the sample interval in its responses; until then the default holds.
     let mut server_period: Option<Duration> = None;
-    let mut update_requests = crate::updates::Requests::default();
+    let mut update_requests = crate::updates::Requests;
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -124,7 +124,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                     Outcome::Accepted(response) => {
                         debug_assert!(response.accepted);
                         spool.remove(&report.report_id); failures=0; retry_at=Instant::now();
-                        if let Some(version)=&response.update_to { update_requests.handle(dir,version,std::time::Instant::now()); }
+                        if let Some(version)=&response.update_to { update_requests.handle_now(dir,version); }
                         if let Some(seconds)=response.report_interval_seconds { server_period=Some(Duration::from_secs(seconds.clamp(MIN_INTERVAL_SECONDS,MAX_INTERVAL_SECONDS).into())); }
                         inventory_delivery.accept(&report)?;
                         if report.collected_at>=started && report.collected_at>=marker_at {

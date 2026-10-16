@@ -8,36 +8,39 @@
 //! for the agent to report. Nothing in either file is trusted beyond being shown.
 use hope_protocol::CollectorStatus;
 use std::{
+    io::Read,
     path::Path,
-    time::{Duration, Instant},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const QUEUE: &str = "update-queue";
 const REQUEST: &str = "request";
 const RESULT: &str = "update-result";
+/// What this agent last asked for and when, kept in its state directory. A failed update rolls back
+/// by restarting the agent, so the memory of having asked must survive a restart; otherwise the
+/// restarted agent asks again at once and a release that cannot report is retried in a loop.
+const ASKED: &str = "update-asked";
 /// A request that did not lead to an update is repeated no sooner than this.
 const RETRY_AFTER: Duration = Duration::from_secs(3600);
 
 pub const COLLECTOR: &str = "agent_update";
 
-/// Remembers what was last asked of the updater, so a failing update is retried hourly, not on
-/// every report.
-#[derive(Default)]
-pub struct Requests {
-    last: Option<(String, Instant)>,
-}
+/// Leaves requests for the updater. It holds no state of its own (see `ASKED`).
+pub struct Requests;
 
 impl Requests {
-    /// Leaves a request for the updater when the server asks for `version`. Returns whether a file
-    /// was written.
-    pub fn handle(&mut self, dir: &Path, version: &str, now: Instant) -> bool {
-        if !plain_version(version) || !queue_ready(dir) {
-            return false;
-        }
-        if let Some((asked, at)) = &self.last
-            && asked == version
-            && now.duration_since(*at) < RETRY_AFTER
-        {
+    /// Leaves a request for the updater when the server asks for `version`, unless the same release
+    /// was asked for within the last hour. Returns whether a file was written.
+    pub fn handle_now(&mut self, dir: &Path, version: &str) -> bool {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        self.handle(dir, version, seconds)
+    }
+
+    /// As `handle_now`, at `now` seconds since the epoch.
+    pub fn handle(&mut self, dir: &Path, version: &str, now: u64) -> bool {
+        if !plain_version(version) || !queue_ready(dir) || recently_asked(dir, version, now) {
             return false;
         }
         let path = dir.join(QUEUE).join(REQUEST);
@@ -47,10 +50,37 @@ impl Requests {
         }
         let written = std::fs::write(&path, format!("{version}\n")).is_ok();
         if written {
-            self.last = Some((version.to_string(), now));
+            let _ = std::fs::write(dir.join(ASKED), format!("{version} {now}\n"));
         }
         written
     }
+}
+
+fn recently_asked(dir: &Path, version: &str, now: u64) -> bool {
+    let path = dir.join(ASKED);
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() > 128 {
+        return false;
+    }
+    let mut text = String::new();
+    if std::fs::File::open(&path)
+        .and_then(|file| file.take(128).read_to_string(&mut text))
+        .is_err()
+    {
+        return false;
+    }
+    let Some((asked, at)) = text.trim().split_once(' ') else {
+        return false;
+    };
+    let Ok(at) = at.parse::<u64>() else {
+        return false;
+    };
+    // A time in the future (the clock was set back) does not hold requests off for long.
+    asked == version
+        && at <= now.saturating_add(RETRY_AFTER.as_secs())
+        && now.saturating_sub(at) < RETRY_AFTER.as_secs()
 }
 
 fn plain_version(version: &str) -> bool {
@@ -118,7 +148,6 @@ fn describe(dir: &Path) -> (bool, String) {
 }
 
 fn read_result(dir: &Path) -> Option<String> {
-    use std::io::Read;
     let path = dir.join(RESULT);
     let meta = std::fs::symlink_metadata(&path).ok()?;
     if !meta.is_file() || meta.len() > 1024 {
@@ -147,8 +176,8 @@ mod tests {
     fn a_request_is_left_once_and_retried_hourly() {
         let dir = installed();
         let request = dir.path().join(QUEUE).join(REQUEST);
-        let mut requests = Requests::default();
-        let start = Instant::now();
+        let mut requests = Requests;
+        let start = 1_000_000;
         assert!(requests.handle(dir.path(), "0.1.60", start));
         assert_eq!(
             std::fs::read_to_string(&request).expect("request"),
@@ -156,34 +185,69 @@ mod tests {
         );
         // The updater consumes the file; a failed update is not retried on the next report.
         std::fs::remove_file(&request).expect("consumed");
-        assert!(!requests.handle(dir.path(), "0.1.60", start + Duration::from_secs(10)));
+        assert!(!requests.handle(dir.path(), "0.1.60", start + 10));
         assert!(!request.exists());
-        assert!(requests.handle(dir.path(), "0.1.60", start + RETRY_AFTER));
+        assert!(requests.handle(dir.path(), "0.1.60", start + RETRY_AFTER.as_secs()));
         // A newer release is asked for at once.
         std::fs::remove_file(&request).expect("consumed");
-        assert!(requests.handle(dir.path(), "0.1.61", start + RETRY_AFTER));
+        assert!(requests.handle(dir.path(), "0.1.61", start + RETRY_AFTER.as_secs()));
+    }
+
+    #[test]
+    fn a_restarted_agent_does_not_ask_again_for_a_release_that_just_failed() {
+        // A failed update rolls back by restarting the agent; the new process has no memory of its own.
+        let dir = installed();
+        let request = dir.path().join(QUEUE).join(REQUEST);
+        let start = 1_000_000;
+        assert!(Requests.handle(dir.path(), "0.1.60", start));
+        std::fs::remove_file(&request).expect("consumed");
+        assert!(!Requests.handle(dir.path(), "0.1.60", start + 150));
+        assert!(!request.exists());
+        assert!(Requests.handle(dir.path(), "0.1.61", start + 150));
+        std::fs::remove_file(&request).expect("consumed");
+        assert!(Requests.handle(dir.path(), "0.1.61", start + 150 + RETRY_AFTER.as_secs()));
+    }
+
+    #[test]
+    fn a_future_or_damaged_memory_of_asking_does_not_hold_requests_off() {
+        let dir = installed();
+        let request = dir.path().join(QUEUE).join(REQUEST);
+        let now = 1_000_000;
+        for written in [
+            "0.1.60 99999999999\n",
+            "0.1.60\n",
+            "0.1.60 soon\n",
+            "garbage",
+            "",
+        ] {
+            std::fs::write(dir.path().join(ASKED), written).expect("memory");
+            assert!(Requests.handle(dir.path(), "0.1.60", now), "{written:?}");
+            std::fs::remove_file(&request).expect("consumed");
+        }
+        std::fs::write(dir.path().join(ASKED), "x".repeat(500)).expect("memory");
+        assert!(Requests.handle(dir.path(), "0.1.60", now));
     }
 
     #[test]
     fn a_waiting_request_is_not_duplicated() {
         let dir = installed();
-        let mut requests = Requests::default();
-        let start = Instant::now();
+        let mut requests = Requests;
+        let start = 1_000_000;
         assert!(requests.handle(dir.path(), "0.1.60", start));
-        let mut later = Requests::default();
-        assert!(!later.handle(dir.path(), "0.1.60", start));
+        std::fs::remove_file(dir.path().join(ASKED)).expect("forget");
+        assert!(!Requests.handle(dir.path(), "0.1.60", start));
     }
 
     #[test]
     fn nothing_is_written_without_an_updater_or_for_a_strange_version() {
         let bare = tempfile::tempdir().expect("state directory");
-        let mut requests = Requests::default();
-        assert!(!requests.handle(bare.path(), "0.1.60", Instant::now()));
+        let mut requests = Requests;
+        assert!(!requests.handle(bare.path(), "0.1.60", 1_000_000));
         assert!(!bare.path().join(QUEUE).exists());
         let dir = installed();
         for version in ["", "../../x", "1.0; rm -rf /", "a b", &"9".repeat(65)] {
             assert!(
-                !requests.handle(dir.path(), version, Instant::now()),
+                !requests.handle(dir.path(), version, 1_000_000),
                 "{version:?}"
             );
         }
@@ -201,7 +265,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("state directory");
         let elsewhere = tempfile::tempdir().expect("elsewhere");
         std::os::unix::fs::symlink(elsewhere.path(), dir.path().join(QUEUE)).expect("link");
-        assert!(!Requests::default().handle(dir.path(), "0.1.60", Instant::now()));
+        assert!(!Requests.handle(dir.path(), "0.1.60", 1_000_000));
         assert_eq!(std::fs::read_dir(elsewhere.path()).expect("dir").count(), 0);
     }
 
