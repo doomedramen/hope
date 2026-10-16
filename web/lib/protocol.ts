@@ -195,15 +195,27 @@ ports_scanned_at: number | null,
 /**
  * The device this one sits behind (its gateway or upstream router), when inferred.
  */
-parent_id: string | null, parent_reason: string | null, };
+parent_id: string | null, parent_reason: string | null,
+/**
+ * Version of the agent, from its `User-Agent` on enrollment and reports.
+ */
+agent_version: string | null, };
 export type MetricPoint = { collected_at: number, resolution_seconds: number, metrics: Metrics, };
 export type Position = { id: string, x: number, y: number, };
 export type MapLink = { id: string, source: string, target: string, label: string, };
 export type MapState = { revision: number, positions: Array<Position>, links: Array<MapLink>, };
 export type MapEdit = { "operation": "set_position", position: Position, } | { "operation": "add_link", link: MapLink, } | { "operation": "remove_link", id: string, };
-export type ReleaseAvailability = { packaged_platforms: Array<string>, };
+export type ReleaseAvailability = { packaged_platforms: Array<string>,
+/**
+ * Version of the signed agent release on offer, when there is one.
+ */
+version: string | null, };
 export type Capabilities = { platform: string, discovery_mode: string, arp: boolean, icmp: boolean, limitations: Array<string>, };
-export type Bootstrap = { networks: Array<Network>, hosts: Array<Host>, scans: Array<ScanJob>, map: MapState, capabilities: Capabilities, server_url: string, };
+export type Bootstrap = { networks: Array<Network>, hosts: Array<Host>, scans: Array<ScanJob>, map: MapState, capabilities: Capabilities, server_url: string,
+/**
+ * Version of the signed agent release the server offers; agents older than it can be updated.
+ */
+agent_release: string | null, };
 export type InstallJob = { id: string,
 /**
  * Selected SSH address.

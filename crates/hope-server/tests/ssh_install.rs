@@ -471,6 +471,7 @@ fn enroll_with(
             let _ = agents::enroll(
                 Extract(state.clone()),
                 axum::extract::Extension(hope_server::limits::ClientKey("test".into())),
+                axum::http::HeaderMap::new(),
                 Json(EnrollmentRequest {
                     schema_version: SCHEMA_VERSION,
                     token: token_of(&command),

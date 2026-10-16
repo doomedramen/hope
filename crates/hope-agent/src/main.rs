@@ -4,6 +4,14 @@ mod delivery;
 mod extras;
 mod reporting;
 mod status;
+
+/// The agent's version: the build version CI compiles in (`HOPE_BUILD_VERSION`, for example
+/// 0.1.57), or the crate version for local builds. `--version` prints it, the installer compares it
+/// with the signed manifest, and every request names it in `User-Agent`.
+pub const VERSION: &str = match option_env!("HOPE_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 use anyhow::{Context, Result};
 use config::Config;
 use hope_protocol::{EnrollmentRequest, EnrollmentResponse, SCHEMA_VERSION};
@@ -34,7 +42,7 @@ async fn main() -> std::process::ExitCode {
 async fn execute() -> Result<()> {
     let operation = std::env::args().nth(1).unwrap_or_else(|| "run".into());
     if operation == "--version" {
-        println!("hope-agent {}", env!("CARGO_PKG_VERSION"));
+        println!("hope-agent {VERSION}");
         return Ok(());
     }
     let dir = config::directory();

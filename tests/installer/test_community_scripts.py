@@ -122,5 +122,38 @@ class InstallScript(unittest.TestCase):
         self.assertLess(INSTALL.index('Configuring Caddy'), INSTALL.index('Creating Service'))
 
 
+    def test_agent_packages_are_downloaded_and_signed_by_this_server(self):
+        # The build release carries unsigned agents; each server signs them with its own key, so the
+        # console can offer agent installation as soon as the container is up.
+        workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()
+        self.assertIn('uses: ./.github/workflows/build-agent.yml', workflow)
+        self.assertIn('dist/server/hope-agents.tar.gz', workflow)
+        package = (ROOT / 'scripts' / 'package-server.sh').read_text()
+        self.assertIn('scripts/assemble-release.sh "$staging/hope-server-$version/tools/assemble-release.sh"', package)
+        deploy = 'fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" "/opt/hope-agents" "hope-agents.tar.gz"'
+        sign = ('HOPE_SIGNING_KEY=/etc/hope/release-signing.pem $STD sh /opt/hope/tools/assemble-release.sh '
+                '--staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases')
+        for script in (INSTALL, CT):
+            self.assertIn(deploy, script)
+            self.assertIn(sign, script)
+            self.assertLess(script.index(deploy), script.index(sign))
+            self.assertIn('(umask 077 && $STD openssl genrsa -out /etc/hope/release-signing.pem 3072)', script)
+        # An update keeps the existing key: installed agents trust it, and a new one would orphan them.
+        self.assertIn('[[ -f /etc/hope/release-signing.pem ]] ||', CT)
+        # The key lives outside the repository-like package and outside the served data.
+        self.assertNotIn('/opt/hope/release-signing', INSTALL + CT)
+
+    def test_builds_have_their_own_version(self):
+        workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()
+        self.assertIn('echo "version=${crate%.*}.${RUN}"', workflow)
+        self.assertEqual(workflow.count('HOPE_BUILD_VERSION: ${{ needs.version.outputs.version }}'), 1)
+        self.assertIn('version: ${{ needs.version.outputs.version }}', workflow)
+        self.assertIn('gh release create "v${VERSION}"', workflow)
+        agent = (ROOT / '.github' / 'workflows' / 'build-agent.yml').read_text()
+        self.assertIn('HOPE_BUILD_VERSION: ${{ inputs.version }}', agent)
+        main = (ROOT / 'crates' / 'hope-agent' / 'src' / 'main.rs').read_text()
+        self.assertIn('option_env!("HOPE_BUILD_VERSION")', main)
+
+
 if __name__ == '__main__':
     unittest.main()

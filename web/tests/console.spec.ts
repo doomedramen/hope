@@ -892,6 +892,37 @@ test.describe.serial("H.O.P.E console", () => {
       ntfy.close();
     }
   });
+  test("an agent older than the server's release offers an update", async ({
+    page,
+  }) => {
+    let atlas = "";
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.agent_release = "0.1.60";
+      for (const host of body.hosts) {
+        if (host.name === "atlas-nas") {
+          atlas = host.id;
+          host.agent_version = "0.1.57";
+        } else if (host.agent_id) host.agent_version = "0.1.60";
+      }
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto("/?view=hosts");
+    await page.getByRole("row").filter({ hasText: "atlas-nas" }).click();
+    const details = page.getByRole("complementary", { name: "Host details" });
+    await expect(details.getByText("Agent 0.1.57")).toBeVisible();
+    await expect(details.getByTestId("agent-update")).toContainText(
+      "Agent 0.1.60 is available",
+    );
+    await details.getByRole("button", { name: "Update agent" }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    expect(atlas).not.toBe("");
+    await page.getByRole("row").filter({ hasText: "studio-mac" }).click();
+    await expect(details.getByText("Agent 0.1.60")).toBeVisible();
+    await expect(details.getByTestId("agent-update")).toHaveCount(0);
+  });
   test("the map draws routers above the ranges they serve", async ({
     page,
   }) => {

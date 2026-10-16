@@ -752,6 +752,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                 hosts={hosts}
                 wide
                 close={closeHostPage}
+                agentRelease={data.agent_release}
                 install={() => setInstallOpen(true)}
                 refresh={() => {
                   void refresh();
@@ -995,6 +996,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                   hosts={hosts}
                   close={() => select(null)}
                   expand={() => go({ view: "host" })}
+                  agentRelease={data.agent_release}
                   install={() => setInstallOpen(true)}
                   refresh={() => {
                     void refresh();

@@ -19,6 +19,7 @@ msg_ok "Installed Dependencies"
 
 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"
 install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server
+fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" "/opt/hope-agents" "hope-agents.tar.gz"
 
 msg_info "Configuring Caddy"
 mkdir -p /etc/hope
@@ -56,6 +57,12 @@ RUST_LOG=hope_server=info
 EOF
 chmod 600 /etc/hope/hope.env
 msg_ok "Configured H.O.P.E"
+
+# Agents install only from packages signed by this server's own key, made here and never shared.
+msg_info "Signing agent packages"
+(umask 077 && $STD openssl genrsa -out /etc/hope/release-signing.pem 3072)
+HOPE_SIGNING_KEY=/etc/hope/release-signing.pem $STD sh /opt/hope/tools/assemble-release.sh --staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases
+msg_ok "Signed agent packages"
 
 msg_info "Creating Service"
 cat <<EOF >/etc/systemd/system/hope.service

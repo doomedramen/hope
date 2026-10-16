@@ -64,6 +64,10 @@ pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstr
             capabilities
         },
         server_url: state.0.server_url.clone(),
+        agent_release: crate::releases::published_version(
+            &crate::releases::release_directory(&state.0.release_dir).await,
+        )
+        .await,
     }))
 }
 pub use hope_protocol::NetworkInput;

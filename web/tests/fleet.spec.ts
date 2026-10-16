@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import {
+  agentUpdate,
   compareHosts,
   fleetSummary,
   hostIssues,
@@ -45,6 +46,7 @@ function host(overrides: Partial<Host>): Host {
   return {
     id: "h",
     agent_id: null,
+    agent_version: null,
     name: "host",
     addresses: ["192.168.1.2"],
     macs: [],
@@ -295,3 +297,16 @@ function inventoryOf(os: string) {
     collectors: [],
   };
 }
+
+test("agents are offered an update only when the server's release is newer", () => {
+  const agent = host({ agent_id: "a", agent_version: "0.1.57" });
+  expect(agentUpdate(agent, "0.1.60")).toBe("0.1.60");
+  expect(agentUpdate(agent, "0.2.1")).toBe("0.2.1");
+  expect(agentUpdate(agent, "0.1.57")).toBeNull();
+  expect(agentUpdate(agent, "0.1.9")).toBeNull();
+  expect(agentUpdate(agent, null)).toBeNull();
+  // Agents too old to report a version, discovered hosts and revoked agents are never flagged.
+  expect(agentUpdate(host({ agent_id: "a" }), "0.1.60")).toBeNull();
+  expect(agentUpdate(host({ agent_version: "0.1.1" }), "0.1.60")).toBeNull();
+  expect(agentUpdate({ ...agent, agent_revoked: true }, "0.1.60")).toBeNull();
+});

@@ -583,7 +583,7 @@ impl Monitors {
                     .timeout(MONITOR_TIMEOUT)
                     .connect_timeout(MONITOR_TIMEOUT)
                     .redirect(reqwest::redirect::Policy::none())
-                    .user_agent(concat!("hope-agent-monitor/", env!("CARGO_PKG_VERSION")));
+                    .user_agent(format!("hope-agent-monitor/{}", crate::VERSION));
                 if let Some(pem) = &settings.ca_pem
                     && let Ok(certificates) = reqwest::Certificate::from_pem_bundle(pem.as_bytes())
                 {

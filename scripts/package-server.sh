@@ -27,13 +27,17 @@ if [ "$build" = 1 ]; then
 fi
 [ -x target/release/hope-server ] || { echo "package-server: target/release/hope-server is missing" >&2; exit 1; }
 [ -f web/out/index.html ] || { echo "package-server: web/out/index.html is missing" >&2; exit 1; }
-version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+# HOPE_BUILD_VERSION (set by CI for published builds) names the package and its agents.
+version=${HOPE_BUILD_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)}
 staging=$(mktemp -d "${TMPDIR:-/tmp}/hope-server-package.XXXXXX")
 trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/hope-server-$version" "$out"
 install -m 755 target/release/hope-server "$staging/hope-server-$version/hope-server"
 cp -R web/out "$staging/hope-server-$version/web"
 cp LICENSE "$staging/hope-server-$version/LICENSE"
+# The signing script, so a server can sign the agent packages it serves (ct/hope.sh does).
+mkdir -p "$staging/hope-server-$version/tools"
+install -m 755 scripts/assemble-release.sh "$staging/hope-server-$version/tools/assemble-release.sh"
 printf '%s\n' "$version" > "$staging/hope-server-$version/VERSION"
 name=hope-server-$architecture-linux.tar.gz
 # Reproducible ordering and ownership; the installer extracts into its own staging directory.

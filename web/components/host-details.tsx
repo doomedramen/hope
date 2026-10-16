@@ -43,7 +43,7 @@ import {
   deviceLabel,
   kindLabel,
 } from "@/lib/devices";
-import { hostIssues, hostState, type Tone } from "@/lib/fleet";
+import { agentUpdate, hostIssues, hostState, type Tone } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
 
 export function HostDetails({
@@ -52,6 +52,7 @@ export function HostDetails({
   close,
   expand,
   wide = false,
+  agentRelease = null,
   install,
   refresh,
   notify,
@@ -63,6 +64,8 @@ export function HostDetails({
   expand?: () => void;
   /** Full-page layout: facts on the left, charts in a two-column grid. */
   wide?: boolean;
+  /** Version of the signed agent release the server offers. */
+  agentRelease?: string | null;
   install: () => void;
   refresh: () => void;
   notify: (message: string, tone?: Tone) => void;
@@ -73,6 +76,7 @@ export function HostDetails({
   const [hours, setHours] = useState<HistoryWindow>("1");
   const inventory = host.inventory;
   const metrics = host.metrics;
+  const update = agentUpdate(host, agentRelease);
   const state = hostState(host);
   const issues = hostIssues(host);
   const history = useHistory(host.id, hours, host.last_report);
@@ -168,7 +172,7 @@ export function HostDetails({
           {host.agent_id && !host.agent_revoked && (
             <Badge variant="outline">
               <Bot data-icon="inline-start" />
-              Agent
+              {host.agent_version ? `Agent ${host.agent_version}` : "Agent"}
             </Badge>
           )}
           <span>
@@ -210,6 +214,19 @@ export function HostDetails({
             <Button size="sm" onClick={install}>
               <ArrowDownToLine data-icon="inline-start" />
               Install reporting agent
+            </Button>
+          </div>
+        )}
+        {update && (
+          <div className="rounded-xl border p-3.5" data-testid="agent-update">
+            <p className="mb-2.5 text-xs leading-relaxed text-muted-foreground">
+              Agent {update} is available (this host runs {host.agent_version}).
+              Run a new installation command on the host to update it; it keeps
+              its identity and history.
+            </p>
+            <Button size="sm" variant="outline" onClick={install}>
+              <ArrowDownToLine data-icon="inline-start" />
+              Update agent
             </Button>
           </div>
         )}

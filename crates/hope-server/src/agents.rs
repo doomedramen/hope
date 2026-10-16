@@ -137,13 +137,26 @@ pub fn inventory_macs(inv: &Inventory) -> Vec<String> {
 
 /// Failed enrollments count against the client; successful ones do not, and there is no global
 /// ceiling that would let an attacker block a legitimate agent.
+/// The agent's version from its `User-Agent` (`hope-agent/0.1.57`), when well formed.
+pub fn agent_version(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get("user-agent")?.to_str().ok()?;
+    let version = value.strip_prefix("hope-agent/")?;
+    (!version.is_empty()
+        && version.len() <= 32
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')))
+    .then(|| version.to_string())
+}
+
 pub async fn enroll(
     Extract(state): Extract<State>,
     Extension(client): Extension<ClientKey>,
+    headers: HeaderMap,
     Json(request): Json<EnrollmentRequest>,
 ) -> ApiResult<Json<EnrollmentResponse>> {
     limited(state.0.enroll_limit.check(&client.0, now()))?;
-    let result = enroll_inner(&state, request).await;
+    let result = enroll_inner(&state, request, agent_version(&headers)).await;
     if result.is_err() {
         state.0.enroll_limit.hit(&client.0, now());
     }
@@ -152,6 +165,7 @@ pub async fn enroll(
 async fn enroll_inner(
     state: &State,
     request: EnrollmentRequest,
+    version: Option<String>,
 ) -> ApiResult<Json<EnrollmentResponse>> {
     let state = state.clone();
     if request.schema_version != SCHEMA_VERSION
@@ -241,6 +255,7 @@ async fn enroll_inner(
     host.addresses = addresses;
     host.macs = macs;
     host.inventory = Some(request.inventory);
+    host.agent_version = version;
     host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
     crate::classify::refresh(&mut host, &state.gateway_set());
     let credential = request.credential;
@@ -349,6 +364,9 @@ pub async fn report(
     if inserted > 0 {
         host.last_report = Some(now());
         host.last_seen = now();
+        if let Some(version) = agent_version(&headers) {
+            host.agent_version = Some(version);
+        }
         if report.collected_at >= previous {
             host.last_collected_at = Some(report.collected_at);
             if let Some(inv) = report.inventory {
@@ -402,4 +420,30 @@ pub async fn revoke(
     tx.commit().await?;
     state.changed();
     Ok(Json(OkResponse { ok: true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_versions_come_only_from_well_formed_user_agents() {
+        let headers = |value: &str| {
+            let mut map = HeaderMap::new();
+            map.insert("user-agent", value.parse().expect("header"));
+            map
+        };
+        assert_eq!(
+            agent_version(&headers("hope-agent/0.1.57")).as_deref(),
+            Some("0.1.57")
+        );
+        assert_eq!(
+            agent_version(&headers("hope-agent/0.1.0-rc.1")).as_deref(),
+            Some("0.1.0-rc.1")
+        );
+        assert_eq!(agent_version(&headers("curl/8.0")), None);
+        assert_eq!(agent_version(&headers("hope-agent/")), None);
+        assert_eq!(agent_version(&headers("hope-agent/1.0 <script>")), None);
+        assert_eq!(agent_version(&HeaderMap::new()), None);
+    }
 }

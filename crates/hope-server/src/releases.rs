@@ -221,12 +221,27 @@ fn public_key_id(pem: &str) -> Option<String> {
     None
 }
 
+/// Version of the release in `directory`, when it offers at least one platform.
+pub async fn published_version(directory: &Path) -> Option<String> {
+    if packaged_platforms(directory).await.is_empty() {
+        return None;
+    }
+    let manifest: Manifest = serde_json::from_slice(
+        &tokio::fs::read(directory.join("manifest.json"))
+            .await
+            .ok()?,
+    )
+    .ok()?;
+    Some(manifest.version)
+}
+
 pub async fn availability(
     Extract(state): Extract<State>,
 ) -> ApiResult<axum::Json<hope_protocol::ReleaseAvailability>> {
+    let directory = release_directory(&state.0.release_dir).await;
     Ok(axum::Json(hope_protocol::ReleaseAvailability {
-        packaged_platforms: packaged_platforms(&release_directory(&state.0.release_dir).await)
-            .await,
+        packaged_platforms: packaged_platforms(&directory).await,
+        version: published_version(&directory).await,
     }))
 }
 

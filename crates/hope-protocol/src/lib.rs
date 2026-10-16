@@ -557,6 +557,9 @@ pub struct Host {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub parent_reason: Option<String>,
+    /// Version of the agent, from its `User-Agent` on enrollment and reports.
+    #[serde(default)]
+    pub agent_version: Option<String>,
 }
 
 impl Host {
@@ -585,6 +588,7 @@ impl Host {
             ports_scanned_at: None,
             parent_id: None,
             parent_reason: None,
+            agent_version: None,
         }
     }
 }
@@ -631,6 +635,9 @@ pub enum MapEdit {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ReleaseAvailability {
     pub packaged_platforms: Vec<String>,
+    /// Version of the signed agent release on offer, when there is one.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -650,6 +657,9 @@ pub struct Bootstrap {
     pub map: MapState,
     pub capabilities: Capabilities,
     pub server_url: String,
+    /// Version of the signed agent release the server offers; agents older than it can be updated.
+    #[serde(default)]
+    pub agent_release: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

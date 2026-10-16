@@ -175,7 +175,7 @@ pub fn client(config: &Config) -> Result<reqwest::Client> {
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("hope-agent/", env!("CARGO_PKG_VERSION")));
+        .user_agent(format!("hope-agent/{}", crate::VERSION));
     if let Some(pem) = &config.ca_pem {
         let certificates = reqwest::Certificate::from_pem_bundle(pem.as_bytes())?;
         anyhow::ensure!(

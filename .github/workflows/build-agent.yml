@@ -4,6 +4,12 @@ name: build-agent
 
 on:
   workflow_call:
+    inputs:
+      version:
+        description: Build version compiled into the agents (empty for the crate version)
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -34,6 +40,8 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
       - name: Build, inspect and smoke-test
+        env:
+          HOPE_BUILD_VERSION: ${{ inputs.version }}
         run: sh scripts/build-agent.sh "${{ matrix.target }}" --out dist/agents
       - uses: actions/upload-artifact@v4
         with:

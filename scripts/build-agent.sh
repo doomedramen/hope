@@ -74,7 +74,8 @@ cargo build --release --locked -p hope-agent --target "$target"
 built="${CARGO_TARGET_DIR:-target}/$target/release/hope-agent"
 [ -s "$built" ] || die "cargo did not produce $built"
 
-version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+# HOPE_BUILD_VERSION (set by CI for published builds) is also compiled into the binary.
+version=${HOPE_BUILD_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)}
 [ -n "$version" ] || die 'cannot read the workspace version from Cargo.toml'
 commit=${HOPE_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
 commit=$(printf '%s' "$commit" | cut -c1-12)

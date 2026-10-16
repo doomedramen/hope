@@ -379,3 +379,30 @@ export function ipValue(address: string | undefined): number {
   }
   return value;
 }
+
+/** Numeric parts of a version (`0.1.57` → [0, 1, 57]); anything after the numbers is ignored. */
+function versionParts(version: string): number[] {
+  return version
+    .split(/[-+]/)[0]
+    .split(".")
+    .map((part) => Number.parseInt(part, 10) || 0);
+}
+
+/**
+ * The release an agent can update to: the server's signed release when it is newer than the
+ * version the agent last reported. Agents too old to report a version are not flagged.
+ */
+export function agentUpdate(
+  host: Host,
+  release: string | null | undefined,
+): string | null {
+  if (!host.agent_id || host.agent_revoked || !host.agent_version || !release)
+    return null;
+  const have = versionParts(host.agent_version);
+  const offer = versionParts(release);
+  for (let i = 0; i < Math.max(have.length, offer.length); i++) {
+    const difference = (offer[i] ?? 0) - (have[i] ?? 0);
+    if (difference !== 0) return difference > 0 ? release : null;
+  }
+  return null;
+}

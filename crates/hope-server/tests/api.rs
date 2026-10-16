@@ -1448,3 +1448,44 @@ async fn device_types_can_be_set_by_hand_and_scan_intervals_are_validated() {
     .await;
     assert_eq!(default["interval_minutes"], 5);
 }
+
+#[tokio::test]
+async fn reports_record_the_agent_version_and_bootstrap_names_the_release_on_offer() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let report = AgentReport {
+        schema_version: 1,
+        report_id: Uuid::new_v4().to_string(),
+        agent_id: agent,
+        collected_at: now(),
+        inventory: None,
+        metrics: Metrics::default(),
+        collectors: vec![],
+    };
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/agent/report")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {credential}"))
+                .header("user-agent", "hope-agent/0.1.57")
+                .body(Body::from(json!(report).to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let (_, bootstrap) = request(
+        &app,
+        "GET",
+        "/api/v1/bootstrap",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(bootstrap["hosts"][0]["agent_version"], "0.1.57");
+    // No signed release in the test release directory, so none is on offer.
+    assert_eq!(bootstrap["agent_release"], Value::Null);
+}
