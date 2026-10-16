@@ -66,6 +66,7 @@ import { api, del, post, put } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 import {
   HOST_FILTERS,
+  HOST_FILTER_HINTS,
   hostState,
   matchesFilter,
   matchesSearch,
@@ -191,6 +192,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
   const [location, setLocation] = useState(readLocation);
+  // The inventory view a host page returns to and keeps highlighted.
+  const [lastInventory, setLastInventory] = useState<
+    "map" | "hosts" | "agents"
+  >(() =>
+    location.view === "map" || location.view === "agents"
+      ? location.view
+      : "hosts",
+  );
   const view = location.view;
   const selected = location.host;
   const [mode, setMode] = useState<Mode>("topology");
@@ -282,7 +291,16 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     const fallback = setInterval(() => {
       void refresh();
     }, 15000);
-    const navigate = () => setLocation(readLocation());
+    const navigate = () => {
+      const next = readLocation();
+      if (
+        next.view === "map" ||
+        next.view === "hosts" ||
+        next.view === "agents"
+      )
+        setLastInventory(next.view);
+      setLocation(next);
+    };
     window.addEventListener("popstate", navigate);
     return () => {
       clearTimeout(initialRefresh);
@@ -294,6 +312,12 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   }, [refresh]);
   const go = useCallback(
     (next: Partial<{ view: View; host: string | null }>) => {
+      if (
+        next.view === "map" ||
+        next.view === "hosts" ||
+        next.view === "agents"
+      )
+        setLastInventory(next.view);
       setLocation((current) => {
         const target = { ...current, ...next };
         const url = new URL(window.location.href);
@@ -460,12 +484,6 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     setNetwork("all");
     setView(next);
   };
-  // The inventory view a host page returns to.
-  const lastInventory = useRef<"map" | "hosts" | "agents">("hosts");
-  useEffect(() => {
-    if (view === "map" || view === "hosts" || view === "agents")
-      lastInventory.current = view;
-  }, [view]);
   const selectHost = useCallback(
     (target: Host) => {
       if (
@@ -480,8 +498,8 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     [go, select, view],
   );
   const closeHostPage = useCallback(
-    () => go({ view: lastInventory.current, host: null }),
-    [go],
+    () => go({ view: lastInventory, host: null }),
+    [go, lastInventory],
   );
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -612,9 +630,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       aria-label={label}
       aria-current={
         view === target ||
-        (target === "agents" &&
-          view === "host" &&
-          lastInventory.current === "agents")
+        (target === "agents" && view === "host" && lastInventory === "agents")
           ? "page"
           : undefined
       }
@@ -638,7 +654,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             aria-current={
               view === "map" ||
               view === "hosts" ||
-              (view === "host" && lastInventory.current !== "agents")
+              (view === "host" && lastInventory !== "agents")
                 ? "page"
                 : undefined
             }
@@ -1021,7 +1037,16 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                   </div>
                 </div>
                 {hosts.length > 0 && (
-                  <div className="chip-row" role="group" aria-label="Status">
+                  <div
+                    className="chip-row"
+                    role="group"
+                    aria-label="Status"
+                    aria-describedby={
+                      HOST_FILTER_HINTS[statusFilter]
+                        ? "host-filter-help"
+                        : undefined
+                    }
+                  >
                     {HOST_FILTERS.map((option) => {
                       const count = hosts.filter(
                         (h) =>
@@ -1041,6 +1066,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                           key={option.key}
                           type="button"
                           className="chip"
+                          title={HOST_FILTER_HINTS[option.key]}
                           aria-pressed={statusFilter === option.key}
                           onClick={() => setStatusFilter(option.key)}
                         >
@@ -1066,6 +1092,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                         </Button>
                       )}
                   </div>
+                )}
+                {HOST_FILTER_HINTS[statusFilter] && (
+                  <p
+                    id="host-filter-help"
+                    className="border-b px-4 py-3 text-xs text-muted-foreground"
+                  >
+                    {HOST_FILTER_HINTS[statusFilter]}
+                  </p>
                 )}
                 {!hosts.length ? (
                   <Empty className="min-h-[480px]">

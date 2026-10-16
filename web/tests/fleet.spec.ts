@@ -305,6 +305,7 @@ test("filters, search and sorting", () => {
   expect(matchesFilter(a, "reporting", now)).toBeTruthy();
   expect(matchesFilter(b, "unobserved", now)).toBeTruthy();
   expect(matchesFilter(a, "attention", now)).toBeTruthy();
+  expect(matchesFilter(a, "unobserved", now)).toBeFalsy();
   expect(matchesFilter(b, "attention", now)).toBeTruthy();
   expect(matchesSearch(b, "macos")).toBeTruthy();
   expect(matchesSearch(a, "22 ssh")).toBeTruthy();

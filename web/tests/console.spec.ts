@@ -1290,6 +1290,7 @@ test.describe.serial("H.O.P.E console", () => {
         .getByRole("button", { name: "Add network" }),
     ).toHaveCount(0);
     await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 844 });
     expect(
       await page.evaluate(

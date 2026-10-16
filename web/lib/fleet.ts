@@ -318,6 +318,11 @@ export const HOST_FILTERS: { key: HostFilter; label: string }[] = [
   { key: "unobserved", label: "Unobserved" },
   { key: "revoked", label: "Revoked" },
 ];
+export const HOST_FILTER_HINTS: Partial<Record<HostFilter, string>> = {
+  attention:
+    "Includes devices not seen recently, agents not reporting, and reported resource, service or monitor problems.",
+  unobserved: `Devices without an agent that have not been seen for ${OBSERVED_SECONDS / 60} minutes or more. These also appear under Needs attention; this does not prove they are offline.`,
+};
 export function matchesFilter(
   host: Host,
   filter: HostFilter,
