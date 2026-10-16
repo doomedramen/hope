@@ -17,6 +17,7 @@ import {
   type Edge,
 } from "@xyflow/react";
 import { Bot, Router, Network as NetworkIcon } from "lucide-react";
+import { ipValue } from "@/lib/fleet";
 import type { Host, MapEdit, MapState, Network } from "@/lib/protocol";
 import { percent0 } from "@/lib/api";
 import { Meter } from "@/components/ui/meter";
@@ -38,8 +39,29 @@ type Data = {
   health: boolean;
   tone: Tone;
 };
-type HopeNode = Node<Data, "hope">;
-function DeviceNode({ data, selected }: NodeProps<HopeNode>) {
+type SubnetData = {
+  label: string;
+  cidr: string;
+  members: number;
+  responding: number;
+};
+type HopeNode = Node<Data, "hope"> | Node<SubnetData, "subnet">;
+/** A range drawn as a container: membership is a grouping, not a relationship, so it needs no edges. */
+function SubnetNode({ data }: NodeProps<Node<SubnetData, "subnet">>) {
+  return (
+    <div className="subnet-group" data-testid="subnet-group">
+      <header>
+        <NetworkIcon size={14} />
+        <strong>{data.label}</strong>
+        <span className="mono">{data.cidr}</span>
+        <span className="ml-auto">
+          {data.responding} / {data.members} responding
+        </span>
+      </header>
+    </div>
+  );
+}
+function DeviceNode({ data, selected }: NodeProps<Node<Data, "hope">>) {
   const state = data.host ? hostState(data.host) : null;
   const cpu = data.host ? cpuPercent(data.host) : null;
   const memory = data.host ? memoryUsage(data.host) : null;
@@ -106,7 +128,19 @@ function DeviceNode({ data, selected }: NodeProps<HopeNode>) {
     </div>
   );
 }
-const nodeTypes = { hope: DeviceNode };
+const nodeTypes = { hope: DeviceNode, subnet: SubnetNode };
+const NODE_WIDTH = 232;
+const COLUMN_PITCH = 256;
+const GROUP_PADDING = 20;
+const GROUP_HEADER = 54;
+/** What a discovered host is, when its name is only its address. */
+function describe(host: Host) {
+  if (host.inventory) return host.inventory.os;
+  const method = host.discovery_method.toUpperCase();
+  return host.services.length
+    ? `${method} · ${host.services.length} ${host.services.length === 1 ? "service" : "services"}`
+    : `Found by ${method}`;
+}
 function InitialViewport() {
   const initialized = useNodesInitialized();
   const { fitView } = useReactFlow();
@@ -181,128 +215,137 @@ export function NetworkMap({
       moving[`${mode}:${id}`] ??
       layout.positions.find((p) => p.id === `${mode}:${id}`) ??
       fallback;
+    const rowPitch = mode === "health" ? 186 : 118;
     const groups = [
       ...networks.map((n) => ({ id: n.id, label: n.name, cidr: n.cidr })),
       {
         id: "ungrouped",
         label: "Other hosts",
-        cidr: "Outside configured ranges",
+        cidr: "outside configured ranges",
       },
     ];
     let offset = 0;
     for (const group of groups) {
-      const members = hosts.filter(
-        (h) =>
-          (networks.find((n) => h.network_ids.includes(n.id))?.id ??
-            "ungrouped") === group.id,
-      );
+      const members = hosts
+        .filter(
+          (h) =>
+            (networks.find((n) => h.network_ids.includes(n.id))?.id ??
+              "ungrouped") === group.id,
+        )
+        .sort(
+          (a, b) =>
+            ipValue(a.addresses[0]) - ipValue(b.addresses[0]) ||
+            a.name.localeCompare(b.name),
+        );
       if (!members.length && group.id === "ungrouped") continue;
       const columns = Math.min(
-        8,
-        Math.max(2, Math.ceil(Math.sqrt(members.length))),
+        6,
+        Math.max(2, Math.ceil(Math.sqrt(members.length || 1))),
+      );
+      const rows = Math.max(1, Math.ceil(members.length / columns));
+      // Positions are relative to the container; a host dragged past the grid enlarges it.
+      const placed = members.map((host, index) =>
+        position(host.id, {
+          x: GROUP_PADDING + (index % columns) * COLUMN_PITCH,
+          y:
+            GROUP_HEADER +
+            GROUP_PADDING +
+            Math.floor(index / columns) * rowPitch,
+        }),
+      );
+      const width = Math.max(
+        GROUP_PADDING * 2 + (columns - 1) * COLUMN_PITCH + NODE_WIDTH,
+        ...placed.map((p) => p.x + NODE_WIDTH + GROUP_PADDING),
+      );
+      const height = Math.max(
+        GROUP_HEADER + GROUP_PADDING + rows * rowPitch + GROUP_PADDING / 2,
+        ...placed.map((p) => p.y + rowPitch),
       );
       const x = offset;
-      const center = (columns - 1) * 140 + 20;
-      offset += columns * 280 + 60;
+      offset += width + 80;
       const root = `network-${group.id}`;
       nodes.push({
         id: root,
-        type: "hope",
-        position: position(root, {
-          x: x + center,
-          y: mode === "subnets" ? 0 : -300,
-        }),
+        type: "subnet",
+        position: { x, y: 0 },
+        style: { width, height },
         data: {
           label: group.label,
-          subtitle: group.cidr,
-          kind: "network",
-          health: false,
-          tone: "neutral",
+          cidr: group.cidr,
+          members: members.length,
+          responding: members.filter((h) => hostState(h).tone === "good")
+            .length,
         },
         draggable: false,
+        selectable: false,
         connectable: false,
       });
       members.forEach((host, index) => {
         nodes.push({
           id: host.id,
           type: "hope",
-          position: position(host.id, {
-            x: x + (index % columns) * 280,
-            y: 160 + Math.floor(index / columns) * 190,
-          }),
+          parentId: root,
+          extent: "parent",
+          position: placed[index],
           selected: selected === host.id,
           data: {
             label: host.name,
-            subtitle: host.addresses.join(", "),
+            subtitle:
+              host.name === host.addresses[0]
+                ? describe(host)
+                : host.addresses.join(", "),
             host,
             kind: "host",
             health: mode === "health",
             tone: hostState(host).tone,
           },
         });
-        if (mode === "subnets") {
-          if (group.id !== "ungrouped")
-            edges.push({
-              id: `${root}-${host.id}`,
-              source: root,
-              target: host.id,
-              label: "Member",
-              className: "membership-edge",
-              type: "smoothstep",
-            });
-        } else {
-          const gateway = host.inventory?.interfaces.find(
-            (i) => i.gateway,
-          )?.gateway;
-          if (gateway) {
-            const gatewayHost = hosts.find((h) =>
-              h.addresses.includes(gateway),
-            );
-            const source = gatewayHost?.id ?? `gateway-${group.id}-${gateway}`;
-            if (!gatewayHost && !nodes.some((n) => n.id === source))
-              nodes.push({
-                id: source,
-                type: "hope",
-                position: position(source, { x: x + center, y: -150 }),
-                data: {
-                  label: gateway,
-                  subtitle: "Reported default gateway",
-                  kind: "gateway",
-                  health: false,
-                  tone: "neutral",
-                },
-                connectable: false,
-              });
-            if (source !== host.id)
-              edges.push({
-                id: `gateway-${source}-${host.id}`,
-                source,
-                target: host.id,
-                label: "Reported gateway",
-                type: "smoothstep",
-              });
-          } else if (group.id !== "ungrouped")
-            edges.push({
-              id: `${root}-${host.id}`,
-              source: root,
-              target: host.id,
-              label: "Subnet membership",
-              className: "membership-edge",
-              type: "smoothstep",
-            });
-        }
+        if (mode === "subnets") return;
+        // The only automatic relationship an agent can vouch for: its default gateway.
+        const gateway = host.inventory?.interfaces.find(
+          (i) => i.gateway,
+        )?.gateway;
+        if (!gateway) return;
+        const gatewayHost = hosts.find((h) => h.addresses.includes(gateway));
+        const source = gatewayHost?.id ?? `gateway-${group.id}-${gateway}`;
+        if (!gatewayHost && !nodes.some((n) => n.id === source))
+          nodes.push({
+            id: source,
+            type: "hope",
+            position: position(source, {
+              x: x + width / 2 - NODE_WIDTH / 2,
+              y: -150,
+            }),
+            data: {
+              label: gateway,
+              subtitle: "Reported default gateway",
+              kind: "gateway",
+              health: false,
+              tone: "neutral",
+            },
+            connectable: false,
+          });
+        if (source !== host.id)
+          edges.push({
+            id: `gateway-${source}-${host.id}`,
+            source,
+            target: host.id,
+            type: "smoothstep",
+            className: "gateway-edge",
+          });
       });
     }
-    for (const link of layout.links)
-      if (visibleIds.has(link.source) && visibleIds.has(link.target))
-        edges.push({
-          id: `manual-${link.id}`,
-          source: link.source,
-          target: link.target,
-          label: `${link.label || "Connection"} · Manual`,
-          type: "smoothstep",
-          className: "manual-edge",
-        });
+    if (mode !== "subnets")
+      for (const link of layout.links)
+        if (visibleIds.has(link.source) && visibleIds.has(link.target))
+          edges.push({
+            id: `manual-${link.id}`,
+            source: link.source,
+            target: link.target,
+            label: `${link.label || "Connection"} · Manual`,
+            type: "smoothstep",
+            className: "manual-edge",
+          });
     return {
       nodes: nodes.map((node) => ({
         ...node,
@@ -343,7 +386,8 @@ export function NetworkMap({
         minZoom={0.02}
         maxZoom={1.6}
         onNodeClick={(_, node) => {
-          if (node.data.host) onSelect(node.id);
+          if (node.type === "hope" && (node.data as Data).host)
+            onSelect(node.id);
         }}
         onNodeDrag={(_, node) =>
           setMoving((previous) => ({
@@ -393,7 +437,11 @@ export function NetworkMap({
           <MiniMap
             pannable
             zoomable
-            nodeColor={(node) => TONE_COLORS[(node.data as Data).tone]}
+            nodeColor={(node) =>
+              node.type === "subnet"
+                ? "var(--muted)"
+                : TONE_COLORS[(node.data as Data).tone]
+            }
             nodeStrokeWidth={0}
             maskColor="color-mix(in srgb, var(--background) 70%, transparent)"
           />
@@ -401,21 +449,25 @@ export function NetworkMap({
       </ReactFlow>
       <div className="map-legend">
         <span>
-          <i className="legend-line" />
-          Reported relationship
+          <i className="legend-box" />
+          Range (hosts grouped by subnet)
         </span>
-        <span>
-          <i className="legend-line dashed" />
-          Subnet membership
-        </span>
-        <span>
-          <i className="legend-line manual" />
-          Manual link
-        </span>
-        <span>
-          Drag handles to add manual links. Double-click a manual link to remove
-          it.
-        </span>
+        {mode !== "subnets" && (
+          <>
+            <span>
+              <i className="legend-line" />
+              Reported gateway
+            </span>
+            <span>
+              <i className="legend-line manual" />
+              Manual link
+            </span>
+            <span>
+              Drag handles to add manual links. Double-click a manual link to
+              remove it.
+            </span>
+          </>
+        )}
       </div>
     </div>
   );

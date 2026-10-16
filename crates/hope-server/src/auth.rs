@@ -48,10 +48,8 @@ pub async fn setup(
         state.0.login_limit.hit(&setup_key, now());
         return Err(ApiError::unauthorized());
     }
-    if body.password.len() < 12 || body.password.len() > 256 {
-        return Err(ApiError::bad(
-            "Use a password between 12 and 256 characters",
-        ));
+    if body.password.len() < 8 || body.password.len() > 256 {
+        return Err(ApiError::bad("Use a password between 8 and 256 characters"));
     }
     let password = body.password;
     let _permit = hash_permit(&state).await?;

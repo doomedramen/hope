@@ -364,3 +364,18 @@ export function matchesSearch(host: Host, query: string) {
     .toLowerCase()
     .includes(needle);
 }
+
+/** Numeric value of a dotted IPv4 address for sorting; anything else sorts last. */
+export function ipValue(address: string | undefined): number {
+  if (!address) return Number.MAX_SAFE_INTEGER;
+  const parts = address.split(".");
+  if (parts.length !== 4) return Number.MAX_SAFE_INTEGER - 1;
+  let value = 0;
+  for (const part of parts) {
+    const octet = Number(part);
+    if (!Number.isInteger(octet) || octet < 0 || octet > 255)
+      return Number.MAX_SAFE_INTEGER - 1;
+    value = value * 256 + octet;
+  }
+  return value;
+}

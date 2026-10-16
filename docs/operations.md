@@ -94,7 +94,7 @@ A minimal Caddy site, `hope.example.com { reverse_proxy 127.0.0.1:8080 }`, is th
 
 ## First-run setup
 
-While no administrator exists, every start prints `H.O.P.E first-run setup token: <token>` to standard error (`docker compose logs hope`). A new random token is generated on each start unless `HOPE_SETUP_TOKEN` is set; only its SHA-256 is stored. The console asks for this token plus a password of 12 to 256 characters (hashed with Argon2). Failed attempts are rate limited per client. Setup can run only once.
+While no administrator exists, every start prints `H.O.P.E first-run setup token: <token>` to standard error (`docker compose logs hope`). A new random token is generated on each start unless `HOPE_SETUP_TOKEN` is set; only its SHA-256 is stored. The console asks for this token plus a password of 8 to 256 characters (hashed with Argon2). Failed attempts are rate limited per client. Setup can run only once.
 
 There is no password-reset command. If the password is lost, restore a database backup taken when the password was known, or accept re-creating the database (which discards all history and enrollments). Sessions last 24 hours (`hope_session` cookie, `HttpOnly`, `SameSite=Strict`).
 

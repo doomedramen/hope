@@ -290,7 +290,8 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByRole("button", { name: "Map", exact: true }).click();
     await page.getByRole("button", { name: "Subnets", exact: true }).click();
-    await expect(page.locator(".membership-edge").first()).toBeAttached();
+    await expect(page.getByTestId("subnet-group").first()).toBeVisible();
+    await expect(page.locator(".react-flow__edge")).toHaveCount(0);
     await expectMapFits(page);
     await page.screenshot({
       path: "test-results/hope-subnets.png",
@@ -365,16 +366,17 @@ test.describe.serial("H.O.P.E console", () => {
     const other = data.hosts.find(
       (h: { name: string }) => h.name === "studio-mac",
     );
-    for (const [mode, x] of [
-      ["topology", 125],
-      ["health", 450],
+    // Positions are relative to the host's subnet container; both land on empty grid cells.
+    for (const [mode, x, y] of [
+      ["topology", 276, 310],
+      ["health", 20, 446],
     ] as const) {
       expect(
         (
           await request.patch("/api/v1/map", {
             data: {
               operation: "set_position",
-              position: { id: `${mode}:${host.id}`, x, y: 200 },
+              position: { id: `${mode}:${host.id}`, x, y },
             },
           })
         ).ok(),
@@ -382,7 +384,7 @@ test.describe.serial("H.O.P.E console", () => {
     }
     await page.goto("/?view=map");
     const node = page.locator(`[data-id="${host.id}"]`);
-    await expect(node).toHaveAttribute("style", /translate\(125px, 200px\)/);
+    await expect(node).toHaveAttribute("style", /translate\(276px, 310px\)/);
     await expectMapFits(page);
     let rejectFirstSave = true;
     await page.route("**/api/v1/map", (route) => {
@@ -416,14 +418,14 @@ test.describe.serial("H.O.P.E console", () => {
         const x = state.map.positions.find(
           (p: { id: string }) => p.id === `topology:${host.id}`,
         )?.x;
-        return typeof x === "number" && x !== 125;
+        return typeof x === "number" && x !== 276;
       })
       .toBeTruthy();
     const saved = (
       await (await request.get("/api/v1/bootstrap")).json()
     ).map.positions.find((p: { id: string }) => p.id === `topology:${host.id}`);
     await page.getByRole("button", { name: "Health", exact: true }).click();
-    await expect(node).toHaveAttribute("style", /translate\(450px, 200px\)/);
+    await expect(node).toHaveAttribute("style", /translate\(20px, 446px\)/);
     await page.getByRole("button", { name: "Topology", exact: true }).click();
     await expect
       .poll(async () => {

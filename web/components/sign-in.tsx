@@ -137,7 +137,7 @@ export function SignIn({
                   id="password"
                   type="password"
                   required
-                  minLength={setup ? 12 : undefined}
+                  minLength={setup ? 8 : undefined}
                   maxLength={256}
                   autoComplete={setup ? "new-password" : "current-password"}
                   value={password}
@@ -145,7 +145,7 @@ export function SignIn({
                 />
                 {setup && (
                   <FieldDescription>
-                    Use at least 12 characters. There is one account; keep it
+                    Use at least 8 characters. There is one account; keep it
                     safe.
                   </FieldDescription>
                 )}
