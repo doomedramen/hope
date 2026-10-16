@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Area,
   CartesianGrid,
@@ -30,11 +30,27 @@ import type { MetricPoint, Metrics } from "@/lib/protocol";
 
 export type HistoryWindow = "1" | "6" | "24" | "168";
 
-/** Loads one host's history for a window; refetches when a new report arrives. */
+/** Seconds per point the server averages each window into; 0 keeps raw samples. */
+const BUCKET_SECONDS: Record<HistoryWindow, number> = {
+  "1": 0,
+  "6": 0,
+  "24": 120,
+  "168": 900,
+};
+/** Raw windows still reload now and then so the server's stored samples replace live ones. */
+const RAW_RELOAD_SECONDS = 600;
+
+/**
+ * Loads one host's history for a window and keeps it live: each new report the
+ * host carries is appended as it arrives, and the window slides with it. The
+ * stored history is reloaded when an averaging bucket closes (or every ten
+ * minutes for raw windows), which folds the live points back into it.
+ */
 export function useHistory(
   hostId: string,
   hours: HistoryWindow,
-  lastReport: number | null,
+  collectedAt: number | null,
+  latest: Metrics | null,
 ) {
   const [result, setResult] = useState<{
     hostId: string;
@@ -42,14 +58,34 @@ export function useHistory(
     points: MetricPoint[];
   } | null>(null);
   const [error, setError] = useState("");
-  const [windowEnd, setWindowEnd] = useState(() => Date.now() / 1000);
+  const [fetchedAt, setFetchedAt] = useState(() => Date.now() / 1000);
+  const [live, setLive] = useState<{
+    hostId: string;
+    points: MetricPoint[];
+  }>({ hostId, points: [] });
+  // Append the host's newest sample while rendering, React's pattern for state
+  // derived from a changing prop; an effect would paint the stale chart first.
+  const newest = live.points.at(-1)?.collected_at ?? 0;
+  if (live.hostId !== hostId) setLive({ hostId, points: [] });
+  else if (collectedAt && latest && collectedAt > newest)
+    setLive({
+      hostId,
+      points: [
+        ...live.points.filter(
+          (point) => point.collected_at > collectedAt - 7 * 86400,
+        ),
+        { collected_at: collectedAt, resolution_seconds: 30, metrics: latest },
+      ],
+    });
+  const bucket = BUCKET_SECONDS[hours] || RAW_RELOAD_SECONDS;
+  const reload = collectedAt ? Math.floor(collectedAt / bucket) : 0;
   useEffect(() => {
     let alive = true;
     api<MetricPoint[]>(`/hosts/${hostId}/metrics?hours=${hours}`)
       .then((p) => {
         if (alive) {
           setResult({ hostId, hours, points: p });
-          setWindowEnd(Date.now() / 1000);
+          setFetchedAt(Date.now() / 1000);
           setError("");
         }
       })
@@ -59,9 +95,19 @@ export function useHistory(
     return () => {
       alive = false;
     };
-  }, [hostId, hours, lastReport]);
-  const points =
+  }, [hostId, hours, reload]);
+  const stored =
     result?.hostId === hostId && result.hours === hours ? result.points : null;
+  const points = useMemo(() => {
+    if (!stored) return null;
+    const through = stored.at(-1)?.collected_at ?? 0;
+    const fresh =
+      live.hostId === hostId
+        ? live.points.filter((point) => point.collected_at > through)
+        : [];
+    return fresh.length ? [...stored, ...fresh] : stored;
+  }, [stored, live, hostId]);
+  const windowEnd = Math.max(fetchedAt, collectedAt ?? 0);
   return {
     points,
     error,

@@ -80,7 +80,12 @@ export function HostDetails({
   const update = agentUpdate(host, agentRelease);
   const state = hostState(host);
   const issues = hostIssues(host);
-  const history = useHistory(host.id, hours, host.last_report);
+  const history = useHistory(
+    host.id,
+    hours,
+    host.last_collected_at,
+    host.metrics,
+  );
   async function revoke() {
     try {
       await post(`/agents/${host.agent_id}/revoke`);

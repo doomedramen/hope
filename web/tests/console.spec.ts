@@ -871,7 +871,7 @@ test.describe.serial("H.O.P.E console", () => {
     await page.goto("/?view=hosts");
     const row = page.getByRole("row", { name: /live-node/ });
     await expect(row).toBeVisible();
-    for (const cpu of [37, 64]) {
+    const report = async (cpu: number) => {
       const response = await request.post("/api/v1/agent/report", {
         headers: { authorization: `Bearer ${credential}` },
         data: {
@@ -895,9 +895,28 @@ test.describe.serial("H.O.P.E console", () => {
         },
       });
       expect(response.ok()).toBeTruthy();
+    };
+    for (const cpu of [37, 64]) {
+      await report(cpu);
       // Well inside the 15-second fallback reload: the event itself carried the figures.
       await expect(row).toContainText(`${cpu}%`, { timeout: 5000 });
     }
+    // History stores one sample per 30 seconds, so these reports seconds apart
+    // reach the chart only as live points.
+    await row.getByText("live-node", { exact: true }).click();
+    const cpu = page
+      .getByRole("complementary", { name: "Host details" })
+      .getByTestId("chart-CPU");
+    await expect(cpu).toContainText("64%");
+    await report(81);
+    await expect(cpu).toContainText("81%", { timeout: 5000 });
+    // Averaged windows show the live points after their last bucket too.
+    await page
+      .getByRole("group", { name: "History window" })
+      .getByText("24h", { exact: true })
+      .click();
+    await expect(cpu).toContainText("81%");
+    await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByRole("button", { name: "Networks", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Networks" });
     await dialog
