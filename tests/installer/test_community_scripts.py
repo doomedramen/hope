@@ -47,6 +47,17 @@ class CtScript(unittest.TestCase):
         body = CT[CT.index('function update_script'):]
         self.assertRegex(body, r'\n  exit\n\}')
 
+    def test_update_migrates_the_previous_layout_before_the_branch_check(self):
+        # The first pair kept the binary in /opt/hope/bin and the console in /opt/hope/web, which
+        # fetch_and_deploy_gh_branch replaces with the checkout; such a container must be rewired
+        # (unit, hope.env, releases, version file) before the branch is deployed.
+        self.assertLess(CT.index('ExecStart=/opt/hope/bin/hope-server'), CT.index('check_for_gh_branch'))
+        for needle in ('HOPE_WEB_DIR=/opt/hope/web/out', 'HOPE_RELEASE_DIR=/var/lib/hope/releases',
+                       'ExecStart=/usr/local/bin/hope-server', 'systemctl daemon-reload', 'rm -f /root/.hope'):
+            self.assertIn(needle, CT)
+        self.assertEqual(CT[CT.index('[Unit]'):CT.index('EOF\n    systemctl daemon-reload')],
+                         INSTALL[INSTALL.index('[Unit]'):INSTALL.index('EOF\nsystemctl enable -q --now hope')])
+
     def test_resources_match_the_metadata(self):
         resources = META['install_methods'][0]['resources']
         self.assertIn(f'var_cpu="${{var_cpu:-{resources["cpu"]}}}"', CT)

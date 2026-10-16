@@ -44,6 +44,43 @@ function update_script() {
     exit
   fi
 
+  # Containers built before the branch-tracking layout kept the binary and console under /opt/hope,
+  # which is now the checkout; move their unit, settings and releases over and force a rebuild.
+  if grep -q '^ExecStart=/opt/hope/bin/hope-server' /etc/systemd/system/hope.service 2>/dev/null; then
+    msg_info "Migrating H.O.P.E to the current layout"
+    systemctl stop hope
+    mkdir -p /var/lib/hope/releases
+    [[ -d /opt/hope/releases ]] && cp -a /opt/hope/releases/. /var/lib/hope/releases/
+    [[ -f /opt/hope/bin/hope-server ]] && install -m 755 /opt/hope/bin/hope-server /usr/local/bin/hope-server
+    sed -i -e 's|^HOPE_WEB_DIR=.*|HOPE_WEB_DIR=/opt/hope/web/out|' -e 's|^HOPE_RELEASE_DIR=.*|HOPE_RELEASE_DIR=/var/lib/hope/releases|' /etc/hope/hope.env
+    grep -q '^HOPE_SETUP_TOKEN=' /etc/hope/hope.env || echo "HOPE_SETUP_TOKEN=$(random_password 32)" >>/etc/hope/hope.env
+    chmod 600 /etc/hope/hope.env
+    cat <<EOF >/etc/systemd/system/hope.service
+[Unit]
+Description=H.O.P.E network observatory
+Documentation=https://github.com/doomedramen/hope
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/hope/hope.env
+WorkingDirectory=/var/lib/hope
+ExecStart=/usr/local/bin/hope-server
+Restart=on-failure
+RestartSec=5
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hope
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    rm -f /root/.hope
+    msg_ok "Migrated H.O.P.E to the current layout"
+  fi
+
   if check_for_gh_branch "hope" "doomedramen/hope" "main"; then
     msg_info "Stopping Service"
     systemctl stop hope
