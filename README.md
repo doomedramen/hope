@@ -64,7 +64,7 @@ Only what is evidenced is claimed. "Supported" in the first release will mean th
 
 ## Install in one command
 
-**Proxmox VE** (a Debian LXC container, built by the [community-scripts](https://github.com/community-scripts/ProxmoxVE) engine with its usual default/advanced settings; `update` inside the container rebuilds the current `main` commit, exactly as it does for any community script):
+**Proxmox VE** (a Debian LXC container, built by the [community-scripts](https://github.com/community-scripts/ProxmoxVE) engine with its usual default/advanced settings; `update` inside the container installs the newest build, exactly as it does for any community script; 1 core, 512 MB RAM, 4 GB disk):
 
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct/hope.sh)"

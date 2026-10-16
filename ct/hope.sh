@@ -9,9 +9,9 @@ source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_
 
 APP="HOPE"
 var_tags="${var_tags:-monitoring;network}"
-var_cpu="${var_cpu:-2}"
-var_ram="${var_ram:-4096}"
-var_disk="${var_disk:-12}"
+var_cpu="${var_cpu:-1}"
+var_ram="${var_ram:-512}"
+var_disk="${var_disk:-4}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
 var_arm64="${var_arm64:-yes}"
@@ -39,23 +39,34 @@ function update_script() {
   check_container_storage
   check_container_resources
 
-  if [[ ! -d /opt/hope ]]; then
+  if [[ ! -f /etc/hope/hope.env ]]; then
     msg_error "No ${APP} Installation Found!"
     exit
   fi
 
-  # Containers built before the branch-tracking layout kept the binary and console under /opt/hope,
-  # which is now the checkout; move their unit, settings and releases over and force a rebuild.
-  if grep -q '^ExecStart=/opt/hope/bin/hope-server' /etc/systemd/system/hope.service 2>/dev/null; then
-    msg_info "Migrating H.O.P.E to the current layout"
+  if check_for_gh_release "hope" "doomedramen/hope"; then
+    msg_info "Stopping Service"
     systemctl stop hope
-    mkdir -p /var/lib/hope/releases
-    [[ -d /opt/hope/releases ]] && cp -a /opt/hope/releases/. /var/lib/hope/releases/
-    [[ -f /opt/hope/bin/hope-server ]] && install -m 755 /opt/hope/bin/hope-server /usr/local/bin/hope-server
-    sed -i -e 's|^HOPE_WEB_DIR=.*|HOPE_WEB_DIR=/opt/hope/web/out|' -e 's|^HOPE_RELEASE_DIR=.*|HOPE_RELEASE_DIR=/var/lib/hope/releases|' /etc/hope/hope.env
+    msg_ok "Stopped Service"
+
+    # Earlier installs compiled H.O.P.E in the container (a git checkout in /opt/hope, or binaries
+    # in /opt/hope/bin). Keep their agent releases, then drop the checkout and the toolchains; the
+    # toolchain records go too, or the engine would reinstall them before the next update.
+    if [[ -d /opt/hope/.git || -d /opt/hope/bin ]]; then
+      msg_info "Removing the H.O.P.E source build"
+      mkdir -p /var/lib/hope/releases
+      [[ -d /opt/hope/releases ]] && cp -a /opt/hope/releases/. /var/lib/hope/releases/
+      rm -rf /opt/hope "$HOME/.cargo" "$HOME/.rustup"
+      rm -f /var/cache/app-versions/rust_version.txt /var/cache/app-versions/nodejs_version.txt
+      $STD apt purge -y nodejs build-essential cmake pkg-config
+      $STD apt autoremove -y
+      msg_ok "Removed the H.O.P.E source build"
+    fi
+    sed -i -e 's|^HOPE_WEB_DIR=.*|HOPE_WEB_DIR=/opt/hope/web|' -e 's|^HOPE_RELEASE_DIR=.*|HOPE_RELEASE_DIR=/var/lib/hope/releases|' /etc/hope/hope.env
     grep -q '^HOPE_SETUP_TOKEN=' /etc/hope/hope.env || echo "HOPE_SETUP_TOKEN=$(random_password 32)" >>/etc/hope/hope.env
     chmod 600 /etc/hope/hope.env
-    cat <<EOF >/etc/systemd/system/hope.service
+    if ! grep -q '^ExecStart=/usr/local/bin/hope-server$' /etc/systemd/system/hope.service; then
+      cat <<EOF >/etc/systemd/system/hope.service
 [Unit]
 Description=H.O.P.E network observatory
 Documentation=https://github.com/doomedramen/hope
@@ -76,28 +87,11 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    rm -f /root/.hope
-    msg_ok "Migrated H.O.P.E to the current layout"
-  fi
+      systemctl daemon-reload
+    fi
 
-  if check_for_gh_branch "hope" "doomedramen/hope" "main"; then
-    msg_info "Stopping Service"
-    systemctl stop hope
-    msg_ok "Stopped Service"
-
-    setup_rust
-    NODE_VERSION="22" setup_nodejs
-    fetch_and_deploy_gh_branch "hope" "doomedramen/hope" "main"
-
-    msg_info "Building H.O.P.E (Patience)"
-    cd /opt/hope/web
-    $STD npm ci --no-audit --no-fund
-    $STD npm run build
-    cd /opt/hope
-    CARGO_BUILD_JOBS="$(get_parallel_jobs)" $STD cargo build --release --locked -p hope-server
-    install -m 755 target/release/hope-server /usr/local/bin/hope-server
-    msg_ok "Built H.O.P.E"
+    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"
+    install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server
 
     msg_info "Starting Service"
     systemctl start hope

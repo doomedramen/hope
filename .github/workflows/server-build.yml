@@ -1,0 +1,104 @@
+name: Server build
+
+# Publishes the server for every push to main as a GitHub release, so installs and updates download
+# it instead of compiling (compiling needs about 4 GB of RAM; the server runs in far less). The
+# community-scripts container (ct/hope.sh) and scripts/install-hope.sh both take the release GitHub
+# marks as latest and its asset hope-server-<x86_64|aarch64>-linux.tar.gz.
+#
+# Tags are v<crate version>-build.<run number>, so every build is newer than the last and the
+# community-scripts update check sees it. Only the newest five builds are kept. Tags created with
+# the workflow token start no other workflow, so release.yml (signed agent releases on v* tags you
+# push yourself) is unaffected.
+#
+# Note: ubuntu-22.04-arm runners are free for public repositories only.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: server-build
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: server ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # The oldest supported glibc, so the binary runs on newer distributions too.
+          - { arch: x86_64, runner: ubuntu-22.04 }
+          - { arch: aarch64, runner: ubuntu-22.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+      - run: sh scripts/package-server.sh --out dist/server
+      - name: Smoke-test the packaged binary
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkg"
+          tar -xzf dist/server/hope-server-${{ matrix.arch }}-linux.tar.gz -C "$RUNNER_TEMP/pkg"
+          test -f "$RUNNER_TEMP/pkg/web/index.html"
+          "$RUNNER_TEMP/pkg/hope-server" export-types | grep -q "export type Host"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.arch }}
+          path: dist/server/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: server-*
+          path: dist/server
+          merge-multiple: true
+      - name: Merge the per-architecture checksum files
+        run: |
+          cd dist/server
+          sort -u -k2 SHA256SUMS-server -o SHA256SUMS-server
+          sha256sum -c SHA256SUMS-server
+          ls -l
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.run_number }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          tag="v${version}-build.${RUN}"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "H.O.P.E ${version} build ${RUN}" \
+            --notes "Automatic build of ${GITHUB_SHA::7} on main: the server and console for x86_64 and aarch64 Linux (glibc 2.35 or newer). Installed and updated by ct/hope.sh and scripts/install-hope.sh." \
+            dist/server/hope-server-*-linux.tar.gz dist/server/SHA256SUMS-server
+      - name: Keep only the newest five builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("-build\\.[0-9]+$"))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+            while read -r old; do
+              gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+            done

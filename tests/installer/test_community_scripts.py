@@ -37,26 +37,37 @@ class CtScript(unittest.TestCase):
                        'header_info "$APP"\nvariables\ncolor\ncatch_errors', 'start\nbuild_container\ndescription'):
             self.assertIn(needle, CT)
 
-    def test_update_tracks_the_branch_and_rebuilds(self):
-        self.assertIn('check_for_gh_branch "hope" "doomedramen/hope" "main"', CT)
-        self.assertIn('fetch_and_deploy_gh_branch "hope" "doomedramen/hope" "main"', CT)
-        self.assertNotRegex(CT, r'git (clone|pull)')
-        for command in ('systemctl stop hope', 'npm ci', 'npm run build', 'cargo build --release --locked -p hope-server',
-                        'install -m 755 target/release/hope-server /usr/local/bin/hope-server', 'systemctl start hope'):
+    def test_update_installs_the_latest_release_without_compiling(self):
+        self.assertIn('check_for_gh_release "hope" "doomedramen/hope"', CT)
+        self.assertIn('CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" '
+                      '"hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"', CT)
+        for command in ('systemctl stop hope', 'install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server',
+                        'systemctl start hope'):
             self.assertIn(command, CT)
+        for compiled in ('setup_rust', 'setup_nodejs', 'cargo build', 'npm ', 'check_for_gh_branch', 'fetch_and_deploy_gh_branch'):
+            self.assertNotIn(compiled, CT, compiled)
         body = CT[CT.index('function update_script'):]
         self.assertRegex(body, r'\n  exit\n\}')
 
-    def test_update_migrates_the_previous_layout_before_the_branch_check(self):
-        # The first pair kept the binary in /opt/hope/bin and the console in /opt/hope/web, which
-        # fetch_and_deploy_gh_branch replaces with the checkout; such a container must be rewired
-        # (unit, hope.env, releases, version file) before the branch is deployed.
-        self.assertLess(CT.index('ExecStart=/opt/hope/bin/hope-server'), CT.index('check_for_gh_branch'))
-        for needle in ('HOPE_WEB_DIR=/opt/hope/web/out', 'HOPE_RELEASE_DIR=/var/lib/hope/releases',
-                       'ExecStart=/usr/local/bin/hope-server', 'systemctl daemon-reload', 'rm -f /root/.hope'):
+    def test_update_removes_an_earlier_source_build_before_deploying(self):
+        # Earlier pairs compiled in the container: /opt/hope was a git checkout (or held bin/), and
+        # rustup and Node.js were installed with their records in /var/cache/app-versions, which the
+        # engine would use to reinstall them. All of that goes before the release is unpacked.
+        deploy = CT.index('fetch_and_deploy_gh_release')
+        for needle in ('/opt/hope/.git', 'rm -rf /opt/hope "$HOME/.cargo" "$HOME/.rustup"',
+                       '/var/cache/app-versions/rust_version.txt', '/var/cache/app-versions/nodejs_version.txt',
+                       'apt purge -y nodejs', 'cp -a /opt/hope/releases/. /var/lib/hope/releases/',
+                       'HOPE_WEB_DIR=/opt/hope/web|', 'HOPE_RELEASE_DIR=/var/lib/hope/releases|'):
             self.assertIn(needle, CT)
-        self.assertEqual(CT[CT.index('[Unit]'):CT.index('EOF\n    systemctl daemon-reload')],
+            self.assertLess(CT.index(needle), deploy, needle)
+        self.assertEqual(CT[CT.index('[Unit]'):CT.index('EOF\n      systemctl daemon-reload')],
                          INSTALL[INSTALL.index('[Unit]'):INSTALL.index('EOF\nsystemctl enable -q --now hope')])
+
+    def test_the_container_is_small(self):
+        resources = META['install_methods'][0]['resources']
+        self.assertLessEqual(resources['ram'], 512)
+        self.assertLessEqual(resources['hdd'], 4)
+        self.assertEqual(resources['cpu'], 1)
 
     def test_resources_match_the_metadata(self):
         resources = META['install_methods'][0]['resources']
@@ -74,11 +85,11 @@ class InstallScript(unittest.TestCase):
         self.assertEqual(functions(INSTALL), [])
 
     def test_uses_engine_helpers_not_hand_rolled_equivalents(self):
-        self.assertIn('setup_rust', INSTALL)
-        self.assertIn('NODE_VERSION="22" setup_nodejs', INSTALL)
-        self.assertIn('fetch_and_deploy_gh_branch "hope" "doomedramen/hope" "main"', INSTALL)
+        self.assertIn('fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" '
+                      '"hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"', INSTALL)
         self.assertIn('random_password', INSTALL)
-        for banned in ('apt-get', 'git clone', 'rustup.rs', 'nodesource', 'useradd', 'adduser', 'sudo ', '${APPLICATION}', '$APP'):
+        for banned in ('apt-get', 'git clone', 'rustup.rs', 'nodesource', 'useradd', 'adduser', 'sudo ', '${APPLICATION}', '$APP',
+                       'setup_rust', 'setup_nodejs', 'cargo ', 'npm ', 'curl '):
             self.assertNotIn(banned, INSTALL, banned)
 
     def test_every_block_is_closed_and_commands_are_quiet(self):
@@ -87,18 +98,20 @@ class InstallScript(unittest.TestCase):
             if re.match(r'\s*(apt|npm|cargo) ', line):
                 self.fail(f'not wrapped in $STD: {line}')
 
-    def test_server_layout_survives_a_branch_update(self):
-        # fetch_and_deploy_gh_branch resets /opt/hope to the branch and removes untracked files, so
-        # nothing the service needs may live there except build outputs the repository ignores.
-        ignored = (ROOT / '.gitignore').read_text().split()
-        self.assertIn('/target/', ignored)
-        self.assertIn('web/out/', ignored)
-        self.assertIn('HOPE_WEB_DIR=/opt/hope/web/out', INSTALL)
+    def test_server_layout_matches_the_release_package(self):
+        # The package (scripts/package-server.sh) holds hope-server and web/ at its top level.
+        package = (ROOT / 'scripts' / 'package-server.sh').read_text()
+        self.assertIn('"$staging/hope-server-$version/hope-server"', package)
+        self.assertIn('"$staging/hope-server-$version/web"', package)
+        self.assertIn('HOPE_WEB_DIR=/opt/hope/web', INSTALL)
         self.assertIn('HOPE_DATA_DIR=/var/lib/hope', INSTALL)
         self.assertIn('HOPE_RELEASE_DIR=/var/lib/hope/releases', INSTALL)
         self.assertIn('ExecStart=/usr/local/bin/hope-server', INSTALL)
         self.assertNotRegex(INSTALL, r'/opt/hope/(bin|release|src|releases)\b')
         self.assertEqual(META['install_methods'][0]['config_path'], '/etc/hope/hope.env')
+        workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()
+        self.assertIn('--latest', workflow)
+        self.assertIn('hope-server-*-linux.tar.gz', workflow)
 
     def test_tls_and_setup_token(self):
         self.assertIn('tls internal', INSTALL)

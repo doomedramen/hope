@@ -14,25 +14,11 @@ network_check
 update_os
 
 msg_info "Installing Dependencies"
-$STD apt install -y \
-  build-essential \
-  pkg-config \
-  cmake \
-  caddy
+$STD apt install -y caddy
 msg_ok "Installed Dependencies"
 
-setup_rust
-NODE_VERSION="22" setup_nodejs
-fetch_and_deploy_gh_branch "hope" "doomedramen/hope" "main"
-
-msg_info "Building H.O.P.E (Patience)"
-cd /opt/hope/web
-$STD npm ci --no-audit --no-fund
-$STD npm run build
-cd /opt/hope
-CARGO_BUILD_JOBS="$(get_parallel_jobs)" $STD cargo build --release --locked -p hope-server
-install -m 755 target/release/hope-server /usr/local/bin/hope-server
-msg_ok "Built H.O.P.E"
+fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"
+install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server
 
 msg_info "Configuring Caddy"
 mkdir -p /etc/hope
@@ -61,7 +47,7 @@ cat <<EOF >/etc/hope/hope.env
 HOPE_SERVER_URL=https://${LOCAL_IP}
 HOPE_BIND=127.0.0.1:8080
 HOPE_DATA_DIR=/var/lib/hope
-HOPE_WEB_DIR=/opt/hope/web/out
+HOPE_WEB_DIR=/opt/hope/web
 HOPE_RELEASE_DIR=/var/lib/hope/releases
 HOPE_DISCOVERY_MODE=native
 HOPE_AGENT_CA=/etc/hope/ca.crt
