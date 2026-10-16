@@ -210,7 +210,7 @@ fetch_release() {
     fi
     mkdir -p "$staging/server"
     tar -xzf "$staging/server.tar.gz" -C "$staging/server" || die 'The release archive could not be extracted.'
-    [ -x "$staging/server/hope-server" ] && [ -f "$staging/server/web/index.html" ] || die 'The release archive is incomplete (hope-server and web/index.html expected).'
+    { [ -x "$staging/server/hope-server" ] && [ -f "$staging/server/web/index.html" ]; } || die 'The release archive is incomplete (hope-server and web/index.html expected).'
     ok "Release $(basename "$_tar") ready"
 }
 build_from_source() {

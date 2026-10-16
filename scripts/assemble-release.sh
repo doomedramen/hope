@@ -71,7 +71,7 @@ while [ -L "$key" ]; do
     target=$(readlink "$key")
     case "$target" in /*) key=$target ;; *) key=$(dirname "$key")/$target ;; esac
 done
-[ -f "$key" ] && [ -r "$key" ] || die "HOPE_SIGNING_KEY is not a readable file"
+{ [ -f "$key" ] && [ -r "$key" ]; } || die "HOPE_SIGNING_KEY is not a readable file"
 key_dir=$(cd "$(dirname "$key")" && pwd -P)
 key_real=$key_dir/$(basename "$key")
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
@@ -88,7 +88,7 @@ fi
 openssl pkey -in "$key" -noout >/dev/null 2>&1 || die 'HOPE_SIGNING_KEY is not a usable private key'
 openssl rsa -in "$key" -noout -check >/dev/null 2>&1 || die 'HOPE_SIGNING_KEY must be an RSA private key'
 bits=$(openssl rsa -in "$key" -noout -text 2>/dev/null | sed -n 's/^Private-Key: (\([0-9]*\) bit.*/\1/p;s/^RSA Private-Key: (\([0-9]*\) bit.*/\1/p' | head -n 1)
-[ -n "$bits" ] && [ "$bits" -ge 2048 ] || die 'the RSA signing key must be at least 2048 bits'
+{ [ -n "$bits" ] && [ "$bits" -ge 2048 ]; } || die 'the RSA signing key must be at least 2048 bits'
 
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d ' ' -f 1
@@ -247,7 +247,7 @@ while IFS= read -r row; do
     file=$(printf '%s' "$row" | sed -n 's/.*"file":"\([^"]*\)".*/\1/p')
     sha=$(printf '%s' "$row" | sed -n 's/.*"sha256":"\([0-9a-f]\{64\}\)".*/\1/p')
     size=$(printf '%s' "$row" | sed -n 's/.*"size":\([0-9]*\)[,}].*/\1/p')
-    [ -n "$file" ] && [ -f "$new/$file" ] || die "manifest lists a missing file '$file'"
+    { [ -n "$file" ] && [ -f "$new/$file" ]; } || die "manifest lists a missing file '$file'"
     [ "$(sha256_of "$new/$file")" = "$sha" ] || die "$file checksum differs from the manifest"
     [ "$(size_of "$new/$file")" = "$size" ] || die "$file size differs from the manifest"
     openssl dgst -sha256 -verify "$pub" -signature "$new/$file.sig" "$new/$file" >/dev/null || die "$file signature does not verify"
@@ -284,7 +284,7 @@ for entry in $(ls -1t "$out"); do
         [0-9]*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
         *) continue ;;
     esac
-    [ -d "$out/$entry" ] && [ ! -L "$out/$entry" ] || continue
+    { [ -d "$out/$entry" ] && [ ! -L "$out/$entry" ]; } || continue
     [ "$entry" != "$name" ] || continue
     kept=$((kept + 1))
     [ "$kept" -le 2 ] || [ "$entry" = "$old_name" ] || rm -rf "${out:?}/$entry"

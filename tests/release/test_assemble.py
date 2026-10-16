@@ -108,7 +108,9 @@ class Assemble(unittest.TestCase):
         for spelling in (inside, Path(str(inside).upper().replace('/USERS', '/Users', 1))):
             env = dict(os.environ, HOPE_SIGNING_KEY=str(spelling))
             done = subprocess.run(['sh', str(SCRIPT), '--staging', str(self.stage), '--version', '1.0.0', '--out', str(self.out)], env=env, capture_output=True, text=True)
-            if spelling == inside or not spelling.exists():
+            # The upper-cased alias reaches the key only on a case-insensitive filesystem (macOS);
+            # elsewhere it names no file, and the script rightly reports that instead.
+            if spelling == inside or spelling.exists():
                 self.assertNotEqual(0, done.returncode)
                 self.assertIn('outside the repository', done.stderr)
 

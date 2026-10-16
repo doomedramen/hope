@@ -2,7 +2,8 @@ name: Docker image
 
 # Builds the server image (the Dockerfile's `runtime` stage) natively on an x86_64 and an arm64
 # runner, pushes each by digest, then publishes one multi-arch manifest to the GitHub Container
-# Registry as ghcr.io/<owner>/hope. Native runners instead of QEMU: a Rust workspace under
+# Registry as ghcr.io/<owner>/hope-server. Not ghcr.io/<owner>/hope: that package already belongs to
+# another repository, and a workflow's token can only push to packages linked to its own repository. Native runners instead of QEMU: a Rust workspace under
 # emulation takes hours. Pull requests are covered by the `docker build` in ci.yml; this workflow
 # runs on pushes to main (tags `main` and `sha-<commit>`), on version tags (`<version>`,
 # `<major>.<minor>`, `latest`, `sha-<commit>`) and on manual dispatch.
@@ -24,7 +25,7 @@ permissions:
   attestations: write
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}
+  IMAGE: ghcr.io/${{ github.repository_owner }}/hope-server
 
 concurrency:
   group: docker-${{ github.ref }}

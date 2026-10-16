@@ -57,7 +57,7 @@ note() { emit "hope-install: $*"; }
 err() { emit "hope-install: error=$1 $2"; }
 fail() { err "$1" "$2"; exit 1; }
 
-journal() { [ -d "$txn" ] && printf '%s\n' "$1" >> "$txn/journal" || true; }
+journal() { { [ -d "$txn" ] && printf '%s\n' "$1" >> "$txn/journal"; } || true; }
 jget() { sed -n "s/^$1=//p" "$txn/journal" 2>/dev/null | tail -n 1; }
 
 is_system() { [ "$mode" = system ]; }
@@ -390,7 +390,7 @@ version_lt() {
             exit 1 }'
 }
 single() { # single NAME VALUE: exactly one non-empty line, else MANIFEST_INVALID
-    [ -n "$2" ] && [ "$(printf '%s\n' "$2" | wc -l | tr -d ' ')" = 1 ] || fail MANIFEST_INVALID "The release manifest has no single valid $1."
+    { [ -n "$2" ] && [ "$(printf '%s\n' "$2" | wc -l | tr -d ' ')" = 1 ]; } || fail MANIFEST_INVALID "The release manifest has no single valid $1."
 }
 
 # =================================== phase: stage =============================================
@@ -414,7 +414,7 @@ entries=$(grep -F "\"platform\":\"$platform\",\"arch\":\"$architecture\"," "$man
 m_file=$(printf '%s\n' "$entries" | sed -n 's/.*"file":"\([^"]*\)".*/\1/p')
 m_sha=$(printf '%s\n' "$entries" | sed -n 's/.*"sha256":"\([0-9a-f]\{64\}\)".*/\1/p')
 m_size=$(printf '%s\n' "$entries" | sed -n 's/.*"size":\([0-9]\{1,12\}\)[,}].*/\1/p')
-[ "$m_file" = "$artifact" ] && [ -n "$m_sha" ] && [ -n "$m_size" ] \
+{ [ "$m_file" = "$artifact" ] && [ -n "$m_sha" ] && [ -n "$m_size" ]; } \
     || fail MANIFEST_INVALID "The manifest entry for $platform/$architecture is malformed."
 
 # Refuse to replace a newer installed agent with an older release. This compares only with the agent
@@ -491,7 +491,7 @@ if is_system; then
                 { [ "$group_gid" -ge 400 ] && [ "$group_gid" -le 499 ]; } || fail SERVICE_ACCOUNT_INVALID "Existing group $service_group must have a GID in 400-499."
                 service_id=$group_gid
                 members=$(dscl . -read "/Groups/$service_group" GroupMembership 2>/dev/null | sed 's/^GroupMembership:[[:space:]]*//' | tr -d '\n')
-                [ -z "$members" ] && [ "$(count_id /Users UniqueID "$service_id")" -eq 0 ] \
+                { [ -z "$members" ] && [ "$(count_id /Users UniqueID "$service_id")" -eq 0 ]; } \
                     || fail SERVICE_ACCOUNT_INVALID "Existing group $service_group must have no members and its ID must not be used by another user."
             else
                 service_id=400
