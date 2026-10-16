@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "hope-server",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "mkdir -p /private/tmp/claude-501/-Users-martin-Developer-hope/b0dc7cd6-e548-4092-8218-d5d9f6e464d3/scratchpad/hope-data && HOPE_DATA_DIR=/private/tmp/claude-501/-Users-martin-Developer-hope/b0dc7cd6-e548-4092-8218-d5d9f6e464d3/scratchpad/hope-data HOPE_SETUP_TOKEN=local-preview-setup-token-0123456789 HOPE_SERVER_URL=http://localhost:8080 HOPE_WEB_DIR=web/out cargo run -p hope-server"
+      ],
+      "port": 8080
+    }
+  ]
+}
