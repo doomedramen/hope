@@ -296,10 +296,14 @@ EOF
         cat > "$updater_service_unit.new" <<EOF
 [Unit]
 Description=H.O.P.E agent update
+StartLimitIntervalSec=1h
+StartLimitBurst=4
 [Service]
 Type=oneshot
 ExecStart="$updater_bin"
 TimeoutStartSec=1800
+Restart=on-failure
+RestartSec=5min
 EOF
         mv -f "$updater_path_unit.new" "$updater_path_unit" && mv -f "$updater_service_unit.new" "$updater_service_unit" || return 1
         [ "$no_manager" = 0 ] || return 0
