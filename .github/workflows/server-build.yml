@@ -8,10 +8,12 @@ name: Server build
 # server signs them with its own key (install/hope-install.sh, scripts/install-hope.sh), so no
 # signing key is involved here.
 #
-# Tags are v<crate version>-build.<run number>, so every build is newer than the last and the
-# community-scripts update check sees it. Only the newest five builds are kept. Tags created with
-# the workflow token start no other workflow, so release.yml (signed agent releases on v* tags you
-# push yourself) is unaffected.
+# Every build has its own version, <major>.<minor>.<run number> from Cargo.toml and this workflow's
+# run number, compiled into the agents and written to the package's VERSION file, and used as the
+# tag (v0.1.57). So the community-scripts update check sees every build as newer, and the console
+# can offer agents older than the server's release an update. Only the newest five builds are
+# kept. Tags created with the workflow token start no other workflow, so release.yml (signed agent
+# releases on v* tags you push yourself) is unaffected.
 #
 # Note: ubuntu-22.04-arm, ubuntu-24.04-arm and the macOS runners are free for public repositories only.
 
@@ -28,8 +30,25 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: version
+        env:
+          RUN: ${{ github.run_number }}
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          echo "version=${crate%.*}.${RUN}" >> "$GITHUB_OUTPUT"
+
   build:
     name: server ${{ matrix.arch }}
+    needs: version
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -51,6 +70,8 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
       - run: sh scripts/package-server.sh --out dist/server
+        env:
+          HOPE_BUILD_VERSION: ${{ needs.version.outputs.version }}
       - name: Smoke-test the packaged binary
         run: |
           mkdir -p "$RUNNER_TEMP/pkg"
@@ -65,10 +86,13 @@ jobs:
           retention-days: 7
 
   agents:
+    needs: version
     uses: ./.github/workflows/build-agent.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
 
   publish:
-    needs: [build, agents]
+    needs: [version, build, agents]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -88,8 +112,10 @@ jobs:
           path: dist/agents
           merge-multiple: true
       - name: Package the agents
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          version="$VERSION"
           # Prove the four agents assemble into a release at the server's version before publishing;
           # the throwaway key is discarded, servers sign with their own.
           (umask 077 && openssl genrsa -out "$RUNNER_TEMP/throwaway.pem" 3072 2>/dev/null)
@@ -106,20 +132,20 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          RUN: ${{ github.run_number }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          tag="v${version}-build.${RUN}"
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
-            --title "H.O.P.E ${version} build ${RUN}" \
+          gh release create "v${VERSION}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "H.O.P.E build ${VERSION}" \
             --notes "Automatic build of ${GITHUB_SHA::7} on main: the server and console for x86_64 and aarch64 Linux (glibc 2.35 or newer), and the unsigned agents (hope-agents.tar.gz) each server signs with its own key. Installed and updated by ct/hope.sh and scripts/install-hope.sh." \
             dist/server/hope-server-*-linux.tar.gz dist/server/hope-agents.tar.gz dist/server/SHA256SUMS-server
       - name: Keep only the newest five builds
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt \
-            --jq '[.[] | select(.tagName | test("-build\\.[0-9]+$"))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+          # Builds are recognised by title ("H.O.P.E build 0.1.57", or "H.O.P.E 0.1.0 build 8" before
+          # builds had their own version), so signed releases from release.yml are never touched.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,name,createdAt \
+            --jq '[.[] | select(.name | test("^H\\.O\\.P\\.E ([0-9.]+ )?build [0-9.]+$"))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
             while read -r old; do
               gh release delete "$old" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
             done

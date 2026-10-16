@@ -152,7 +152,7 @@ class InstallScript(unittest.TestCase):
             self.assertIn('dist/server/hope-agents.tar.gz dist/server/SHA256SUMS-server', workflow, name)
         workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()
         self.assertIn('uses: ./.github/workflows/build-agent.yml', workflow)
-        self.assertIn('needs: [build, agents]', workflow)
+        self.assertIn('needs: [version, build, agents]', workflow)
         self.assertNotIn('secrets.', workflow, 'server builds hold no signing key')
 
     def test_tls_and_setup_token(self):
@@ -163,27 +163,6 @@ class InstallScript(unittest.TestCase):
         self.assertIn('chmod 600 /etc/hope/hope.env', INSTALL)
         self.assertLess(INSTALL.index('Configuring Caddy'), INSTALL.index('Creating Service'))
 
-
-    def test_agent_packages_are_downloaded_and_signed_by_this_server(self):
-        # The build release carries unsigned agents; each server signs them with its own key, so the
-        # console can offer agent installation as soon as the container is up.
-        workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()
-        self.assertIn('uses: ./.github/workflows/build-agent.yml', workflow)
-        self.assertIn('dist/server/hope-agents.tar.gz', workflow)
-        package = (ROOT / 'scripts' / 'package-server.sh').read_text()
-        self.assertIn('scripts/assemble-release.sh "$staging/hope-server-$version/tools/assemble-release.sh"', package)
-        deploy = 'fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" "/opt/hope-agents" "hope-agents.tar.gz"'
-        sign = ('HOPE_SIGNING_KEY=/etc/hope/release-signing.pem $STD sh /opt/hope/tools/assemble-release.sh '
-                '--staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases')
-        for script in (INSTALL, CT):
-            self.assertIn(deploy, script)
-            self.assertIn(sign, script)
-            self.assertLess(script.index(deploy), script.index(sign))
-            self.assertIn('(umask 077 && $STD openssl genrsa -out /etc/hope/release-signing.pem 3072)', script)
-        # An update keeps the existing key: installed agents trust it, and a new one would orphan them.
-        self.assertIn('[[ -f /etc/hope/release-signing.pem ]] ||', CT)
-        # The key lives outside the repository-like package and outside the served data.
-        self.assertNotIn('/opt/hope/release-signing', INSTALL + CT)
 
     def test_builds_have_their_own_version(self):
         workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()

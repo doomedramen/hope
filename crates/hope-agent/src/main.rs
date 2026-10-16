@@ -7,10 +7,11 @@ mod status;
 
 /// The agent's version: the build version CI compiles in (`HOPE_BUILD_VERSION`, for example
 /// 0.1.57), or the crate version for local builds. `--version` prints it, the installer compares it
-/// with the signed manifest, and every request names it in `User-Agent`.
+/// with the signed manifest, and every request names it in `User-Agent`. An empty value (a workflow
+/// that passes no version) means the crate version, as in `scripts/build-agent.sh`.
 pub const VERSION: &str = match option_env!("HOPE_BUILD_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
+    Some(version) if !version.is_empty() => version,
+    _ => env!("CARGO_PKG_VERSION"),
 };
 use anyhow::{Context, Result};
 use config::Config;
