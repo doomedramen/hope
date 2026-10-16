@@ -78,7 +78,7 @@ export function NetworksDialog({
     >
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Networks</DialogTitle>
+          <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
             Control continuous discovery and review what this server can
             observe.

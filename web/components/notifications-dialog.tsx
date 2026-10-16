@@ -52,7 +52,7 @@ export function NotificationsDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Notifications</DialogTitle>
+          <DialogTitle>Notification settings</DialogTitle>
           <DialogDescription>
             Push alerts to your phone or desktop through{" "}
             <a

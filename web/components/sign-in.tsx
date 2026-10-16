@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { Eye, EyeOff, Loader2, Network, ShieldCheck } from "lucide-react";
+import { Eye, EyeOff, Loader2, Network } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -19,9 +19,7 @@ export function Brand() {
       <div className="brand-mark">
         <Network size={20} />
       </div>
-      <span>
-        H.O.P.E<span className="brand-subtitle">Network observatory</span>
-      </span>
+      <span>H.O.P.E</span>
     </div>
   );
 }
@@ -86,11 +84,11 @@ export function SignIn({
         </div>
         <section className="auth-card">
           <header>
-            <h1>{setup ? "Meet your network." : "Welcome back."}</h1>
+            <h1>{setup ? "Set up H.O.P.E" : "Sign in"}</h1>
             <p>
               {setup
                 ? "Create the administrator account to start discovering devices."
-                : "Sign in to your network observatory."}
+                : "Enter the administrator password."}
             </p>
           </header>
           <form onSubmit={submit} className="flex flex-col gap-6">
@@ -176,10 +174,6 @@ export function SignIn({
             </Button>
           </form>
         </section>
-        <p className="auth-footnote">
-          <ShieldCheck size={14} aria-hidden="true" />
-          Self-hosted. Your devices and data stay on this server.
-        </p>
       </div>
     </main>
   );

@@ -15,9 +15,7 @@ import {
   Radar,
   Search,
   Settings2,
-  ShieldCheck,
   Sun,
-  TriangleAlert,
   UserRound,
   X,
 } from "lucide-react";
@@ -53,7 +51,7 @@ import {
 } from "@/components/networks-dialog";
 import { AccountDialog } from "@/components/account-dialog";
 import { NotificationsDialog } from "@/components/notifications-dialog";
-import { ScanProgress } from "@/components/scan-progress";
+import { DiscoveryMenu } from "@/components/discovery-menu";
 import { Brand, SignIn } from "@/components/sign-in";
 import {
   CommandPalette,
@@ -65,7 +63,6 @@ import { api, del, post, put } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 import {
   HOST_FILTERS,
-  hostIssues,
   hostState,
   matchesFilter,
   matchesSearch,
@@ -92,8 +89,8 @@ type Mode = "topology" | "subnets" | "health";
 const VIEWS: View[] = ["overview", "map", "hosts", "host"];
 const TITLES: Record<View, string> = {
   overview: "Overview",
-  map: "Network map",
-  hosts: "Hosts",
+  map: "Devices",
+  hosts: "Devices",
   host: "Host",
 };
 
@@ -300,7 +297,28 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     [],
   );
   const select = useCallback((id: string | null) => go({ host: id }), [go]);
-  const setView = useCallback((next: View) => go({ view: next }), [go]);
+  const setView = useCallback(
+    (next: View) => {
+      if (next === "hosts" || next === "map") {
+        try {
+          localStorage.setItem("hope-device-view", next);
+        } catch {
+          /* Storage may be unavailable. */
+        }
+      }
+      go({ view: next });
+    },
+    [go],
+  );
+  function openDevices() {
+    let preferred: View = "hosts";
+    try {
+      if (localStorage.getItem("hope-device-view") === "map") preferred = "map";
+    } catch {
+      /* Use the list when storage is unavailable. */
+    }
+    setView(preferred);
+  }
   async function action(work: () => Promise<unknown>) {
     setBusy(true);
     setError("");
@@ -372,7 +390,6 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       (job, i, all) =>
         all.findIndex((j) => j.network_id === job.network_id) === i,
     ) ?? [];
-  const attention = hosts.filter((h) => hostIssues(h).length > 0).length;
   function discover(targetNetwork: HopeNetwork | null = null) {
     if (!networks.length) {
       setNetworkOpen(true);
@@ -382,10 +399,18 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       const targets = targetNetwork
         ? [targetNetwork]
         : networks.filter(
-            (n) => n.enabled && (network === "all" || n.id === network),
+            (n) =>
+              n.enabled &&
+              !scans.some(
+                (s) =>
+                  s.network_id === n.id &&
+                  (s.status === "running" || s.status === "queued"),
+              ),
           );
       if (!targets.length)
-        throw new Error("Every range is paused. Resume one in Networks first.");
+        throw new Error(
+          "No enabled networks are ready to scan. Check Settings or wait for current scans to finish.",
+        );
       const results = await Promise.allSettled(
         targets.map((n) => post(`/networks/${n.id}/scan`)),
       );
@@ -405,7 +430,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const cancelScan = (scan: ScanJob) =>
     void action(() => post(`/scans/${scan.id}/cancel`));
   const openView = (next: View, which?: "attention") => {
-    if (which) setStatusFilter("attention");
+    setStatusFilter(which ?? "all");
+    setFilter("");
+    setNetwork("all");
     setView(next);
   };
   // The inventory view a host page returns to.
@@ -494,14 +521,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     },
     {
       id: "settings",
-      label: "Networks",
+      label: "Settings",
       hint: "action",
       icon: commandIcons.settings,
       run: () => setSettingsOpen(true),
     },
     {
       id: "notifications",
-      label: "Notifications",
+      label: "Notification settings",
       hint: "action",
       icon: commandIcons.notifications,
       run: () => setNotificationsOpen(true),
@@ -537,6 +564,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     <button
       type="button"
       className="nav-item"
+      aria-label={label}
       aria-current={view === target ? "page" : undefined}
       onClick={() => setView(target)}
     >
@@ -551,81 +579,22 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
         <Brand />
         <nav aria-label="Main navigation">
           {navItem("overview", LayoutDashboard, "Overview")}
-          {navItem("map", Map, "Network map")}
-          {navItem("hosts", LayoutList, "Hosts", hosts.length)}
           <button
             type="button"
             className="nav-item"
-            onClick={() => setSettingsOpen(true)}
+            aria-label="Devices"
+            aria-current={
+              view === "map" || view === "hosts" || view === "host"
+                ? "page"
+                : undefined
+            }
+            onClick={openDevices}
           >
-            <Settings2 />
-            <span>Networks</span>
-          </button>
-          <button
-            type="button"
-            className="nav-item"
-            onClick={() => setNotificationsOpen(true)}
-          >
-            <BellRing />
-            <span>Notifications</span>
+            <LayoutList />
+            <span>Devices</span>
+            <span className="count">{hosts.length}</span>
           </button>
         </nav>
-        <div className="sidebar-section">
-          <h2>
-            Monitored networks
-            {attention > 0 && (
-              <button
-                type="button"
-                className="attention-pill"
-                title={`${attention} ${attention === 1 ? "host needs" : "hosts need"} attention`}
-                aria-label={`${attention} ${attention === 1 ? "host needs" : "hosts need"} attention`}
-                onClick={() => openView("hosts", "attention")}
-              >
-                <TriangleAlert size={11} aria-hidden="true" />
-                {attention}
-              </button>
-            )}
-          </h2>
-          {networks.length ? (
-            networks.map((n) => {
-              const members = hosts.filter((h) =>
-                h.network_ids.includes(n.id),
-              ).length;
-              return (
-                <button
-                  key={n.id}
-                  className="network-shortcut"
-                  aria-pressed={network === n.id}
-                  onClick={() => {
-                    setNetwork(network === n.id ? "all" : n.id);
-                    if (view === "overview") setView("map");
-                  }}
-                >
-                  <span
-                    className="status-dot"
-                    data-tone={n.enabled ? "good" : "neutral"}
-                  />
-                  <span>
-                    <strong>{n.name}</strong>
-                    <small>{n.cidr}</small>
-                  </span>
-                  <span className="count">{members}</span>
-                </button>
-              );
-            })
-          ) : (
-            <p>Add your first range to begin discovering devices.</p>
-          )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="mt-2 justify-start"
-            onClick={() => setNetworkOpen(true)}
-          >
-            <Plus data-icon="inline-start" />
-            Add network
-          </Button>
-        </div>
         <div className="sidebar-bottom">
           <div className="theme-switch" role="group" aria-label="Theme">
             {(
@@ -646,10 +615,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
               </button>
             ))}
           </div>
-          <div className="sidebar-footnote">
-            <ShieldCheck size={14} />
-            Self-hosted. Locally observed.
-          </div>
+          <button
+            type="button"
+            className="nav-item"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <Settings2 />
+            <span>Settings</span>
+          </button>
           <button
             type="button"
             className="nav-item"
@@ -682,7 +655,25 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
               <span>{connected ? "Live" : "Reconnecting"}</span>
             </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="topbar-controls flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Notification settings"
+              title="Notification settings"
+              onClick={() => setNotificationsOpen(true)}
+            >
+              <BellRing />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="mobile-only"
+              aria-label="Settings"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Settings2 />
+            </Button>
             <button
               type="button"
               className="palette-trigger"
@@ -716,19 +707,20 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             <Button
               variant="outline"
               className="topbar-action"
+              aria-label="Add agent"
               onClick={() => setInstallOpen(true)}
             >
               <ArrowDownToLine data-icon="inline-start" />
               <span className="btn-label">Add agent</span>
             </Button>
-            <Button
-              className="topbar-action"
-              onClick={() => discover()}
-              disabled={busy}
-            >
-              <Radar data-icon="inline-start" />
-              <span className="btn-label">Discover devices</span>
-            </Button>
+            <DiscoveryMenu
+              networks={networks}
+              scans={scans}
+              busy={busy}
+              onScan={discover}
+              onCancel={cancelScan}
+              onAddNetwork={() => setNetworkOpen(true)}
+            />
           </div>
         </header>
         {(error || unsavedMap.length > 0) && (
@@ -825,7 +817,6 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             onAddNetwork={() => setNetworkOpen(true)}
             onInstall={() => setInstallOpen(true)}
             onView={openView}
-            onCancelScan={cancelScan}
             busy={busy}
             onUpdateAll={() => {
               void action(async () => {
@@ -841,17 +832,6 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           />
         ) : (
           <div className="page">
-            {scans.some(
-              (s) => s.status === "running" || s.status === "queued",
-            ) && (
-              <ScanProgress
-                scans={scans.filter(
-                  (s) => s.status === "running" || s.status === "queued",
-                )}
-                networks={networks}
-                onCancel={cancelScan}
-              />
-            )}
             {data.capabilities.limitations.length > 0 && (
               <div className="capability-notice" role="note">
                 <CircleHelp size={15} />
@@ -877,7 +857,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                       </ToggleGroupItem>
                       <ToggleGroupItem value="hosts">
                         <LayoutList data-icon="inline-start" />
-                        Hosts
+                        List
                       </ToggleGroupItem>
                     </ToggleGroup>
                     {view === "map" && (
@@ -941,11 +921,15 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     </div>
                   </div>
                 </div>
-                {view === "hosts" && hosts.length > 0 && (
+                {hosts.length > 0 && (
                   <div className="chip-row" role="group" aria-label="Status">
                     {HOST_FILTERS.map((option) => {
-                      const count = hosts.filter((h) =>
-                        matchesFilter(h, option.key),
+                      const count = hosts.filter(
+                        (h) =>
+                          (network === "all" ||
+                            h.network_ids.includes(network ?? "")) &&
+                          matchesSearch(h, filter) &&
+                          matchesFilter(h, option.key),
                       ).length;
                       if (
                         !count &&
@@ -966,6 +950,22 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                         </button>
                       );
                     })}
+                    {visible.length > 0 &&
+                      (filter ||
+                        network !== "all" ||
+                        statusFilter !== "all") && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setFilter("");
+                            setNetwork("all");
+                            setStatusFilter("all");
+                          }}
+                        >
+                          Clear filters
+                        </Button>
+                      )}
                   </div>
                 )}
                 {!hosts.length ? (
@@ -974,7 +974,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                       <EmptyMedia variant="icon">
                         <Radar />
                       </EmptyMedia>
-                      <EmptyTitle>Your network starts here</EmptyTitle>
+                      <EmptyTitle>No devices yet</EmptyTitle>
                       <EmptyDescription>
                         Add a CIDR range to find devices, or install an agent to
                         start reporting hardware and health.
@@ -1038,11 +1038,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     {hosts.length > 0 &&
                       ` · ${hosts.filter((h) => hostState(h).tone === "good").length} responding`}
                   </span>
-                  <span>
-                    Enabled ranges are rescanned in the background (every five
-                    minutes unless you change it), gently enough not to load the
-                    network.
-                  </span>
+                  <span>Manage scan schedules in Settings.</span>
                 </footer>
               </section>
               {host && (

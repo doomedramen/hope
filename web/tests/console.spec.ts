@@ -211,7 +211,7 @@ test.describe.serial("H.O.P.E console", () => {
   test("protected first-run setup and empty state", async ({ page }) => {
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { name: "Meet your network." }),
+      page.getByRole("heading", { name: "Set up H.O.P.E" }),
     ).toBeVisible();
     await page.screenshot({ path: "test-results/hope-setup.png" });
     await page
@@ -219,7 +219,7 @@ test.describe.serial("H.O.P.E console", () => {
       .fill("hope-playwright-setup-token");
     await page.getByLabel("Administrator password").fill(password);
     await page.getByRole("button", { name: "Create account" }).click();
-    await expect(page.getByText("Your network starts here")).toBeVisible();
+    await expect(page.getByText("No devices yet")).toBeVisible();
     await page.screenshot({
       path: "test-results/hope-empty.png",
       fullPage: true,
@@ -279,7 +279,7 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByRole("complementary", { name: "Host details" }),
     ).toContainText("AMD Ryzen");
     await expect(page).toHaveURL(/host=/);
-    await page.getByRole("button", { name: "Hosts", exact: true }).click();
+    await page.getByRole("button", { name: "List", exact: true }).click();
     await expect(page.getByRole("table")).toContainText("atlas-nas");
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
@@ -450,7 +450,7 @@ test.describe.serial("H.O.P.E console", () => {
         return Math.hypot(position.x - saved.x, position.y - saved.y);
       })
       .toBeLessThan(0.01);
-    await page.getByRole("button", { name: "Hosts", exact: true }).click();
+    await page.getByRole("button", { name: "List", exact: true }).click();
     await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`host=${host.id}`));
     await page.getByRole("button", { name: "studio-mac", exact: true }).click();
@@ -470,9 +470,7 @@ test.describe.serial("H.O.P.E console", () => {
       .getByRole("button", { name: "Sign out", exact: true })
       .filter({ visible: true })
       .click();
-    await expect(
-      page.getByRole("heading", { name: "Welcome back." }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
     await page.getByLabel("Administrator password").fill(password);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await expect(page.getByTestId("network-map")).toBeVisible();
@@ -488,9 +486,7 @@ test.describe.serial("H.O.P.E console", () => {
       }),
     );
     await page.reload();
-    await expect(
-      page.getByRole("heading", { name: "Welcome back." }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
   });
   test("overlapping ranges keep filtered hosts in every map mode", async ({
     page,
@@ -553,6 +549,7 @@ test.describe.serial("H.O.P.E console", () => {
       });
     });
     await page.goto("/");
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page
       .getByRole("button", { name: "Add network", exact: true })
       .click();
@@ -765,7 +762,7 @@ test.describe.serial("H.O.P.E console", () => {
   }) => {
     const before = await (await request.get("/api/v1/bootstrap")).json();
     await page.goto("/");
-    await page.getByRole("button", { name: "Networks", exact: true }).click();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByRole("button", { name: "Remove Workshop" }).click();
     await dialog.getByRole("button", { name: "Remove range" }).click();
@@ -814,8 +811,8 @@ test.describe.serial("H.O.P.E console", () => {
     request,
   }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: "Networks", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Networks" });
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Settings" });
     await expect(dialog).toContainText("Every 5 minutes");
     await dialog
       .getByRole("combobox", { name: "Scan interval for Home network" })
@@ -917,8 +914,8 @@ test.describe.serial("H.O.P.E console", () => {
       .click();
     await expect(cpu).toContainText("81%");
     await page.getByRole("button", { name: "Close host details" }).click();
-    await page.getByRole("button", { name: "Networks", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Networks" });
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Settings" });
     await dialog
       .getByRole("combobox", { name: "Agent report interval" })
       .click();
@@ -955,7 +952,7 @@ test.describe.serial("H.O.P.E console", () => {
     try {
       await page.goto("/");
       await page
-        .getByRole("button", { name: "Notifications", exact: true })
+        .getByRole("button", { name: "Notification settings", exact: true })
         .click();
       const form = page.getByRole("form", { name: "Notification settings" });
       await form.getByLabel("Send notifications").check();
@@ -977,7 +974,7 @@ test.describe.serial("H.O.P.E console", () => {
       );
       await page.keyboard.press("Escape");
       await page
-        .getByRole("button", { name: "Notifications", exact: true })
+        .getByRole("button", { name: "Notification settings", exact: true })
         .click();
       await expect(form.getByLabel("Access token (optional)")).toHaveAttribute(
         "placeholder",
@@ -1114,6 +1111,117 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("button", { name: "Subnets", exact: true }).click();
     await expect(page.locator(".react-flow__edge")).toHaveCount(0);
   });
+  test("device views keep visible filters and remember the chosen layout", async ({
+    page,
+  }) => {
+    await page.goto("/?view=hosts");
+    const navigation = page.getByRole("navigation", {
+      name: "Main navigation",
+    });
+    await expect(navigation.getByRole("button")).toHaveCount(2);
+    await page.getByRole("button", { name: /^Needs attention/ }).click();
+    await page.getByRole("button", { name: "Map", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: /^Needs attention/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await page
+      .getByRole("button", { name: "Clear filters", exact: true })
+      .click();
+    await expect(page.getByRole("button", { name: /^All / })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await navigation.getByRole("button", { name: "Overview" }).click();
+    await navigation.getByRole("button", { name: "Devices" }).click();
+    await expect(page).toHaveURL(/view=map/);
+    await page.reload();
+    await navigation.getByRole("button", { name: "Overview" }).click();
+    await navigation.getByRole("button", { name: "Devices" }).click();
+    await expect(page).toHaveURL(/view=map/);
+  });
+  test("discovery contains progress, exposes failures, and scans all enabled ranges regardless of filters", async ({
+    page,
+    request,
+  }) => {
+    const data = await (await request.get("/api/v1/bootstrap")).json();
+    const networks = Array.from({ length: 4 }, (_, i) => ({
+      ...data.networks[0],
+      id: `ux-network-${i}`,
+      name: `UX network ${i}`,
+      cidr: `10.${i}.0.0/24`,
+      enabled: i !== 3,
+    }));
+    const scans = networks.slice(0, 3).map((n, i) => ({
+      id: `ux-scan-${i}`,
+      network_id: n.id,
+      cidr: n.cidr,
+      status: i === 2 ? "failed" : "running",
+      scanned: 12,
+      total: 254,
+      discovered: 2,
+      started_at: Date.now() / 1000,
+      finished_at: null,
+      error: i === 2 ? "Probe failed" : null,
+    }));
+    await page.route("**/api/v1/bootstrap", (route) =>
+      route.fulfill({ json: { ...data, networks, scans } }),
+    );
+    const started: string[] = [];
+    const cancelled: string[] = [];
+    await page.route("**/api/v1/networks/*/scan", (route) => {
+      started.push(route.request().url().split("/").at(-2)!);
+      return route.fulfill({ json: {} });
+    });
+    await page.route("**/api/v1/scans/*/cancel", (route) => {
+      cancelled.push(route.request().url().split("/").at(-2)!);
+      return route.fulfill({ json: {} });
+    });
+    await page.goto("/?view=hosts");
+    await expect(
+      page.getByRole("region", { name: "Scan progress" }),
+    ).toHaveCount(0);
+    const trigger = page.getByRole("button", {
+      name: "Scanning 2 networks, 1 failed",
+    });
+    await page.getByRole("combobox", { name: "Filter by network" }).click();
+    await page
+      .getByRole("option", { name: "UX network 0", exact: true })
+      .click();
+    await trigger.click();
+    await expect(
+      page.getByRole("region", { name: "Scan progress" }),
+    ).toBeVisible();
+    await expect(page.getByText("Probe failed", { exact: true })).toBeVisible();
+    await page
+      .getByRole("button", { name: "Scan all enabled networks" })
+      .click();
+    await expect.poll(() => started).toEqual(["ux-network-2"]);
+    await page.getByRole("button", { name: "Cancel 10.0.0.0/24 scan" }).click();
+    await expect.poll(() => cancelled).toEqual(["ux-scan-0"]);
+    await page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+    await expect(
+      page.getByRole("region", { name: "Scan progress" }),
+    ).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(
+      page.getByRole("button", { name: "Devices", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Settings", exact: true }),
+    ).toBeVisible();
+    await trigger.click();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+    await page.screenshot({ path: "test-results/hope-discovery-mobile.png" });
+    await page.keyboard.press("Escape");
+    await page.setViewportSize({ width: 1512, height: 982 });
+    await trigger.click();
+    await page.screenshot({ path: "test-results/hope-discovery.png" });
+  });
   test("the administrator changes the password and other browsers are signed out", async ({
     page,
     playwright,
@@ -1130,8 +1238,8 @@ test.describe.serial("H.O.P.E console", () => {
 
     await page.goto("/");
     // Networks holds ranges and server facts only; the theme lives in the sidebar.
-    await page.getByRole("button", { name: "Networks", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Networks" })).toBeVisible();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
     await expect(
       page.getByRole("dialog").getByRole("group", { name: "Theme" }),
     ).toHaveCount(0);
@@ -1168,11 +1276,9 @@ test.describe.serial("H.O.P.E console", () => {
     // The other browser is signed out; this one keeps working with its fresh session.
     expect((await other.get("/api/v1/bootstrap")).status()).toBe(401);
     await page.reload();
+    await expect(page.getByRole("heading", { name: "Sign in" })).toHaveCount(0);
     await expect(
-      page.getByRole("heading", { name: "Welcome back." }),
-    ).toHaveCount(0);
-    await expect(
-      page.getByRole("button", { name: "Networks", exact: true }),
+      page.getByRole("button", { name: "Settings", exact: true }),
     ).toBeVisible();
     adminState = await page.context().storageState();
     for (const [candidate, status] of [

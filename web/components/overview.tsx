@@ -19,7 +19,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Meter } from "@/components/ui/meter";
 import { StatTile } from "@/components/stat-tile";
-import { ScanProgress } from "@/components/scan-progress";
 import { bytes, percent0, rate } from "@/lib/api";
 import {
   cpuPercent,
@@ -29,7 +28,7 @@ import {
   worstDisk,
   type Issue,
 } from "@/lib/fleet";
-import type { Bootstrap, Host, ScanJob } from "@/lib/protocol";
+import type { Bootstrap, Host } from "@/lib/protocol";
 
 export function Overview({
   data,
@@ -38,7 +37,6 @@ export function Overview({
   onAddNetwork,
   onInstall,
   onView,
-  onCancelScan,
   onUpdateAll,
   busy = false,
 }: {
@@ -48,7 +46,6 @@ export function Overview({
   onAddNetwork: () => void;
   onInstall: () => void;
   onView: (view: "map" | "hosts", filter?: "attention") => void;
-  onCancelScan: (scan: ScanJob) => void;
   /** Asks every agent that can update itself to do so. */
   onUpdateAll: () => void;
   busy?: boolean;
@@ -59,12 +56,8 @@ export function Overview({
   const agentsInstalled = hosts.some((h) => h.agent_id);
   const scanned = scans.length > 0 || hosts.length > 0;
   const onboarding = !networks.length || !scanned || !agentsInstalled;
-  const latestScans = scans
-    .filter(
-      (job, i, all) =>
-        all.findIndex((j) => j.network_id === job.network_id) === i,
-    )
-    .slice(0, 4);
+  const affectedHosts = new Set(summary.issues.map((issue) => issue.host.id))
+    .size;
   const attentionTone = summary.issues.some((i) => i.severity === "critical")
     ? "critical"
     : summary.issues.length
@@ -74,12 +67,12 @@ export function Overview({
     <div className="page">
       <div className="page-heading">
         <div>
-          <h2>{greeting()}</h2>
+          <h2>Network status</h2>
           <p>
             {hosts.length
               ? `${summary.online} of ${hosts.length} hosts are responding${
                   summary.issues.length
-                    ? `, ${summary.issues.length} ${summary.issues.length === 1 ? "needs" : "need"} attention`
+                    ? `, ${summary.issues.length} ${summary.issues.length === 1 ? "issue" : "issues"} across ${affectedHosts} ${affectedHosts === 1 ? "host" : "hosts"}`
                     : " and nothing needs attention"
                 }.`
               : "Add a range to start discovering what is on your network."}
@@ -101,7 +94,7 @@ export function Overview({
       {!hosts.length && (
         <section className="hero-empty" data-testid="hero-empty">
           <div>
-            <h2>Your network starts here</h2>
+            <h2>No devices yet</h2>
             <p>
               Add a CIDR range to find every reachable device, or install the
               reporting agent on a machine to see its hardware, storage and live
@@ -198,13 +191,13 @@ export function Overview({
           testId="tile-agents"
         />
         <StatTile
-          label="Needs attention"
+          label="Hosts needing attention"
           icon={<TriangleAlert />}
-          value={summary.issues.length}
+          value={affectedHosts}
           hint={
             summary.issues.length
-              ? `${summary.issues.filter((i) => i.severity === "critical").length} critical`
-              : "All clear"
+              ? `${summary.issues.length} issues · ${summary.issues.filter((i) => i.severity === "critical").length} critical`
+              : "No issues detected"
           }
           tone={hosts.length ? attentionTone : undefined}
           onClick={() => onView("hosts", "attention")}
@@ -289,14 +282,6 @@ export function Overview({
             />
           </div>
         </section>
-      )}
-
-      {latestScans.length > 0 && (
-        <ScanProgress
-          scans={latestScans}
-          networks={networks}
-          onCancel={onCancelScan}
-        />
       )}
 
       {hosts.length > 0 && (
@@ -500,14 +485,6 @@ export function Overview({
       )}
     </div>
   );
-}
-
-function greeting() {
-  const hour = new Date().getHours();
-  if (hour < 5) return "Still up?";
-  if (hour < 12) return "Good morning.";
-  if (hour < 18) return "Good afternoon.";
-  return "Good evening.";
 }
 
 function Step({

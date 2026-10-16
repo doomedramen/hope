@@ -2243,3 +2243,50 @@ kbd.key {
     scroll-behavior: auto !important;
   }
 }
+
+/* Discovery stays available without pushing the inventory down during scans. */
+.discovery-popup {
+  width: min(420px, calc(100vw - 24px));
+  max-height: min(680px, calc(100dvh - 100px));
+  overflow-y: auto;
+}
+.discovery-popup .scan-strip {
+  display: flex;
+  flex-direction: column;
+}
+.discovery-trigger {
+  min-height: 36px;
+}
+@media (max-width: 720px) {
+  .sidebar .nav-item {
+    width: auto;
+    min-height: 44px;
+    padding: 0 10px;
+    gap: 6px;
+  }
+  .sidebar .nav-item span {
+    display: inline;
+    font-size: 12px;
+  }
+  .sidebar .nav-item .count {
+    display: none;
+  }
+  .topbar {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 14px;
+  }
+  .topbar-controls {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .topbar-controls button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .discovery-trigger {
+    margin-left: auto;
+  }
+}

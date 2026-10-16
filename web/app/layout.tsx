@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "H.O.P.E — Your network, understood",
+  title: "H.O.P.E",
   description: "Local network discovery and host monitoring",
 };
 export const viewport: Viewport = {
