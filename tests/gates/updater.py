@@ -321,6 +321,9 @@ class Gate:
                 before_pid = self.main_pid()
                 self.request_all()
                 host = wait_for(f'the agent to report {V2}', lambda: self.reporting(V2), 180)
+                # The installer still waits for its first accepted report and writes the outcome after it.
+                wait_for('the updater to finish', lambda: self.result_file().get('status') == 'updated'
+                         and self.dx('systemctl is-active hope-agent-update.service').stdout.strip() == 'inactive', 120)
                 version, sha = self.manifest_sha()
                 expect(version == V2, 'the published release is not the one just signed')
                 expect(self.installed_version() == V2, 'the installed binary is not the new version')

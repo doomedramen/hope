@@ -255,8 +255,12 @@ if [ -L "$state" ] || { [ -d "$state" ] && [ -n "$(find "$state" -maxdepth 2 -ty
     rc=1
     code=STATE_UNSAFE
 else
-    sh "$dir/install-agent.sh" upgrade 2>"$log" || rc=$?
-    cat "$log" >&2
+    # Progress goes to the journal as it happens (an update can wait two minutes for the new agent's
+    # first report); the same text is kept to find the outcome in.
+    rcfile=$(mktemp)
+    { code=0; sh "$dir/install-agent.sh" upgrade 2>&1 || code=$?; echo "$code" > "$rcfile"; } | tee "$log" >&2
+    rc=$(cat "$rcfile" 2>/dev/null || echo 1)
+    rm -f "$rcfile"
     outcome=$(sed -n 's/^hope-install: result=\(updated\|current\) \([A-Za-z0-9._+-]\{1,64\}\)$/\1 \2/p' "$log" | tail -n 1)
     code=$(sed -n 's/^hope-install: error=\([A-Z_]\{1,40\}\) .*/\1/p' "$log" | head -n 1)
 fi
