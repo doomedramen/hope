@@ -6,6 +6,8 @@ import {
   ArrowLeft,
   Maximize2,
   Bot,
+  Check,
+  Copy,
   Cpu,
   GitMerge,
   MemoryStick,
@@ -44,7 +46,7 @@ import {
   deviceLabel,
   kindLabel,
 } from "@/lib/devices";
-import { agentUpdate, hostIssues, hostState, type Tone } from "@/lib/fleet";
+import { hostIssues, hostState, updatePlan, type Tone } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
 
 export function HostDetails({
@@ -54,6 +56,7 @@ export function HostDetails({
   expand,
   wide = false,
   agentRelease = null,
+  upgradeCommand = "",
   install,
   refresh,
   notify,
@@ -67,6 +70,8 @@ export function HostDetails({
   wide?: boolean;
   /** Version of the signed agent release the server offers. */
   agentRelease?: string | null;
+  /** Token-less command that updates an installed agent from the host itself. */
+  upgradeCommand?: string;
   install: () => void;
   refresh: () => void;
   notify: (message: string, tone?: Tone) => void;
@@ -77,7 +82,8 @@ export function HostDetails({
   const [hours, setHours] = useState<HistoryWindow>("1");
   const inventory = host.inventory;
   const metrics = host.metrics;
-  const update = agentUpdate(host, agentRelease);
+  const update = updatePlan(host, agentRelease);
+  const [copied, setCopied] = useState(false);
   const state = hostState(host);
   const issues = hostIssues(host);
   const history = useHistory(
@@ -91,6 +97,18 @@ export function HostDetails({
       await post(`/agents/${host.agent_id}/revoke`);
       setConfirmRevoke(false);
       notify(`Revoked the agent credential for ${host.name}.`, "warning");
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  async function requestUpdate() {
+    try {
+      await post(`/hosts/${host.id}/update-agent`);
+      notify(
+        `Asked ${host.name} to update to ${update?.target ?? "the latest release"}.`,
+        "good",
+      );
       refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -233,14 +251,59 @@ export function HostDetails({
         {update && (
           <div className="rounded-xl border p-3.5" data-testid="agent-update">
             <p className="mb-2.5 text-xs leading-relaxed text-muted-foreground">
-              Agent {update} is available (this host runs {host.agent_version}).
-              Run a new installation command on the host to update it; it keeps
-              its identity and history.
+              Agent {update.target} is available (this host runs{" "}
+              {host.agent_version}).{" "}
+              {update.state === "ready" &&
+                "The agent installs it itself, but only after checking the release's signature against the key it was installed with. It keeps its identity and history."}
+              {update.state === "pending" && (
+                <>
+                  Update requested{" "}
+                  <Age value={host.update_requested_at} lower />. It starts when
+                  the agent next reports.
+                </>
+              )}
+              {update.state === "manual" &&
+                "This agent has no updater yet. Run this command on the host once; after that, updates can start from here."}
             </p>
-            <Button size="sm" variant="outline" onClick={install}>
-              <ArrowDownToLine data-icon="inline-start" />
-              Update agent
-            </Button>
+            {update.failure && (
+              <p className="mb-2.5 text-xs text-destructive">
+                {update.failure}. The previous version is still running.
+              </p>
+            )}
+            {update.state === "manual" ? (
+              <>
+                <div className="install-command mb-2.5">
+                  <code>{upgradeCommand}</code>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!upgradeCommand}
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(upgradeCommand);
+                      setCopied(true);
+                    } catch {
+                      setError(
+                        "Clipboard access failed. Select and copy the command above.",
+                      );
+                    }
+                  }}
+                >
+                  {copied ? (
+                    <Check data-icon="inline-start" />
+                  ) : (
+                    <Copy data-icon="inline-start" />
+                  )}
+                  {copied ? "Copied" : "Copy command"}
+                </Button>
+              </>
+            ) : (
+              <Button size="sm" variant="outline" onClick={requestUpdate}>
+                <ArrowDownToLine data-icon="inline-start" />
+                {update.state === "pending" ? "Ask again" : "Update now"}
+              </Button>
+            )}
           </div>
         )}
         {host.agent_revoked && (
@@ -499,14 +562,16 @@ export function HostDetails({
         )}
         {host.agent_id && (
           <>
-            {host.collectors.some((c) => !c.available) && (
+            {host.collectors.some(
+              (c) => !c.available && c.name !== "agent_update",
+            ) && (
               <section>
                 <h3 className="detail-heading">
                   <MemoryStick />
                   Unavailable collectors
                 </h3>
                 {host.collectors
-                  .filter((c) => !c.available)
+                  .filter((c) => !c.available && c.name !== "agent_update")
                   .map((c) => (
                     <p key={c.name} className="text-xs text-muted-foreground">
                       <strong className="text-foreground">

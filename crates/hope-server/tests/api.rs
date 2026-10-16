@@ -1608,6 +1608,15 @@ fn publish_release(version: &str) -> TempDir {
     dir
 }
 async fn report_as(app: &Router, bearer: &str, agent: &str, version: &str) -> Value {
+    report_with_updater(app, bearer, agent, version, true).await
+}
+async fn report_with_updater(
+    app: &Router,
+    bearer: &str,
+    agent: &str,
+    version: &str,
+    updater: bool,
+) -> Value {
     let report = AgentReport {
         schema_version: 1,
         report_id: Uuid::new_v4().to_string(),
@@ -1615,7 +1624,15 @@ async fn report_as(app: &Router, bearer: &str, agent: &str, version: &str) -> Va
         collected_at: now(),
         inventory: None,
         metrics: Metrics::default(),
-        collectors: vec![],
+        collectors: if updater {
+            vec![CollectorStatus {
+                name: "agent_update".into(),
+                available: true,
+                detail: Some("Updater ready".into()),
+            }]
+        } else {
+            vec![]
+        },
     };
     let response = app
         .clone()
@@ -1777,4 +1794,48 @@ async fn the_upgrade_command_needs_no_token_and_only_upgrades() {
     );
     assert!(!command.contains("HOPE_ENROLLMENT_TOKEN"), "{command}");
     assert!(command.contains("--proto '=https'"), "{command}");
+}
+
+#[tokio::test]
+async fn an_agent_without_an_updater_is_pointed_at_the_upgrade_command() {
+    let release = publish_release("0.1.60");
+    let (_dir, state, app, cookie) =
+        setup_with(release.path().to_str().expect("path").into()).await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let host_id = state.hosts().await.expect("hosts")[0].id.clone();
+    let admin = Some(("cookie", cookie.as_str()));
+    report_with_updater(&app, &bearer, &agent, "0.1.57", false).await;
+    let (status, body) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/hosts/{host_id}/update-agent"),
+        json!({}),
+        admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|text| text.contains("upgrade command")),
+        "{body}"
+    );
+    let (_, all) = request(&app, "POST", "/api/v1/agents/update", json!({}), admin).await;
+    assert_eq!(all["requested"], 0);
+    assert_eq!(
+        report_with_updater(&app, &bearer, &agent, "0.1.57", false).await["update_to"],
+        Value::Null
+    );
+    // Once it reports an updater, the same request goes through.
+    report_as(&app, &bearer, &agent, "0.1.57").await;
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("/api/v1/hosts/{host_id}/update-agent"),
+        json!({}),
+        admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }

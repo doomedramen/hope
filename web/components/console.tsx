@@ -79,6 +79,7 @@ import type {
   MapEdit,
   Network as HopeNetwork,
   ScanJob,
+  UpdateRequested,
 } from "@/lib/protocol";
 
 const NetworkMap = dynamic(
@@ -795,6 +796,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                 wide
                 close={closeHostPage}
                 agentRelease={data.agent_release}
+                upgradeCommand={data.agent_upgrade_command}
                 install={() => setInstallOpen(true)}
                 refresh={() => {
                   void refresh();
@@ -824,6 +826,18 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             onInstall={() => setInstallOpen(true)}
             onView={openView}
             onCancelScan={cancelScan}
+            busy={busy}
+            onUpdateAll={() => {
+              void action(async () => {
+                const result = await post<UpdateRequested>("/agents/update");
+                toast(
+                  result.requested
+                    ? `Asked ${result.requested} ${result.requested === 1 ? "agent" : "agents"} to update. Each starts when it next reports.`
+                    : "No agent could be asked to update.",
+                  result.requested ? "good" : "warning",
+                );
+              });
+            }}
           />
         ) : (
           <div className="page">
@@ -1039,6 +1053,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                   close={() => select(null)}
                   expand={() => go({ view: "host" })}
                   agentRelease={data.agent_release}
+                  upgradeCommand={data.agent_upgrade_command}
                   install={() => setInstallOpen(true)}
                   refresh={() => {
                     void refresh();

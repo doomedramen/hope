@@ -402,6 +402,60 @@ export function ipValue(address: string | undefined): number {
   return value;
 }
 
+/** How long a request to update stays pending on the server. */
+const UPDATE_REQUEST_SECONDS = 86400;
+
+/** Where an agent that has a newer release on offer stands. */
+export type UpdatePlan = {
+  /** The release on offer. */
+  target: string;
+  /**
+   * ready: the agent has an updater, so it can be asked from here.
+   * pending: it was asked and starts the update when it next reports.
+   * manual: it has no updater yet; the upgrade command must be run on the host once.
+   */
+  state: "ready" | "pending" | "manual";
+  /** What the updater last said, when the last update failed. */
+  failure: string | null;
+};
+
+export function updatePlan(
+  host: Host,
+  release: string | null | undefined,
+  now = Date.now() / 1000,
+): UpdatePlan | null {
+  const target = agentUpdate(host, release);
+  if (!target) return null;
+  const updater = host.collectors.find((c) => c.name === "agent_update");
+  const pending =
+    host.update_requested_at != null &&
+    host.update_target != null &&
+    now - host.update_requested_at < UPDATE_REQUEST_SECONDS;
+  const failed =
+    updater?.available && updater.detail?.startsWith("The last update failed");
+  return {
+    target,
+    state: pending ? "pending" : updater?.available ? "ready" : "manual",
+    failure: failed ? (updater.detail ?? null) : null,
+  };
+}
+
+/** How many agents have a newer release on offer, by what can be done about it. */
+export function fleetUpdates(
+  hosts: Host[],
+  release: string | null | undefined,
+  now = Date.now() / 1000,
+) {
+  const counts = { ready: 0, pending: 0, manual: 0, total: 0 };
+  for (const host of hosts) {
+    const plan = updatePlan(host, release, now);
+    if (!plan) continue;
+    counts[plan.state]++;
+    counts.total++;
+  }
+  return counts;
+}
+
 /** Numeric parts of a version (`0.1.57` → [0, 1, 57]); anything after the numbers is ignored. */
 function versionParts(version: string): number[] {
   return version

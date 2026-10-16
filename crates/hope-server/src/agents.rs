@@ -455,14 +455,32 @@ fn settle_update_request(host: &mut Host, at: f64) {
         host.update_target = None;
     }
 }
-/// Whether a host's agent can be asked to update to `release`.
-fn can_update(host: &Host, release: &str) -> bool {
-    host.agent_id.is_some()
-        && !host.agent_revoked
-        && host
-            .agent_version
-            .as_deref()
-            .is_some_and(|have| version_newer(release, have))
+/// Why a host's agent cannot be asked to update to `release`, or `None` when it can. An agent
+/// reports that it has an updater as a collector; one without (installed before updaters, or as a
+/// user service) has to be updated with the upgrade command on the host.
+fn update_blocker(host: &Host, release: &str) -> Option<&'static str> {
+    if host.agent_id.is_none() || host.agent_revoked {
+        return Some("This host has no active agent to update");
+    }
+    if !host
+        .agent_version
+        .as_deref()
+        .is_some_and(|have| version_newer(release, have))
+    {
+        return Some(
+            "This agent already runs the release the server offers, or has not reported its version",
+        );
+    }
+    if !host
+        .collectors
+        .iter()
+        .any(|c| c.name == "agent_update" && c.available)
+    {
+        return Some(
+            "This agent has no updater yet. Run the upgrade command on the host once; later updates can start from H.O.P.E",
+        );
+    }
+    None
 }
 async fn offered_release(state: &State) -> ApiResult<String> {
     let directory = crate::releases::release_directory(&state.0.release_dir).await;
@@ -489,14 +507,9 @@ pub async fn request_update(
 ) -> ApiResult<Json<OkResponse>> {
     let _guard = state.0.writes.lock().await;
     let mut host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
-    if host.agent_id.is_none() || host.agent_revoked {
-        return Err(ApiError::bad("This host has no active agent to update"));
-    }
     let release = offered_release(&state).await?;
-    if !can_update(&host, &release) {
-        return Err(ApiError::bad(
-            "This agent already runs the release the server offers, or has not reported its version",
-        ));
+    if let Some(reason) = update_blocker(&host, &release) {
+        return Err(ApiError::bad(reason));
     }
     mark_update_requested(&state, &mut host, &release).await?;
     Ok(Json(OkResponse { ok: true }))
@@ -509,7 +522,7 @@ pub async fn request_all_updates(
     let release = offered_release(&state).await?;
     let mut requested = 0;
     for mut host in state.hosts().await? {
-        if can_update(&host, &release) {
+        if update_blocker(&host, &release).is_none() {
             mark_update_requested(&state, &mut host, &release).await?;
             requested += 1;
         }
@@ -552,6 +565,11 @@ mod tests {
         host.agent_version = Some(version.into());
         host.update_requested_at = requested;
         host.update_target = requested.map(|_| "0.1.60".to_string());
+        host.collectors = vec![hope_protocol::CollectorStatus {
+            name: "agent_update".into(),
+            available: true,
+            detail: None,
+        }];
         host
     }
     #[test]
@@ -585,18 +603,26 @@ mod tests {
         assert!(live.update_requested_at.is_some());
     }
     #[test]
-    fn only_active_agents_that_report_an_older_version_can_be_asked() {
-        assert!(can_update(&host_at("0.1.57", None), "0.1.60"));
-        assert!(!can_update(&host_at("0.1.60", None), "0.1.60"));
+    fn only_active_agents_with_an_updater_and_an_older_version_can_be_asked() {
+        assert_eq!(update_blocker(&host_at("0.1.57", None), "0.1.60"), None);
+        assert!(update_blocker(&host_at("0.1.60", None), "0.1.60").is_some());
+        assert!(update_blocker(&host_at("0.1.61", None), "0.1.60").is_some());
         let mut revoked = host_at("0.1.57", None);
         revoked.agent_revoked = true;
-        assert!(!can_update(&revoked, "0.1.60"));
+        assert!(update_blocker(&revoked, "0.1.60").is_some());
         let mut unknown = host_at("0.1.57", None);
         unknown.agent_version = None;
-        assert!(!can_update(&unknown, "0.1.60"));
+        assert!(update_blocker(&unknown, "0.1.60").is_some());
         let mut no_agent = host_at("0.1.57", None);
         no_agent.agent_id = None;
-        assert!(!can_update(&no_agent, "0.1.60"));
+        assert!(update_blocker(&no_agent, "0.1.60").is_some());
+        // No updater reported, or one reported unavailable: the upgrade command is the way.
+        let mut bare = host_at("0.1.57", None);
+        bare.collectors.clear();
+        assert!(update_blocker(&bare, "0.1.60").is_some_and(|why| why.contains("upgrade command")));
+        let mut unavailable = host_at("0.1.57", None);
+        unavailable.collectors[0].available = false;
+        assert!(update_blocker(&unavailable, "0.1.60").is_some());
     }
     #[test]
     fn agent_versions_come_only_from_well_formed_user_agents() {

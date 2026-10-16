@@ -994,34 +994,83 @@ test.describe.serial("H.O.P.E console", () => {
       ntfy.close();
     }
   });
-  test("an agent older than the server's release offers an update", async ({
+  test("an agent older than the server's release can be updated from the console", async ({
     page,
   }) => {
-    let atlas = "";
+    let asked = false;
+    let allAsked = false;
+    const posts: string[] = [];
     await page.route("**/api/v1/bootstrap", async (route) => {
       const response = await route.fetch();
       const body = await response.json();
       body.agent_release = "0.1.60";
       for (const host of body.hosts) {
-        if (host.name === "atlas-nas") {
-          atlas = host.id;
+        if (host.name === "atlas-nas") host.agent_version = "0.1.57";
+        else if (host.name === "studio-mac") {
           host.agent_version = "0.1.57";
+          host.collectors = [
+            { name: "agent_update", available: true, detail: "Updater ready" },
+          ];
+          if (asked) {
+            host.update_requested_at = Date.now() / 1000;
+            host.update_target = "0.1.60";
+          }
         } else if (host.agent_id) host.agent_version = "0.1.60";
       }
       await route.fulfill({ response, json: body });
     });
+    await page.route("**/api/v1/hosts/*/update-agent", async (route) => {
+      posts.push(new URL(route.request().url()).pathname);
+      asked = true;
+      await route.fulfill({ json: { ok: true } });
+    });
+    await page.route("**/api/v1/agents/update", async (route) => {
+      allAsked = true;
+      await route.fulfill({ json: { requested: 1 } });
+    });
+
+    // The overview counts what can be done about each outdated agent.
+    await page.goto("/");
+    const fleet = page.getByTestId("fleet-updates");
+    await expect(fleet).toContainText(
+      "2 agents run an older release than 0.1.60",
+    );
+    await expect(fleet).toContainText("1 can update from here");
+    await expect(fleet).toContainText("1 needs the upgrade command");
+    await fleet.getByRole("button", { name: "Update 1 agent" }).click();
+    await expect(page.getByText("Asked 1 agent to update.")).toBeVisible();
+    expect(allAsked).toBe(true);
+
+    // No updater yet: the host shows the token-less command to run once, and no button to ask.
     await page.goto("/?view=hosts");
     await page.getByRole("row").filter({ hasText: "atlas-nas" }).click();
     const details = page.getByRole("complementary", { name: "Host details" });
     await expect(details.getByText("Agent 0.1.57")).toBeVisible();
-    await expect(details.getByTestId("agent-update")).toContainText(
-      "Agent 0.1.60 is available",
+    const card = details.getByTestId("agent-update");
+    await expect(card).toContainText("Agent 0.1.60 is available");
+    await expect(card).toContainText("has no updater yet");
+    await expect(card.locator("code")).toContainText("/agent/install");
+    await expect(card.locator("code")).toContainText("HOPE_ONLY_NEWER=1");
+    await expect(card.locator("code")).not.toContainText(
+      "HOPE_ENROLLMENT_TOKEN",
     );
-    await details.getByRole("button", { name: "Update agent" }).click();
-    await expect(page.getByRole("dialog")).toBeVisible();
-    await page.keyboard.press("Escape");
-    expect(atlas).not.toBe("");
+    await expect(card.getByRole("button", { name: "Update now" })).toHaveCount(
+      0,
+    );
+
+    // An agent with an updater is asked with one click, then shows as waiting.
     await page.getByRole("row").filter({ hasText: "studio-mac" }).click();
+    await expect(card).toContainText("after checking the release's signature");
+    await card.getByRole("button", { name: "Update now" }).click();
+    await expect(
+      page.getByText(/Asked studio-mac to update to 0\.1\.60/),
+    ).toBeVisible();
+    expect(posts).toHaveLength(1);
+    await expect(card).toContainText("Update requested");
+    await expect(card.getByRole("button", { name: "Ask again" })).toBeVisible();
+
+    // An agent that is up to date has no card at all.
+    await page.getByRole("row").filter({ hasText: "compute-node" }).click();
     await expect(details.getByText("Agent 0.1.60")).toBeVisible();
     await expect(details.getByTestId("agent-update")).toHaveCount(0);
   });

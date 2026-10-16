@@ -219,7 +219,7 @@ install_updater() {
     {
         printf '#!/bin/sh\n# H.O.P.E agent updater, written by install-agent.sh and owned by root.\n'
         printf "dir='%s'\nstate='%s'\nroot='%s'\n" "$updater_dir" "$state" "$root"
-        cat <<'HOPE_UPDATER_BODY'
+        cat <<'UPDATER_SCRIPT_END'
 # Runs the installer kept in $dir in upgrade mode when the server offers a newer agent. Started as
 # root by the service manager when the agent leaves a request, or by an administrator: sudo hope-agent-update
 set -eu
@@ -246,10 +246,20 @@ export HOPE_SERVER HOPE_AGENT_DIR HOPE_INSTALL_MODE HOPE_ONLY_NEWER HOPE_UPDATER
 if [ -f "$dir/ca" ]; then HOPE_CA_CERT=$(cat "$dir/ca"); export HOPE_CA_CERT; fi
 if [ -n "$root" ]; then HOPE_INSTALL_ROOT=$root; export HOPE_INSTALL_ROOT; fi
 rc=0
-sh "$dir/install-agent.sh" upgrade 2>"$log" || rc=$?
-cat "$log" >&2
-outcome=$(sed -n 's/^hope-install: result=\(updated\|current\) \([A-Za-z0-9._+-]\{1,64\}\)$/\1 \2/p' "$log" | tail -n 1)
-code=$(sed -n 's/^hope-install: error=\([A-Z_]\{1,40\}\) .*/\1/p' "$log" | head -n 1)
+outcome=
+code=
+# The agent never creates symbolic links, and this runs as root over files it can write: a link
+# anywhere near its state is tampering, so stop before the installer or the agent binary open it.
+if [ -L "$state" ] || { [ -d "$state" ] && [ -n "$(find "$state" -maxdepth 2 -type l 2>/dev/null | head -n 1)" ]; }; then
+    echo 'hope-agent-update: refusing to run: a symbolic link was found in the agent state directory' >&2
+    rc=1
+    code=STATE_UNSAFE
+else
+    sh "$dir/install-agent.sh" upgrade 2>"$log" || rc=$?
+    cat "$log" >&2
+    outcome=$(sed -n 's/^hope-install: result=\(updated\|current\) \([A-Za-z0-9._+-]\{1,64\}\)$/\1 \2/p' "$log" | tail -n 1)
+    code=$(sed -n 's/^hope-install: error=\([A-Z_]\{1,40\}\) .*/\1/p' "$log" | head -n 1)
+fi
 if [ "$rc" -eq 0 ] && [ -n "$outcome" ]; then
     status="status=${outcome%% *}
 version=${outcome#* }"
@@ -267,7 +277,7 @@ if [ -d "$state" ] && [ ! -L "$state" ]; then
     } || true
 fi
 exit "$rc"
-HOPE_UPDATER_BODY
+UPDATER_SCRIPT_END
     } > "$updater_bin.new" && chmod 755 "$updater_bin.new" && mv -f "$updater_bin.new" "$updater_bin" || return 1
     if is_linux; then
         cat > "$updater_path_unit.new" <<EOF

@@ -66,7 +66,8 @@ fn queue_ready(dir: &Path) -> bool {
     std::fs::symlink_metadata(dir.join(QUEUE)).is_ok_and(|meta| meta.is_dir())
 }
 
-/// What to tell the server about updates on this host.
+/// What to tell the server about updates on this host. `available` means an updater is installed
+/// (so a request can lead somewhere), not that the last update worked; the detail says that.
 pub fn status(dir: &Path) -> CollectorStatus {
     let (available, detail) = describe(dir);
     CollectorStatus {
@@ -108,7 +109,7 @@ fn describe(dir: &Path) -> (bool, String) {
                     && c.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')
             });
             (
-                false,
+                true,
                 format!("The last update failed ({})", code.unwrap_or("UNKNOWN")),
             )
         }
@@ -226,12 +227,12 @@ mod tests {
             ),
             (
                 "status=failed\ncode=MANIFEST_INVALID\nat=1",
-                false,
+                true,
                 "The last update failed (MANIFEST_INVALID)",
             ),
             (
                 "status=failed\ncode=bad code!\nat=1",
-                false,
+                true,
                 "The last update failed (UNKNOWN)",
             ),
             ("status=updated\nversion=<script>\n", true, "Updated"),

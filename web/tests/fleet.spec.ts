@@ -3,10 +3,12 @@ import {
   agentUpdate,
   compareHosts,
   fleetSummary,
+  fleetUpdates,
   hostIssues,
   hostState,
   matchesFilter,
   matchesSearch,
+  updatePlan,
   worstDisk,
 } from "../lib/fleet";
 import type { Host, Metrics } from "../lib/protocol";
@@ -48,6 +50,8 @@ function host(overrides: Partial<Host>): Host {
     id: "h",
     agent_id: null,
     agent_version: null,
+    update_requested_at: null,
+    update_target: null,
     name: "host",
     addresses: ["192.168.1.2"],
     macs: [],
@@ -357,4 +361,94 @@ test("agents are offered an update only when the server's release is newer", () 
   expect(agentUpdate(host({ agent_id: "a" }), "0.1.60")).toBeNull();
   expect(agentUpdate(host({ agent_version: "0.1.1" }), "0.1.60")).toBeNull();
   expect(agentUpdate({ ...agent, agent_revoked: true }, "0.1.60")).toBeNull();
+});
+
+test("an update plan says whether the agent can be asked, is waiting, or needs the command once", () => {
+  const updater = (available: boolean, detail = "Updater ready") => [
+    { name: "agent_update", available, detail },
+  ];
+  const old = (overrides: Partial<Host> = {}) =>
+    host({
+      agent_id: "a",
+      agent_version: "0.1.57",
+      collectors: updater(true),
+      ...overrides,
+    });
+  expect(updatePlan(old(), "0.1.60", now)).toEqual({
+    target: "0.1.60",
+    state: "ready",
+    failure: null,
+  });
+  // No updater reported, or none installed: the upgrade command is the way.
+  expect(updatePlan(old({ collectors: [] }), "0.1.60", now)?.state).toBe(
+    "manual",
+  );
+  expect(
+    updatePlan(old({ collectors: updater(false) }), "0.1.60", now)?.state,
+  ).toBe("manual");
+  // Asked, and still inside the server's window.
+  const asked = { update_requested_at: now - 600, update_target: "0.1.60" };
+  expect(updatePlan(old(asked), "0.1.60", now)?.state).toBe("pending");
+  expect(
+    updatePlan(
+      old({ ...asked, update_requested_at: now - 90000 }),
+      "0.1.60",
+      now,
+    )?.state,
+  ).toBe("ready");
+  // A failed attempt is shown but does not stop another request.
+  const failed = old({
+    collectors: updater(true, "The last update failed (BAD_SIGNATURE)"),
+  });
+  expect(updatePlan(failed, "0.1.60", now)).toMatchObject({
+    state: "ready",
+    failure: "The last update failed (BAD_SIGNATURE)",
+  });
+  // Up to date, unknown version, revoked or discovered-only hosts have no plan.
+  expect(
+    updatePlan(old({ agent_version: "0.1.60" }), "0.1.60", now),
+  ).toBeNull();
+  expect(updatePlan(old({ agent_version: null }), "0.1.60", now)).toBeNull();
+  expect(updatePlan(old({ agent_revoked: true }), "0.1.60", now)).toBeNull();
+  expect(updatePlan(old(), null, now)).toBeNull();
+});
+
+test("the fleet counts agents by what can be done about their update", () => {
+  const hosts = [
+    host({
+      id: "1",
+      agent_id: "1",
+      agent_version: "0.1.57",
+      collectors: [{ name: "agent_update", available: true, detail: null }],
+    }),
+    host({
+      id: "2",
+      agent_id: "2",
+      agent_version: "0.1.57",
+      collectors: [{ name: "agent_update", available: true, detail: null }],
+    }),
+    host({
+      id: "3",
+      agent_id: "3",
+      agent_version: "0.1.57",
+      collectors: [{ name: "agent_update", available: true, detail: null }],
+      update_requested_at: now - 60,
+      update_target: "0.1.60",
+    }),
+    host({ id: "4", agent_id: "4", agent_version: "0.1.50" }),
+    host({ id: "5", agent_id: "5", agent_version: "0.1.60" }),
+    host({ id: "6" }),
+  ];
+  expect(fleetUpdates(hosts, "0.1.60", now)).toEqual({
+    ready: 2,
+    pending: 1,
+    manual: 1,
+    total: 4,
+  });
+  expect(fleetUpdates(hosts, null, now)).toEqual({
+    ready: 0,
+    pending: 0,
+    manual: 0,
+    total: 0,
+  });
 });

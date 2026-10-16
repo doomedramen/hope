@@ -883,33 +883,58 @@ class Updater(Base):
         self.env.updater(HOPE_FIRST_REPORT_TIMEOUT=2)
         self.assertFalse(request.exists())
 
-    def test_a_linked_queue_directory_is_not_followed(self):
+    def test_a_link_in_the_state_directory_stops_the_update_before_anything_runs_as_root(self):
         paths = self.installed()
+        self.env.publish('v2')
         victim = self.env.base / 'victim'
         victim.mkdir()
         (victim / 'request').write_text('keep me')
+        before = len(self.env.log())
         queue = paths['state'] / 'update-queue'
         queue.rmdir()
         queue.symlink_to(victim)
-        self.ok(self.env.updater())
+        result = self.env.updater()
+        self.assertNotEqual(0, result.code)
+        self.assertIn('symbolic link', result.err)
         self.assertEqual('keep me', (victim / 'request').read_text())
+        self.assertEqual('v1', self.version(paths['binary']))
+        attempt = self.env.log()[before:]
+        self.assertNotIn('curl', attempt)
+        self.assertNotIn('agent[', attempt)
+        self.assertEqual({'status': 'failed', 'code': 'STATE_UNSAFE'}, {k: v for k, v in self.result_of().items() if k != 'at'})
 
-    def test_a_link_left_at_the_result_path_is_replaced_not_followed(self):
+    def test_a_link_left_at_the_result_path_is_refused_and_replaced_not_followed(self):
         paths = self.installed()
         victim = self.env.base / 'victim.txt'
         victim.write_text('keep me')
         (paths['state'] / 'update-result').symlink_to(victim)
-        self.ok(self.env.updater())
+        self.assertNotEqual(0, self.env.updater().code)
         self.assertEqual('keep me', victim.read_text())
         self.assertFalse((paths['state'] / 'update-result').is_symlink())
-        self.assertEqual('current', self.result_of()['status'])
+        self.assertEqual('STATE_UNSAFE', self.result_of()['code'])
+
+    def test_a_link_at_the_request_path_is_only_deleted_never_followed(self):
+        paths = self.installed()
+        victim = self.env.base / 'victim.txt'
+        victim.write_text('keep me')
+        (paths['state'] / 'update-queue' / 'request').symlink_to(victim)
+        self.ok(self.env.updater())
+        self.assertEqual('keep me', victim.read_text())
+        self.assertFalse((paths['state'] / 'update-queue' / 'request').exists())
+
+    def test_a_deeper_link_is_found_too(self):
+        paths = self.installed()
+        (paths['state'] / 'update-queue' / 'other').symlink_to(self.env.base / 'elsewhere')
+        result = self.env.updater()
+        self.assertNotEqual(0, result.code)
+        self.assertEqual('STATE_UNSAFE', self.result_of()['code'])
 
     def test_a_linked_state_directory_gets_no_result(self):
         paths = self.installed()
         real = self.env.base / 'elsewhere'
         paths['state'].rename(real)
         paths['state'].symlink_to(real)
-        self.env.updater()
+        self.assertNotEqual(0, self.env.updater().code)
         self.assertEqual([], [p.name for p in real.iterdir() if p.name == 'update-result'])
 
     def test_two_updates_do_not_run_at_once(self):

@@ -2,6 +2,7 @@
 import { Age } from "@/components/age";
 import {
   Activity,
+  ArrowDownToLine,
   ArrowRight,
   Check,
   CircleCheck,
@@ -23,6 +24,7 @@ import { bytes, percent0, rate } from "@/lib/api";
 import {
   cpuPercent,
   fleetSummary,
+  fleetUpdates,
   memoryUsage,
   worstDisk,
   type Issue,
@@ -37,6 +39,8 @@ export function Overview({
   onInstall,
   onView,
   onCancelScan,
+  onUpdateAll,
+  busy = false,
 }: {
   data: Bootstrap;
   onSelect: (host: Host) => void;
@@ -45,9 +49,13 @@ export function Overview({
   onInstall: () => void;
   onView: (view: "map" | "hosts", filter?: "attention") => void;
   onCancelScan: (scan: ScanJob) => void;
+  /** Asks every agent that can update itself to do so. */
+  onUpdateAll: () => void;
+  busy?: boolean;
 }) {
   const { hosts, networks, scans } = data;
   const summary = fleetSummary(hosts, scans);
+  const updates = fleetUpdates(hosts, data.agent_release);
   const agentsInstalled = hosts.some((h) => h.agent_id);
   const scanned = scans.length > 0 || hosts.length > 0;
   const onboarding = !networks.length || !scanned || !agentsInstalled;
@@ -122,6 +130,35 @@ export function Overview({
               hosts with names and services. An unanswered probe never marks a
               host offline; H.O.P.E only reports what it observed.
             </div>
+          </div>
+        </section>
+      )}
+
+      {updates.total > 0 && (
+        <section className="panel" data-testid="fleet-updates">
+          <div className="panel-header">
+            <h3>
+              <ArrowDownToLine />
+              Agent updates
+            </h3>
+          </div>
+          <div className="panel-body flex flex-wrap items-center justify-between gap-3 text-sm">
+            <p className="text-muted-foreground">
+              {updates.total}{" "}
+              {updates.total === 1 ? "agent runs" : "agents run"} an older
+              release than {data.agent_release}.
+              {updates.ready > 0 && ` ${updates.ready} can update from here.`}
+              {updates.pending > 0 &&
+                ` ${updates.pending} already ${updates.pending === 1 ? "has" : "have"} been asked.`}
+              {updates.manual > 0 &&
+                ` ${updates.manual} need${updates.manual === 1 ? "s" : ""} the upgrade command run on ${updates.manual === 1 ? "its host" : "their hosts"} once (open the host).`}
+            </p>
+            {updates.ready > 0 && (
+              <Button size="sm" disabled={busy} onClick={onUpdateAll}>
+                <ArrowDownToLine data-icon="inline-start" />
+                {`Update ${updates.ready} ${updates.ready === 1 ? "agent" : "agents"}`}
+              </Button>
+            )}
           </div>
         </section>
       )}
