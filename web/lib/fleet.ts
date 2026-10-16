@@ -1,0 +1,296 @@
+import type { Disk, Host, ScanJob } from "@/lib/protocol";
+import { memoryPercent } from "@/lib/history";
+
+export type Tone = "good" | "warning" | "critical" | "neutral";
+export type StateKey =
+  "reporting" | "stale" | "revoked" | "observed" | "unobserved";
+export type HostState = { key: StateKey; label: string; tone: Tone };
+
+/** Agents report every 30 s; two missed reports mean the agent is stale. */
+export const AGENT_STALE_SECONDS = 120;
+/** Discovery runs every five minutes; two missed passes mean a host is unobserved. */
+export const OBSERVED_SECONDS = 600;
+
+export function hostState(
+  host: Pick<Host, "agent_id" | "agent_revoked" | "last_report" | "last_seen">,
+  now = Date.now() / 1000,
+): HostState {
+  if (host.agent_revoked)
+    return { key: "revoked", label: "Agent revoked", tone: "neutral" };
+  if (host.agent_id)
+    return host.last_report && now - host.last_report < AGENT_STALE_SECONDS
+      ? { key: "reporting", label: "Reporting", tone: "good" }
+      : { key: "stale", label: "Agent stale", tone: "critical" };
+  return now - host.last_seen < OBSERVED_SECONDS
+    ? { key: "observed", label: "Observed", tone: "good" }
+    : { key: "unobserved", label: "Not recently observed", tone: "warning" };
+}
+
+export function usageTone(percent: number | null | undefined): Tone {
+  if (percent == null || !Number.isFinite(percent)) return "neutral";
+  if (percent >= 95) return "critical";
+  if (percent >= 85) return "warning";
+  return "good";
+}
+
+export function diskPercent(disk: Disk): number | null {
+  return disk.total_bytes > 0
+    ? (1 - disk.available_bytes / disk.total_bytes) * 100
+    : null;
+}
+
+/** The fullest filesystem a host reports, or null without any usable mount. */
+export function worstDisk(host: Host): { disk: Disk; percent: number } | null {
+  const disks = host.metrics?.disks.length
+    ? host.metrics.disks
+    : (host.inventory?.disks ?? []);
+  let worst: { disk: Disk; percent: number } | null = null;
+  for (const disk of disks) {
+    const percent = diskPercent(disk);
+    if (percent != null && (!worst || percent > worst.percent))
+      worst = { disk, percent };
+  }
+  return worst;
+}
+
+export function cpuPercent(host: Host): number | null {
+  const value = host.metrics?.cpu_percent;
+  return value != null && Number.isFinite(value) ? value : null;
+}
+export function memoryUsage(host: Host): number | null {
+  return host.metrics ? memoryPercent(host.metrics) : null;
+}
+
+export type Issue = {
+  host: Host;
+  severity: "critical" | "warning";
+  kind: "agent" | "observation" | "cpu" | "memory" | "disk";
+  message: string;
+};
+
+function duration(seconds: number) {
+  if (seconds < 3600) return `${Math.max(1, Math.floor(seconds / 60))} min`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h`;
+  return `${Math.floor(seconds / 86400)} d`;
+}
+
+/** Everything that deserves an operator's attention on a host, most severe first. */
+export function hostIssues(host: Host, now = Date.now() / 1000): Issue[] {
+  const issues: Issue[] = [];
+  const state = hostState(host, now);
+  if (state.key === "stale")
+    issues.push({
+      host,
+      severity: "critical",
+      kind: "agent",
+      message: host.last_report
+        ? `Agent silent for ${duration(now - host.last_report)}`
+        : "Agent has never reported",
+    });
+  if (state.key === "unobserved")
+    issues.push({
+      host,
+      severity: "warning",
+      kind: "observation",
+      message: `Not observed for ${duration(now - host.last_seen)}`,
+    });
+  if (state.key === "reporting") {
+    const cpu = cpuPercent(host);
+    if (cpu != null && cpu >= 90)
+      issues.push({
+        host,
+        severity: cpu >= 98 ? "critical" : "warning",
+        kind: "cpu",
+        message: `CPU at ${cpu.toFixed(0)}%`,
+      });
+    const memory = memoryUsage(host);
+    if (memory != null && memory >= 90)
+      issues.push({
+        host,
+        severity: memory >= 97 ? "critical" : "warning",
+        kind: "memory",
+        message: `Memory at ${memory.toFixed(0)}%`,
+      });
+    const disk = worstDisk(host);
+    if (disk && disk.percent >= 90)
+      issues.push({
+        host,
+        severity: disk.percent >= 97 ? "critical" : "warning",
+        kind: "disk",
+        message: `${disk.disk.mount} is ${disk.percent.toFixed(0)}% full`,
+      });
+  }
+  return issues.sort((a, b) => rank(a.severity) - rank(b.severity));
+}
+const rank = (severity: Issue["severity"]) => (severity === "critical" ? 0 : 1);
+
+export function fleetIssues(hosts: Host[], now = Date.now() / 1000): Issue[] {
+  return hosts
+    .flatMap((host) => hostIssues(host, now))
+    .sort(
+      (a, b) =>
+        rank(a.severity) - rank(b.severity) ||
+        a.host.name.localeCompare(b.host.name),
+    );
+}
+
+export type FleetSummary = {
+  total: number;
+  online: number;
+  agents: number;
+  reporting: number;
+  issues: Issue[];
+  cpuAverage: number | null;
+  memoryUsed: number;
+  memoryTotal: number;
+  diskUsed: number;
+  diskTotal: number;
+  rx: number | null;
+  tx: number | null;
+  runningScans: ScanJob[];
+  lastScan: ScanJob | null;
+};
+
+/** Fleet-wide figures from the latest sample of every host; nothing is invented for missing data. */
+export function fleetSummary(
+  hosts: Host[],
+  scans: ScanJob[],
+  now = Date.now() / 1000,
+): FleetSummary {
+  let online = 0;
+  let agents = 0;
+  let reporting = 0;
+  let cpuSum = 0;
+  let cpuCount = 0;
+  let memoryUsed = 0;
+  let memoryTotal = 0;
+  let diskUsed = 0;
+  let diskTotal = 0;
+  let rx: number | null = null;
+  let tx: number | null = null;
+  for (const host of hosts) {
+    const state = hostState(host, now);
+    if (state.tone === "good") online++;
+    if (host.agent_id && !host.agent_revoked) agents++;
+    if (state.key !== "reporting") continue;
+    reporting++;
+    const cpu = cpuPercent(host);
+    if (cpu != null) {
+      cpuSum += cpu;
+      cpuCount++;
+    }
+    const metrics = host.metrics;
+    if (
+      metrics?.memory_used_bytes != null &&
+      metrics.memory_total_bytes != null &&
+      metrics.memory_total_bytes > 0
+    ) {
+      memoryUsed += metrics.memory_used_bytes;
+      memoryTotal += metrics.memory_total_bytes;
+    }
+    for (const disk of metrics?.disks ?? [])
+      if (disk.total_bytes > 0) {
+        diskUsed += disk.total_bytes - disk.available_bytes;
+        diskTotal += disk.total_bytes;
+      }
+    if (metrics?.network_rx_bytes_per_second != null)
+      rx = (rx ?? 0) + metrics.network_rx_bytes_per_second;
+    if (metrics?.network_tx_bytes_per_second != null)
+      tx = (tx ?? 0) + metrics.network_tx_bytes_per_second;
+  }
+  const runningScans = scans.filter(
+    (scan) => scan.status === "running" || scan.status === "queued",
+  );
+  const lastScan = [...scans].sort(
+    (a, b) => (b.finished_at ?? b.started_at) - (a.finished_at ?? a.started_at),
+  )[0];
+  return {
+    total: hosts.length,
+    online,
+    agents,
+    reporting,
+    issues: fleetIssues(hosts, now),
+    cpuAverage: cpuCount ? cpuSum / cpuCount : null,
+    memoryUsed,
+    memoryTotal,
+    diskUsed,
+    diskTotal,
+    rx,
+    tx,
+    runningScans,
+    lastScan: lastScan ?? null,
+  };
+}
+
+export type HostFilter = "all" | "attention" | StateKey;
+export const HOST_FILTERS: { key: HostFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "attention", label: "Needs attention" },
+  { key: "reporting", label: "Reporting" },
+  { key: "observed", label: "Observed" },
+  { key: "stale", label: "Agent stale" },
+  { key: "unobserved", label: "Unobserved" },
+  { key: "revoked", label: "Revoked" },
+];
+export function matchesFilter(
+  host: Host,
+  filter: HostFilter,
+  now = Date.now() / 1000,
+) {
+  if (filter === "all") return true;
+  if (filter === "attention") return hostIssues(host, now).length > 0;
+  return hostState(host, now).key === filter;
+}
+
+export type SortKey = "name" | "status" | "cpu" | "memory" | "disk" | "seen";
+export function compareHosts(
+  key: SortKey,
+  now = Date.now() / 1000,
+): (a: Host, b: Host) => number {
+  const number = (value: number | null) =>
+    value == null ? Number.NEGATIVE_INFINITY : value;
+  const toneRank: Record<Tone, number> = {
+    critical: 0,
+    warning: 1,
+    neutral: 2,
+    good: 3,
+  };
+  switch (key) {
+    case "name":
+      return (a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    case "status":
+      return (a, b) =>
+        toneRank[hostState(a, now).tone] - toneRank[hostState(b, now).tone] ||
+        a.name.localeCompare(b.name);
+    case "cpu":
+      return (a, b) => number(cpuPercent(b)) - number(cpuPercent(a));
+    case "memory":
+      return (a, b) => number(memoryUsage(b)) - number(memoryUsage(a));
+    case "disk":
+      return (a, b) =>
+        number(worstDisk(b)?.percent ?? null) -
+        number(worstDisk(a)?.percent ?? null);
+    case "seen":
+      return (a, b) =>
+        Math.max(b.last_report ?? 0, b.last_seen) -
+        Math.max(a.last_report ?? 0, a.last_seen);
+  }
+}
+
+/** Matches name, addresses, MACs, OS and observed service names. */
+export function matchesSearch(host: Host, query: string) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return [
+    host.name,
+    ...host.addresses,
+    ...host.macs,
+    host.inventory?.os ?? "",
+    host.inventory?.cpu_model ?? "",
+    ...host.services.map((s) => `${s.port} ${s.name}`),
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(needle);
+}

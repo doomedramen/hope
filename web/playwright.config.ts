@@ -1,4 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
+// Point PLAYWRIGHT_CHROMIUM at a Chromium binary to run the suite without a browser download.
+const executablePath = process.env.PLAYWRIGHT_CHROMIUM;
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: false,
@@ -8,6 +10,7 @@ export default defineConfig({
     baseURL: "http://127.0.0.1:8087",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
+    ...(executablePath ? { launchOptions: { executablePath } } : {}),
   },
   projects: [
     {

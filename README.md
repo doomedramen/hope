@@ -4,6 +4,23 @@ Home network discovery, host monitoring and a lightweight reporting agent for up
 
 **Status: pre-release.** The code builds and passes its automated suites, but the release is **not** complete: key environment-dependent gates are unverified (below). Do not rely on it for anything that matters, and read [docs/validation.md](docs/validation.md) before trusting any claim made here.
 
+## The console
+
+![Overview: fleet health at a glance](docs/screenshots/overview.png)
+
+- **Overview**: hosts responding, agents reporting, what needs attention (stale agents, unobserved hosts, CPU, memory or filesystems above 90%), fleet-wide usage, the busiest hosts and a getting-started checklist until the first agent reports. Every figure comes from the latest sample; nothing is invented for missing data.
+- **Hosts**: status filters, sortable columns and inline CPU, memory and disk meters; click a host for details.
+- **Network map**: topology, subnet and health modes with provenance for reported, inferred and manual links, a minimap for large fleets, and drag-to-link.
+- **Host details**: live usage tiles with sparklines, hardware, storage meters, interfaces and counters, services, GPUs, and 1 h / 6 h / 24 h / 7 d history that draws outages as gaps.
+- **Command palette** (`⌘K` / `Ctrl+K`, or `/`): jump to any host or run any action from the keyboard.
+- Light, dark and automatic themes; everything works at phone width.
+
+| Hosts | Map (health mode) | Host details (dark) |
+| --- | --- | --- |
+| ![Hosts](docs/screenshots/hosts.png) | ![Map](docs/screenshots/map-health.png) | ![Host details](docs/screenshots/host-details-dark.png) |
+
+Screenshots are taken by the Playwright suite from synthetic inventory (`web/tests/console.spec.ts`).
+
 ## What is and is not in scope
 
 In scope: discovery of IPv4 ranges (`/20` or smaller) with fair concurrent scanning, cancellation and progress; bounded enrichment; map modes (topology, subnets, health) with provenance for observed, inferred and manual links (physical switch connections are never invented); agents for Linux and macOS (x86_64 and ARM64, systemd and launchd); manual and SSH-assisted agent installation through one signed installer; history (raw 24 hours, five-minute aggregates through day seven); revocable per-agent credentials.
@@ -15,7 +32,7 @@ Not in scope and not planned for this release: Windows agents, distributed disco
 | # | Stage | Evidence today | Still open |
 | --- | --- | --- | --- |
 | 1 | Discovery and hosts | Controlled two-range Docker fixtures (OrbStack, Linux ARM64): [routed](docs/benchmarks/discovery-routed.json) 25.4 s and [on-link](docs/benchmarks/discovery-on-link.json) 26.4 s for both ranges; fairness, cancellation and enrichment tests | A physical LAN with host networking and ARP; Docker Engine on a physical Linux host; Docker Desktop on Windows |
-| 2 | Map modes | Playwright acceptance (10 Chromium tests) for topology/subnet/health modes, drag persistence, selection and filters; screenshots reviewed | Tests use synthetic inventory, not data from real discovery |
+| 2 | Map modes and console | Playwright acceptance (17 Chromium tests) for the overview, topology/subnet/health modes, drag persistence, selection, filters, command palette, themes and range removal; screenshots reviewed | Tests use synthetic inventory, not data from real discovery |
 | 3 | Agent and history | Agent fault tests, 250-host retention load test, a 30-minute [Linux x86_64 LXC measurement](docs/benchmarks/agent-linux-x86_64-lxc.json), and a 30-minute macOS arm64 measurement (see "Resource use") | Linux ARM64 and macOS x86_64 measurements; GPU-collector comparisons; the signed musl artifact was not re-measured |
 | 4 | Manual installation | Transactional installer with rollback, covered by a 77-test harness with stubbed service managers and real signatures, **and a real Linux matrix (2026-10-15)**: Debian 13 with systemd, arm64 native and amd64 emulated, system and user services, custom CA; install, reinstall, interrupted activation, upgrade, downgrade refusal, uninstall, purge | **launchd (macOS) installation, upgrade, rollback and uninstall; the default public-CA path; physical x86_64 hardware and other Linux distributions** |
 | 5 | SSH and release hardening | SSH jobs against an in-process SSH server and, since 2026-10-15, against a real OpenSSH 10.0 on Debian 13 (host-key binding, auth failures, user-service fallback, reinstall, dropped connection); a real Caddy 2.10.2 reverse proxy (SSE, Secure cookie, rate-limit key, spoofed `X-Forwarded-For`); four-target signed release build and assembly with a throwaway key; CI definitions | The CI workflows have never run on GitHub; no production signing key exists; nginx and Traefik, `sudo` that needs a password |
@@ -76,6 +93,8 @@ tests/gates/run.sh all      # real systemd/sshd/Caddy gate fixture in disposable
 python3 -I -m unittest discover -s tests/docs
 npm --prefix web run typecheck && npm --prefix web run lint && npm --prefix web run test:e2e
 ```
+
+The browser suite downloads its own Chromium; on a machine that already has one (or cannot download), point `PLAYWRIGHT_CHROMIUM` at the binary.
 
 ## Resource use of the agent
 

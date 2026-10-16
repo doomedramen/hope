@@ -1,3 +1,5 @@
+import { hostState } from "@/lib/fleet";
+
 export async function api<T>(
   path: string,
   options: RequestInit = {},
@@ -22,6 +24,7 @@ export const post = <T>(path: string, data: unknown = {}) =>
   api<T>(path, { method: "POST", body: JSON.stringify(data) });
 export const put = <T>(path: string, data: unknown) =>
   api<T>(path, { method: "PUT", body: JSON.stringify(data) });
+export const del = <T>(path: string) => api<T>(path, { method: "DELETE" });
 export function bytes(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "Unavailable";
   if (value === 0) return "0 B";
@@ -30,6 +33,10 @@ export function bytes(value: number | null | undefined): string {
     Math.min(4, Math.floor(Math.log(value) / Math.log(1024))),
   );
   return `${(value / 1024 ** index).toFixed(index ? 1 : 0)} ${["B", "KiB", "MiB", "GiB", "TiB"][index]}`;
+}
+/** Throughput as "12.3 KiB/s" or "—" when the counter is unavailable. */
+export function rate(value: number | null | undefined): string {
+  return value == null || !Number.isFinite(value) ? "—" : `${bytes(value)}/s`;
 }
 export function age(value: number | null | undefined): string {
   if (!value) return "Never";
@@ -43,7 +50,15 @@ export function age(value: number | null | undefined): string {
         : `${Math.floor(seconds / 86400)}d ago`;
 }
 export function percentage(value: number | null | undefined) {
-  return value == null ? "—" : `${value.toFixed(1)}%`;
+  return value == null || !Number.isFinite(value)
+    ? "—"
+    : `${value.toFixed(1)}%`;
+}
+/** Whole-number percentage for dense tables and tiles. */
+export function percent0(value: number | null | undefined) {
+  return value == null || !Number.isFinite(value)
+    ? "—"
+    : `${Math.round(value)}%`;
 }
 export function status(host: {
   agent_id: string | null;
@@ -51,12 +66,5 @@ export function status(host: {
   last_report: number | null;
   last_seen: number;
 }) {
-  if (host.agent_revoked) return "Agent revoked";
-  if (host.agent_id)
-    return host.last_report && Date.now() / 1000 - host.last_report < 120
-      ? "Reporting"
-      : "Agent stale";
-  return Date.now() / 1000 - host.last_seen < 600
-    ? "Observed"
-    : "Not recently observed";
+  return hostState({ agent_revoked: false, ...host }).label;
 }

@@ -2,8 +2,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
+  BackgroundVariant,
   Controls,
   Handle,
+  MiniMap,
   Position,
   ReactFlow,
   useNodesInitialized,
@@ -14,10 +16,18 @@ import {
   type Connection,
   type Edge,
 } from "@xyflow/react";
-import { Computer, Router, Network as NetworkIcon } from "lucide-react";
+import { Bot, Router, Network as NetworkIcon } from "lucide-react";
 import type { Host, MapEdit, MapState, Network } from "@/lib/protocol";
-import { percentage, status } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
+import { percent0 } from "@/lib/api";
+import { Meter } from "@/components/ui/meter";
+import { HostIcon } from "@/components/host-table";
+import {
+  cpuPercent,
+  hostState,
+  memoryUsage,
+  worstDisk,
+  type Tone,
+} from "@/lib/fleet";
 import "@xyflow/react/dist/style.css";
 
 type Data = {
@@ -26,16 +36,14 @@ type Data = {
   host?: Host;
   kind: "host" | "network" | "gateway";
   health: boolean;
+  tone: Tone;
 };
 type HopeNode = Node<Data, "hope">;
 function DeviceNode({ data, selected }: NodeProps<HopeNode>) {
-  const Icon =
-    data.kind === "gateway"
-      ? Router
-      : data.kind === "network"
-        ? NetworkIcon
-        : Computer;
-  const state = data.host ? status(data.host) : null;
+  const state = data.host ? hostState(data.host) : null;
+  const cpu = data.host ? cpuPercent(data.host) : null;
+  const memory = data.host ? memoryUsage(data.host) : null;
+  const disk = data.host ? worstDisk(data.host) : null;
   return (
     <div
       className={`map-device ${selected ? "selected" : ""}`}
@@ -43,42 +51,54 @@ function DeviceNode({ data, selected }: NodeProps<HopeNode>) {
     >
       <Handle type="target" position={Position.Top} />
       <div className="flex items-center gap-3">
-        <div className="device-icon">
-          <Icon size={20} />
+        <div
+          className="device-icon"
+          data-tone={data.kind === "host" ? data.tone : undefined}
+        >
+          {data.kind === "gateway" ? (
+            <Router size={18} />
+          ) : data.host ? (
+            <HostIcon host={data.host} size={18} />
+          ) : (
+            <NetworkIcon size={18} />
+          )}
         </div>
         <div className="min-w-0">
-          <div className="truncate font-medium">{data.label}</div>
-          <div className="truncate text-xs text-muted-foreground">
+          <div className="truncate font-semibold">{data.label}</div>
+          <div className="mono truncate text-[11px] text-muted-foreground">
             {data.subtitle}
           </div>
         </div>
       </div>
       {state && (
-        <div className="mt-3 flex items-center justify-between gap-2">
+        <div className="mt-2.5 flex items-center gap-2 text-[11px]">
           <span
-            className={`status-dot ${state === "Reporting" || state === "Observed" ? "live" : "stale"}`}
+            className="status-dot"
+            data-tone={state.tone}
+            aria-hidden="true"
           />
-          <span className="mr-auto text-xs text-muted-foreground">{state}</span>
-          {data.host?.agent_id && <Badge variant="secondary">Agent</Badge>}
+          <span className={`mr-auto tone-${state.tone}`}>{state.label}</span>
+          {data.host?.agent_id && !data.host.agent_revoked && (
+            <span className="inline-flex items-center gap-1 text-muted-foreground">
+              <Bot size={12} />
+              Agent
+            </span>
+          )}
         </div>
       )}
       {data.health && data.host && (
         <div className="node-health">
           <span>
-            CPU <strong>{percentage(data.host.metrics?.cpu_percent)}</strong>
+            CPU <Meter value={cpu} thin />
+            <strong>{percent0(cpu)}</strong>
           </span>
           <span>
-            RAM{" "}
-            <strong>
-              {data.host.metrics?.memory_total_bytes &&
-              data.host.metrics.memory_used_bytes != null
-                ? percentage(
-                    (data.host.metrics.memory_used_bytes /
-                      data.host.metrics.memory_total_bytes) *
-                      100,
-                  )
-                : "—"}
-            </strong>
+            RAM <Meter value={memory} thin />
+            <strong>{percent0(memory)}</strong>
+          </span>
+          <span>
+            Disk <Meter value={disk?.percent} thin />
+            <strong>{percent0(disk?.percent)}</strong>
           </span>
         </div>
       )}
@@ -101,6 +121,13 @@ function InitialViewport() {
   }, [initialized, fitView]);
   return null;
 }
+
+const TONE_COLORS: Record<Tone, string> = {
+  good: "var(--status-good)",
+  warning: "var(--status-warning)",
+  critical: "var(--status-critical)",
+  neutral: "var(--status-neutral)",
+};
 
 export function NetworkMap({
   hosts,
@@ -190,6 +217,7 @@ export function NetworkMap({
           subtitle: group.cidr,
           kind: "network",
           health: false,
+          tone: "neutral",
         },
         draggable: false,
         connectable: false,
@@ -200,7 +228,7 @@ export function NetworkMap({
           type: "hope",
           position: position(host.id, {
             x: x + (index % columns) * 280,
-            y: 160 + Math.floor(index / columns) * 180,
+            y: 160 + Math.floor(index / columns) * 190,
           }),
           selected: selected === host.id,
           data: {
@@ -209,6 +237,7 @@ export function NetworkMap({
             host,
             kind: "host",
             health: mode === "health",
+            tone: hostState(host).tone,
           },
         });
         if (mode === "subnets") {
@@ -240,6 +269,7 @@ export function NetworkMap({
                   subtitle: "Reported default gateway",
                   kind: "gateway",
                   health: false,
+                  tone: "neutral",
                 },
                 connectable: false,
               });
@@ -352,8 +382,22 @@ export function NetworkMap({
         proOptions={{ hideAttribution: false }}
       >
         <InitialViewport />
-        <Background gap={24} size={1} color="var(--border)" />
+        <Background
+          variant={BackgroundVariant.Dots}
+          gap={22}
+          size={1.2}
+          color="var(--grid)"
+        />
         <Controls showInteractive={false} />
+        {nodes.length > 8 && (
+          <MiniMap
+            pannable
+            zoomable
+            nodeColor={(node) => TONE_COLORS[(node.data as Data).tone]}
+            nodeStrokeWidth={0}
+            maskColor="color-mix(in srgb, var(--background) 70%, transparent)"
+          />
+        )}
       </ReactFlow>
       <div className="map-legend">
         <span>
@@ -363,6 +407,10 @@ export function NetworkMap({
         <span>
           <i className="legend-line dashed" />
           Subnet membership
+        </span>
+        <span>
+          <i className="legend-line manual" />
+          Manual link
         </span>
         <span>
           Drag handles to add manual links. Double-click a manual link to remove

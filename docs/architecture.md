@@ -50,7 +50,7 @@ H.O.P.E is a single Rust server (Axum, Tokio, SQLx on SQLite) that serves a stat
 
 ### Discovery to hosts
 
-1. An administrator adds a range (`POST /api/v1/networks`) and starts a scan, or the 300-second monitoring timer in `main.rs` starts one for every enabled range.
+1. An administrator adds a range (`POST /api/v1/networks`; `PUT`/`DELETE /api/v1/networks/{id}` pause or remove it) and starts a scan, or the 300-second monitoring timer in `main.rs` starts one for every enabled range.
 2. `scanner::start` creates a scan row and queues a batch of addresses in the shared `Scheduler`. The scheduler interleaves batches (one address per range in turn), runs at most 64 host probes at once, and a `ProbeLimiter` caps probe starts at 200 per second and sockets at 64 across all ranges.
 3. Per address `NativeProbe` runs ICMP, TCP 22/80/443 and (on-link, Linux, native mode) ARP concurrently under a six-second budget. A host is alive when ICMP, ARP or any TCP connect or refusal answered; unanswered probes record nothing and never mark a host offline.
 4. `persist_observation` creates or updates the host (rechecking cancellation under the write lock) and enqueues it in `enrichment`, whose workers add TCP service ports and a reverse-DNS name, visible as the host's enrichment state.

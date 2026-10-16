@@ -131,12 +131,17 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("heading", { name: "Meet your network." }),
     ).toBeVisible();
+    await page.screenshot({ path: "test-results/hope-setup.png" });
     await page
       .getByLabel("Setup token", { exact: true })
       .fill("hope-playwright-setup-token");
     await page.getByLabel("Administrator password").fill(password);
     await page.getByRole("button", { name: "Create account" }).click();
     await expect(page.getByText("Your network starts here")).toBeVisible();
+    await page.screenshot({
+      path: "test-results/hope-empty.png",
+      fullPage: true,
+    });
     adminState = await page.context().storageState();
     await page.getByRole("button", { name: "Add agent", exact: true }).click();
     await expect(
@@ -156,7 +161,7 @@ test.describe.serial("H.O.P.E console", () => {
     await seed(request);
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
-    await page.goto("/");
+    await page.goto("/?view=map");
     await expect(page.getByTestId("network-map")).toBeVisible();
     await expect(
       page.locator(".map-device").filter({ hasText: "atlas-nas" }),
@@ -293,7 +298,7 @@ test.describe.serial("H.O.P.E console", () => {
         ).ok(),
       ).toBeTruthy();
     }
-    await page.goto("/");
+    await page.goto("/?view=map");
     const node = page.locator(`[data-id="${host.id}"]`);
     await expect(node).toHaveAttribute("style", /translate\(125px, 200px\)/);
     await expectMapFits(page);
@@ -374,7 +379,7 @@ test.describe.serial("H.O.P.E console", () => {
   test("expired session returns to login and mobile logout is reachable", async ({
     page,
   }) => {
-    await page.goto("/");
+    await page.goto("/?view=map");
     await expect(page.getByTestId("network-map")).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
     await page
@@ -418,7 +423,7 @@ test.describe.serial("H.O.P.E console", () => {
         })
       ).ok(),
     ).toBeTruthy();
-    await page.goto("/");
+    await page.goto("/?view=map");
     await page.getByRole("combobox", { name: "Filter by network" }).click();
     await page
       .getByRole("option", { name: "Home network", exact: true })
@@ -477,5 +482,136 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("button", { name: "Retry discovery" }).click();
     await expect.poll(() => scans).toBe(2);
     expect(creates).toBe(1);
+  });
+  test("overview surfaces fleet health and leads to the host that needs attention", async ({
+    page,
+    request,
+  }) => {
+    const enrollment = await (
+      await request.post("/api/v1/enrollment-tokens", { data: {} })
+    ).json();
+    const enrolled = await request.post("/api/v1/agent/enroll", {
+      data: {
+        schema_version: 1,
+        token: enrollment.token,
+        agent_id: randomUUID(),
+        credential: randomBytes(32).toString("hex"),
+        inventory: {
+          hostname: "quiet-node",
+          os: "Linux",
+          architecture: "x86_64",
+          cpu_model: "Intel N100",
+          cpu_cores: 4,
+          memory_total_bytes: 8589934592,
+          interfaces: [
+            {
+              name: "eth0",
+              mac: "02:00:00:00:00:99",
+              addresses: ["192.168.1.99"],
+              gateway: "192.168.1.1",
+            },
+          ],
+          disks: [],
+          gpus: [],
+          collectors: [],
+        },
+      },
+    });
+    expect(enrolled.ok()).toBeTruthy();
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByTestId("tile-hosts")).toContainText(
+      "Hosts responding",
+    );
+    await expect(page.getByTestId("tile-attention")).toContainText("1");
+    const attention = page.getByRole("region", { name: "Needs attention" });
+    await expect(attention).toContainText("quiet-node");
+    await expect(attention).toContainText("Agent has never reported");
+    await expect(
+      page.getByRole("region", { name: "Busiest CPUs" }),
+    ).toContainText("compute-node");
+    await page.screenshot({
+      path: "test-results/hope-overview.png",
+      fullPage: true,
+    });
+    await attention.getByRole("button", { name: /quiet-node/ }).click();
+    await expect(page).toHaveURL(/view=hosts/);
+    await expect(
+      page.getByRole("complementary", { name: "Host details" }),
+    ).toContainText("Intel N100");
+    await expect(
+      page.getByRole("complementary", { name: "Host details" }),
+    ).toContainText("Agent has never reported");
+    await page.getByRole("button", { name: "Close host details" }).click();
+    await page.getByRole("button", { name: /^Needs attention/ }).click();
+    await expect(page.getByRole("table").getByRole("row")).toHaveCount(2);
+    await expect(page.getByRole("table")).toContainText("quiet-node");
+    await page.getByRole("button", { name: /^Reporting/ }).click();
+    await expect(page.getByRole("table")).not.toContainText("quiet-node");
+    await page
+      .getByRole("columnheader", { name: "CPU" })
+      .getByRole("button")
+      .click();
+    await expect(page.getByRole("table").getByRole("row").nth(1)).toContainText(
+      "compute-node",
+    );
+    await page.screenshot({
+      path: "test-results/hope-hosts.png",
+      fullPage: true,
+    });
+  });
+  test("command palette jumps to a host and the theme persists", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await page.keyboard.press("Control+k");
+    const palette = page.getByRole("dialog", { name: "Search and commands" });
+    await expect(palette).toBeVisible();
+    await palette.getByRole("combobox").fill("studio");
+    await expect(palette.getByRole("option")).toHaveCount(1);
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(
+      /view=hosts&host=|host=.*view=hosts|view=hosts/,
+    );
+    await expect(
+      page.getByRole("complementary", { name: "Host details" }),
+    ).toContainText("studio-mac");
+    await expect(page.locator("html")).not.toHaveClass(/dark/);
+    await page
+      .getByRole("group", { name: "Theme" })
+      .getByRole("button", { name: "Dark" })
+      .click();
+    await expect(page.locator("html")).toHaveClass(/dark/);
+    await page.screenshot({
+      path: "test-results/hope-dark.png",
+      fullPage: true,
+    });
+    await page.reload();
+    await expect(page.locator("html")).toHaveClass(/dark/);
+    await expect(page.getByRole("heading", { name: "Hosts" })).toBeVisible();
+    await page.keyboard.press("Control+k");
+    await page
+      .getByRole("dialog", { name: "Search and commands" })
+      .getByRole("combobox")
+      .fill("light theme");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("html")).not.toHaveClass(/dark/);
+  });
+  test("a range can be removed from settings without losing its hosts", async ({
+    page,
+    request,
+  }) => {
+    const before = await (await request.get("/api/v1/bootstrap")).json();
+    await page.goto("/");
+    await page.getByRole("button", { name: "Networks & settings" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: "Remove Workshop" }).click();
+    await dialog.getByRole("button", { name: "Remove range" }).click();
+    await expect(dialog).not.toContainText("192.168.30.0/24");
+    const after = await (await request.get("/api/v1/bootstrap")).json();
+    expect(after.networks.length).toBe(before.networks.length - 1);
+    expect(after.hosts.length).toBe(before.hosts.length);
+    await expect(page.getByText("Removed Workshop.")).toBeVisible();
   });
 });

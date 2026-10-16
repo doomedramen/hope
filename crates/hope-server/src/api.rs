@@ -119,6 +119,48 @@ pub async fn update_network(
     state.changed();
     Ok(Json(OkResponse { ok: true }))
 }
+/// Removes a range. Hosts discovered through it stay in the inventory and simply lose this
+/// membership; the range's scan history goes with it, and an active scan is cancelled first.
+pub async fn delete_network(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<OkResponse>> {
+    if !networks(&state).await?.iter().any(|n| n.id == id) {
+        return Err(ApiError::not_found());
+    }
+    let active: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM scans WHERE network_id=? AND status IN ('queued','running')",
+    )
+    .bind(&id)
+    .fetch_all(&state.0.db)
+    .await?;
+    for scan in active {
+        scanner::cancel(&state, &scan).await?;
+    }
+    let _guard = state.0.writes.lock().await;
+    let mut tx = state.0.db.begin().await?;
+    sqlx::query("DELETE FROM networks WHERE id=?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM scans WHERE network_id=?")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    for mut host in state.hosts().await? {
+        if host.network_ids.iter().any(|n| n == &id) {
+            host.network_ids.retain(|n| n != &id);
+            sqlx::query("UPDATE hosts SET body=? WHERE id=?")
+                .bind(serde_json::to_string(&host)?)
+                .bind(&host.id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    tx.commit().await?;
+    state.changed();
+    Ok(Json(OkResponse { ok: true }))
+}
 pub async fn start_scan(
     Extract(state): Extract<State>,
     Path(id): Path<String>,

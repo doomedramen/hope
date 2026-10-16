@@ -1,50 +1,27 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import {
-  Activity,
   ArrowDownToLine,
   CircleHelp,
+  LayoutDashboard,
   LayoutList,
+  LogOut,
   Map,
-  Network,
+  Monitor,
+  Moon,
   Plus,
   Radar,
   Search,
   Settings2,
   ShieldCheck,
-  LogOut,
-  Play,
-  Square,
-  Server,
-  Cpu,
+  Sun,
+  TriangleAlert,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
-import {
-  Field,
-  FieldGroup,
-  FieldLabel,
-  FieldDescription,
-} from "@/components/ui/field";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import {
   Empty,
   EmptyHeader,
@@ -54,7 +31,6 @@ import {
   EmptyContent,
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Progress } from "@/components/ui/progress";
 import {
   Select,
   SelectTrigger,
@@ -65,7 +41,28 @@ import {
 } from "@/components/ui/select";
 import { InstallDialog } from "@/components/install-dialog";
 import { HostDetails } from "@/components/host-details";
-import { api, post, put, bytes, age, percentage, status } from "@/lib/api";
+import { HostTable } from "@/components/host-table";
+import { Overview } from "@/components/overview";
+import { NetworkDialog } from "@/components/network-dialog";
+import { SettingsDialog } from "@/components/settings-dialog";
+import { ScanProgress } from "@/components/scan-progress";
+import { Brand, SignIn } from "@/components/sign-in";
+import {
+  CommandPalette,
+  commandIcons,
+  type Command,
+} from "@/components/command-palette";
+import { ToastProvider, useToast } from "@/components/toast";
+import { api, del, post, put } from "@/lib/api";
+import { useTheme } from "@/lib/theme";
+import {
+  HOST_FILTERS,
+  hostIssues,
+  hostState,
+  matchesFilter,
+  matchesSearch,
+  type HostFilter,
+} from "@/lib/fleet";
 import type {
   AuthStatus as Auth,
   Bootstrap,
@@ -73,12 +70,38 @@ import type {
   MapState,
   MapEdit,
   Network as HopeNetwork,
+  ScanJob,
 } from "@/lib/protocol";
 
 const NetworkMap = dynamic(
   () => import("@/components/network-map").then((m) => m.NetworkMap),
   { ssr: false, loading: () => <Skeleton className="h-[65vh] w-full" /> },
 );
+
+type View = "overview" | "map" | "hosts";
+type Mode = "topology" | "subnets" | "health";
+const VIEWS: View[] = ["overview", "map", "hosts"];
+const TITLES: Record<View, string> = {
+  overview: "Overview",
+  map: "Network map",
+  hosts: "Hosts",
+};
+
+function readLocation(): { view: View; host: string | null } {
+  if (typeof window === "undefined") return { view: "overview", host: null };
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get("view");
+  const host = params.get("host");
+  // A shared host link without a view opens on the map, where the host is highlighted.
+  return {
+    view: VIEWS.includes(view as View)
+      ? (view as View)
+      : host
+        ? "map"
+        : "overview",
+    host,
+  };
+}
 
 export function Console() {
   const [auth, setAuth] = useState<Auth | null>(null);
@@ -101,163 +124,66 @@ export function Console() {
   }, [check]);
   if (error)
     return (
-      <main className="auth-shell">
-        <Alert variant="destructive">
-          <AlertTitle>Cannot reach H.O.P.E</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-        <Button
-          onClick={() => {
-            setError("");
-            void check();
-          }}
-        >
-          Retry connection
-        </Button>
+      <main className="auth-center">
+        <div className="flex flex-col gap-4">
+          <Brand />
+          <Alert variant="destructive">
+            <AlertTitle>Cannot reach H.O.P.E</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+          <Button
+            onClick={() => {
+              setError("");
+              void check();
+            }}
+          >
+            Retry connection
+          </Button>
+        </div>
       </main>
     );
   if (!auth)
     return (
-      <main className="auth-shell">
-        <Brand />
-        <Skeleton className="h-48 w-full" />
+      <main className="auth-center">
+        <div className="flex flex-col gap-6">
+          <Brand />
+          <Skeleton className="h-48 w-full" />
+        </div>
       </main>
     );
   if (!auth.authenticated)
     return <SignIn setup={auth.setup_required} onComplete={check} />;
   return (
-    <Dashboard
-      onLogout={async () => {
-        await post("/logout");
-        await check();
-      }}
-    />
-  );
-}
-function Brand() {
-  return (
-    <div className="brand">
-      <div className="brand-mark">
-        <Network size={22} />
-      </div>
-      <span>
-        H.O.P.E<span className="brand-subtitle">Network observatory</span>
-      </span>
-    </div>
-  );
-}
-function SignIn({
-  setup,
-  onComplete,
-}: {
-  setup: boolean;
-  onComplete: () => Promise<void>;
-}) {
-  const [password, setPassword] = useState("");
-  const [token, setToken] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      await post(setup ? "/auth/setup" : "/auth/login", {
-        password,
-        setup_token: token,
-      });
-      await onComplete();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <main className="auth-shell">
-      <Brand />
-      <div className="auth-panel">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            {setup ? "Meet your network." : "Welcome back."}
-          </h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            {setup
-              ? "Create your administrator account to start discovering devices."
-              : "Sign in to your H.O.P.E observatory."}
-          </p>
-        </div>
-        <form onSubmit={submit} className="flex flex-col gap-6">
-          {error && (
-            <Alert variant="destructive">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-          <FieldGroup>
-            {setup && (
-              <Field>
-                <FieldLabel htmlFor="setup-token">Setup token</FieldLabel>
-                <Input
-                  id="setup-token"
-                  type="password"
-                  autoComplete="off"
-                  required
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                />
-                <FieldDescription>
-                  Find this token in your H.O.P.E server startup logs.
-                </FieldDescription>
-              </Field>
-            )}
-            <Field>
-              <FieldLabel htmlFor="password">Administrator password</FieldLabel>
-              <Input
-                id="password"
-                type="password"
-                required
-                minLength={setup ? 12 : undefined}
-                maxLength={256}
-                autoComplete={setup ? "new-password" : "current-password"}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-              {setup && (
-                <FieldDescription>Use at least 12 characters.</FieldDescription>
-              )}
-            </Field>
-          </FieldGroup>
-          <Button type="submit" disabled={busy}>
-            {busy ? "Connecting…" : setup ? "Create account" : "Sign in"}
-          </Button>
-        </form>
-      </div>
-      <p className="text-center text-xs text-muted-foreground">
-        Your devices. Your data. Your server.
-      </p>
-    </main>
+    <ToastProvider>
+      <Dashboard
+        onLogout={async () => {
+          await post("/logout");
+          await check();
+        }}
+      />
+    </ToastProvider>
   );
 }
 
 function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
+  const toast = useToast();
+  const { theme, dark, setTheme } = useTheme();
   const [data, setData] = useState<Bootstrap | null>(null);
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
-  const [view, setView] = useState("map");
-  const [mode, setMode] = useState<"topology" | "subnets" | "health">(
-    "topology",
-  );
+  const [location, setLocation] = useState(readLocation);
+  const view = location.view;
+  const selected = location.host;
+  const [mode, setMode] = useState<Mode>("topology");
   const [filter, setFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState<HostFilter>("all");
   const [network, setNetwork] = useState<string | null>("all");
-  const [selected, setSelected] = useState<string | null>(() =>
-    typeof window === "undefined"
-      ? null
-      : new URLSearchParams(window.location.search).get("host"),
-  );
   const [networkOpen, setNetworkOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
   const refreshPending = useRef(false);
   const refresh = useCallback(async () => {
     if (refreshPending.current) return;
@@ -297,8 +223,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     const fallback = setInterval(() => {
       void refresh();
     }, 15000);
-    const navigate = () =>
-      setSelected(new URLSearchParams(window.location.search).get("host"));
+    const navigate = () => setLocation(readLocation());
     window.addEventListener("popstate", navigate);
     return () => {
       clearTimeout(initialRefresh);
@@ -308,14 +233,24 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       window.removeEventListener("popstate", navigate);
     };
   }, [refresh]);
-  const select = (id: string | null) => {
-    setSelected(id);
-    const url = new URL(window.location.href);
-    if (id) url.searchParams.set("host", id);
-    else url.searchParams.delete("host");
-    if (url.href !== window.location.href)
-      window.history.pushState({}, "", url);
-  };
+  const go = useCallback(
+    (next: Partial<{ view: View; host: string | null }>) => {
+      setLocation((current) => {
+        const target = { ...current, ...next };
+        const url = new URL(window.location.href);
+        if (target.view === "overview") url.searchParams.delete("view");
+        else url.searchParams.set("view", target.view);
+        if (target.host) url.searchParams.set("host", target.host);
+        else url.searchParams.delete("host");
+        if (url.href !== window.location.href)
+          window.history.pushState({}, "", url);
+        return target;
+      });
+    },
+    [],
+  );
+  const select = useCallback((id: string | null) => go({ host: id }), [go]);
+  const setView = useCallback((next: View) => go({ view: next }), [go]);
   async function action(work: () => Promise<unknown>) {
     setBusy(true);
     setError("");
@@ -373,80 +308,238 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     setError("");
     for (const edit of pending) await saveMap(edit);
   }
-  const hosts = data?.hosts ?? [];
-  const networks = data?.networks ?? [];
+  const hosts = useMemo(() => data?.hosts ?? [], [data]);
+  const networks = useMemo(() => data?.networks ?? [], [data]);
   const visible = hosts.filter(
     (h) =>
       (network === "all" || h.network_ids.includes(network ?? "")) &&
-      `${h.name} ${h.addresses.join(" ")} ${h.macs.join(" ")}`
-        .toLowerCase()
-        .includes(filter.toLowerCase()),
+      matchesFilter(h, statusFilter) &&
+      matchesSearch(h, filter),
   );
   const host = hosts.find((h) => h.id === selected) ?? null;
-  const reporting = hosts.filter((h) => status(h) === "Reporting").length;
   const scans =
     data?.scans.filter(
       (job, i, all) =>
         all.findIndex((j) => j.network_id === job.network_id) === i,
     ) ?? [];
+  const attention = hosts.filter((h) => hostIssues(h).length > 0).length;
+  function discover(targetNetwork: HopeNetwork | null = null) {
+    if (!networks.length) {
+      setNetworkOpen(true);
+      return;
+    }
+    void action(async () => {
+      const targets = targetNetwork
+        ? [targetNetwork]
+        : networks.filter(
+            (n) => n.enabled && (network === "all" || n.id === network),
+          );
+      if (!targets.length)
+        throw new Error(
+          "Every range is paused. Resume one in Networks & settings first.",
+        );
+      const results = await Promise.allSettled(
+        targets.map((n) => post(`/networks/${n.id}/scan`)),
+      );
+      const failed = results.filter((r) => r.status === "rejected");
+      const started = targets.length - failed.length;
+      if (started)
+        toast(
+          `Discovery started on ${started} ${started === 1 ? "range" : "ranges"}.`,
+          "good",
+        );
+      if (failed.length)
+        throw new Error(
+          `${failed.length} scan(s) could not start. A range may already be scanning.`,
+        );
+    });
+  }
+  const cancelScan = (scan: ScanJob) =>
+    void action(() => post(`/scans/${scan.id}/cancel`));
+  const openView = (next: View, which?: "attention") => {
+    if (which) setStatusFilter("attention");
+    setView(next);
+  };
+  const selectHost = useCallback(
+    (target: Host) => {
+      if (view === "overview") go({ view: "hosts", host: target.id });
+      else select(target.id);
+    },
+    [go, select, view],
+  );
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((open) => !open);
+      } else if (e.key === "/" && !typing && !e.metaKey && !e.ctrlKey) {
+        if (view === "overview") {
+          e.preventDefault();
+          setPaletteOpen(true);
+        } else if (searchRef.current) {
+          e.preventDefault();
+          searchRef.current.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view]);
+  const commands: Command[] = [
+    {
+      id: "overview",
+      label: "Go to overview",
+      hint: "view",
+      icon: commandIcons.overview,
+      run: () => setView("overview"),
+    },
+    {
+      id: "map",
+      label: "Go to network map",
+      hint: "view",
+      icon: commandIcons.map,
+      run: () => setView("map"),
+    },
+    {
+      id: "hosts",
+      label: "Go to hosts",
+      hint: "view",
+      icon: commandIcons.hosts,
+      run: () => setView("hosts"),
+    },
+    {
+      id: "discover",
+      label: "Discover devices now",
+      hint: "action",
+      icon: commandIcons.discover,
+      run: () => discover(),
+    },
+    {
+      id: "network",
+      label: "Add a network range",
+      hint: "action",
+      icon: commandIcons.network,
+      run: () => setNetworkOpen(true),
+    },
+    {
+      id: "agent",
+      label: "Add a reporting agent",
+      hint: "action",
+      icon: commandIcons.agent,
+      run: () => setInstallOpen(true),
+    },
+    {
+      id: "settings",
+      label: "Networks & settings",
+      hint: "action",
+      icon: commandIcons.settings,
+      run: () => setSettingsOpen(true),
+    },
+    {
+      id: "theme",
+      label: dark ? "Switch to light theme" : "Switch to dark theme",
+      hint: "appearance",
+      icon: dark ? commandIcons.theme : commandIcons.themeDark,
+      run: () => setTheme(dark ? "light" : "dark"),
+    },
+    {
+      id: "logout",
+      label: "Sign out",
+      hint: "session",
+      icon: commandIcons.logout,
+      run: () => void action(onLogout),
+    },
+  ];
+  const navItem = (
+    target: View,
+    Icon: typeof LayoutDashboard,
+    label: string,
+    count?: number,
+  ) => (
+    <button
+      type="button"
+      className="nav-item"
+      aria-current={view === target ? "page" : undefined}
+      onClick={() => setView(target)}
+    >
+      <Icon />
+      <span>{label}</span>
+      {count != null && <span className="count">{count}</span>}
+    </button>
+  );
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <Brand />
-        <nav className="flex flex-col gap-1" aria-label="Main navigation">
-          <Button
-            variant={view === "map" ? "secondary" : "ghost"}
-            className="justify-start"
-            onClick={() => setView("map")}
-          >
-            <Map data-icon="inline-start" />
-            Network map
-          </Button>
-          <Button
-            variant={view === "hosts" ? "secondary" : "ghost"}
-            className="justify-start"
-            onClick={() => setView("hosts")}
-          >
-            <LayoutList data-icon="inline-start" />
-            Hosts
-            <Badge variant="outline" className="ml-auto">
-              {hosts.length}
-            </Badge>
-          </Button>
-          <Button
-            variant="ghost"
-            className="justify-start"
+        <nav aria-label="Main navigation">
+          {navItem("overview", LayoutDashboard, "Overview")}
+          {navItem("map", Map, "Network map")}
+          {navItem("hosts", LayoutList, "Hosts", hosts.length)}
+          <button
+            type="button"
+            className="nav-item"
             onClick={() => setSettingsOpen(true)}
           >
-            <Settings2 data-icon="inline-start" />
-            Networks & settings
-          </Button>
+            <Settings2 />
+            <span>Networks &amp; settings</span>
+          </button>
         </nav>
-        <div className="sidebar-networks">
-          <h2>Monitored networks</h2>
-          {networks.length ? (
-            networks.map((n) => (
+        <div className="sidebar-section">
+          <h2>
+            Monitored networks
+            {attention > 0 && (
               <button
-                key={n.id}
-                className="network-shortcut"
-                onClick={() => setNetwork(n.id)}
+                type="button"
+                className="attention-pill"
+                title={`${attention} ${attention === 1 ? "host needs" : "hosts need"} attention`}
+                aria-label={`${attention} ${attention === 1 ? "host needs" : "hosts need"} attention`}
+                onClick={() => openView("hosts", "attention")}
               >
-                <span
-                  className={`status-dot ${n.enabled ? "live" : "stale"}`}
-                />
-                <span>
-                  {n.name}
-                  <small>{n.cidr}</small>
-                </span>
+                <TriangleAlert size={11} aria-hidden="true" />
+                {attention}
               </button>
-            ))
+            )}
+          </h2>
+          {networks.length ? (
+            networks.map((n) => {
+              const members = hosts.filter((h) =>
+                h.network_ids.includes(n.id),
+              ).length;
+              return (
+                <button
+                  key={n.id}
+                  className="network-shortcut"
+                  aria-pressed={network === n.id}
+                  onClick={() => {
+                    setNetwork(network === n.id ? "all" : n.id);
+                    if (view === "overview") setView("map");
+                  }}
+                >
+                  <span
+                    className="status-dot"
+                    data-tone={n.enabled ? "good" : "neutral"}
+                  />
+                  <span>
+                    <strong>{n.name}</strong>
+                    <small>{n.cidr}</small>
+                  </span>
+                  <span className="count">{members}</span>
+                </button>
+              );
+            })
           ) : (
-            <p>Add your first network to begin.</p>
+            <p>Add your first range to begin discovering devices.</p>
           )}
           <Button
             variant="ghost"
             size="sm"
-            className="mt-3 justify-start"
+            className="mt-2 justify-start"
             onClick={() => setNetworkOpen(true)}
           >
             <Plus data-icon="inline-start" />
@@ -454,32 +547,64 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           </Button>
         </div>
         <div className="sidebar-bottom">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <ShieldCheck size={15} />
+          <div className="theme-switch" role="group" aria-label="Theme">
+            {(
+              [
+                ["light", Sun, "Light"],
+                ["dark", Moon, "Dark"],
+                ["system", Monitor, "Auto"],
+              ] as const
+            ).map(([key, Icon, label]) => (
+              <button
+                key={key}
+                type="button"
+                aria-pressed={theme === key}
+                onClick={() => setTheme(key)}
+              >
+                <Icon />
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="sidebar-footnote">
+            <ShieldCheck size={14} />
             Self-hosted. Locally observed.
           </div>
-          <Button
-            variant="ghost"
-            className="justify-start"
+          <button
+            type="button"
+            className="nav-item"
             onClick={() => {
               void action(onLogout);
             }}
           >
-            <LogOut data-icon="inline-start" />
-            Sign out
-          </Button>
+            <LogOut />
+            <span>Sign out</span>
+          </button>
         </div>
       </aside>
       <main className="workspace">
         <header className="topbar">
-          <div className="flex items-center gap-2 text-sm">
-            <span className={`status-dot ${connected ? "live" : "stale"}`} />
-            {connected ? "Live connection" : "Reconnecting"}
-            <span className="hidden text-muted-foreground sm:inline">
-              / Network observatory
+          <div className="topbar-title">
+            <h1>{TITLES[view]}</h1>
+            <span className="connection">
+              <i
+                className={`status-dot ${connected ? "live pulse" : "stale"}`}
+                aria-hidden="true"
+              />
+              <span>{connected ? "Live" : "Reconnecting"}</span>
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="palette-trigger"
+              onClick={() => setPaletteOpen(true)}
+              aria-label="Open command palette"
+            >
+              <Search size={14} />
+              <span>Search hosts, run commands…</span>
+              <kbd className="key">⌘K</kbd>
+            </button>
             <Button
               variant="ghost"
               size="icon"
@@ -491,317 +616,319 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             >
               <LogOut />
             </Button>
-            <Button variant="outline" onClick={() => setInstallOpen(true)}>
+            <Button
+              variant="outline"
+              className="topbar-action"
+              onClick={() => setInstallOpen(true)}
+            >
               <ArrowDownToLine data-icon="inline-start" />
-              Add agent
+              <span className="btn-label">Add agent</span>
+            </Button>
+            <Button
+              className="topbar-action"
+              onClick={() => discover()}
+              disabled={busy}
+            >
+              <Radar data-icon="inline-start" />
+              <span className="btn-label">Discover devices</span>
             </Button>
           </div>
         </header>
-        {unsavedMap.length > 0 && (
-          <Button
-            variant="outline"
-            onClick={() => {
-              void retryMap();
-            }}
-          >
-            Retry {unsavedMap.length} unsaved map{" "}
-            {unsavedMap.length === 1 ? "change" : "changes"}
-          </Button>
-        )}
-        <div className="page-heading">
-          <div>
-            <h1>
-              {view === "map"
-                ? "Your network, connected."
-                : "Every host, in view."}
-            </h1>
-            <p>
-              {view === "map"
-                ? "Explore the devices and relationships behind your network."
-                : "Discovery, hardware, and live health in one place."}
-            </p>
-          </div>
-          <Button
-            onClick={() => {
-              if (!networks.length) {
-                setNetworkOpen(true);
-                return;
-              }
-              void action(async () => {
-                const targets = networks.filter(
-                  (n) => n.enabled && (network === "all" || n.id === network),
-                );
-                const results = await Promise.allSettled(
-                  targets.map((n) => post(`/networks/${n.id}/scan`)),
-                );
-                const failed = results.filter((r) => r.status === "rejected");
-                if (failed.length)
-                  throw new Error(
-                    `${failed.length} scan(s) could not start. A range may already be scanning.`,
-                  );
-              });
-            }}
-            disabled={busy}
-          >
-            <Radar data-icon="inline-start" />
-            Discover devices
-          </Button>
-        </div>
-        {error && (
-          <Alert variant="destructive" className="mb-5">
-            <AlertTitle>Action needs attention</AlertTitle>
-            <AlertDescription>
-              {error}
-              <Button
-                variant="link"
-                onClick={() => {
-                  void refresh();
-                }}
-              >
-                Refresh
-              </Button>
-            </AlertDescription>
-          </Alert>
-        )}
-        <div className="overview-strip">
-          <div>
-            <Server size={19} />
-            <span>
-              <strong>{hosts.length}</strong>Discovered hosts
-            </span>
-          </div>
-          <div>
-            <Activity size={19} />
-            <span>
-              <strong>
-                {reporting}
-                <small> / {hosts.filter((h) => h.agent_id).length}</small>
-              </strong>
-              Agents reporting
-            </span>
-          </div>
-          <div>
-            <Network size={19} />
-            <span>
-              <strong>{networks.length}</strong>Network ranges
-            </span>
-          </div>
-          <div>
-            <Cpu size={19} />
-            <span>
-              <strong>
-                7 <small>days</small>
-              </strong>
-              Metric history
-            </span>
-          </div>
-        </div>
-        {scans.length > 0 && (
-          <section className="scan-strip" aria-label="Scan progress">
-            {scans.map((scan) => (
-              <div key={scan.id} className="scan-item">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium">
-                    {networks.find((n) => n.id === scan.network_id)?.name ??
-                      scan.cidr}
-                  </span>
-                  <Badge variant="secondary">
-                    {scan.status === "completed"
-                      ? "Discovery complete"
-                      : scan.status}
-                  </Badge>
-                </div>
-                <Progress
-                  value={scan.total ? (scan.scanned / scan.total) * 100 : 0}
-                  aria-label={`${scan.cidr} scan progress`}
-                />
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>
-                    {scan.scanned} / {scan.total} addresses · {scan.discovered}{" "}
-                    observed
-                  </span>
-                  {scan.status === "running" ? (
+        {(error || unsavedMap.length > 0) && (
+          <div className="px-7 pt-5">
+            {error && (
+              <Alert variant="destructive">
+                <AlertTitle>Action needs attention</AlertTitle>
+                <AlertDescription>
+                  {error}
+                  <div className="mt-2 flex gap-2">
                     <Button
-                      variant="ghost"
-                      size="xs"
+                      variant="outline"
+                      size="sm"
                       onClick={() => {
-                        void action(() => post(`/scans/${scan.id}/cancel`));
+                        void refresh();
                       }}
                     >
-                      <Square data-icon="inline-start" />
-                      Cancel
+                      Refresh
                     </Button>
-                  ) : (
-                    <span>{age(scan.finished_at)}</span>
-                  )}
-                </div>
-                {scan.error && (
-                  <p className="text-xs text-destructive">{scan.error}</p>
-                )}
-              </div>
-            ))}
-          </section>
-        )}
-        {data?.capabilities.limitations.length ? (
-          <div className="capability-notice">
-            <CircleHelp size={16} />
-            <span>{data.capabilities.limitations.join(" ")}</span>
-          </div>
-        ) : null}
-        <div className="inventory-layout">
-          <section className="inventory-main">
-            <div className="view-toolbar">
-              <div className="flex flex-wrap items-center gap-3">
-                <ToggleGroup
-                  value={[view]}
-                  onValueChange={(v) => {
-                    if (v[0]) setView(v[0]);
-                  }}
-                  variant="outline"
-                  size="sm"
-                  aria-label="Inventory view"
-                >
-                  <ToggleGroupItem value="map">
-                    <Map data-icon="inline-start" />
-                    Map
-                  </ToggleGroupItem>
-                  <ToggleGroupItem value="hosts">
-                    <LayoutList data-icon="inline-start" />
-                    Hosts
-                  </ToggleGroupItem>
-                </ToggleGroup>
-                {view === "map" && (
-                  <ToggleGroup
-                    value={[mode]}
-                    onValueChange={(v) => {
-                      if (["topology", "subnets", "health"].includes(v[0]))
-                        setMode(v[0] as typeof mode);
-                    }}
-                    size="sm"
-                    aria-label="Map mode"
-                  >
-                    <ToggleGroupItem value="topology">Topology</ToggleGroupItem>
-                    <ToggleGroupItem value="subnets">Subnets</ToggleGroupItem>
-                    <ToggleGroupItem value="health">Health</ToggleGroupItem>
-                  </ToggleGroup>
-                )}
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Select value={network} onValueChange={setNetwork}>
-                  <SelectTrigger aria-label="Filter by network">
-                    <SelectValue>
-                      {network === "all"
-                        ? "All networks"
-                        : networks.find((n) => n.id === network)?.name}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="all">All networks</SelectItem>
-                      {networks.map((n) => (
-                        <SelectItem value={n.id} key={n.id}>
-                          {n.name}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                <div className="search-box">
-                  <Search size={15} />
-                  <Input
-                    aria-label="Search hosts"
-                    placeholder="Search hosts…"
-                    value={filter}
-                    onChange={(e) => setFilter(e.target.value)}
-                  />
-                </div>
-              </div>
-            </div>
-            {!data ? (
-              <Skeleton className="h-[60vh] w-full" />
-            ) : !hosts.length ? (
-              <Empty className="min-h-[480px]">
-                <EmptyHeader>
-                  <EmptyMedia variant="icon">
-                    <Radar />
-                  </EmptyMedia>
-                  <EmptyTitle>Your network starts here</EmptyTitle>
-                  <EmptyDescription>
-                    Add a CIDR range to find devices, or install an agent to
-                    start reporting hardware and health.
-                  </EmptyDescription>
-                </EmptyHeader>
-                <EmptyContent>
-                  <Button onClick={() => setNetworkOpen(true)}>
-                    <Plus data-icon="inline-start" />
-                    Add a network
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => setInstallOpen(true)}
-                  >
-                    Install an agent
-                  </Button>
-                </EmptyContent>
-              </Empty>
-            ) : !visible.length ? (
-              <Empty className="min-h-[400px]">
-                <EmptyHeader>
-                  <EmptyTitle>No matching hosts</EmptyTitle>
-                  <EmptyDescription>
-                    Try another network or search term.
-                  </EmptyDescription>
-                </EmptyHeader>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setFilter("");
-                    setNetwork("all");
-                  }}
-                >
-                  Clear filters
-                </Button>
-              </Empty>
-            ) : view === "map" ? (
-              <NetworkMap
-                key={mode}
-                hosts={visible}
-                networks={networks.filter(
-                  (n) => network === "all" || n.id === network,
-                )}
-                layout={data.map}
-                mode={mode}
-                selected={selected}
-                onSelect={select}
-                onSave={saveMap}
-              />
-            ) : (
-              <HostTable hosts={visible} selected={selected} select={select} />
+                    {unsavedMap.length > 0 && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          void retryMap();
+                        }}
+                      >
+                        Retry {unsavedMap.length} unsaved map{" "}
+                        {unsavedMap.length === 1 ? "change" : "changes"}
+                      </Button>
+                    )}
+                  </div>
+                </AlertDescription>
+              </Alert>
             )}
-            <footer className="inventory-footer">
-              <span>{visible.length} hosts in view</span>
-              <span>Discovery runs every five minutes for enabled ranges.</span>
-            </footer>
-          </section>
-          {host && (
-            <HostDetails
-              key={host.id}
-              host={host}
-              hosts={hosts}
-              close={() => select(null)}
-              install={() => setInstallOpen(true)}
-              refresh={() => {
-                void refresh();
-              }}
-            />
-          )}
-        </div>
+            {!error && unsavedMap.length > 0 && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  void retryMap();
+                }}
+              >
+                Retry {unsavedMap.length} unsaved map{" "}
+                {unsavedMap.length === 1 ? "change" : "changes"}
+              </Button>
+            )}
+          </div>
+        )}
+        {!data ? (
+          <div className="page">
+            <div className="stat-grid">
+              {[0, 1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-28 w-full rounded-2xl" />
+              ))}
+            </div>
+            <Skeleton className="h-[50vh] w-full rounded-2xl" />
+          </div>
+        ) : view === "overview" ? (
+          <Overview
+            data={data}
+            onSelect={selectHost}
+            onDiscover={() => discover()}
+            onAddNetwork={() => setNetworkOpen(true)}
+            onInstall={() => setInstallOpen(true)}
+            onView={openView}
+            onCancelScan={cancelScan}
+          />
+        ) : (
+          <div className="page">
+            {scans.some(
+              (s) => s.status === "running" || s.status === "queued",
+            ) && (
+              <ScanProgress
+                scans={scans.filter(
+                  (s) => s.status === "running" || s.status === "queued",
+                )}
+                networks={networks}
+                onCancel={cancelScan}
+              />
+            )}
+            {data.capabilities.limitations.length > 0 && (
+              <div className="capability-notice" role="note">
+                <CircleHelp size={15} />
+                <span>{data.capabilities.limitations.join(" ")}</span>
+              </div>
+            )}
+            <div className="inventory-layout">
+              <section className="inventory-main">
+                <div className="view-toolbar">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <ToggleGroup
+                      value={[view]}
+                      onValueChange={(v) => {
+                        if (v[0] === "map" || v[0] === "hosts") setView(v[0]);
+                      }}
+                      variant="outline"
+                      size="sm"
+                      aria-label="Inventory view"
+                    >
+                      <ToggleGroupItem value="map">
+                        <Map data-icon="inline-start" />
+                        Map
+                      </ToggleGroupItem>
+                      <ToggleGroupItem value="hosts">
+                        <LayoutList data-icon="inline-start" />
+                        Hosts
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                    {view === "map" && (
+                      <ToggleGroup
+                        value={[mode]}
+                        onValueChange={(v) => {
+                          if (["topology", "subnets", "health"].includes(v[0]))
+                            setMode(v[0] as Mode);
+                        }}
+                        size="sm"
+                        aria-label="Map mode"
+                      >
+                        <ToggleGroupItem value="topology">
+                          Topology
+                        </ToggleGroupItem>
+                        <ToggleGroupItem value="subnets">
+                          Subnets
+                        </ToggleGroupItem>
+                        <ToggleGroupItem value="health">Health</ToggleGroupItem>
+                      </ToggleGroup>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Select value={network} onValueChange={setNetwork}>
+                      <SelectTrigger aria-label="Filter by network">
+                        <SelectValue>
+                          {network === "all"
+                            ? "All networks"
+                            : networks.find((n) => n.id === network)?.name}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value="all">All networks</SelectItem>
+                          {networks.map((n) => (
+                            <SelectItem value={n.id} key={n.id}>
+                              {n.name}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <div className="search-box">
+                      <Search size={15} />
+                      <input
+                        ref={searchRef}
+                        aria-label="Search hosts"
+                        placeholder="Search hosts…  /"
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                      />
+                      {filter && (
+                        <button
+                          type="button"
+                          aria-label="Clear search"
+                          onClick={() => setFilter("")}
+                        >
+                          <X size={13} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {view === "hosts" && hosts.length > 0 && (
+                  <div className="chip-row" role="group" aria-label="Status">
+                    {HOST_FILTERS.map((option) => {
+                      const count = hosts.filter((h) =>
+                        matchesFilter(h, option.key),
+                      ).length;
+                      if (
+                        !count &&
+                        option.key !== "all" &&
+                        option.key !== statusFilter
+                      )
+                        return null;
+                      return (
+                        <button
+                          key={option.key}
+                          type="button"
+                          className="chip"
+                          aria-pressed={statusFilter === option.key}
+                          onClick={() => setStatusFilter(option.key)}
+                        >
+                          {option.label}
+                          <span className="count">{count}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                {!hosts.length ? (
+                  <Empty className="min-h-[480px]">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        <Radar />
+                      </EmptyMedia>
+                      <EmptyTitle>Your network starts here</EmptyTitle>
+                      <EmptyDescription>
+                        Add a CIDR range to find devices, or install an agent to
+                        start reporting hardware and health.
+                      </EmptyDescription>
+                    </EmptyHeader>
+                    <EmptyContent>
+                      <Button onClick={() => setNetworkOpen(true)}>
+                        <Plus data-icon="inline-start" />
+                        Add a network
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setInstallOpen(true)}
+                      >
+                        Install an agent
+                      </Button>
+                    </EmptyContent>
+                  </Empty>
+                ) : !visible.length ? (
+                  <Empty className="min-h-[400px]">
+                    <EmptyHeader>
+                      <EmptyTitle>No matching hosts</EmptyTitle>
+                      <EmptyDescription>
+                        Try another network, status or search term.
+                      </EmptyDescription>
+                    </EmptyHeader>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setFilter("");
+                        setNetwork("all");
+                        setStatusFilter("all");
+                      }}
+                    >
+                      Clear filters
+                    </Button>
+                  </Empty>
+                ) : view === "map" ? (
+                  <NetworkMap
+                    key={mode}
+                    hosts={visible}
+                    networks={networks.filter(
+                      (n) => network === "all" || n.id === network,
+                    )}
+                    layout={data.map}
+                    mode={mode}
+                    selected={selected}
+                    onSelect={select}
+                    onSave={saveMap}
+                  />
+                ) : (
+                  <HostTable
+                    hosts={visible}
+                    selected={selected}
+                    select={select}
+                  />
+                )}
+                <footer className="inventory-footer">
+                  <span>
+                    {visible.length} of {hosts.length} hosts in view
+                    {hosts.length > 0 &&
+                      ` · ${hosts.filter((h) => hostState(h).tone === "good").length} responding`}
+                  </span>
+                  <span>
+                    Discovery runs every five minutes for enabled ranges.
+                  </span>
+                </footer>
+              </section>
+              {host && (
+                <HostDetails
+                  key={host.id}
+                  host={host}
+                  hosts={hosts}
+                  close={() => select(null)}
+                  install={() => setInstallOpen(true)}
+                  refresh={() => {
+                    void refresh();
+                  }}
+                  notify={toast}
+                />
+              )}
+            </div>
+          </div>
+        )}
       </main>
       <NetworkDialog
         open={networkOpen}
         onOpenChange={setNetworkOpen}
-        onAdded={() => {
+        onAdded={(created) => {
           void refresh();
+          if (created) {
+            toast(`Discovering ${created.name} (${created.cidr}).`, "good");
+            if (view === "overview") setView("map");
+          }
         }}
       />
       {installOpen && (
@@ -812,244 +939,40 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           host={host}
         />
       )}
-      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>Networks & settings</DialogTitle>
-            <DialogDescription>
-              Control continuous discovery and review server capabilities.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-4">
-            {networks.map((n) => (
-              <div
-                key={n.id}
-                className="flex items-center justify-between gap-3 rounded-lg border p-3"
-              >
-                <div>
-                  <strong className="text-sm">{n.name}</strong>
-                  <p className="text-xs text-muted-foreground">{n.cidr}</p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    void action(() =>
-                      put(`/networks/${n.id}`, { enabled: !n.enabled }),
-                    );
-                  }}
-                >
-                  {n.enabled ? (
-                    <Square data-icon="inline-start" />
-                  ) : (
-                    <Play data-icon="inline-start" />
-                  )}
-                  {n.enabled ? "Pause monitoring" : "Enable monitoring"}
-                </Button>
-              </div>
-            ))}
-            <Button
-              variant="outline"
-              onClick={() => {
-                setSettingsOpen(false);
-                setNetworkOpen(true);
-              }}
-            >
-              <Plus data-icon="inline-start" />
-              Add network
-            </Button>
-            <dl className="detail-list">
-              <dt>Server</dt>
-              <dd>{data?.server_url}</dd>
-              <dt>Platform</dt>
-              <dd>{data?.capabilities.platform}</dd>
-              <dt>Discovery</dt>
-              <dd>{data?.capabilities.discovery_mode}</dd>
-              <dt>ICMP</dt>
-              <dd>{data?.capabilities.icmp ? "Available" : "Unavailable"}</dd>
-              <dt>ARP</dt>
-              <dd>
-                {data?.capabilities.arp
-                  ? "Available on local link"
-                  : "Unavailable"}
-              </dd>
-            </dl>
-            <p className="text-xs text-muted-foreground">
-              Agent reports use 30-second intervals. Full-resolution samples
-              last 24 hours, with five-minute averages retained through day
-              seven.
-            </p>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <SettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        data={data}
+        theme={theme}
+        setTheme={setTheme}
+        busy={busy}
+        onAddNetwork={() => setNetworkOpen(true)}
+        onScanNetwork={(n) => discover(n)}
+        onToggleNetwork={(n) => {
+          void action(async () => {
+            await put(`/networks/${n.id}`, { enabled: !n.enabled });
+            toast(
+              n.enabled
+                ? `Paused discovery on ${n.name}.`
+                : `Resumed discovery on ${n.name}.`,
+            );
+          });
+        }}
+        onDeleteNetwork={async (n) => {
+          await action(async () => {
+            await del(`/networks/${n.id}`);
+            if (network === n.id) setNetwork("all");
+            toast(`Removed ${n.name}.`);
+          });
+        }}
+      />
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        hosts={hosts}
+        commands={commands}
+        onSelectHost={selectHost}
+      />
     </div>
-  );
-}
-function HostTable({
-  hosts,
-  selected,
-  select,
-}: {
-  hosts: Host[];
-  selected: string | null;
-  select: (id: string) => void;
-}) {
-  return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Host</TableHead>
-          <TableHead>Address</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>CPU</TableHead>
-          <TableHead>Memory</TableHead>
-          <TableHead>Last seen</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {hosts.map((h) => (
-          <TableRow
-            key={h.id}
-            data-state={h.id === selected ? "selected" : undefined}
-          >
-            <TableCell>
-              <Button
-                variant="link"
-                className="px-0"
-                onClick={() => select(h.id)}
-              >
-                {h.name}
-              </Button>
-              <div className="text-xs text-muted-foreground">
-                {h.inventory?.os ?? "Discovered device"}
-              </div>
-            </TableCell>
-            <TableCell>{h.addresses[0] ?? "Unknown"}</TableCell>
-            <TableCell>
-              <Badge variant="secondary">{status(h)}</Badge>
-            </TableCell>
-            <TableCell>{percentage(h.metrics?.cpu_percent)}</TableCell>
-            <TableCell>
-              {h.inventory ? bytes(h.inventory.memory_total_bytes) : "—"}
-            </TableCell>
-            <TableCell>{age(h.last_seen)}</TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  );
-}
-function NetworkDialog({
-  open,
-  onOpenChange,
-  onAdded,
-}: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
-  onAdded: () => void;
-}) {
-  const [name, setName] = useState("");
-  const [cidr, setCidr] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [created, setCreated] = useState<HopeNetwork | null>(null);
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      const network =
-        created ??
-        (await post<HopeNetwork>("/networks", {
-          name,
-          cidr,
-          enabled: true,
-        }));
-      setCreated(network);
-      onAdded();
-      try {
-        await post(`/networks/${network.id}/scan`);
-      } catch (e) {
-        setError(
-          `Network saved, but scanning could not start: ${(e as Error).message}`,
-        );
-        return;
-      }
-      onOpenChange(false);
-      setCreated(null);
-      setName("");
-      setCidr("");
-      onAdded();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(value) => {
-        onOpenChange(value);
-        if (!value) {
-          setCreated(null);
-          setName("");
-          setCidr("");
-          setError("");
-        }
-      }}
-    >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Add a network</DialogTitle>
-          <DialogDescription>
-            H.O.P.E discovers reachable devices and keeps watching for changes.
-          </DialogDescription>
-        </DialogHeader>
-        <form onSubmit={submit} className="flex flex-col gap-5">
-          {error && (
-            <Alert variant="destructive">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-          <FieldGroup>
-            <Field>
-              <FieldLabel htmlFor="network-name">Network name</FieldLabel>
-              <Input
-                id="network-name"
-                placeholder="Home network"
-                required
-                disabled={created != null}
-                maxLength={120}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="network-cidr">IPv4 CIDR</FieldLabel>
-              <Input
-                id="network-cidr"
-                placeholder="192.168.1.0/24"
-                required
-                disabled={created != null}
-                value={cidr}
-                onChange={(e) => setCidr(e.target.value)}
-              />
-              <FieldDescription>
-                The server must have a route to this network. Use a /20 or
-                smaller range.
-              </FieldDescription>
-            </Field>
-          </FieldGroup>
-          <Button disabled={busy} type="submit">
-            {busy
-              ? "Starting discovery…"
-              : created
-                ? "Retry discovery"
-                : "Add and discover"}
-          </Button>
-        </form>
-      </DialogContent>
-    </Dialog>
   );
 }

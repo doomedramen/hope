@@ -361,6 +361,90 @@ async fn retention_averages_old_samples_and_deletes_expired_history() {
     );
 }
 #[tokio::test]
+async fn deleting_a_network_keeps_hosts_and_cancels_its_scan() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (status, created) = request(
+        &app,
+        "POST",
+        "/api/v1/networks",
+        json!({"name":"LAN","cidr":"192.168.1.0/24","enabled":false}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let id = created["id"].as_str().expect("id").to_string();
+    // An enrolled agent inside the range is a member of it.
+    let (agent, _credential, _token) = enrolled(&state, &app).await;
+    let host = state
+        .hosts()
+        .await
+        .expect("hosts")
+        .into_iter()
+        .find(|h| h.agent_id.as_deref() == Some(&agent))
+        .expect("agent host");
+    assert_eq!(host.network_ids, vec![id.clone()]);
+    sqlx::query("INSERT INTO scans(id,network_id,cidr,status,total,started_at) VALUES('active','net-to-delete','192.168.1.0/24','running',254,?)")
+        .bind(now()).execute(&state.0.db).await.expect("scan");
+    sqlx::query("UPDATE scans SET network_id=? WHERE id='active'")
+        .bind(&id)
+        .execute(&state.0.db)
+        .await
+        .expect("scan network");
+    let (status, _) = request(
+        &app,
+        "DELETE",
+        &format!("/api/v1/networks/{id}"),
+        json!({}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, bootstrap) = request(
+        &app,
+        "GET",
+        "/api/v1/bootstrap",
+        json!({}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        bootstrap["networks"]
+            .as_array()
+            .expect("networks")
+            .is_empty()
+    );
+    assert!(bootstrap["scans"].as_array().expect("scans").is_empty());
+    let hosts = bootstrap["hosts"].as_array().expect("hosts");
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0]["network_ids"], json!([]));
+    assert_eq!(
+        request(
+            &app,
+            "DELETE",
+            &format!("/api/v1/networks/{id}"),
+            json!({}),
+            Some(("cookie", &cookie)),
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(
+            &app,
+            "DELETE",
+            &format!("/api/v1/networks/{id}"),
+            json!({}),
+            None
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn network_validation_and_restart_recovery() {
     let (dir, state, app, cookie) = setup().await;
     for cidr in ["0.0.0.0/0", "192.168.0.0/16", "not-a-cidr", "224.0.0.0/24"] {

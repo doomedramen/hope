@@ -30,7 +30,10 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/bootstrap", get(api::bootstrap))
         .route("/logout", post(auth::logout))
         .route("/networks", post(api::add_network))
-        .route("/networks/{id}", put(api::update_network))
+        .route(
+            "/networks/{id}",
+            put(api::update_network).delete(api::delete_network),
+        )
         .route("/networks/{id}/scan", post(api::start_scan))
         .route("/scans/{id}/cancel", post(api::cancel_scan))
         .route("/map", put(api::map).patch(api::edit_map))
