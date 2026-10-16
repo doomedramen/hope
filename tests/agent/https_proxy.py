@@ -42,7 +42,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
         except (OSError, ValueError, http.client.HTTPException):
             self.close_connection = True
-    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = forward
+    do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = forward
 
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.minimum_version = ssl.TLSVersion.TLSv1_2
