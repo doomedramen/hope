@@ -1,17 +1,18 @@
 "use client";
 import { useState } from "react";
 import {
-  Activity,
   ArrowDownToLine,
+  ArrowLeft,
+  Maximize2,
   Bot,
   Cpu,
   GitMerge,
-  HardDrive,
   MemoryStick,
   Network,
   Radio,
   ShieldOff,
   Waypoints,
+  Wifi,
   X,
   Zap,
 } from "lucide-react";
@@ -26,8 +27,6 @@ import {
   SelectGroup,
   SelectItem,
 } from "@/components/ui/select";
-import { Meter } from "@/components/ui/meter";
-import { Sparkline } from "@/components/ui/sparkline";
 import { StatusPill } from "@/components/status-pill";
 import { HostIcon } from "@/components/host-table";
 import {
@@ -36,24 +35,16 @@ import {
   useHistory,
   type HistoryWindow,
 } from "@/components/metric-history";
-import { age, bytes, percent0, percentage, post, rate } from "@/lib/api";
-import { historySeries, memoryPercent } from "@/lib/history";
-import {
-  cpuPercent,
-  diskPercent,
-  hostIssues,
-  hostState,
-  memoryUsage,
-  usageTone,
-  worstDisk,
-  type Tone,
-} from "@/lib/fleet";
+import { age, bytes, post, rate } from "@/lib/api";
+import { hostIssues, hostState, type Tone } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
 
 export function HostDetails({
   host,
   hosts,
   close,
+  expand,
+  wide = false,
   install,
   refresh,
   notify,
@@ -61,6 +52,10 @@ export function HostDetails({
   host: Host;
   hosts: Host[];
   close: () => void;
+  /** Opens the full-page view; absent on the page itself. */
+  expand?: () => void;
+  /** Full-page layout: facts on the left, charts in a two-column grid. */
+  wide?: boolean;
   install: () => void;
   refresh: () => void;
   notify: (message: string, tone?: Tone) => void;
@@ -74,32 +69,6 @@ export function HostDetails({
   const state = hostState(host);
   const issues = hostIssues(host);
   const history = useHistory(host.id, hours, host.last_report);
-  const series = historySeries(
-    history.points ?? [],
-    history.windowStart,
-    history.windowEnd,
-    (m) => ({
-      cpu: m.cpu_percent,
-      memory: memoryPercent(m),
-      disk: (() => {
-        const worst = m.disks
-          .map(diskPercent)
-          .filter((value): value is number => value != null);
-        return worst.length ? Math.max(...worst) : null;
-      })(),
-      net:
-        m.network_rx_bytes_per_second == null &&
-        m.network_tx_bytes_per_second == null
-          ? null
-          : (m.network_rx_bytes_per_second ?? 0) +
-            (m.network_tx_bytes_per_second ?? 0),
-    }),
-  );
-  const spark = (key: "cpu" | "memory" | "disk" | "net") =>
-    series.map((row) => ({ time: row.time ?? 0, value: row[key] ?? null }));
-  const cpu = cpuPercent(host);
-  const memory = memoryUsage(host);
-  const disk = worstDisk(host);
   async function revoke() {
     try {
       await post(`/agents/${host.agent_id}/revoke`);
@@ -123,9 +92,23 @@ export function HostDetails({
     }
   }
   return (
-    <aside className="host-details" aria-label="Host details">
+    <aside
+      className={`host-details${wide ? " host-page" : ""}`}
+      aria-label="Host details"
+    >
       <header className="details-header">
         <div className="flex items-start gap-3">
+          {wide && (
+            <Button
+              variant="outline"
+              size="sm"
+              aria-label="Close host details"
+              onClick={close}
+            >
+              <ArrowLeft data-icon="inline-start" />
+              Back
+            </Button>
+          )}
           <span className="host-avatar" data-tone={state.tone}>
             <HostIcon host={host} size={17} />
           </span>
@@ -137,14 +120,26 @@ export function HostDetails({
               {host.addresses.join(" · ")}
             </p>
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Close host details"
-            onClick={close}
-          >
-            <X />
-          </Button>
+          {!wide && expand && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Open host page"
+              onClick={expand}
+            >
+              <Maximize2 />
+            </Button>
+          )}
+          {!wide && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Close host details"
+              onClick={close}
+            >
+              <X />
+            </Button>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <StatusPill host={host} />
@@ -156,7 +151,7 @@ export function HostDetails({
           )}
           <span>
             {host.agent_id && host.last_report
-              ? `Reported ${age(host.last_report)}`
+              ? `Reported ${age(host.last_report)} · collected ${age(host.last_collected_at)}`
               : `Seen ${age(host.last_seen)}`}
           </span>
         </div>
@@ -209,61 +204,21 @@ export function HostDetails({
             </AlertDescription>
           </Alert>
         )}
-        {metrics && (
-          <section>
-            <div className="detail-heading">
-              <Activity />
-              Live usage
+        {host.agent_id && (
+          <section className="history">
+            <h3 className="detail-heading">
+              <Waypoints />
+              History
               <span className="spacer" />
               <HistoryRange value={hours} onChange={setHours} />
-            </div>
-            <div className="tile-grid">
-              <MiniTile
-                label="CPU"
-                value={percent0(cpu)}
-                percent={cpu}
-                spark={spark("cpu")}
-                max={100}
-                detail={inventory ? `${inventory.cpu_cores} cores` : undefined}
-              />
-              <MiniTile
-                label="Memory"
-                value={percent0(memory)}
-                percent={memory}
-                spark={spark("memory")}
-                max={100}
-                detail={
-                  metrics.memory_used_bytes != null
-                    ? `${bytes(metrics.memory_used_bytes)} of ${bytes(metrics.memory_total_bytes)}`
-                    : "Unavailable"
-                }
-              />
-              <MiniTile
-                label="Disk"
-                value={percent0(disk?.percent)}
-                percent={disk?.percent ?? null}
-                spark={spark("disk")}
-                max={100}
-                detail={disk ? `${disk.disk.mount} fullest` : "Unavailable"}
-              />
-              <MiniTile
-                label="Network"
-                value={rate(
-                  metrics.network_rx_bytes_per_second == null &&
-                    metrics.network_tx_bytes_per_second == null
-                    ? null
-                    : (metrics.network_rx_bytes_per_second ?? 0) +
-                        (metrics.network_tx_bytes_per_second ?? 0),
-                )}
-                spark={spark("net")}
-                color="var(--chart-3)"
-                detail={`↓ ${rate(metrics.network_rx_bytes_per_second)} · ↑ ${rate(metrics.network_tx_bytes_per_second)}`}
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Collected {age(host.last_collected_at)}; received{" "}
-              {age(host.last_report)}.
-            </p>
+            </h3>
+            <MetricHistory
+              points={history.points}
+              error={history.error}
+              hours={hours}
+              windowStart={history.windowStart}
+              windowEnd={history.windowEnd}
+            />
           </section>
         )}
         <section>
@@ -297,54 +252,6 @@ export function HostDetails({
             </dl>
           )}
         </section>
-        {(metrics?.disks ?? inventory?.disks ?? []).length > 0 && (
-          <section>
-            <h3 className="detail-heading">
-              <HardDrive />
-              Storage
-              <span className="spacer" />
-              {metrics &&
-                (metrics.disk_read_bytes_per_second != null ||
-                  metrics.disk_write_bytes_per_second != null) && (
-                  <span className="text-xs font-normal text-muted-foreground">
-                    R {rate(metrics.disk_read_bytes_per_second)} · W{" "}
-                    {rate(metrics.disk_write_bytes_per_second)}
-                  </span>
-                )}
-            </h3>
-            {metrics && !metrics.disks.length && !!inventory?.disks.length && (
-              <p className="text-xs text-muted-foreground">
-                Filesystem metrics are unavailable; showing the last reported
-                mounts.
-              </p>
-            )}
-            {(metrics?.disks.length ? metrics.disks : (inventory?.disks ?? []))
-              .map((d) => ({ disk: d, percent: diskPercent(d) }))
-              .sort((a, b) => (b.percent ?? -1) - (a.percent ?? -1))
-              .map(({ disk: d, percent }) => (
-                <div key={`${d.name}-${d.mount}`} className="storage-row">
-                  <div className="label">
-                    <span className="truncate">
-                      <span className="mono font-semibold">{d.mount}</span>
-                      <span className="ml-2 text-muted-foreground">
-                        {d.name} · {d.filesystem}
-                      </span>
-                    </span>
-                    <span>
-                      {percent != null
-                        ? `${bytes(d.total_bytes - d.available_bytes)} of ${bytes(d.total_bytes)}`
-                        : "Usage unavailable"}
-                    </span>
-                  </div>
-                  <Meter
-                    value={percent}
-                    label={`${d.mount} storage used`}
-                    tone={usageTone(percent)}
-                  />
-                </div>
-              ))}
-          </section>
-        )}
         <section>
           <h3 className="detail-heading">
             <Network />
@@ -398,6 +305,88 @@ export function HostDetails({
             </details>
           )}
         </section>
+        {metrics?.service_summary && (
+          <section data-testid="service-units">
+            <h3 className="detail-heading">
+              <Zap />
+              Service units
+              <span className="spacer" />
+              <span className="text-xs font-normal text-muted-foreground">
+                {metrics.service_summary.active} active ·{" "}
+                <span
+                  className={
+                    metrics.service_summary.failed ? "tone-critical" : ""
+                  }
+                >
+                  {metrics.service_summary.failed} failed
+                </span>{" "}
+                of {metrics.service_summary.total}
+              </span>
+            </h3>
+            {metrics.services.length ? (
+              <div className="flex flex-col">
+                {metrics.services.map((unit) => (
+                  <div key={unit.name} className="interface-row row">
+                    <span className="min-w-0">
+                      <strong className="mono block truncate">
+                        {unit.name}
+                      </strong>
+                      <span className="block truncate">{unit.description}</span>
+                    </span>
+                    <span
+                      className="status-pill shrink-0"
+                      data-tone={
+                        unit.state === "active"
+                          ? "good"
+                          : unit.state === "failed"
+                            ? "critical"
+                            : "warning"
+                      }
+                    >
+                      {unit.state}
+                      {unit.sub_state !== unit.state && ` · ${unit.sub_state}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                No failed units. Add names to HOPE_WATCH_SERVICES on the agent
+                to always show them here.
+              </p>
+            )}
+          </section>
+        )}
+        {(metrics?.monitors.length ?? 0) > 0 && (
+          <section data-testid="monitors">
+            <h3 className="detail-heading">
+              <Wifi />
+              Network monitors
+            </h3>
+            <div className="flex flex-col">
+              {metrics?.monitors.map((monitor) => (
+                <div key={monitor.target} className="interface-row row">
+                  <span className="min-w-0">
+                    <strong className="mono block truncate">
+                      {monitor.target}
+                    </strong>
+                    <span className="block truncate">
+                      {monitor.up
+                        ? `${monitor.latency_ms != null ? `${monitor.latency_ms.toFixed(0)} ms` : "reachable"}${monitor.status_code ? ` · HTTP ${monitor.status_code}` : ""}`
+                        : (monitor.detail ?? "unreachable")}
+                    </span>
+                  </span>
+                  <span
+                    className="status-pill shrink-0"
+                    data-tone={monitor.up ? "good" : "critical"}
+                  >
+                    {monitor.up ? "Up" : "Down"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
         <section>
           <h3 className="detail-heading">
             <Radio />
@@ -426,41 +415,20 @@ export function HostDetails({
               <Zap />
               Graphics
             </h3>
-            {(metrics?.gpus ?? inventory?.gpus ?? []).map((g, i) => (
-              <div key={g.id ?? `${g.name}-${i}`} className="interface-row">
-                <strong>{g.name}</strong>
-                <span>
-                  Utilization {percentage(g.utilization_percent)} · VRAM{" "}
-                  {bytes(g.memory_used_bytes)}
-                  {g.memory_total_bytes != null &&
-                    ` of ${bytes(g.memory_total_bytes)}`}
+            <div className="flex flex-wrap gap-1.5">
+              {(metrics?.gpus ?? inventory?.gpus ?? []).map((g, i) => (
+                <span key={g.id ?? `${g.name}-${i}`} className="service-chip">
+                  {g.name}
+                  {g.temperature_celsius != null && (
+                    <b>{g.temperature_celsius.toFixed(0)}°C</b>
+                  )}
                 </span>
-                <span>
-                  {g.temperature_celsius == null
-                    ? "Temperature unavailable"
-                    : `${g.temperature_celsius.toFixed(0)}°C`}
-                </span>
-              </div>
-            ))}
+              ))}
+            </div>
           </section>
         )}
         {host.agent_id && (
           <>
-            <section>
-              <h3 className="detail-heading">
-                <Waypoints />
-                History
-                <span className="spacer" />
-                {!metrics && <HistoryRange value={hours} onChange={setHours} />}
-              </h3>
-              <MetricHistory
-                points={history.points}
-                error={history.error}
-                hours={hours}
-                windowStart={history.windowStart}
-                windowEnd={history.windowEnd}
-              />
-            </section>
             {host.collectors.some((c) => !c.available) && (
               <section>
                 <h3 className="detail-heading">
@@ -555,43 +523,5 @@ export function HostDetails({
         )}
       </div>
     </aside>
-  );
-}
-
-function MiniTile({
-  label,
-  value,
-  percent,
-  spark,
-  max,
-  color,
-  detail,
-}: {
-  label: string;
-  value: string;
-  percent?: number | null;
-  spark: { time: number; value: number | null }[];
-  max?: number;
-  color?: string;
-  detail?: string;
-}) {
-  return (
-    <div
-      className="mini-tile"
-      data-tone={percent != null ? usageTone(percent) : undefined}
-    >
-      <header>
-        <span>{label}</span>
-      </header>
-      <div className="value">{value}</div>
-      <div className="spark">
-        <Sparkline points={spark} max={max} color={color} />
-      </div>
-      {detail && (
-        <div className="truncate text-[11px] text-muted-foreground">
-          {detail}
-        </div>
-      )}
-    </div>
   );
 }

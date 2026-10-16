@@ -17,8 +17,19 @@ const metrics: Metrics = {
   network_rx_bytes_per_second: 1000,
   network_tx_bytes_per_second: 500,
   network_interfaces: [],
+  memory_cached_bytes: null,
+  memory_zfs_arc_bytes: null,
+  swap_used_bytes: null,
+  swap_total_bytes: null,
+  load_average: null,
   disk_read_bytes_per_second: null,
   disk_write_bytes_per_second: null,
+  disk_io: [],
+  pools: [],
+  temperatures: [],
+  services: [],
+  service_summary: null,
+  monitors: [],
   disks: [
     {
       name: "nvme0",
@@ -97,6 +108,74 @@ test("issues cover silent agents, unobserved hosts and full resources, most seve
       }),
       now,
     ).map((i) => i.kind),
+  ).toEqual(["agent"]);
+});
+
+test("pools, sensors, failed units and down monitors raise issues only while reporting", () => {
+  const rich = host({
+    agent_id: "a",
+    last_report: now - 10,
+    metrics: {
+      ...metrics,
+      disks: [],
+      pools: [
+        {
+          name: "tank",
+          kind: "zfs",
+          size_bytes: 100,
+          allocated_bytes: 50,
+          health: "DEGRADED",
+          read_bytes_per_second: null,
+          write_bytes_per_second: null,
+          root: false,
+        },
+        {
+          name: "rpool",
+          kind: "zfs",
+          size_bytes: 100,
+          allocated_bytes: 98,
+          health: "ONLINE",
+          read_bytes_per_second: null,
+          write_bytes_per_second: null,
+          root: true,
+        },
+      ],
+      temperatures: [
+        { sensor: "a", label: "Package id 0", celsius: 96 },
+        { sensor: "b", label: "nvme", celsius: 40 },
+      ],
+      services: [
+        {
+          name: "nginx.service",
+          state: "failed",
+          sub_state: "failed",
+          description: "",
+          watched: false,
+        },
+      ],
+      monitors: [
+        {
+          target: "tcp://10.0.0.1:22",
+          kind: "tcp",
+          up: false,
+          latency_ms: null,
+          status_code: null,
+          detail: "timed out",
+        },
+      ],
+    },
+  });
+  expect(
+    hostIssues(rich, now).map((i) => [i.kind, i.severity, i.message]),
+  ).toEqual([
+    ["pool", "critical", "Pool tank is DEGRADED"],
+    ["pool", "critical", "Pool rpool is 98% allocated"],
+    ["sensor", "critical", "Package id 0 at 96°C"],
+    ["monitor", "critical", "tcp://10.0.0.1:22 is down"],
+    ["service", "warning", "nginx.service failed"],
+  ]);
+  expect(
+    hostIssues({ ...rich, last_report: now - 1000 }, now).map((i) => i.kind),
   ).toEqual(["agent"]);
 });
 

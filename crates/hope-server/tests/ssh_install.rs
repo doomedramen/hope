@@ -454,13 +454,7 @@ async fn send_report(state: &State, agent: &str, credential: &str) {
             cpu_percent: Some(1.0),
             memory_used_bytes: Some(1e6),
             memory_total_bytes: Some(8e9),
-            network_rx_bytes_per_second: None,
-            network_tx_bytes_per_second: None,
-            network_interfaces: vec![],
-            disk_read_bytes_per_second: None,
-            disk_write_bytes_per_second: None,
-            disks: vec![],
-            gpus: vec![],
+            ..Default::default()
         },
         collectors: vec![],
     };

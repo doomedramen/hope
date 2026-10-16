@@ -223,11 +223,103 @@ pub struct NetworkCounter {
     pub included_in_total: bool,
 }
 
+/// System load averages as the kernel reports them (runnable tasks, not percentages).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+pub struct LoadAverage {
+    pub one: f64,
+    pub five: f64,
+    pub fifteen: f64,
+}
+
+/// One temperature sensor reading.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct Temperature {
+    /// Stable identifier for history (driver and channel), unique within a host.
+    pub sensor: String,
+    /// Human label, for example "Package id 0" or "nvme Composite".
+    pub label: String,
+    pub celsius: f64,
+}
+
+/// Throughput of one block device.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DiskIo {
+    pub device: String,
+    pub read_bytes_per_second: Option<f64>,
+    pub write_bytes_per_second: Option<f64>,
+    /// Share of the interval the device spent with I/O in flight.
+    pub busy_percent: Option<f64>,
+    /// True when the root filesystem lives on this device.
+    pub root: bool,
+}
+
+/// A storage pool (ZFS today) with capacity and throughput.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct StoragePool {
+    pub name: String,
+    /// Pool technology, for example "zfs".
+    pub kind: String,
+    pub size_bytes: f64,
+    pub allocated_bytes: f64,
+    /// Pool-reported health, for example ONLINE or DEGRADED.
+    pub health: String,
+    pub read_bytes_per_second: Option<f64>,
+    pub write_bytes_per_second: Option<f64>,
+    /// True when the root filesystem is a dataset of this pool.
+    pub root: bool,
+}
+
+/// A service unit the agent reports: failed units, and units the operator asked to watch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ServiceUnit {
+    pub name: String,
+    /// Manager state: active, inactive, failed, activating, deactivating.
+    pub state: String,
+    pub sub_state: String,
+    pub description: String,
+    /// True for units named in the agent's watch list (reported whatever their state).
+    pub watched: bool,
+}
+
+/// Counts over every service unit the service manager knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ServiceSummary {
+    pub active: u32,
+    pub failed: u32,
+    pub total: u32,
+}
+
+/// Result of one configured reachability check from the agent's point of view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct MonitorResult {
+    /// The configured target, for example "tcp://10.0.0.1:22" or "https://example.com/".
+    pub target: String,
+    /// "tcp", "http" or "https".
+    pub kind: String,
+    pub up: bool,
+    pub latency_ms: Option<f64>,
+    pub status_code: Option<u16>,
+    /// Short failure reason; never remote response bodies.
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, Default)]
 pub struct Metrics {
     pub cpu_percent: Option<f64>,
     pub memory_used_bytes: Option<f64>,
     pub memory_total_bytes: Option<f64>,
+    /// Page cache plus buffers and reclaimable slab; part of the kernel's reclaimable memory.
+    #[serde(default)]
+    pub memory_cached_bytes: Option<f64>,
+    /// ZFS ARC size; counted as used by the kernel, released under pressure.
+    #[serde(default)]
+    pub memory_zfs_arc_bytes: Option<f64>,
+    #[serde(default)]
+    pub swap_used_bytes: Option<f64>,
+    #[serde(default)]
+    pub swap_total_bytes: Option<f64>,
+    #[serde(default)]
+    pub load_average: Option<LoadAverage>,
     pub network_rx_bytes_per_second: Option<f64>,
     pub network_tx_bytes_per_second: Option<f64>,
     #[serde(default)]
@@ -235,7 +327,19 @@ pub struct Metrics {
     pub disk_read_bytes_per_second: Option<f64>,
     pub disk_write_bytes_per_second: Option<f64>,
     pub disks: Vec<Disk>,
+    #[serde(default)]
+    pub disk_io: Vec<DiskIo>,
+    #[serde(default)]
+    pub pools: Vec<StoragePool>,
     pub gpus: Vec<Gpu>,
+    #[serde(default)]
+    pub temperatures: Vec<Temperature>,
+    #[serde(default)]
+    pub services: Vec<ServiceUnit>,
+    #[serde(default)]
+    pub service_summary: Option<ServiceSummary>,
+    #[serde(default)]
+    pub monitors: Vec<MonitorResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -437,6 +541,13 @@ pub fn typescript() -> String {
         CollectorStatus::decl(),
         Inventory::decl(),
         NetworkCounter::decl(),
+        LoadAverage::decl(),
+        Temperature::decl(),
+        DiskIo::decl(),
+        StoragePool::decl(),
+        ServiceUnit::decl(),
+        ServiceSummary::decl(),
+        MonitorResult::decl(),
         Metrics::decl(),
         AgentReport::decl(),
         EnrollmentRequest::decl(),

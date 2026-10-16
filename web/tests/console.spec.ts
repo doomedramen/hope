@@ -40,6 +40,86 @@ async function expectMapFits(page: import("@playwright/test").Page) {
     .toBeTruthy();
 }
 
+function extended(sample: number) {
+  return {
+    memory_cached_bytes: 6e9,
+    memory_zfs_arc_bytes: 4e9,
+    swap_used_bytes: 1e8,
+    swap_total_bytes: 2e9,
+    load_average: { one: 1.2 + sample * 0.1, five: 0.9, fifteen: 0.7 },
+    disk_io: [
+      {
+        device: "nvme0n1",
+        read_bytes_per_second: 1e6 * (sample + 1),
+        write_bytes_per_second: 5e5,
+        busy_percent: 12,
+        root: true,
+      },
+    ],
+    pools: [
+      {
+        name: "rpool",
+        kind: "zfs",
+        size_bytes: 2e12,
+        allocated_bytes: 1.9e12,
+        health: "ONLINE",
+        read_bytes_per_second: 2e6,
+        write_bytes_per_second: 1e6,
+        root: false,
+      },
+      {
+        name: "tank",
+        kind: "zfs",
+        size_bytes: 8e12,
+        allocated_bytes: 3e12,
+        health: "DEGRADED",
+        read_bytes_per_second: null,
+        write_bytes_per_second: null,
+        root: false,
+      },
+    ],
+    temperatures: [
+      { sensor: "coretemp:temp1", label: "Package id 0", celsius: 61 + sample },
+      { sensor: "nvme:temp1", label: "nvme Composite", celsius: 44 },
+    ],
+    services: [
+      {
+        name: "ssh.service",
+        state: "active",
+        sub_state: "running",
+        description: "OpenBSD Secure Shell server",
+        watched: true,
+      },
+      {
+        name: "nginx.service",
+        state: "failed",
+        sub_state: "failed",
+        description: "A high performance web server",
+        watched: false,
+      },
+    ],
+    service_summary: { active: 40, failed: 1, total: 42 },
+    monitors: [
+      {
+        target: "tcp://192.168.1.1:22",
+        kind: "tcp",
+        up: true,
+        latency_ms: 2.5 + sample,
+        status_code: null,
+        detail: null,
+      },
+      {
+        target: "https://example.com/",
+        kind: "https",
+        up: false,
+        latency_ms: null,
+        status_code: null,
+        detail: "timed out",
+      },
+    ],
+  };
+}
+
 async function seed(request: APIRequestContext) {
   await request.post("/api/v1/networks", {
     data: { name: "Home network", cidr: "192.168.1.0/24", enabled: false },
@@ -110,6 +190,8 @@ async function seed(request: APIRequestContext) {
             disk_write_bytes_per_second: null,
             disks: inventory.disks,
             gpus: [],
+            // The first host reports everything the extended agent can collect.
+            ...(i === 0 ? extended(sample) : {}),
           },
           collectors: [
             {
@@ -257,7 +339,7 @@ test.describe.serial("H.O.P.E console", () => {
   }) => {
     const data = await (await request.get("/api/v1/bootstrap")).json();
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(`/?host=${data.hosts[0].id}`);
+    await page.goto(`/?view=map&host=${data.hosts[0].id}`);
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
     ).toBeVisible();
@@ -519,14 +601,21 @@ test.describe.serial("H.O.P.E console", () => {
     });
     expect(enrolled.ok()).toBeTruthy();
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Overview", exact: true }),
+    ).toBeVisible();
     await expect(page.getByTestId("tile-hosts")).toContainText(
       "Hosts responding",
     );
-    await expect(page.getByTestId("tile-attention")).toContainText("1");
+    await expect(page.getByTestId("tile-attention")).toContainText(
+      "3 critical",
+    );
     const attention = page.getByRole("region", { name: "Needs attention" });
     await expect(attention).toContainText("quiet-node");
     await expect(attention).toContainText("Agent has never reported");
+    await expect(attention).toContainText("Pool tank is DEGRADED");
+    await expect(attention).toContainText("https://example.com/ is down");
+    await expect(attention).toContainText("nginx.service failed");
     await expect(
       page.getByRole("region", { name: "Busiest CPUs" }),
     ).toContainText("compute-node");
@@ -535,7 +624,7 @@ test.describe.serial("H.O.P.E console", () => {
       fullPage: true,
     });
     await attention.getByRole("button", { name: /quiet-node/ }).click();
-    await expect(page).toHaveURL(/view=hosts/);
+    await expect(page).toHaveURL(/view=host&/);
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
     ).toContainText("Intel N100");
@@ -543,9 +632,11 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByRole("complementary", { name: "Host details" }),
     ).toContainText("Agent has never reported");
     await page.getByRole("button", { name: "Close host details" }).click();
+    await expect(page).toHaveURL(/view=hosts/);
     await page.getByRole("button", { name: /^Needs attention/ }).click();
-    await expect(page.getByRole("table").getByRole("row")).toHaveCount(2);
+    await expect(page.getByRole("table").getByRole("row")).toHaveCount(3);
     await expect(page.getByRole("table")).toContainText("quiet-node");
+    await expect(page.getByRole("table")).toContainText("atlas-nas");
     await page.getByRole("button", { name: /^Reporting/ }).click();
     await expect(page.getByRole("table")).not.toContainText("quiet-node");
     await page
@@ -560,20 +651,86 @@ test.describe.serial("H.O.P.E console", () => {
       fullPage: true,
     });
   });
+  test("host details show pools, sensors, service units, monitors and their history", async ({
+    page,
+  }) => {
+    await page.goto("/?view=hosts");
+    await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
+    const details = page.getByRole("complementary", { name: "Host details" });
+    // Current values live on the charts, not in a separate facts list.
+    await expect(details.getByTestId("chart-CPU")).toContainText("20%");
+    await expect(details.getByTestId("chart-Load average")).toContainText(
+      "1 min1.60",
+    );
+    await expect(details.getByTestId("chart-Memory")).toContainText(
+      "ZFS ARC3.73 GiB",
+    );
+    await expect(details.getByTestId("chart-Memory")).toContainText(
+      "Cache and buffers5.59 GiB",
+    );
+    await expect(details.getByTestId("chart-Disk I/O")).toContainText(
+      "nvme0n1 (root) · 12% busy",
+    );
+    await expect(details.getByTestId("chart-Pool usage")).toContainText(
+      "ONLINE",
+    );
+    await expect(details.getByTestId("chart-Pool usage")).toContainText(
+      "rpool · 1.7 TiB of 1.8 TiB",
+    );
+    await expect(details.getByTestId("chart-Temperatures")).toContainText(
+      "Package id 065.0 °C",
+    );
+    await expect(details.getByTestId("chart-Monitor latency")).toContainText(
+      "7 ms",
+    );
+    await expect(details.getByTestId("service-units")).toContainText(
+      "40 active",
+    );
+    await expect(details.getByTestId("service-units")).toContainText(
+      "nginx.service",
+    );
+    await expect(details.getByTestId("monitors")).toContainText("timed out");
+    await expect(details).not.toContainText("Live usage");
+    await expect(details.getByTestId("chart-Filesystem usage")).toContainText(
+      "/ · nvme0 · 372.5 GiB of 931.3 GiB",
+    );
+    await page.getByRole("button", { name: "Open host page" }).click();
+    await expect(page).toHaveURL(/view=host&host=/);
+    await expect(
+      page.getByRole("heading", { name: "Host", exact: true }),
+    ).toBeVisible();
+    await expect(page.locator(".host-page .charts")).toBeVisible();
+    await expect(details.getByTestId("chart-Temperatures")).toBeVisible();
+    await expect(details.getByTestId("chart-Temperatures")).toContainText(
+      "nvme Composite",
+    );
+    await details.getByLabel("Filter sensors").fill("package");
+    await expect(details.getByTestId("chart-Temperatures")).not.toContainText(
+      "nvme Composite",
+    );
+    await details.getByLabel("Filter sensors").fill("");
+    await page.screenshot({
+      path: "test-results/hope-host-page.png",
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Close host details" }).click();
+    await expect(page).toHaveURL(/view=hosts/);
+    await expect(page.getByRole("table")).toBeVisible();
+  });
   test("command palette jumps to a host and the theme persists", async ({
     page,
   }) => {
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Overview", exact: true }),
+    ).toBeVisible();
     await page.keyboard.press("Control+k");
     const palette = page.getByRole("dialog", { name: "Search and commands" });
     await expect(palette).toBeVisible();
     await palette.getByRole("combobox").fill("studio");
     await expect(palette.getByRole("option")).toHaveCount(1);
     await page.keyboard.press("Enter");
-    await expect(page).toHaveURL(
-      /view=hosts&host=|host=.*view=hosts|view=hosts/,
-    );
+    await expect(page).toHaveURL(/view=host&host=/);
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
     ).toContainText("studio-mac");
@@ -589,7 +746,9 @@ test.describe.serial("H.O.P.E console", () => {
     });
     await page.reload();
     await expect(page.locator("html")).toHaveClass(/dark/);
-    await expect(page.getByRole("heading", { name: "Hosts" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Host", exact: true }),
+    ).toBeVisible();
     await page.keyboard.press("Control+k");
     await page
       .getByRole("dialog", { name: "Search and commands" })

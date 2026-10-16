@@ -62,6 +62,7 @@ H.O.P.E is a single Rust server (Axum, Tokio, SQLx on SQLite) that serves a stat
 2. The agent generates its UUID and a 256-bit credential, saves the credential as pending, and calls `POST /api/v1/agent/enroll` with token and inventory. The server consumes the token in the same transaction that inserts the agent (credential stored as SHA-256) and the host, matching an existing unassigned host by unique MAC (see Identity reconciliation). A lost response is recovered by retrying with the same pending credential.
 3. `POST /api/v1/agent/report` carries `Authorization: Bearer <credential>`. The server authenticates before taking the global write lock, re-checks under it (ordering against revocation), validates the report, inserts it idempotently by `report_id`, updates the host snapshot and network membership in one transaction, and emits an event. Inventory is sent on enrollment, when it changes, and at least hourly.
 4. The agent removes a report from its spool only after an accepted response and only then records the acceptance marker used by `hope-agent status`.
+5. Beyond the core sample (`collect.rs`), `extras.rs` adds the memory breakdown, load average, sensors, per-device and per-pool throughput, service units and monitors; every list is bounded and validated by `validation.rs`, and `metrics.rs` keeps per-key statistics for each sensor, device, pool and monitor so aggregates average per entity.
 
 ### Retention
 

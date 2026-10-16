@@ -27,15 +27,51 @@ impl Statistics {
             cpu_percent,
             memory_used_bytes,
             memory_total_bytes,
+            memory_cached_bytes,
+            memory_zfs_arc_bytes,
+            swap_used_bytes,
+            swap_total_bytes,
             network_rx_bytes_per_second,
             network_tx_bytes_per_second,
             disk_read_bytes_per_second,
             disk_write_bytes_per_second
         );
+        if let Some(load) = metrics.load_average {
+            result.add("load:one", Some(load.one));
+            result.add("load:five", Some(load.five));
+            result.add("load:fifteen", Some(load.fifteen));
+        }
         for interface in &metrics.network_interfaces {
             let key = format!("network:{}", serde_json::json!(interface.name));
             result.add(&format!("{key}:rx"), interface.rx_bytes_per_second);
             result.add(&format!("{key}:tx"), interface.tx_bytes_per_second);
+        }
+        for sensor in &metrics.temperatures {
+            result.add(
+                &format!("temperature:{}", serde_json::json!(sensor.sensor)),
+                Some(sensor.celsius),
+            );
+        }
+        for device in &metrics.disk_io {
+            let key = format!("device:{}", serde_json::json!(device.device));
+            result.add(&format!("{key}:read"), device.read_bytes_per_second);
+            result.add(&format!("{key}:write"), device.write_bytes_per_second);
+            result.add(&format!("{key}:busy"), device.busy_percent);
+        }
+        for pool in &metrics.pools {
+            let key = format!("pool:{}", serde_json::json!(pool.name));
+            result.add(&format!("{key}:size"), Some(pool.size_bytes));
+            result.add(&format!("{key}:allocated"), Some(pool.allocated_bytes));
+            result.add(&format!("{key}:read"), pool.read_bytes_per_second);
+            result.add(&format!("{key}:write"), pool.write_bytes_per_second);
+        }
+        for monitor in &metrics.monitors {
+            let key = format!("monitor:{}", serde_json::json!(monitor.target));
+            result.add(&format!("{key}:latency"), monitor.latency_ms);
+            result.add(
+                &format!("{key}:up"),
+                Some(if monitor.up { 1.0 } else { 0.0 }),
+            );
         }
         for gpu in &metrics.gpus {
             if gpu.id.is_none() {
@@ -80,15 +116,61 @@ impl Statistics {
             cpu_percent,
             memory_used_bytes,
             memory_total_bytes,
+            memory_cached_bytes,
+            memory_zfs_arc_bytes,
+            swap_used_bytes,
+            swap_total_bytes,
             network_rx_bytes_per_second,
             network_tx_bytes_per_second,
             disk_read_bytes_per_second,
             disk_write_bytes_per_second
         );
+        latest.load_average = match (
+            self.mean("load:one"),
+            self.mean("load:five"),
+            self.mean("load:fifteen"),
+        ) {
+            (Some(one), Some(five), Some(fifteen)) => {
+                Some(hope_protocol::LoadAverage { one, five, fifteen })
+            }
+            _ => None,
+        };
         for interface in &mut latest.network_interfaces {
             let key = format!("network:{}", serde_json::json!(interface.name));
             interface.rx_bytes_per_second = self.mean(&format!("{key}:rx"));
             interface.tx_bytes_per_second = self.mean(&format!("{key}:tx"));
+        }
+        for sensor in &mut latest.temperatures {
+            if let Some(value) =
+                self.mean(&format!("temperature:{}", serde_json::json!(sensor.sensor)))
+            {
+                sensor.celsius = value;
+            }
+        }
+        for device in &mut latest.disk_io {
+            let key = format!("device:{}", serde_json::json!(device.device));
+            device.read_bytes_per_second = self.mean(&format!("{key}:read"));
+            device.write_bytes_per_second = self.mean(&format!("{key}:write"));
+            device.busy_percent = self.mean(&format!("{key}:busy"));
+        }
+        for pool in &mut latest.pools {
+            let key = format!("pool:{}", serde_json::json!(pool.name));
+            if let Some(value) = self.mean(&format!("{key}:size")) {
+                pool.size_bytes = value;
+            }
+            if let Some(value) = self.mean(&format!("{key}:allocated")) {
+                pool.allocated_bytes = value;
+            }
+            pool.read_bytes_per_second = self.mean(&format!("{key}:read"));
+            pool.write_bytes_per_second = self.mean(&format!("{key}:write"));
+        }
+        for monitor in &mut latest.monitors {
+            let key = format!("monitor:{}", serde_json::json!(monitor.target));
+            monitor.latency_ms = self.mean(&format!("{key}:latency"));
+            // An aggregate is "up" only when every sample in it was up.
+            if let Some(up) = self.mean(&format!("{key}:up")) {
+                monitor.up = up >= 1.0;
+            }
         }
         for gpu in &mut latest.gpus {
             if gpu.id.is_none() {
@@ -393,6 +475,52 @@ mod tests {
                 .expect("second")
                 .utilization_percent,
             Some(70.0)
+        );
+    }
+    #[test]
+    fn extended_series_average_per_key_and_monitors_need_every_sample_up() {
+        use hope_protocol::{DiskIo, LoadAverage, MonitorResult, Temperature};
+        let sample = |load, celsius, read: Option<f64>, up| Metrics {
+            load_average: Some(LoadAverage {
+                one: load,
+                five: load,
+                fifteen: load,
+            }),
+            temperatures: vec![Temperature {
+                sensor: "coretemp:temp1".into(),
+                label: "Package".into(),
+                celsius,
+            }],
+            disk_io: vec![DiskIo {
+                device: "nvme0n1".into(),
+                read_bytes_per_second: read,
+                write_bytes_per_second: None,
+                busy_percent: None,
+                root: true,
+            }],
+            monitors: vec![MonitorResult {
+                target: "tcp://10.0.0.1:22".into(),
+                kind: "tcp".into(),
+                up,
+                latency_ms: Some(10.0),
+                status_code: None,
+                detail: None,
+            }],
+            ..Default::default()
+        };
+        let result = aggregate(&[
+            sample(1.0, 40.0, Some(100.0), true),
+            sample(3.0, 60.0, None, false),
+        ]);
+        assert_eq!(result.load_average.map(|l| l.one), Some(2.0));
+        assert_eq!(result.temperatures[0].celsius, 50.0);
+        assert_eq!(result.disk_io[0].read_bytes_per_second, Some(100.0));
+        assert_eq!(result.disk_io[0].write_bytes_per_second, None);
+        assert!(!result.monitors[0].up);
+        assert_eq!(
+            aggregate(&[Metrics::default()]).load_average,
+            None,
+            "no load samples means no load average"
         );
     }
     #[test]

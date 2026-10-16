@@ -26,6 +26,12 @@ export function hostState(
     : { key: "unobserved", label: "Not recently observed", tone: "warning" };
 }
 
+export function sensorTone(celsius: number): Tone {
+  if (celsius >= 95) return "critical";
+  if (celsius >= 85) return "warning";
+  return "good";
+}
+
 export function usageTone(percent: number | null | undefined): Tone {
   if (percent == null || !Number.isFinite(percent)) return "neutral";
   if (percent >= 95) return "critical";
@@ -64,7 +70,16 @@ export function memoryUsage(host: Host): number | null {
 export type Issue = {
   host: Host;
   severity: "critical" | "warning";
-  kind: "agent" | "observation" | "cpu" | "memory" | "disk";
+  kind:
+    | "agent"
+    | "observation"
+    | "cpu"
+    | "memory"
+    | "disk"
+    | "pool"
+    | "sensor"
+    | "service"
+    | "monitor";
   message: string;
 };
 
@@ -118,6 +133,61 @@ export function hostIssues(host: Host, now = Date.now() / 1000): Issue[] {
         severity: disk.percent >= 97 ? "critical" : "warning",
         kind: "disk",
         message: `${disk.disk.mount} is ${disk.percent.toFixed(0)}% full`,
+      });
+    const metrics = host.metrics;
+    for (const pool of metrics?.pools ?? []) {
+      const percent =
+        pool.size_bytes > 0
+          ? (pool.allocated_bytes / pool.size_bytes) * 100
+          : 0;
+      if (pool.health.toUpperCase() !== "ONLINE")
+        issues.push({
+          host,
+          severity: "critical",
+          kind: "pool",
+          message: `Pool ${pool.name} is ${pool.health}`,
+        });
+      else if (percent >= 90)
+        issues.push({
+          host,
+          severity: percent >= 97 ? "critical" : "warning",
+          kind: "pool",
+          message: `Pool ${pool.name} is ${percent.toFixed(0)}% allocated`,
+        });
+    }
+    const hottest = [...(metrics?.temperatures ?? [])].sort(
+      (a, b) => b.celsius - a.celsius,
+    )[0];
+    if (hottest && hottest.celsius >= 85)
+      issues.push({
+        host,
+        severity: hottest.celsius >= 95 ? "critical" : "warning",
+        kind: "sensor",
+        message: `${hottest.label} at ${hottest.celsius.toFixed(0)}°C`,
+      });
+    const failed = (metrics?.services ?? []).filter(
+      (unit) => unit.state === "failed",
+    );
+    if (failed.length)
+      issues.push({
+        host,
+        severity: "warning",
+        kind: "service",
+        message:
+          failed.length === 1
+            ? `${failed[0].name} failed`
+            : `${failed.length} service units failed`,
+      });
+    const down = (metrics?.monitors ?? []).filter((monitor) => !monitor.up);
+    if (down.length)
+      issues.push({
+        host,
+        severity: "critical",
+        kind: "monitor",
+        message:
+          down.length === 1
+            ? `${down[0].target} is down`
+            : `${down.length} monitors are down`,
       });
   }
   return issues.sort((a, b) => rank(a.severity) - rank(b.severity));

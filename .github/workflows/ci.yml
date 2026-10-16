@@ -133,6 +133,25 @@ jobs:
           path: target/discovery-ci.json
           retention-days: 7
 
+  server-package:
+    # Proves scripts/package-server.sh (what install-hope.sh downloads) builds on a clean runner,
+    # then exercises the installer's download, checksum and layout paths from the package.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - run: sh scripts/package-server.sh --out dist/server
+      - run: cd dist/server && sha256sum -c SHA256SUMS-server
+      - run: python3 -I -m unittest discover -s tests/installer -p 'test_server_installer.py' -v
+
   release-build-smoke:
     uses: ./.github/workflows/build-agent.yml
 

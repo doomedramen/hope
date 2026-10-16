@@ -1,6 +1,13 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  XAxis,
+  YAxis,
+} from "recharts";
 import {
   ChartContainer,
   ChartTooltip,
@@ -17,9 +24,9 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api } from "@/lib/api";
+import { api, bytes } from "@/lib/api";
 import { historySeries, memoryPercent } from "@/lib/history";
-import type { MetricPoint } from "@/lib/protocol";
+import type { MetricPoint, Metrics } from "@/lib/protocol";
 
 export type HistoryWindow = "1" | "6" | "24" | "168";
 
@@ -63,14 +70,25 @@ export function useHistory(
   };
 }
 
-const SERIES = {
-  cpu: { label: "CPU", color: "var(--chart-1)" },
-  memory: { label: "Memory", color: "var(--chart-2)" },
-  rx: { label: "Receive", color: "var(--chart-1)" },
-  tx: { label: "Transmit", color: "var(--chart-2)" },
-  utilization: { label: "GPU", color: "var(--chart-1)" },
-  used: { label: "Used", color: "var(--chart-1)" },
-} as const;
+/** Categorical slots in validated order; never cycled past eight. */
+export const SLOTS = [
+  "var(--chart-1)",
+  "var(--chart-2)",
+  "var(--chart-3)",
+  "var(--chart-4)",
+  "var(--chart-5)",
+  "var(--chart-6)",
+  "var(--chart-7)",
+  "var(--chart-8)",
+];
+type Series = { key: string; label: string; color: string };
+const GIB = 1024 ** 3;
+const ratePerSecond = (value: number) => `${bytes(value)}/s`;
+const gib = (value: number) => `${value.toFixed(value < 10 ? 2 : 1)} GiB`;
+const percent = (value: number) => `${value.toFixed(0)}%`;
+const celsius = (value: number) => `${value.toFixed(1)} °C`;
+const plain = (value: number) => value.toFixed(2);
+const millis = (value: number) => `${value.toFixed(0)} ms`;
 
 export function HistoryRange({
   value,
@@ -111,23 +129,6 @@ export function MetricHistory({
   windowStart: number;
   windowEnd: number;
 }) {
-  const data = historySeries(
-    points ?? [],
-    windowStart,
-    windowEnd,
-    (metrics) => ({
-      cpu: metrics.cpu_percent,
-      memory: memoryPercent(metrics),
-      rx:
-        metrics.network_rx_bytes_per_second == null
-          ? null
-          : metrics.network_rx_bytes_per_second / 1024,
-      tx:
-        metrics.network_tx_bytes_per_second == null
-          ? null
-          : metrics.network_tx_bytes_per_second / 1024,
-    }),
-  );
   const timeLabel = (value: number) =>
     new Date(value).toLocaleString([], {
       ...(Number(hours) > 24 ? { month: "short", day: "numeric" } : {}),
@@ -153,35 +154,102 @@ export function MetricHistory({
         History appears after the agent sends its first report.
       </p>
     );
+  const frame = { start: windowStart, end: windowEnd, timeLabel };
+  const series = (select: (m: Metrics) => Record<string, number | null>) =>
+    historySeries(points, windowStart, windowEnd, select);
+  const hasBreakdown = points.some(
+    (p) => p.metrics.memory_cached_bytes != null,
+  );
+  const hasArc = points.some((p) => p.metrics.memory_zfs_arc_bytes != null);
+  const hasLoad = points.some((p) => p.metrics.load_average);
   return (
-    <div className="flex flex-col gap-5">
+    <div className="charts flex flex-col gap-5">
       <ChartBlock
-        title="CPU and memory"
+        title="CPU"
         unit="%"
-        keys={["cpu", "memory"]}
-        data={data}
+        series={[{ key: "cpu", label: "CPU", color: SLOTS[0] }]}
+        data={series((m) => ({ cpu: m.cpu_percent }))}
         domain={[0, 100]}
-        start={windowStart}
-        end={windowEnd}
-        timeLabel={timeLabel}
+        format={percent}
+        height="h-32"
+        {...frame}
+      />
+      {hasLoad && (
+        <ChartBlock
+          title="Load average"
+          unit="runnable tasks"
+          kind="line"
+          series={[
+            { key: "one", label: "1 min", color: SLOTS[0] },
+            { key: "five", label: "5 min", color: SLOTS[1] },
+            { key: "fifteen", label: "15 min", color: SLOTS[2] },
+          ]}
+          data={series((m) => ({
+            one: m.load_average?.one ?? null,
+            five: m.load_average?.five ?? null,
+            fifteen: m.load_average?.fifteen ?? null,
+          }))}
+          format={plain}
+          height="h-32"
+          {...frame}
+        />
+      )}
+      <ChartBlock
+        title="Memory"
+        unit="GiB"
+        kind="stacked"
+        series={[
+          {
+            key: "used",
+            label: hasArc ? "Used (excluding ARC)" : "Used",
+            color: SLOTS[0],
+          },
+          ...(hasArc
+            ? [{ key: "arc", label: "ZFS ARC", color: SLOTS[1] }]
+            : []),
+          ...(hasBreakdown
+            ? [{ key: "cache", label: "Cache and buffers", color: SLOTS[2] }]
+            : []),
+        ]}
+        total={{ key: "total", label: "Total" }}
+        data={series((m) => {
+          const arc = m.memory_zfs_arc_bytes;
+          const used = m.memory_used_bytes;
+          return {
+            used: used == null ? null : Math.max(0, used - (arc ?? 0)) / GIB,
+            arc: arc == null ? null : arc / GIB,
+            cache:
+              m.memory_cached_bytes == null
+                ? null
+                : m.memory_cached_bytes / GIB,
+            total:
+              m.memory_total_bytes == null ? null : m.memory_total_bytes / GIB,
+          };
+        })}
+        format={gib}
         height="h-40"
+        {...frame}
       />
       <ChartBlock
         title="Network throughput"
-        unit="KiB/s"
-        keys={["rx", "tx"]}
-        data={data}
-        start={windowStart}
-        end={windowEnd}
-        timeLabel={timeLabel}
+        unit="per second"
+        series={[
+          { key: "rx", label: "Receive", color: SLOTS[0] },
+          { key: "tx", label: "Transmit", color: SLOTS[1] },
+        ]}
+        data={series((m) => ({
+          rx: m.network_rx_bytes_per_second,
+          tx: m.network_tx_bytes_per_second,
+        }))}
+        format={ratePerSecond}
         height="h-32"
+        {...frame}
       />
-      <ResourceHistory
-        points={points}
-        start={windowStart}
-        end={windowEnd}
-        timeLabel={timeLabel}
-      />
+      <DeviceHistory points={points} {...frame} />
+      <PoolHistory points={points} {...frame} />
+      <SensorHistory points={points} {...frame} />
+      <MonitorHistory points={points} {...frame} />
+      <ResourceHistory points={points} {...frame} />
       <p className="text-xs text-muted-foreground">
         Gaps are missing samples or unavailable metrics, never zero. Windows
         beyond 24 hours use five-minute averages, grouped further for display.
@@ -190,10 +258,16 @@ export function MetricHistory({
   );
 }
 
+type Frame = {
+  start: number;
+  end: number;
+  timeLabel: (time: number) => string;
+};
+
 function ChartBlock({
   title,
   unit,
-  keys,
+  series,
   data,
   domain,
   start,
@@ -201,40 +275,73 @@ function ChartBlock({
   timeLabel,
   height,
   action,
-}: {
+  kind = "area",
+  total,
+  format = (value) => String(Math.round(value)),
+}: Frame & {
   title: string;
   unit: string;
-  keys: (keyof typeof SERIES)[];
+  series: Series[];
   data: Record<string, number | null>[];
   domain?: [number, number];
-  start: number;
-  end: number;
-  timeLabel: (time: number) => string;
   height: string;
   action?: React.ReactNode;
+  kind?: "area" | "line" | "stacked";
+  /** A reference series drawn as a line above the areas (for example total memory). */
+  total?: { key: string; label: string };
+  format?: (value: number) => string;
 }) {
-  const config = Object.fromEntries(keys.map((key) => [key, SERIES[key]]));
+  const config = Object.fromEntries([
+    ...series.map((s) => [s.key, { label: s.label, color: s.color }]),
+    ...(total
+      ? [[total.key, { label: total.label, color: "var(--muted-foreground)" }]]
+      : []),
+  ]);
+  const legend = [
+    ...series,
+    ...(total
+      ? [
+          {
+            key: total.key,
+            label: total.label,
+            color: "var(--muted-foreground)",
+          },
+        ]
+      : []),
+  ];
+  // The most recent known value per series, so the chart carries the current reading itself.
+  const latest = (key: string) => {
+    for (let i = data.length - 1; i >= 0; i--) {
+      const value = data[i][key];
+      if (value != null) return format(value);
+    }
+    return null;
+  };
   return (
-    <div className="chart-block">
+    <div className="chart-block" data-testid={`chart-${title}`}>
       <div className="chart-title">
         <span>
           {title}{" "}
           <span className="font-normal text-muted-foreground">({unit})</span>
+          {legend.length === 1 && (
+            <span className="chart-latest">{latest(series[0].key) ?? "—"}</span>
+          )}
         </span>
         {action}
       </div>
-      {keys.length > 1 && (
+      {legend.length > 1 && (
         <div className="chart-legend" aria-label="Legend">
-          {keys.map((key) => (
-            <span key={key}>
-              <i style={{ background: SERIES[key].color }} />
-              {SERIES[key].label}
+          {legend.map((s) => (
+            <span key={s.key}>
+              <i style={{ background: s.color }} />
+              {s.label}
+              <b>{latest(s.key) ?? "—"}</b>
             </span>
           ))}
         </div>
       )}
       <ChartContainer config={config} className={`${height} w-full`}>
-        <AreaChart
+        <ComposedChart
           accessibilityLayer
           data={data}
           margin={{ top: 6, right: 6, bottom: 0, left: 0 }}
@@ -251,54 +358,370 @@ function ChartBlock({
           />
           <YAxis
             domain={domain}
-            width={34}
+            width={66}
+            tickCount={4}
             tickLine={false}
             axisLine={false}
-            tickFormatter={(value: number) =>
-              value >= 1000
-                ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`
-                : String(Math.round(value))
-            }
+            tickFormatter={(value: number) => format(value)}
           />
           <ChartTooltip
             content={
               <ChartTooltipContent
-                labelFormatter={(v) => new Date(v).toLocaleString()}
+                labelFormatter={(_, payload) => {
+                  const time = payload?.[0]?.payload?.time;
+                  return typeof time === "number"
+                    ? new Date(time).toLocaleString()
+                    : "";
+                }}
+                formatter={(value, name, item) => (
+                  <>
+                    <span
+                      className="inline-block size-2.5 shrink-0 rounded-[2px]"
+                      style={{ background: item.color }}
+                    />
+                    <span className="text-muted-foreground">
+                      {config[name as string]?.label ?? name}
+                    </span>
+                    <span className="ml-auto font-mono font-medium tabular-nums text-foreground">
+                      {typeof value === "number"
+                        ? format(value)
+                        : String(value)}
+                    </span>
+                  </>
+                )}
               />
             }
           />
-          {keys.map((key) => (
-            <Area
-              key={key}
-              dataKey={key}
-              type="monotone"
-              stroke={`var(--color-${key})`}
-              strokeWidth={2}
-              fill={`var(--color-${key})`}
-              fillOpacity={0.1}
+          {series.map((s) =>
+            kind === "line" ? (
+              <Line
+                key={s.key}
+                dataKey={s.key}
+                type="monotone"
+                stroke={`var(--color-${s.key})`}
+                strokeWidth={2}
+                connectNulls={false}
+                isAnimationActive={false}
+                dot={false}
+                activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--card)" }}
+              />
+            ) : (
+              <Area
+                key={s.key}
+                dataKey={s.key}
+                type="monotone"
+                stackId={kind === "stacked" ? "stack" : undefined}
+                stroke={`var(--color-${s.key})`}
+                strokeWidth={kind === "stacked" ? 1 : 2}
+                fill={`var(--color-${s.key})`}
+                fillOpacity={kind === "stacked" ? 0.35 : 0.1}
+                connectNulls={false}
+                isAnimationActive={false}
+                dot={false}
+                activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--card)" }}
+              />
+            ),
+          )}
+          {total && (
+            <Line
+              dataKey={total.key}
+              type="stepAfter"
+              stroke="var(--muted-foreground)"
+              strokeWidth={1.5}
               connectNulls={false}
               isAnimationActive={false}
               dot={false}
-              activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--card)" }}
+              activeDot={false}
             />
-          ))}
-        </AreaChart>
+          )}
+        </ComposedChart>
       </ChartContainer>
     </div>
   );
 }
 
+function Picker({
+  value,
+  options,
+  onChange,
+  label,
+}: {
+  value: string;
+  options: [string, string][];
+  onChange: (value: string) => void;
+  label: string;
+}) {
+  const name = options.find(([id]) => id === value)?.[1] ?? value;
+  if (options.length <= 1)
+    return (
+      <span className="text-xs font-normal text-muted-foreground">{name}</span>
+    );
+  return (
+    <Select value={value} onValueChange={(v) => v && onChange(v)}>
+      <SelectTrigger size="sm" aria-label={label}>
+        <SelectValue>{name}</SelectValue>
+      </SelectTrigger>
+      <SelectContent>
+        <SelectGroup>
+          {options.map(([id, label]) => (
+            <SelectItem key={id} value={id}>
+              {label}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
+
+/** Keeps at most eight series: the latest-highest ones, so identity never cycles hues. */
+function topKeys(
+  points: MetricPoint[],
+  extract: (m: Metrics) => [string, string, number | null][],
+): [string, string][] {
+  const latest = new Map<string, { label: string; value: number }>();
+  for (const point of points)
+    for (const [id, label, value] of extract(point.metrics))
+      if (value != null) latest.set(id, { label, value });
+  return [...latest]
+    .sort((a, b) => b[1].value - a[1].value || a[0].localeCompare(b[0]))
+    .slice(0, 8)
+    .map(([id, entry]) => [id, entry.label]);
+}
+
+function DeviceHistory({
+  points,
+  ...frame
+}: Frame & { points: MetricPoint[] }) {
+  const [choice, setChoice] = useState<string | null>(null);
+  const options = new Map<string, string>();
+  let root: string | null = null;
+  for (const point of points)
+    for (const device of point.metrics.disk_io) {
+      const busy =
+        device.busy_percent == null
+          ? ""
+          : ` · ${device.busy_percent.toFixed(0)}% busy`;
+      options.set(
+        device.device,
+        `${device.device}${device.root ? " (root)" : ""}${busy}`,
+      );
+      if (device.root) root = device.device;
+    }
+  if (!options.size) return null;
+  const selected =
+    choice && options.has(choice) ? choice : (root ?? [...options.keys()][0]);
+  const data = historySeries(points, frame.start, frame.end, (m) => {
+    const device = m.disk_io.find((d) => d.device === selected);
+    return {
+      read: device?.read_bytes_per_second ?? null,
+      write: device?.write_bytes_per_second ?? null,
+    };
+  });
+  return (
+    <ChartBlock
+      title="Disk I/O"
+      unit="per second"
+      series={[
+        { key: "read", label: "Read", color: SLOTS[0] },
+        { key: "write", label: "Write", color: SLOTS[1] },
+      ]}
+      data={data}
+      format={ratePerSecond}
+      height="h-32"
+      action={
+        <Picker
+          value={selected}
+          options={[...options]}
+          onChange={setChoice}
+          label="Disk I/O device"
+        />
+      }
+      {...frame}
+    />
+  );
+}
+
+function PoolHistory({ points, ...frame }: Frame & { points: MetricPoint[] }) {
+  const [choice, setChoice] = useState<string | null>(null);
+  const options = new Map<string, string>();
+  const health = new Map<string, string>();
+  let root: string | null = null;
+  for (const point of points)
+    for (const pool of point.metrics.pools) {
+      options.set(
+        pool.name,
+        `${pool.name}${pool.root ? " (root)" : ""} · ${bytes(pool.allocated_bytes)} of ${bytes(pool.size_bytes)}`,
+      );
+      health.set(pool.name, pool.health);
+      if (pool.root) root = pool.name;
+    }
+  if (!options.size) return null;
+  const selected =
+    choice && options.has(choice) ? choice : (root ?? [...options.keys()][0]);
+  const pick = (m: Metrics) => m.pools.find((p) => p.name === selected);
+  const state = health.get(selected) ?? "";
+  const picker = (label: string) => (
+    <span className="flex items-center gap-2">
+      <span
+        className="status-pill"
+        data-tone={state.toUpperCase() === "ONLINE" ? "good" : "critical"}
+      >
+        {state}
+      </span>
+      <Picker
+        value={selected}
+        options={[...options]}
+        onChange={setChoice}
+        label={label}
+      />
+    </span>
+  );
+  return (
+    <>
+      <ChartBlock
+        title="Pool usage"
+        unit="%"
+        series={[{ key: "used", label: "Allocated", color: SLOTS[0] }]}
+        data={historySeries(points, frame.start, frame.end, (m) => {
+          const pool = pick(m);
+          return {
+            used:
+              pool && pool.size_bytes > 0
+                ? (pool.allocated_bytes / pool.size_bytes) * 100
+                : null,
+          };
+        })}
+        domain={[0, 100]}
+        format={percent}
+        height="h-28"
+        action={picker("Pool usage device")}
+        {...frame}
+      />
+      <ChartBlock
+        title="Pool I/O"
+        unit="per second"
+        series={[
+          { key: "read", label: "Read", color: SLOTS[0] },
+          { key: "write", label: "Write", color: SLOTS[1] },
+        ]}
+        data={historySeries(points, frame.start, frame.end, (m) => {
+          const pool = pick(m);
+          return {
+            read: pool?.read_bytes_per_second ?? null,
+            write: pool?.write_bytes_per_second ?? null,
+          };
+        })}
+        format={ratePerSecond}
+        height="h-28"
+        action={picker("Pool I/O device")}
+        {...frame}
+      />
+    </>
+  );
+}
+
+function SensorHistory({
+  points,
+  ...frame
+}: Frame & { points: MetricPoint[] }) {
+  const [filter, setFilter] = useState("");
+  const needle = filter.trim().toLowerCase();
+  const total = new Set(
+    points.flatMap((p) => p.metrics.temperatures.map((t) => t.sensor)),
+  ).size;
+  // The hottest eight matching sensors keep the palette within its validated slots.
+  const keys = topKeys(points, (m) =>
+    m.temperatures
+      .filter(
+        (t) =>
+          !needle ||
+          t.label.toLowerCase().includes(needle) ||
+          t.sensor.toLowerCase().includes(needle),
+      )
+      .map((t) => [t.sensor, t.label, t.celsius]),
+  );
+  if (!total) return null;
+  const data = historySeries(points, frame.start, frame.end, (m) =>
+    Object.fromEntries(
+      keys.map(([id], index) => [
+        `s${index}`,
+        m.temperatures.find((t) => t.sensor === id)?.celsius ?? null,
+      ]),
+    ),
+  );
+  return (
+    <ChartBlock
+      title="Temperatures"
+      unit="°C"
+      kind="line"
+      series={keys.map(([, label], index) => ({
+        key: `s${index}`,
+        label,
+        color: SLOTS[index],
+      }))}
+      data={data}
+      format={celsius}
+      height="h-36"
+      action={
+        <span className="flex items-center gap-2 text-xs font-normal text-muted-foreground">
+          {total > keys.length &&
+            !needle &&
+            `Hottest ${keys.length} of ${total}`}
+          {total > 1 && (
+            <input
+              className="chart-filter"
+              aria-label="Filter sensors"
+              placeholder="Filter sensors…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          )}
+        </span>
+      }
+      {...frame}
+    />
+  );
+}
+
+function MonitorHistory({
+  points,
+  ...frame
+}: Frame & { points: MetricPoint[] }) {
+  const keys = topKeys(points, (m) =>
+    m.monitors.map((r) => [r.target, r.target, r.latency_ms]),
+  );
+  if (!keys.length) return null;
+  const data = historySeries(points, frame.start, frame.end, (m) =>
+    Object.fromEntries(
+      keys.map(([id], index) => [
+        `m${index}`,
+        m.monitors.find((r) => r.target === id)?.latency_ms ?? null,
+      ]),
+    ),
+  );
+  return (
+    <ChartBlock
+      title="Monitor latency"
+      unit="ms"
+      kind="line"
+      series={keys.map(([, label], index) => ({
+        key: `m${index}`,
+        label: label.replace(/^[a-z]+:\/\//, ""),
+        color: SLOTS[index],
+      }))}
+      data={data}
+      format={millis}
+      height="h-32"
+      {...frame}
+    />
+  );
+}
+
 function ResourceHistory({
   points,
-  start,
-  end,
-  timeLabel,
-}: {
-  points: MetricPoint[];
-  start: number;
-  end: number;
-  timeLabel: (time: number) => string;
-}) {
+  ...frame
+}: Frame & { points: MetricPoint[] }) {
   const [gpuChoice, setGpuChoice] = useState<string | null>(null);
   const [diskChoice, setDiskChoice] = useState<string | null>(null);
   const gpuOptions = new Map(
@@ -313,9 +736,20 @@ function ResourceHistory({
   const diskOptions = new Map(
     points.flatMap((p) =>
       p.metrics.disks.map(
-        (d) => [diskKey(d), `${d.mount} · ${d.name}`] as const,
+        (d) =>
+          [
+            diskKey(d),
+            `${d.mount} · ${d.name} · ${
+              d.total_bytes > 0
+                ? `${bytes(d.total_bytes - d.available_bytes)} of ${bytes(d.total_bytes)}`
+                : "size unknown"
+            }`,
+          ] as const,
       ),
     ),
+  );
+  const rootKey = [...diskOptions.keys()].find(
+    (key) => JSON.parse(key)[1] === "/",
   );
   const gpuId =
     gpuChoice && gpuOptions.has(gpuChoice)
@@ -324,8 +758,8 @@ function ResourceHistory({
   const diskId =
     diskChoice && diskOptions.has(diskChoice)
       ? diskChoice
-      : [...diskOptions.keys()][0];
-  const gpuData = historySeries(points, start, end, (metrics) => {
+      : (rootKey ?? [...diskOptions.keys()][0]);
+  const gpuData = historySeries(points, frame.start, frame.end, (metrics) => {
     const gpu = metrics.gpus.find((g) => g.id === gpuId);
     return {
       utilization: gpu?.utilization_percent ?? null,
@@ -337,7 +771,7 @@ function ResourceHistory({
           : null,
     };
   });
-  const diskData = historySeries(points, start, end, (metrics) => {
+  const diskData = historySeries(points, frame.start, frame.end, (metrics) => {
     const disk = metrics.disks.find((d) => diskKey(d) === diskId);
     return {
       used:
@@ -352,37 +786,20 @@ function ResourceHistory({
         <ChartBlock
           title="Filesystem usage"
           unit="%"
-          keys={["used"]}
+          series={[{ key: "used", label: "Used", color: SLOTS[0] }]}
           data={diskData}
           domain={[0, 100]}
-          start={start}
-          end={end}
-          timeLabel={timeLabel}
+          format={percent}
           height="h-28"
           action={
-            diskOptions.size > 1 ? (
-              <Select value={diskId} onValueChange={setDiskChoice}>
-                <SelectTrigger size="sm" aria-label="Filesystem history device">
-                  <SelectValue>
-                    {diskId ? diskOptions.get(diskId) : "Choose filesystem"}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {[...diskOptions].map(([id, name]) => (
-                      <SelectItem key={id} value={id}>
-                        {name}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-            ) : (
-              <span className="text-xs font-normal text-muted-foreground">
-                {diskId ? diskOptions.get(diskId) : ""}
-              </span>
-            )
+            <Picker
+              value={diskId}
+              options={[...diskOptions]}
+              onChange={setDiskChoice}
+              label="Filesystem history device"
+            />
           }
+          {...frame}
         />
       )}
       {gpuOptions.size > 0 &&
@@ -392,33 +809,26 @@ function ResourceHistory({
           <ChartBlock
             title="GPU utilization and memory"
             unit="%"
-            keys={["utilization", "memory"]}
+            series={[
+              { key: "utilization", label: "GPU", color: SLOTS[0] },
+              { key: "memory", label: "Memory", color: SLOTS[1] },
+            ]}
             data={gpuData}
             domain={[0, 100]}
-            start={start}
-            end={end}
-            timeLabel={timeLabel}
+            format={percent}
             height="h-28"
             action={
-              <Select value={gpuId} onValueChange={setGpuChoice}>
-                <SelectTrigger size="sm" aria-label="GPU history device">
-                  <SelectValue>
-                    {gpuId
-                      ? `${gpuOptions.get(gpuId)} · ${gpuId.slice(-8)}`
-                      : "Choose GPU"}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {[...gpuOptions].map(([id, name]) => (
-                      <SelectItem key={id} value={id}>
-                        {name} · {id}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+              <Picker
+                value={gpuId}
+                options={[...gpuOptions].map(([id, name]) => [
+                  id,
+                  `${name} · ${id.slice(-8)}`,
+                ])}
+                onChange={setGpuChoice}
+                label="GPU history device"
+              />
             }
+            {...frame}
           />
         ) : (
           <p className="text-xs text-muted-foreground">
@@ -428,3 +838,5 @@ function ResourceHistory({
     </>
   );
 }
+
+export { memoryPercent };

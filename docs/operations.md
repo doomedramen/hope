@@ -8,6 +8,40 @@ Contents: [Installing the server](#installing-the-server), [Canonical URL and re
 
 The supported server deployment is the Docker image on a **Linux host with host networking**, because layer-2 discovery (ARP, MAC addresses) needs to see the LAN.
 
+### One-command installer
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/scripts/install-hope.sh)"
+```
+
+`scripts/install-hope.sh` is interactive (whiptail when present, plain prompts otherwise) and idempotent: re-running upgrades the binary and console and keeps `/etc/hope/hope.env` and the database.
+
+- **On a Proxmox VE host** it offers to create an unprivileged Debian LXC container (ID, host name, storage, disk, cores, memory, bridge, DHCP or static IPv4) and installs H.O.P.E inside it with the host installer below. Discovery works from an unprivileged container because `CAP_NET_RAW` is available to root inside it.
+- **On any other systemd Linux host** (Debian/Ubuntu, Fedora/RHEL or Arch families) it installs packages (`curl`, `ca-certificates`, `tar`, `libcap`), creates the no-login account `hope`, places the binary in `/opt/hope/bin` and the console in `/opt/hope/web`, writes `/etc/hope/hope.env` (mode 640) and a hardened `hope.service` (`User=hope`, `AmbientCapabilities=CAP_NET_RAW` and nothing else, `ProtectSystem=strict`, `ReadWritePaths=/var/lib/hope`), runs `setcap cap_net_raw=ep`, enables the unit and prints the setup token from the journal.
+- **Reverse proxy.** By default it installs the distribution's Caddy package and writes `/etc/caddy/Caddyfile` (an existing file is kept as `Caddyfile.before-hope`). A public host name gets a public certificate; `localhost`, `.local`, `.lan`, `.home`, `.internal`, `.home.arpa` names and bare IP addresses use `tls internal`, and the installer then exports Caddy's root certificate to `/etc/hope/ca.crt` and sets `HOPE_AGENT_CA=/etc/hope/ca.crt`, so generated agent commands expect that file at the same path on every agent host (copy it there). Choose "I run my own reverse proxy" to skip Caddy; the server listens on `127.0.0.1:8080`.
+- **Binary source.** The latest GitHub release asset `hope-server-<arch>-linux.tar.gz` (x86_64 or aarch64, verified against `SHA256SUMS-server`) when one exists; otherwise it offers a source build (rustup and Node.js under `/opt/hope/build`, `git clone`, `npm run build`, `cargo build --release`; 10 to 20 minutes). Release packages are produced by `scripts/package-server.sh` in `release.yml`.
+
+Every prompt has an environment answer for unattended use; unset values prompt (or take the default with `HOPE_INSTALL_NONINTERACTIVE=1`):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HOPE_INSTALL_TARGET` | `lxc` on Proxmox, else `host` | `host` installs on this machine; `lxc` creates a container (Proxmox only) |
+| `HOPE_INSTALL_URL` | `https://<primary IP>` | Canonical HTTPS URL written to `HOPE_SERVER_URL` (never overwritten on re-runs) |
+| `HOPE_INSTALL_PROXY` | `caddy` | `caddy` installs Caddy; `none` leaves the proxy to you |
+| `HOPE_INSTALL_TLS` | `auto` | `internal` or `public` forces Caddy's certificate source |
+| `HOPE_INSTALL_SOURCE` | `auto` | `release`, `source`, or `auto` (release when published, else source after confirmation) |
+| `HOPE_INSTALL_VERSION` | latest | Release tag to install, for example `v0.1.0` |
+| `HOPE_INSTALL_REF` | `main` | Git ref for source builds |
+| `HOPE_INSTALL_REPO` | `doomedramen/hope` | Repository for releases and source |
+| `HOPE_INSTALL_NONINTERACTIVE` | unset | `1` never prompts; defaults apply |
+| `HOPE_INSTALL_PLAIN` | unset | `1` uses plain prompts even when whiptail exists |
+| `HOPE_INSTALL_CT_ID`, `HOPE_INSTALL_CT_HOSTNAME`, `HOPE_INSTALL_CT_STORAGE`, `HOPE_INSTALL_CT_DISK_GB`, `HOPE_INSTALL_CT_CORES`, `HOPE_INSTALL_CT_MEMORY_MB`, `HOPE_INSTALL_CT_BRIDGE`, `HOPE_INSTALL_CT_IP` | next free ID, `hope`, first rootdir storage, 8, 2, 1024, `vmbr0`, `dhcp` | LXC settings; `HOPE_INSTALL_CT_IP` is `dhcp` or `CIDR,gateway` |
+| `HOPE_INSTALL_NODE_VERSION` | `22.22.0` | Node.js used by source builds |
+| `HOPE_INSTALL_SCRIPT_URL` | raw GitHub URL of the script | Where the container fetches the installer from |
+| `HOPE_INSTALL_RELEASE_URL`, `HOPE_INSTALL_ROOT` | unset | Test knobs: a local base URL holding the package, and a prefix for every absolute path (`tests/installer/test_server_installer.py`) |
+
+The installer has been exercised only through that stub harness (download, checksum, layout, unit, env file, Caddy configuration, re-run) and shellcheck. It has **not** been run on a real Proxmox host or a real Debian VM yet; see [validation.md](validation.md).
+
 ```sh
 cp .env.example .env            # set HOPE_SERVER_URL to your public https:// origin
 docker compose up -d --build    # compose.yaml: network_mode: host, cap_drop ALL + NET_RAW, read-only root
@@ -139,6 +173,19 @@ System services run as the dedicated no-login account `hope-agent` (Linux) or `_
 SSH jobs: the console first reads the host key fingerprint **without authenticating**; you must confirm it. The job is bound to the confirmed key (a different key aborts before any credential is sent, `HOST_KEY_MISMATCH`), runs the same command through `sh -s`, uses only non-interactive `sudo -n`, and parses only the known progress grammar. Passwords and keys are not stored. Default limits: connect 15 s, inactivity 5 minutes, total 20 minutes, first report 2 minutes; output beyond 1 MiB ends the job. Outcomes are `completed`, `failed` (meaning known), `uncertain` (the remote state could not be determined: inspect the host) or `interrupted` (server restarted). History keeps 100 jobs or 30 days, with at most four running at once.
 
 **Verification status of installation:** the installer is tested with stubbed service managers (77 harness tests) and, since 2026-10-15, on real Debian 13 hosts with systemd 257 (arm64 native, amd64 emulated): system service as root and as a sudo user, user service with lingering, custom CA, reinstall, interrupted activation (rolled back), upgrade, downgrade refusal, uninstall and purge, and SSH jobs against a real OpenSSH 10.0. **No launchd (macOS) cell, no default-CA run and no other distribution has been run.** Matrix and limits: [validation.md](validation.md#release-gate-fixture--2026-10-15).
+
+## What agents report
+
+Every 30 seconds (with jitter) an agent sends CPU, memory (used, total, cache and buffers from `/proc/meminfo`, ZFS ARC size from `/proc/spl/kstat/zfs/arcstats`, swap), load averages, network throughput and per-interface counters, filesystem usage, host-wide and per-device disk throughput (`/proc/diskstats`, the root device flagged), ZFS pools (`zpool list -Hp` plus per-dataset read and write counters under `/proc/spl/kstat/zfs/<pool>`), temperature sensors (hwmon on Linux, SMC on macOS), GPUs, systemd service units (every failed unit, plus the watched list, with active/failed/total counts from `systemctl list-units`) and the results of configured network monitors. Each collector reports its availability; a source that is missing on a platform yields "unavailable", never an estimate. Rates need a previous sample, so the first report after a start has none.
+
+Two settings are read at agent start, from environment variables on the service (`systemctl edit hope-agent` adds a drop-in) or from `settings.json` in the agent state directory (`{"monitors": [...], "watch_services": [...]}`; the variables win when set):
+
+| Variable | Purpose |
+| --- | --- |
+| `HOPE_MONITORS` | Comma-separated reachability checks run every sample with a five-second deadline each: `tcp://host:port` (connect latency) and `http://` or `https://` URLs (GET, status below 400 counts as up; redirects are not followed; the agent's custom CA is trusted). At most 32 |
+| `HOPE_WATCH_SERVICES` | Comma-separated systemd unit names (with or without `.service`) always included in the report whatever their state. At most 64 |
+
+The console graphs memory as a stack (used excluding ARC, ARC, cache and buffers) under a total line, load averages, per-device and per-pool throughput, pool allocation, temperatures (the hottest eight sensors, filterable) and monitor latency, and raises attention items for degraded or nearly full pools, sensors at 85 °C and above, failed units and monitors that are down.
 
 ## Agent upgrade, rollback and uninstall
 

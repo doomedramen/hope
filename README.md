@@ -1,6 +1,6 @@
 # H.O.P.E
 
-Home network discovery, host monitoring and a lightweight reporting agent for up to 250 hosts, with a single administrator and one self-hosted server. A Rust server (Axum, Tokio, SQLx/SQLite) scans configured IPv4 ranges, enriches what it finds, and serves a static Next.js console (host list, topology / subnet / health maps, per-host history). An optional Rust agent for Linux and macOS reports a machine's own CPU, memory, network, storage and GPU data to the server over HTTPS every 30 seconds.
+Home network discovery, host monitoring and a lightweight reporting agent for up to 250 hosts, with a single administrator and one self-hosted server. A Rust server (Axum, Tokio, SQLx/SQLite) scans configured IPv4 ranges, enriches what it finds, and serves a static Next.js console (host list, topology / subnet / health maps, per-host history). An optional Rust agent for Linux and macOS reports a machine's own CPU, load, memory (including cache and ZFS ARC), network, storage, disk and pool throughput, temperatures, GPU, systemd unit and reachability-monitor data to the server over HTTPS every 30 seconds.
 
 **Status: pre-release.** The code builds and passes its automated suites, but the release is **not** complete: key environment-dependent gates are unverified (below). Do not rely on it for anything that matters, and read [docs/validation.md](docs/validation.md) before trusting any claim made here.
 
@@ -11,9 +11,11 @@ Home network discovery, host monitoring and a lightweight reporting agent for up
 - **Overview**: hosts responding, agents reporting, what needs attention (stale agents, unobserved hosts, CPU, memory or filesystems above 90%), fleet-wide usage, the busiest hosts and a getting-started checklist until the first agent reports. Every figure comes from the latest sample; nothing is invented for missing data.
 - **Hosts**: status filters, sortable columns and inline CPU, memory and disk meters; click a host for details.
 - **Network map**: topology, subnet and health modes with provenance for reported, inferred and manual links, a minimap for large fleets, and drag-to-link.
-- **Host details**: live usage tiles with sparklines, hardware, storage meters, interfaces and counters, services, GPUs, and 1 h / 6 h / 24 h / 7 d history that draws outages as gaps.
+- **Host details**: live usage tiles with sparklines, hardware, storage meters and ZFS pools, per-device throughput, temperature sensors, interfaces and counters, systemd units, network monitors, GPUs, and 1 h / 6 h / 24 h / 7 d history that draws outages as gaps. Open a host's full page for a two-column chart dashboard: CPU, load average, memory (used, ZFS ARC, cache and buffers under the total), bandwidth, disk I/O, pool usage and I/O, temperatures, monitor latency, filesystem and GPU usage.
 - **Command palette** (`⌘K` / `Ctrl+K`, or `/`): jump to any host or run any action from the keyboard.
 - Light, dark and automatic themes; everything works at phone width.
+
+![Host page: every metric graphed, current values on the charts](docs/screenshots/host-page.png)
 
 | Hosts | Map (health mode) | Host details (dark) |
 | --- | --- | --- |
@@ -55,6 +57,14 @@ Only what is evidenced is claimed. "Supported" in the first release will mean th
 | Agent | macOS x86_64 | Compiles; **never executed** |
 | Agent installation | Linux, systemd, system and user mode, custom CA | Verified in the fixture matrix (Debian 13 only) |
 | Agent installation | macOS (launchd), default public CA, other distributions | **Unverified** (see stage 4) |
+
+## Install in one command
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/scripts/install-hope.sh)"
+```
+
+On a Proxmox VE host this creates a Debian LXC container and installs H.O.P.E in it; on any other systemd Linux host it installs directly: a dedicated account, a hardened service with `CAP_NET_RAW` for discovery, and Caddy as the HTTPS reverse proxy (automatic public certificates, or an internal CA for LAN names and IP addresses whose root is exported for agents). It uses the latest GitHub release when one is published and otherwise builds from source. Re-run it to upgrade. Details, every prompt's environment variable and what has and has not been verified: [docs/operations.md](docs/operations.md#one-command-installer).
 
 ## Quick start (Docker, Linux host networking)
 

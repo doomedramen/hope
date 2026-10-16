@@ -29,7 +29,70 @@ id: string | null, name: string, vendor: string, utilization_percent: number | n
 export type CollectorStatus = { name: string, available: boolean, detail: string | null, };
 export type Inventory = { hostname: string, os: string, architecture: string, cpu_model: string, cpu_cores: number, memory_total_bytes: number, interfaces: Array<Interface>, disks: Array<Disk>, gpus: Array<Gpu>, collectors: Array<CollectorStatus>, };
 export type NetworkCounter = { name: string, received_bytes: number, transmitted_bytes: number, rx_bytes_per_second: number | null, tx_bytes_per_second: number | null, included_in_total: boolean, };
-export type Metrics = { cpu_percent: number | null, memory_used_bytes: number | null, memory_total_bytes: number | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null, network_interfaces: Array<NetworkCounter>, disk_read_bytes_per_second: number | null, disk_write_bytes_per_second: number | null, disks: Array<Disk>, gpus: Array<Gpu>, };
+export type LoadAverage = { one: number, five: number, fifteen: number, };
+export type Temperature = {
+/**
+ * Stable identifier for history (driver and channel), unique within a host.
+ */
+sensor: string,
+/**
+ * Human label, for example "Package id 0" or "nvme Composite".
+ */
+label: string, celsius: number, };
+export type DiskIo = { device: string, read_bytes_per_second: number | null, write_bytes_per_second: number | null,
+/**
+ * Share of the interval the device spent with I/O in flight.
+ */
+busy_percent: number | null,
+/**
+ * True when the root filesystem lives on this device.
+ */
+root: boolean, };
+export type StoragePool = { name: string,
+/**
+ * Pool technology, for example "zfs".
+ */
+kind: string, size_bytes: number, allocated_bytes: number,
+/**
+ * Pool-reported health, for example ONLINE or DEGRADED.
+ */
+health: string, read_bytes_per_second: number | null, write_bytes_per_second: number | null,
+/**
+ * True when the root filesystem is a dataset of this pool.
+ */
+root: boolean, };
+export type ServiceUnit = { name: string,
+/**
+ * Manager state: active, inactive, failed, activating, deactivating.
+ */
+state: string, sub_state: string, description: string,
+/**
+ * True for units named in the agent's watch list (reported whatever their state).
+ */
+watched: boolean, };
+export type ServiceSummary = { active: number, failed: number, total: number, };
+export type MonitorResult = {
+/**
+ * The configured target, for example "tcp://10.0.0.1:22" or "https://example.com/".
+ */
+target: string,
+/**
+ * "tcp", "http" or "https".
+ */
+kind: string, up: boolean, latency_ms: number | null, status_code: number | null,
+/**
+ * Short failure reason; never remote response bodies.
+ */
+detail: string | null, };
+export type Metrics = { cpu_percent: number | null, memory_used_bytes: number | null, memory_total_bytes: number | null,
+/**
+ * Page cache plus buffers and reclaimable slab; part of the kernel's reclaimable memory.
+ */
+memory_cached_bytes: number | null,
+/**
+ * ZFS ARC size; counted as used by the kernel, released under pressure.
+ */
+memory_zfs_arc_bytes: number | null, swap_used_bytes: number | null, swap_total_bytes: number | null, load_average: LoadAverage | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null, network_interfaces: Array<NetworkCounter>, disk_read_bytes_per_second: number | null, disk_write_bytes_per_second: number | null, disks: Array<Disk>, disk_io: Array<DiskIo>, pools: Array<StoragePool>, gpus: Array<Gpu>, temperatures: Array<Temperature>, services: Array<ServiceUnit>, service_summary: ServiceSummary | null, monitors: Array<MonitorResult>, };
 export type AgentReport = { schema_version: number, report_id: string, agent_id: string, collected_at: number, inventory: Inventory | null, metrics: Metrics, collectors: Array<CollectorStatus>, };
 export type EnrollmentRequest = { schema_version: number, token: string, agent_id: string,
 /**

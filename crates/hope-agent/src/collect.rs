@@ -1,3 +1,4 @@
+use crate::extras;
 use hope_protocol::{CollectorStatus, Disk, Gpu, Interface, Inventory, Metrics, NetworkCounter};
 use sha2::{Digest, Sha256};
 use std::{
@@ -24,6 +25,11 @@ pub struct Collector {
     gpus: Vec<Gpu>,
     gpu_at: Instant,
     first: bool,
+    settings: extras::Settings,
+    sensors: extras::Sensors,
+    monitors: extras::Monitors,
+    previous_devices: HashMap<String, extras::DeviceCounters>,
+    previous_pools: HashMap<String, (u64, u64)>,
 }
 
 struct DiskProbe {
@@ -86,12 +92,17 @@ pub fn rate(previous: u64, current: u64, seconds: f64) -> Option<f64> {
     }
 }
 impl Collector {
-    pub fn new() -> Self {
+    pub fn new(settings: extras::Settings) -> Self {
         let mut system = System::new();
         system.refresh_cpu_usage();
         system.refresh_memory();
         Self {
-            costs: Vec::with_capacity(10),
+            monitors: extras::Monitors::new(&settings),
+            settings,
+            sensors: extras::Sensors::new(),
+            previous_devices: HashMap::new(),
+            previous_pools: HashMap::new(),
+            costs: Vec::with_capacity(20),
             system,
             networks: Networks::new_with_refreshed_list(),
             disks: DiskProbe::new(),
@@ -209,7 +220,46 @@ impl Collector {
             self.cost("gpu_metrics", started);
         }
         let gpu_metrics_available = gpus.iter().any(|g| g.utilization_percent.is_some());
-        let collectors = vec![
+        let started = Instant::now();
+        let breakdown = extras::memory_breakdown().await;
+        let load_average = extras::load_average();
+        self.cost("memory_breakdown", started);
+        let started = Instant::now();
+        let temperatures = self.sensors.sample();
+        self.cost("temperatures", started);
+        let started = Instant::now();
+        let root = extras::root().await;
+        let devices = extras::device_counters().await;
+        let disk_io = extras::device_rates(&self.previous_devices, &devices, elapsed, &root);
+        self.previous_devices = devices;
+        self.cost("disk_devices", started);
+        let started = Instant::now();
+        let capacities = extras::pool_capacities().await;
+        let pools = match &capacities {
+            Some(capacities) => {
+                let counters = extras::pool_counters(capacities).await;
+                let pools =
+                    extras::pools(capacities, &self.previous_pools, &counters, elapsed, &root);
+                self.previous_pools = counters;
+                pools
+            }
+            None => {
+                self.previous_pools.clear();
+                vec![]
+            }
+        };
+        self.cost("storage_pools", started);
+        let started = Instant::now();
+        let services = extras::services(&self.settings.watch_services).await;
+        self.cost("services", started);
+        let started = Instant::now();
+        let monitors = if self.monitors.configured() > 0 {
+            self.monitors.sample().await
+        } else {
+            vec![]
+        };
+        self.cost("monitors", started);
+        let mut collectors = vec![
             status(
                 "cpu",
                 !self.first && !self.system.cpus().is_empty(),
@@ -241,7 +291,44 @@ impl Collector {
                 gpu_metrics_available,
                 Some("GPU driver metrics are unavailable; inventory remains visible"),
             ),
+            status(
+                "memory_breakdown",
+                breakdown.cached_bytes.is_some(),
+                Some("Cache and buffer sizes are only available from /proc/meminfo on Linux"),
+            ),
+            status(
+                "load_average",
+                load_average.is_some(),
+                Some("Load averages are unavailable on this platform"),
+            ),
+            status(
+                "temperatures",
+                !temperatures.is_empty(),
+                Some("No temperature sensor is readable (hwmon on Linux, SMC on macOS)"),
+            ),
+            status(
+                "disk_devices",
+                !disk_io.is_empty(),
+                Some("Per-device throughput needs /proc/diskstats (Linux)"),
+            ),
+            status(
+                "storage_pools",
+                capacities.is_some(),
+                Some("No ZFS pools: zpool is missing or not permitted for this user"),
+            ),
+            status(
+                "services",
+                services.is_some(),
+                Some("Service units need systemd (systemctl list-units)"),
+            ),
         ];
+        if self.monitors.configured() > 0 {
+            collectors.push(status(
+                "monitors",
+                monitors.len() == self.monitors.configured(),
+                Some("Some configured monitors could not be checked"),
+            ));
+        }
         let started = Instant::now();
         let interfaces = interfaces(&self.networks, gateway);
         let inventory = Inventory {
@@ -270,13 +357,25 @@ impl Collector {
                 .then(|| self.system.global_cpu_usage() as f64),
             memory_used_bytes: Some(self.system.used_memory() as f64),
             memory_total_bytes: Some(self.system.total_memory() as f64),
+            memory_cached_bytes: breakdown.cached_bytes,
+            memory_zfs_arc_bytes: breakdown.zfs_arc_bytes,
+            swap_used_bytes: (self.system.total_swap() > 0).then(|| self.system.used_swap() as f64),
+            swap_total_bytes: (self.system.total_swap() > 0)
+                .then(|| self.system.total_swap() as f64),
+            load_average,
             network_rx_bytes_per_second: has_rate.then_some(receive),
             network_tx_bytes_per_second: has_rate.then_some(transmit),
             network_interfaces,
             disk_read_bytes_per_second: disk_rate.and_then(|r| r.0),
             disk_write_bytes_per_second: disk_rate.and_then(|r| r.1),
             disks,
+            disk_io,
+            pools,
             gpus,
+            temperatures,
+            service_summary: services.as_ref().map(|s| s.summary),
+            services: services.map(|s| s.units).unwrap_or_default(),
+            monitors,
         };
         self.cost("inventory", started);
         self.first = false;
@@ -397,7 +496,7 @@ async fn disk_counters() -> Option<(u64, u64)> {
     }
     found.then_some((read, write))
 }
-async fn command(binary: &str, args: &[&str], seconds: u64) -> Option<String> {
+pub(crate) async fn command(binary: &str, args: &[&str], seconds: u64) -> Option<String> {
     let mut cmd = Command::new(binary);
     cmd.args(args)
         .kill_on_drop(true)

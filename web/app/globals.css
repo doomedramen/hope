@@ -17,6 +17,9 @@
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar: var(--sidebar);
   --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-7: var(--chart-7);
+  --color-chart-8: var(--chart-8);
   --color-chart-4: var(--chart-4);
   --color-chart-3: var(--chart-3);
   --color-chart-2: var(--chart-2);
@@ -84,6 +87,9 @@
   --chart-3: #1baf7a;
   --chart-4: #eda100;
   --chart-5: #6250d6;
+  --chart-6: #e87ba4;
+  --chart-7: #008300;
+  --chart-8: #e34948;
   --sidebar: #ffffff;
   --sidebar-foreground: #16202e;
   --sidebar-primary: #2a78d6;
@@ -142,6 +148,9 @@
   --chart-3: #199e70;
   --chart-4: #c98500;
   --chart-5: #9085e9;
+  --chart-6: #d55181;
+  --chart-7: #008300;
+  --chart-8: #e66767;
   --sidebar: #11151c;
   --sidebar-foreground: #e6e9ef;
   --sidebar-primary: #3987e5;
@@ -341,30 +350,6 @@ pre {
 }
 .meter.thin {
   height: 4px;
-}
-
-.sparkline {
-  display: block;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-}
-.sparkline path.line {
-  fill: none;
-  stroke: var(--spark, var(--chart-1));
-  stroke-width: 2;
-  stroke-linejoin: round;
-  stroke-linecap: round;
-  vector-effect: non-scaling-stroke;
-}
-.sparkline path.area {
-  fill: var(--spark, var(--chart-1));
-  opacity: 0.12;
-}
-.sparkline circle {
-  fill: var(--spark, var(--chart-1));
-  stroke: var(--card);
-  stroke-width: 2;
 }
 
 kbd.key {
@@ -1535,6 +1520,38 @@ kbd.key {
 .interface-row span {
   color: var(--muted-foreground);
 }
+.interface-row.row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.interface-row.row > :first-child {
+  min-width: 0;
+  flex: 1;
+}
+.interface-row.row > :last-child {
+  flex-shrink: 0;
+  text-align: right;
+}
+.chart-filter {
+  height: 26px;
+  width: 130px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--input);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: 11.5px;
+  font-weight: 400;
+  outline: none;
+}
+.chart-filter:focus {
+  border-color: var(--ring);
+}
+.chart-block .recharts-cartesian-axis-tick text {
+  font-size: 10.5px;
+}
 .storage-row {
   display: flex;
   flex-direction: column;
@@ -1574,9 +1591,10 @@ kbd.key {
 }
 .chart-block .chart-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px 10px;
   font-size: 12px;
   font-weight: 600;
 }
@@ -1598,6 +1616,19 @@ kbd.key {
   height: 10px;
   border-radius: 3px;
 }
+.chart-legend b {
+  margin-left: 2px;
+  font-weight: 600;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
+.chart-latest {
+  margin-left: 8px;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.2px;
+  font-variant-numeric: tabular-nums;
+}
 .details-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1607,6 +1638,69 @@ kbd.key {
   border: 1px dashed color-mix(in srgb, var(--destructive) 45%, transparent);
   border-radius: 11px;
   padding: 12px 14px;
+}
+
+/* Full-page host view: facts on the left, charts in a two-column grid. */
+.host-page {
+  width: 100%;
+  max-height: none;
+  position: static;
+  overflow: visible;
+}
+.host-page .details-header {
+  position: static;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.host-page .details-header h2 {
+  font-size: 22px;
+}
+.host-page .details-body {
+  display: grid;
+  grid-template-columns: 380px minmax(0, 1fr);
+  /* No row gap: the history section spans many implicit rows, which would otherwise add space. */
+  gap: 0 24px;
+  align-items: start;
+}
+.host-page .details-body > * {
+  grid-column: 1;
+  min-width: 0;
+  margin-bottom: 20px;
+}
+.host-page .details-body > section.history {
+  grid-column: 2;
+  grid-row: 1 / span 60;
+}
+.host-page .charts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.host-page .charts > p {
+  grid-column: 1 / -1;
+}
+.host-page .chart-block {
+  padding: 14px 16px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+}
+.host-page .chart-block [data-slot="chart"] {
+  height: 200px;
+}
+@media (max-width: 1280px) {
+  .host-page .details-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .host-page .details-body > section.history {
+    grid-column: 1;
+    grid-row: auto;
+  }
+}
+@media (max-width: 720px) {
+  .host-page .charts {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* ---------- Auth ---------- */

@@ -40,8 +40,40 @@ jobs:
     needs: guard
     uses: ./.github/workflows/build-agent.yml
 
+  build-server:
+    # Server packages for install-hope.sh: the release binary plus the console export, per
+    # architecture, on the oldest supported glibc (Ubuntu 22.04) so newer distributions can run them.
+    needs: guard
+    name: server ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-22.04 }
+          - { arch: aarch64, runner: ubuntu-22.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+      - run: sh scripts/package-server.sh --out dist/server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.arch }}
+          path: dist/server/
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
-    needs: [guard, build]
+    needs: [guard, build, build-server]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release # holds the HOPE_SIGNING_KEY secret (RSA private key PEM) with required reviewers
@@ -58,6 +90,16 @@ jobs:
           pattern: agent-*
           path: dist/agents
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: server-*
+          path: dist/server
+          merge-multiple: true
+      - name: Merge the per-architecture server checksum files
+        run: |
+          cd dist/server
+          sort -u -k2 SHA256SUMS-server -o SHA256SUMS-server
+          sha256sum -c SHA256SUMS-server
       - name: Assemble, sign and verify (fails unless all four platforms are present)
         env:
           SIGNING_KEY_PEM: ${{ secrets.HOPE_SIGNING_KEY }}
@@ -78,7 +120,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --title "${GITHUB_REF_NAME}" --verify-tag \
-            "$RUNNER_TEMP"/publish/hope-agent-* "$RUNNER_TEMP"/publish/manifest.json "$RUNNER_TEMP"/publish/manifest.json.sig "$RUNNER_TEMP"/publish/release-public.pem
+            "$RUNNER_TEMP"/publish/hope-agent-* "$RUNNER_TEMP"/publish/manifest.json "$RUNNER_TEMP"/publish/manifest.json.sig "$RUNNER_TEMP"/publish/release-public.pem \
+            dist/server/hope-server-*-linux.tar.gz dist/server/SHA256SUMS-server
       - uses: actions/upload-artifact@v4
         with:
           name: signed-release

@@ -1,6 +1,7 @@
 mod collect;
 mod config;
 mod delivery;
+mod extras;
 mod reporting;
 mod status;
 use anyhow::{Context, Result};
@@ -66,7 +67,7 @@ async fn execute() -> Result<()> {
         println!("Previous settings restored; enrollment identity retained");
         return Ok(());
     }
-    let mut collector = collect::Collector::new();
+    let mut collector = collect::Collector::new(extras::Settings::load(&dir).await);
     if operation == "inspect" {
         let (inventory, metrics, collectors) = collector.sample().await;
         println!(

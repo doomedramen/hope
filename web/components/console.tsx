@@ -78,13 +78,14 @@ const NetworkMap = dynamic(
   { ssr: false, loading: () => <Skeleton className="h-[65vh] w-full" /> },
 );
 
-type View = "overview" | "map" | "hosts";
+type View = "overview" | "map" | "hosts" | "host";
 type Mode = "topology" | "subnets" | "health";
-const VIEWS: View[] = ["overview", "map", "hosts"];
+const VIEWS: View[] = ["overview", "map", "hosts", "host"];
 const TITLES: Record<View, string> = {
   overview: "Overview",
   map: "Network map",
   hosts: "Hosts",
+  host: "Host",
 };
 
 function readLocation(): { view: View; host: string | null } {
@@ -92,12 +93,12 @@ function readLocation(): { view: View; host: string | null } {
   const params = new URLSearchParams(window.location.search);
   const view = params.get("view");
   const host = params.get("host");
-  // A shared host link without a view opens on the map, where the host is highlighted.
+  // A shared host link without a view opens that host's page.
   return {
     view: VIEWS.includes(view as View)
       ? (view as View)
       : host
-        ? "map"
+        ? "host"
         : "overview",
     host,
   };
@@ -360,12 +361,22 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     if (which) setStatusFilter("attention");
     setView(next);
   };
+  // The inventory view a host page returns to.
+  const lastInventory = useRef<"map" | "hosts">("hosts");
+  useEffect(() => {
+    if (view === "map" || view === "hosts") lastInventory.current = view;
+  }, [view]);
   const selectHost = useCallback(
     (target: Host) => {
-      if (view === "overview") go({ view: "hosts", host: target.id });
+      if (view === "overview" || view === "host")
+        go({ view: "host", host: target.id });
       else select(target.id);
     },
     [go, select, view],
+  );
+  const closeHostPage = useCallback(
+    () => go({ view: lastInventory.current, host: null }),
+    [go],
   );
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -689,6 +700,35 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             </div>
             <Skeleton className="h-[50vh] w-full rounded-2xl" />
           </div>
+        ) : view === "host" ? (
+          <div className="page">
+            {host ? (
+              <HostDetails
+                key={host.id}
+                host={host}
+                hosts={hosts}
+                wide
+                close={closeHostPage}
+                install={() => setInstallOpen(true)}
+                refresh={() => {
+                  void refresh();
+                }}
+                notify={toast}
+              />
+            ) : (
+              <Empty className="min-h-[400px]">
+                <EmptyHeader>
+                  <EmptyTitle>Host not found</EmptyTitle>
+                  <EmptyDescription>
+                    It may have been merged or is not in the inventory yet.
+                  </EmptyDescription>
+                </EmptyHeader>
+                <Button variant="outline" onClick={closeHostPage}>
+                  Back to hosts
+                </Button>
+              </Empty>
+            )}
+          </div>
         ) : view === "overview" ? (
           <Overview
             data={data}
@@ -909,6 +949,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                   host={host}
                   hosts={hosts}
                   close={() => select(null)}
+                  expand={() => go({ view: "host" })}
                   install={() => setInstallOpen(true)}
                   refresh={() => {
                     void refresh();
