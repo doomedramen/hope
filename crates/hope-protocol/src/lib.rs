@@ -78,6 +78,11 @@ pub struct LoginRequest {
     pub setup_token: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct PasswordChange {
+    pub current_password: String,
+    pub new_password: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct AuthStatus {
     pub setup_required: bool,
     pub authenticated: bool,
@@ -522,6 +527,7 @@ pub fn typescript() -> String {
         InstallStage::decl(),
         InstallMode::decl(),
         LoginRequest::decl(),
+        PasswordChange::decl(),
         AuthStatus::decl(),
         OkResponse::decl(),
         ReportResponse::decl(),

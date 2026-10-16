@@ -178,6 +178,133 @@ async fn authentication_setup_and_cross_site_protection() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 #[tokio::test]
+async fn password_change_requires_the_current_password_and_ends_other_sessions() {
+    let (_dir, _state, app, cookie) = setup().await;
+    let change = |body: Value, credential: Option<String>| {
+        let app = app.clone();
+        async move {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/api/v1/account/password")
+                .header("content-type", "application/json");
+            if let Some(cookie) = credential {
+                builder = builder.header("cookie", cookie);
+            }
+            let response = app
+                .oneshot(builder.body(Body::from(body.to_string())).expect("request"))
+                .await
+                .expect("response");
+            let status = response.status();
+            let fresh = response.headers().get("set-cookie").map(|v| {
+                v.to_str()
+                    .expect("cookie")
+                    .split(';')
+                    .next()
+                    .expect("session")
+                    .to_string()
+            });
+            (status, fresh)
+        }
+    };
+    let login = |password: &'static str| {
+        let app = app.clone();
+        async move {
+            request(
+                &app,
+                "POST",
+                "/api/v1/auth/login",
+                json!({"password":password,"setup_token":null}),
+                None,
+            )
+            .await
+            .0
+        }
+    };
+    // A second browser signed in with the old password.
+    let other = {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"password":"a-long-test-password","setup_token":null}).to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        response.headers()["set-cookie"]
+            .to_str()
+            .expect("cookie")
+            .split(';')
+            .next()
+            .expect("session")
+            .to_string()
+    };
+
+    // Not signed in: refused before anything else.
+    let body =
+        json!({"current_password":"a-long-test-password","new_password":"a-brand-new-password"});
+    assert_eq!(change(body.clone(), None).await.0, StatusCode::UNAUTHORIZED);
+    // Wrong current password: refused, nothing changes.
+    assert_eq!(
+        change(
+            json!({"current_password":"not-the-password","new_password":"a-brand-new-password"}),
+            Some(cookie.clone())
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    // Too short, and unchanged, new passwords are refused.
+    assert_eq!(
+        change(
+            json!({"current_password":"a-long-test-password","new_password":"short"}),
+            Some(cookie.clone())
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        change(json!({"current_password":"a-long-test-password","new_password":"a-long-test-password"}), Some(cookie.clone())).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(login("a-long-test-password").await, StatusCode::OK);
+
+    let (status, fresh) = change(body, Some(cookie.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    let fresh = fresh.expect("a fresh session for this browser");
+    assert_ne!(fresh, cookie);
+    for (session, expected) in [
+        (&cookie, StatusCode::UNAUTHORIZED),
+        (&other, StatusCode::UNAUTHORIZED),
+        (&fresh, StatusCode::OK),
+    ] {
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                "/api/v1/bootstrap",
+                Value::Null,
+                Some(("cookie", session))
+            )
+            .await
+            .0,
+            expected
+        );
+    }
+    assert_eq!(
+        login("a-long-test-password").await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(login("a-brand-new-password").await, StatusCode::OK);
+}
+#[tokio::test]
 async fn token_is_single_use_and_expired_token_cannot_enroll() {
     let (_dir, state, app, _) = setup().await;
     let (_, _, token) = enrolled(&state, &app).await;

@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   Sun,
   TriangleAlert,
+  UserRound,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -44,7 +45,8 @@ import { HostDetails } from "@/components/host-details";
 import { HostTable } from "@/components/host-table";
 import { Overview } from "@/components/overview";
 import { NetworkDialog } from "@/components/network-dialog";
-import { SettingsDialog } from "@/components/settings-dialog";
+import { NetworksDialog } from "@/components/networks-dialog";
+import { AccountDialog } from "@/components/account-dialog";
 import { ScanProgress } from "@/components/scan-progress";
 import { Brand, SignIn } from "@/components/sign-in";
 import {
@@ -182,6 +184,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const [networkOpen, setNetworkOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -336,9 +339,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             (n) => n.enabled && (network === "all" || n.id === network),
           );
       if (!targets.length)
-        throw new Error(
-          "Every range is paused. Resume one in Networks & settings first.",
-        );
+        throw new Error("Every range is paused. Resume one in Networks first.");
       const results = await Promise.allSettled(
         targets.map((n) => post(`/networks/${n.id}/scan`)),
       );
@@ -447,10 +448,17 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     },
     {
       id: "settings",
-      label: "Networks & settings",
+      label: "Networks",
       hint: "action",
       icon: commandIcons.settings,
       run: () => setSettingsOpen(true),
+    },
+    {
+      id: "password",
+      label: "Change password",
+      hint: "account",
+      icon: commandIcons.account,
+      run: () => setAccountOpen(true),
     },
     {
       id: "theme",
@@ -498,7 +506,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             onClick={() => setSettingsOpen(true)}
           >
             <Settings2 />
-            <span>Networks &amp; settings</span>
+            <span>Networks</span>
           </button>
         </nav>
         <div className="sidebar-section">
@@ -584,6 +592,14 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           <button
             type="button"
             className="nav-item"
+            onClick={() => setAccountOpen(true)}
+          >
+            <UserRound />
+            <span>Account</span>
+          </button>
+          <button
+            type="button"
+            className="nav-item"
             onClick={() => {
               void action(onLogout);
             }}
@@ -616,6 +632,15 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
               <span>Search hosts, run commands…</span>
               <kbd className="key">⌘K</kbd>
             </button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="mobile-only"
+              aria-label="Account"
+              onClick={() => setAccountOpen(true)}
+            >
+              <UserRound />
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -980,12 +1005,17 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           host={host}
         />
       )}
-      <SettingsDialog
+      <AccountDialog
+        open={accountOpen}
+        onOpenChange={setAccountOpen}
+        onPasswordChanged={() =>
+          toast("Password changed. Other browsers were signed out.", "good")
+        }
+      />
+      <NetworksDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         data={data}
-        theme={theme}
-        setTheme={setTheme}
         busy={busy}
         onAddNetwork={() => setNetworkOpen(true)}
         onScanNetwork={(n) => discover(n)}

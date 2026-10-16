@@ -11,7 +11,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use hope_protocol::{AuthStatus, OkResponse};
+use hope_protocol::{AuthStatus, OkResponse, PasswordChange};
 use subtle::ConstantTimeEq;
 
 pub async fn status(
@@ -51,18 +51,7 @@ pub async fn setup(
     if body.password.len() < 8 || body.password.len() > 256 {
         return Err(ApiError::bad("Use a password between 8 and 256 characters"));
     }
-    let password = body.password;
-    let _permit = hash_permit(&state).await?;
-    let encoded = tokio::task::spawn_blocking(move || {
-        Argon2::default()
-            .hash_password(
-                password.as_bytes(),
-                &SaltString::generate(&mut rand::rngs::OsRng),
-            )
-            .map(|h| h.to_string())
-            .map_err(|e| anyhow::anyhow!(e.to_string()))
-    })
-    .await??;
+    let encoded = hash_password(&state, body.password).await?;
     state.set_meta("password_hash", &encoded).await?;
     sqlx::query("DELETE FROM meta WHERE key='setup_token_hash'")
         .execute(&state.0.db)
@@ -107,23 +96,80 @@ pub async fn login(
     if body.password.len() > 256 {
         return Err(fail());
     }
-    let Some(encoded) = state.meta("password_hash").await? else {
-        return Err(fail());
-    };
-    let permit = hash_permit(&state).await?;
-    let valid = tokio::task::spawn_blocking(move || {
-        PasswordHash::new(&encoded).is_ok_and(|parsed| {
-            Argon2::default()
-                .verify_password(body.password.as_bytes(), &parsed)
-                .is_ok()
-        })
-    })
-    .await?;
-    drop(permit);
-    if !valid {
+    if !verify_password(&state, body.password).await? {
         return Err(fail());
     }
     state.0.login_limit.clear(&client.0);
+    new_session(&state).await
+}
+
+/// Whether `password` matches the stored administrator password (false when none is set).
+async fn verify_password(state: &State, password: String) -> ApiResult<bool> {
+    let Some(encoded) = state.meta("password_hash").await? else {
+        return Ok(false);
+    };
+    let _permit = hash_permit(state).await?;
+    Ok(tokio::task::spawn_blocking(move || {
+        PasswordHash::new(&encoded).is_ok_and(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        })
+    })
+    .await?)
+}
+
+/// Argon2 PHC string for a new administrator password.
+async fn hash_password(state: &State, password: String) -> ApiResult<String> {
+    let _permit = hash_permit(state).await?;
+    Ok(tokio::task::spawn_blocking(move || {
+        Argon2::default()
+            .hash_password(
+                password.as_bytes(),
+                &SaltString::generate(&mut rand::rngs::OsRng),
+            )
+            .map(|h| h.to_string())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    })
+    .await??)
+}
+
+/// Change the administrator password. Requires the current password (a borrowed session alone is
+/// not enough), shares the login limiter so it cannot be used to guess the password, and ends every
+/// session, issuing a fresh one to this browser so the person changing it stays signed in.
+pub async fn change_password(
+    Extract(state): Extract<State>,
+    Extension(client): Extension<ClientKey>,
+    Json(body): Json<PasswordChange>,
+) -> ApiResult<Response> {
+    let key = format!("password:{}", client.0);
+    limited(state.0.login_limit.check(&key, now()))?;
+    let PasswordChange {
+        current_password,
+        new_password,
+    } = body;
+    if current_password.len() > 256 || !verify_password(&state, current_password.clone()).await? {
+        state.0.login_limit.hit(&key, now());
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "The current password is incorrect".into(),
+        ));
+    }
+    state.0.login_limit.clear(&key);
+    if new_password.len() < 8 || new_password.len() > 256 {
+        return Err(ApiError::bad("Use a password between 8 and 256 characters"));
+    }
+    if new_password == current_password {
+        return Err(ApiError::bad(
+            "Choose a new password that differs from the current one",
+        ));
+    }
+    let encoded = hash_password(&state, new_password).await?;
+    let _lock = state.0.writes.lock().await;
+    state.set_meta("password_hash", &encoded).await?;
+    sqlx::query("DELETE FROM sessions")
+        .execute(&state.0.db)
+        .await?;
     new_session(&state).await
 }
 

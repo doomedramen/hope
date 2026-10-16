@@ -765,7 +765,7 @@ test.describe.serial("H.O.P.E console", () => {
   }) => {
     const before = await (await request.get("/api/v1/bootstrap")).json();
     await page.goto("/");
-    await page.getByRole("button", { name: "Networks & settings" }).click();
+    await page.getByRole("button", { name: "Networks", exact: true }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByRole("button", { name: "Remove Workshop" }).click();
     await dialog.getByRole("button", { name: "Remove range" }).click();
@@ -774,5 +774,80 @@ test.describe.serial("H.O.P.E console", () => {
     expect(after.networks.length).toBe(before.networks.length - 1);
     expect(after.hosts.length).toBe(before.hosts.length);
     await expect(page.getByText("Removed Workshop.")).toBeVisible();
+  });
+
+  test("the administrator changes the password and other browsers are signed out", async ({
+    page,
+    playwright,
+  }) => {
+    const changed = "hope-browser-new-password";
+    // A second browser, signed in with the current password.
+    const other = await playwright.request.newContext({
+      baseURL: "http://127.0.0.1:8087",
+    });
+    expect(
+      (await other.post("/api/v1/auth/login", { data: { password } })).status(),
+    ).toBe(200);
+    expect((await other.get("/api/v1/bootstrap")).status()).toBe(200);
+
+    await page.goto("/");
+    // Networks holds ranges and server facts only; the theme lives in the sidebar.
+    await page.getByRole("button", { name: "Networks", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Networks" })).toBeVisible();
+    await expect(
+      page.getByRole("dialog").getByRole("group", { name: "Theme" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("dialog").getByRole("form", { name: "Change password" }),
+    ).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Account", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Account" })).toBeVisible();
+    const form = page.getByRole("form", { name: "Change password" });
+    const submit = form.getByRole("button", { name: "Change password" });
+    await form.getByLabel("Current password").fill("not-the-password");
+    await form.getByLabel("New password", { exact: true }).fill(changed);
+    await form.getByLabel("Confirm new password").fill("something-else");
+    await expect(
+      form.getByText("The new passwords do not match."),
+    ).toBeVisible();
+    await expect(submit).toBeDisabled();
+    await form.getByLabel("Confirm new password").fill(changed);
+    await submit.click();
+    await expect(
+      form.getByText("The current password is incorrect"),
+    ).toBeVisible();
+    expect((await other.get("/api/v1/bootstrap")).status()).toBe(200);
+
+    await form.getByLabel("Current password").fill(password);
+    await page.screenshot({ path: "test-results/hope-change-password.png" });
+    await submit.click();
+    await expect(
+      page.getByText("Password changed. Other browsers were signed out."),
+    ).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Account" })).toHaveCount(0);
+
+    // The other browser is signed out; this one keeps working with its fresh session.
+    expect((await other.get("/api/v1/bootstrap")).status()).toBe(401);
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: "Welcome back." }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Networks", exact: true }),
+    ).toBeVisible();
+    adminState = await page.context().storageState();
+    for (const [candidate, status] of [
+      [password, 401],
+      [changed, 200],
+    ] as const)
+      expect(
+        (
+          await other.post("/api/v1/auth/login", {
+            data: { password: candidate },
+          })
+        ).status(),
+      ).toBe(status);
+    await other.dispose();
   });
 });

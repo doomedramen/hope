@@ -28,6 +28,7 @@ use tower_http::services::ServeDir;
 pub fn router(state: State, web_dir: &str) -> Router {
     let private = Router::new()
         .route("/bootstrap", get(api::bootstrap))
+        .route("/account/password", post(auth::change_password))
         .route("/logout", post(auth::logout))
         .route("/networks", post(api::add_network))
         .route(

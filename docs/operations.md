@@ -101,7 +101,18 @@ A minimal Caddy site, `hope.example.com { reverse_proxy 127.0.0.1:8080 }`, is th
 
 While no administrator exists, every start prints `H.O.P.E first-run setup token: <token>` to standard error (`docker compose logs hope`). A new random token is generated on each start unless `HOPE_SETUP_TOKEN` is set; only its SHA-256 is stored. The console asks for this token plus a password of 8 to 256 characters (hashed with Argon2). Failed attempts are rate limited per client. Setup can run only once.
 
-There is no password-reset command. If the password is lost, restore a database backup taken when the password was known, or accept re-creating the database (which discards all history and enrollments). Sessions last 24 hours (`hope_session` cookie, `HttpOnly`, `SameSite=Strict`).
+**Changing the password.** Open Account at the bottom of the sidebar (the person icon in the header on narrow screens, or "Change password" in the command palette): enter the current password and the new one twice (8 to 256 characters, different from the current one). `POST /api/v1/account/password` (`PasswordChange`) verifies the current password with the same Argon2 check and per-client rate limit as sign-in (a wrong one is refused with 403 and counts as a failed attempt), stores the new hash, ends every session and issues a fresh session cookie to the browser that made the change, so other signed-in browsers must sign in again.
+
+**A lost password** cannot be recovered from the console, but it can be reset without losing data. Stop the server, back up `hope.db`, delete the stored hash and the sessions, and start it again; the server is then back in first-run setup and prints (or takes from `HOPE_SETUP_TOKEN`) a setup token, while hosts, history and enrollments are kept:
+
+```sh
+systemctl stop hope            # docker compose stop hope
+cp /var/lib/hope/hope.db /var/lib/hope/hope.db.before-reset
+sqlite3 /var/lib/hope/hope.db "DELETE FROM meta WHERE key='password_hash'; DELETE FROM sessions;"
+systemctl start hope           # then open the console and complete setup with the token
+```
+
+Sessions last 24 hours (`hope_session` cookie, `HttpOnly`, `SameSite=Strict`).
 
 ## Custom CA: server, agent and SSH destination
 
@@ -121,7 +132,7 @@ The bundle must contain valid PEM certificates and be at most 64 KiB. Replacing 
 
 Adding a range (IPv4 CIDR, `/20` or smaller: a shorter prefix such as `/16` is rejected, so add several `/20`-or-smaller ranges instead) starts a scan. A range's `enabled` flag controls **monitoring**: every 300 seconds the server starts a new scan of each enabled range (the first monitoring pass runs 300 s after start). Disabled ranges are scanned only when you press scan. A range with an active scan is never queued twice.
 
-Removing a range (Networks & settings, or `DELETE /api/v1/networks/{id}`) cancels its active scan, deletes its scan history and drops the membership from hosts that were in it; the hosts themselves, their agents and their history stay.
+Removing a range (Networks in the sidebar, or `DELETE /api/v1/networks/{id}`) cancels its active scan, deletes its scan history and drops the membership from hosts that were in it; the hosts themselves, their agents and their history stay.
 
 All ranges share one scheduler: up to 64 concurrent host probes, taken round-robin per range so a silent range does not delay a responsive one, plus an independent bounded enrichment queue (eight workers) for service and name lookup. Scans can be cancelled and show progress. A host that does not answer is **not** declared offline; discovery only records what it observed and when.
 

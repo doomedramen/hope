@@ -13,6 +13,7 @@ import {
   Search,
   Server,
   Settings2,
+  UserRound,
   Sun,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -39,6 +40,7 @@ const ICONS = {
   theme: Sun,
   themeDark: Moon,
   logout: LogOut,
+  account: UserRound,
 };
 
 export function CommandPalette({

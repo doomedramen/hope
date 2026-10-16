@@ -1,15 +1,6 @@
 "use client";
 import { useState } from "react";
-import {
-  Monitor,
-  Moon,
-  Play,
-  Plus,
-  Radar,
-  Square,
-  Sun,
-  Trash2,
-} from "lucide-react";
+import { Play, Plus, Radar, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,15 +10,12 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import type { Theme } from "@/lib/theme";
 import type { Bootstrap, Network } from "@/lib/protocol";
 
-export function SettingsDialog({
+export function NetworksDialog({
   open,
   onOpenChange,
   data,
-  theme,
-  setTheme,
   onToggleNetwork,
   onScanNetwork,
   onDeleteNetwork,
@@ -37,8 +25,6 @@ export function SettingsDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   data: Bootstrap | null;
-  theme: Theme;
-  setTheme: (theme: Theme) => void;
   onToggleNetwork: (network: Network) => void;
   onScanNetwork: (network: Network) => void;
   onDeleteNetwork: (network: Network) => Promise<void>;
@@ -57,10 +43,10 @@ export function SettingsDialog({
     >
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Networks &amp; settings</DialogTitle>
+          <DialogTitle>Networks</DialogTitle>
           <DialogDescription>
-            Control continuous discovery, choose a theme and review what this
-            server can observe.
+            Control continuous discovery and review what this server can
+            observe.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-6">
@@ -167,28 +153,6 @@ export function SettingsDialog({
               <Plus data-icon="inline-start" />
               Add network
             </Button>
-          </section>
-          <section className="flex flex-col gap-3">
-            <h3 className="text-sm font-semibold">Appearance</h3>
-            <div className="theme-switch" role="group" aria-label="Theme">
-              {(
-                [
-                  ["light", Sun, "Light"],
-                  ["dark", Moon, "Dark"],
-                  ["system", Monitor, "System"],
-                ] as const
-              ).map(([key, Icon, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  aria-pressed={theme === key}
-                  onClick={() => setTheme(key)}
-                >
-                  <Icon />
-                  {label}
-                </button>
-              ))}
-            </div>
           </section>
           <section className="flex flex-col gap-3">
             <h3 className="text-sm font-semibold">This server</h3>

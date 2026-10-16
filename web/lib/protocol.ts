@@ -6,6 +6,7 @@ export type InstallStatus = "running" | "completed" | "failed" | "interrupted" |
 export type InstallStage = "connecting" | "authenticating" | "preflight" | "recover" | "uninstall" | "stage" | "verify" | "stop" | "place_binary" | "configure" | "write_unit" | "activate" | "wait_report" | "rollback" | "complete" | "confirming_report";
 export type InstallMode = "install" | "reinstall";
 export type LoginRequest = { password: string, setup_token: string | null, };
+export type PasswordChange = { current_password: string, new_password: string, };
 export type AuthStatus = { setup_required: boolean, authenticated: boolean, };
 export type OkResponse = { ok: boolean, };
 export type ReportResponse = { accepted: boolean, duplicate: boolean, };
