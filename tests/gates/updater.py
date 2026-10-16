@@ -379,8 +379,10 @@ class Gate:
                 self.publish(V4, 'good')
                 sha = self.installed_sha()
                 previous = int(self.result_file().get('at', '0'))
+                # The journal still holds the earlier update; only a new wait-report is this one.
+                waits = self.updater_journal().count('phase=wait-report')
                 self.request_all()
-                wait_for('the updater to wait for the new agent', lambda: 'phase=wait-report' in self.updater_journal(), 180, 1)
+                wait_for('the updater to wait for the new agent', lambda: self.updater_journal().count('phase=wait-report') > waits, 180, 1)
                 self.stop_proxy()
                 wait_for('the updater to give up and roll back', lambda: int(self.result_file().get('at', '0')) > previous, 300, 3)
                 result = self.result_file()
