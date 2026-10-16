@@ -10,6 +10,7 @@ parser.add_argument('--certificate', required=True)
 parser.add_argument('--key', required=True)
 parser.add_argument('--port', type=int, default=9443)
 parser.add_argument('--backend-port', type=int, default=8090)
+parser.add_argument('--reject-agent-version', default='', help='answer 503 to agent reports whose User-Agent is hope-agent/VERSION')
 args = parser.parse_args()
 
 class Proxy(http.server.BaseHTTPRequestHandler):
@@ -17,6 +18,11 @@ class Proxy(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # Do not log credentials, headers, installer commands, or request bodies.
     def forward(self):
+        if (args.reject_agent_version and self.command == 'POST' and self.path.split('?')[0] == '/api/v1/agent/report'
+                and self.headers.get('User-Agent', '') == 'hope-agent/' + args.reject_agent_version):
+            self.send_error(503)
+            self.close_connection = True
+            return
         try:
             length = int(self.headers.get('Content-Length', '0'))
             if length < 0 or length > 256 * 1024:

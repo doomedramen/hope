@@ -151,10 +151,11 @@ class Gate:
         raise Failure('the published manifest has no entry for this platform')
 
     # ------------------------------------------------------------------ processes
-    def start_proxy(self):
+    def start_proxy(self, reject_agent_version=''):
         self.proxy = subprocess.Popen(
             [sys.executable, '-I', str(REPO / 'tests/agent/https_proxy.py'), '--certificate', str(self.work / 'leaf.pem'), '--key',
-             str(self.work / 'leaf.key'), '--port', str(TLS_PORT), '--backend-port', str(BACKEND_PORT)],
+             str(self.work / 'leaf.key'), '--port', str(TLS_PORT), '--backend-port', str(BACKEND_PORT)]
+            + (['--reject-agent-version', reject_agent_version] if reject_agent_version else []),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         wait_for('the TLS proxy', lambda: self.tls_up(), 20, 0.5)
 
@@ -374,19 +375,21 @@ class Gate:
                 expect('error=MANIFEST_INVALID' in self.updater_journal(), 'the updater journal does not show why')
                 wait_for('the failure to be reported', lambda: 'MANIFEST_INVALID' in ((self.collector(self.host() or {}) or {}).get('detail') or ''), 60)
 
-        with self.cell('a signed release whose agent cannot reach the server is rolled back') as go:
+        with self.cell('a signed release whose agent cannot report is rolled back') as go:
             if go:
                 self.publish(V4, 'good')
                 sha = self.installed_sha()
                 previous = int(self.result_file().get('at', '0'))
-                # The journal still holds the earlier update; only a new wait-report is this one.
+                # The server answers 503 to reports from the new version only: the installed agent keeps
+                # reporting (and learns of the request), the update installs, and the new agent never
+                # gets an accepted report. The journal still holds the earlier update's phases.
+                self.stop_proxy()
+                self.start_proxy(reject_agent_version=V4)
                 waits = self.updater_journal().count('phase=wait-report')
                 self.request_all()
                 wait_for('the updater to wait for the new agent', lambda: self.updater_journal().count('phase=wait-report') > waits, 180, 1)
-                self.stop_proxy()
                 wait_for('the updater to give up and roll back', lambda: int(self.result_file().get('at', '0')) > previous, 300, 3)
                 result = self.result_file()
-                self.start_proxy()
                 expect(result.get('status') == 'failed' and result.get('code') == 'FIRST_REPORT_TIMEOUT', f'update-result says {result}')
                 journal = self.updater_journal()
                 expect('phase=rollback' in journal, 'the updater journal shows no rollback')
