@@ -1,6 +1,7 @@
 #!/bin/sh
 # Package the server for install-hope.sh: hope-server-<arch>-linux.tar.gz holding the release
-# binary, the static console export and the licence, plus a SHA256SUMS-server line.
+# binary, the static console export, the licence, VERSION and tools/assemble-release.sh, plus a
+# SHA256SUMS-server line.
 #
 #   scripts/package-server.sh --out dist/server          # builds web/out and target/release first
 #   scripts/package-server.sh --out dist/server --no-build
@@ -34,6 +35,9 @@ mkdir -p "$staging/hope-server-$version" "$out"
 install -m 755 target/release/hope-server "$staging/hope-server-$version/hope-server"
 cp -R web/out "$staging/hope-server-$version/web"
 cp LICENSE "$staging/hope-server-$version/LICENSE"
+# install-hope.sh signs the release's hope-agents.tar.gz with this, using the server's own key.
+mkdir -p "$staging/hope-server-$version/tools"
+install -m 755 scripts/assemble-release.sh "$staging/hope-server-$version/tools/assemble-release.sh"
 printf '%s\n' "$version" > "$staging/hope-server-$version/VERSION"
 name=hope-server-$architecture-linux.tar.gz
 # Reproducible ordering and ownership; the installer extracts into its own staging directory.

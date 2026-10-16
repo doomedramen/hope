@@ -13,8 +13,11 @@
 #
 # The server binary comes from the latest GitHub release when one is published for this
 # architecture (checksum verified) and otherwise from a source build (Rust and Node are
-# installed under /opt/hope/build; nothing else on the system is touched).
-# Re-running upgrades the binary and console and keeps /etc/hope/hope.env and the database.
+# installed under /opt/hope/build; nothing else on the system is touched). A release install also
+# downloads the release's hope-agents.tar.gz (same checksum file) and signs it into
+# /opt/hope/releases with this server's own key, /etc/hope/release-signing.pem (created once, kept).
+# Re-running upgrades the binary and console, re-signs the agents with the existing key and keeps
+# /etc/hope/hope.env, the key and the database.
 #
 # Non-interactive use (every prompt has an environment answer; unset values prompt):
 #   HOPE_INSTALL_TARGET=host|lxc        where to install (lxc = community-scripts engine, Proxmox only; default there)
@@ -26,7 +29,7 @@
 #   HOPE_INSTALL_NONINTERACTIVE=1       never prompt; missing answers use the defaults above
 #   HOPE_INSTALL_CT_SCRIPT_URL=...      ct script the Proxmox hand-over runs (default: ct/hope.sh of HOPE_INSTALL_REPO)
 #   HOPE_INSTALL_REPO=owner/repo        (default doomedramen/hope)
-#   HOPE_INSTALL_RELEASE_URL=...        TEST ONLY: base URL holding hope-server-<arch>-linux.tar.gz
+#   HOPE_INSTALL_RELEASE_URL=...        TEST ONLY: base URL holding hope-server-<arch>-linux.tar.gz and hope-agents.tar.gz
 #   HOPE_INSTALL_ROOT=/prefix           TEST ONLY: prefix for every absolute system path
 set -eu
 umask 022
@@ -39,6 +42,8 @@ case "$root" in ''|/*) ;; *) echo "HOPE_INSTALL_ROOT must be absolute" >&2; exit
 noninteractive=${HOPE_INSTALL_NONINTERACTIVE:-0}
 node_version=${HOPE_INSTALL_NODE_VERSION:-22.22.0}
 staging=
+agents_dir=
+agents_signed=
 
 # ---------- output ----------
 if [ -t 1 ] && [ "${NO_COLOR:-}" = "" ]; then
@@ -171,17 +176,18 @@ pkg_install() {
 }
 deps_for() {
     case "$(os_id)" in
-    debian) case "$1" in base) echo "curl ca-certificates tar xz-utils libcap2-bin" ;; build) echo "git build-essential pkg-config cmake" ;; caddy) echo caddy ;; esac ;;
-    fedora) case "$1" in base) echo "curl ca-certificates tar xz libcap" ;; build) echo "git gcc gcc-c++ make pkgconf-pkg-config cmake" ;; caddy) echo caddy ;; esac ;;
-    arch) case "$1" in base) echo "curl ca-certificates tar xz libcap" ;; build) echo "git base-devel cmake" ;; caddy) echo caddy ;; esac ;;
+    debian) case "$1" in base) echo "curl ca-certificates tar xz-utils libcap2-bin openssl" ;; build) echo "git build-essential pkg-config cmake" ;; caddy) echo caddy ;; esac ;;
+    fedora) case "$1" in base) echo "curl ca-certificates tar xz libcap openssl" ;; build) echo "git gcc gcc-c++ make pkgconf-pkg-config cmake" ;; caddy) echo caddy ;; esac ;;
+    arch) case "$1" in base) echo "curl ca-certificates tar xz libcap openssl" ;; build) echo "git base-devel cmake" ;; caddy) echo caddy ;; esac ;;
     esac
 }
 
 # ---------- obtaining the server ----------
 release_url() {
-    # Prints the tarball URL and, on a second line, the checksum file URL; nothing when no release fits.
+    # Prints the tarball URL, on a second line the checksum file URL and on a third the agents
+    # archive URL (either may be empty); nothing when no release fits.
     if [ -n "${HOPE_INSTALL_RELEASE_URL:-}" ]; then
-        printf '%s/hope-server-%s-linux.tar.gz\n%s/SHA256SUMS-server\n' "$HOPE_INSTALL_RELEASE_URL" "$(arch)" "$HOPE_INSTALL_RELEASE_URL"
+        printf '%s/hope-server-%s-linux.tar.gz\n%s/SHA256SUMS-server\n%s/hope-agents.tar.gz\n' "$HOPE_INSTALL_RELEASE_URL" "$(arch)" "$HOPE_INSTALL_RELEASE_URL" "$HOPE_INSTALL_RELEASE_URL"
         return
     fi
     if [ -n "${HOPE_INSTALL_VERSION:-}" ]; then _api="https://api.github.com/repos/$repo/releases/tags/$HOPE_INSTALL_VERSION"
@@ -190,13 +196,15 @@ release_url() {
     _tar=$(printf '%s' "$_json" | tr ',' '\n' | sed -n 's/.*"browser_download_url": *"\([^"]*hope-server-'"$(arch)"'-linux\.tar\.gz\)".*/\1/p' | head -n 1)
     [ -n "$_tar" ] || return 0
     _sums=$(printf '%s' "$_json" | tr ',' '\n' | sed -n 's/.*"browser_download_url": *"\([^"]*SHA256SUMS-server\)".*/\1/p' | head -n 1)
-    printf '%s\n%s\n' "$_tar" "$_sums"
+    _agents=$(printf '%s' "$_json" | tr ',' '\n' | sed -n 's/.*"browser_download_url": *"\([^"]*\/hope-agents\.tar\.gz\)".*/\1/p' | head -n 1)
+    printf '%s\n%s\n%s\n' "$_tar" "$_sums" "$_agents"
 }
 fetch_release() {
     _urls=$(release_url) || true
     [ -n "$_urls" ] || return 1
     _tar=$(printf '%s\n' "$_urls" | sed -n 1p)
     _sums=$(printf '%s\n' "$_urls" | sed -n 2p)
+    _agents=$(printf '%s\n' "$_urls" | sed -n 3p)
     info "Downloading $(basename "$_tar")"
     curl -fsSL --max-time 600 -o "$staging/server.tar.gz" "$_tar" || die "Download failed: $_tar"
     if [ -n "$_sums" ] && curl -fsSL --max-time 60 -o "$staging/SHA256SUMS" "$_sums" 2>/dev/null; then
@@ -212,6 +220,29 @@ fetch_release() {
     tar -xzf "$staging/server.tar.gz" -C "$staging/server" || die 'The release archive could not be extracted.'
     { [ -x "$staging/server/hope-server" ] && [ -f "$staging/server/web/index.html" ]; } || die 'The release archive is incomplete (hope-server and web/index.html expected).'
     ok "Release $(basename "$_tar") ready"
+    fetch_agents "$_agents"
+}
+# fetch_agents URL: the release's unsigned agent binaries, verified like the server package and
+# extracted to $staging/agents; sets agents_dir. A release without them only warns (agents can still
+# be published by hand); a checksum mismatch aborts like the server's, before anything is installed.
+fetch_agents() {
+    _missing='agents cannot be added until a signed agent release is published (docs/operations.md, Signed agent releases).'
+    [ -n "$1" ] || { warn "This release has no hope-agents.tar.gz; $_missing"; return 0; }
+    info 'Downloading hope-agents.tar.gz'
+    curl -fsSL --max-time 600 -o "$staging/agents.tar.gz" "$1" 2>/dev/null || { warn "Could not download $1; $_missing"; return 0; }
+    if [ -f "$staging/SHA256SUMS" ]; then
+        _expected=$(grep " hope-agents\.tar\.gz\$" "$staging/SHA256SUMS" | awk '{print $1}' | head -n 1)
+        [ -n "$_expected" ] || { warn "The release checksum file does not list hope-agents.tar.gz; not signing unverified agents, so $_missing"; return 0; }
+        _actual=$(sha256sum "$staging/agents.tar.gz" | awk '{print $1}')
+        [ "$_expected" = "$_actual" ] || die 'Checksum mismatch for hope-agents.tar.gz; the download is corrupt or tampered with.'
+        ok 'Agent checksum verified'
+    fi
+    mkdir -p "$staging/agents"
+    tar -xzf "$staging/agents.tar.gz" --no-same-owner -C "$staging/agents" 2>/dev/null || { warn "hope-agents.tar.gz could not be extracted; $_missing"; return 0; }
+    # The binaries sit at the top level or in one directory below it.
+    _info=$(find "$staging/agents" -maxdepth 2 -type f -name 'hope-agent-*.info' | head -n 1)
+    [ -n "$_info" ] || { warn "hope-agents.tar.gz holds no hope-agent-*.info; $_missing"; return 0; }
+    agents_dir=$(dirname "$_info")
 }
 build_from_source() {
     _ref=${HOPE_INSTALL_REF:-main}
@@ -256,6 +287,45 @@ obtain_server() {
 }
 
 # ---------- host installation ----------
+# Signs the downloaded agents into /opt/hope/releases with this server's key, creating the key on
+# the first install only: installed agents trust its public key, so it is never replaced. Never
+# fatal: assemble-release.sh repoints `current` only after a verified publish, so on any failure
+# the previous release stays live.
+sign_agents() {
+    [ -n "$agents_dir" ] || return 0
+    _tool=$staging/server/tools/assemble-release.sh
+    _version=$(cat "$staging/server/VERSION" 2>/dev/null || true)
+    if [ ! -f "$_tool" ] || [ -z "$_version" ]; then
+        warn 'The server package has no tools/assemble-release.sh or VERSION; agents not signed.'
+        return 0
+    fi
+    _key=$root/etc/hope/release-signing.pem
+    _releases=$root/opt/hope/releases
+    if [ ! -e "$_key" ] && [ ! -L "$_key" ]; then
+        if [ -e "$_releases/current" ] || [ -L "$_releases/current" ]; then
+            # Published by hand with a key kept elsewhere; a new key here would be refused anyway.
+            warn "/opt/hope/releases holds a release signed with a key outside /etc/hope; agents not signed. Publish with that key (scripts/assemble-release.sh), or see Rotation in docs/operations.md."
+            return 0
+        fi
+        info 'Creating the agent release signing key /etc/hope/release-signing.pem'
+        rm -f "$_key.new"
+        if ! (umask 077 && openssl genrsa -out "$_key.new" 3072 >/dev/null 2>&1); then
+            rm -f "$_key.new"
+            warn 'openssl could not create the signing key; agents not signed.'
+            return 0
+        fi
+        mv "$_key.new" "$_key"
+    fi
+    info "Signing agent release $_version"
+    if HOPE_SIGNING_KEY=$_key sh "$_tool" --staging "$agents_dir" --version "$_version" --out "$_releases" >"$staging/assemble.log" 2>&1; then
+        chmod 755 "$_releases"
+        agents_signed=$_version
+        ok "Agent release $_version signed into /opt/hope/releases"
+    else
+        warn 'Signing the agent release failed; the previous agent release (if any) stays published:'
+        sed 's/^/      /' "$staging/assemble.log" >&2
+    fi
+}
 write_unit() {
     cat > "$root/etc/systemd/system/hope.service" <<EOF
 [Unit]
@@ -392,6 +462,7 @@ host_install() {
     chown -R hope:hope "$root/var/lib/hope"
     chmod 700 "$root/var/lib/hope"
     setcap cap_net_raw=ep "$root/opt/hope/bin/hope-server" || warn 'setcap failed: ICMP and ARP discovery will be unavailable (TCP probing continues).'
+    sign_agents
     write_env
     write_unit
     systemctl daemon-reload
@@ -412,7 +483,13 @@ host_install() {
     else printf '  Setup token:    journalctl -u hope | grep "setup token"\n'; fi
     printf '  Settings:       /etc/hope/hope.env   (systemctl restart hope)\n'
     printf '  Logs:           journalctl -fu hope\n'
-    printf '  Agent releases: /opt/hope/releases   (publish a signed release before adding agents)\n'
+    if [ -n "$agents_signed" ]; then
+        printf '  Agent releases: /opt/hope/releases   (%s, signed with /etc/hope/release-signing.pem; back it up)\n' "$agents_signed"
+    elif [ -e "$root/opt/hope/releases/current" ]; then
+        printf '  Agent releases: /opt/hope/releases   (previous signed release kept)\n'
+    else
+        printf '  Agent releases: /opt/hope/releases   (none signed: publish a signed release before adding agents)\n'
+    fi
     [ "$ca_exported" = 1 ] && printf '  Agents must trust the internal CA: copy /etc/hope/ca.crt to the same path on each agent host.\n'
     [ "$HOPE_INSTALL_PROXY" = none ] && printf '  Point your reverse proxy at http://127.0.0.1:8080 with Host and Origin unchanged and SSE unbuffered.\n'
     printf '\n'
