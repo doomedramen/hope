@@ -29,3 +29,18 @@ Requirements: Docker (OrbStack on macOS was used), Python 3.9+, OpenSSL, `ssh-ke
 ## Limits
 
 Emulated amd64 is Rosetta, not an Intel CPU. Containers share one kernel and one network bridge, so this is not a physical LAN; the lingering and logind behavior is that of Debian 13 only. The CA is trusted by file path, so the default public-CA path is not exercised. Only Linux cells run here.
+
+## Updater gate
+
+`tests/gates/run.sh updater` is a leaner, Linux-only fixture for the agent updater (`docs/operations.md`, "Updating agents from the console"). It needs Docker, OpenSSL, `cargo` and Python 3, and no macOS host: it builds the server and four agents (versions `0.9.1` to `0.9.4`, so none can be mistaken for a real release) for the host's architecture, signs them with throwaway keys into a partial release, serves them from the real server behind `tests/agent/https_proxy.py` with a throwaway CA, and boots a Debian 13 container with systemd as PID 1 (`updater.Dockerfile`, run `--privileged --cgroupns=host --network host`; disposable machines only). Then, with the console's own HTTP API and installation command:
+
+| Cell | Checks |
+| --- | --- |
+| install | The installer reports `result=installed`; `hope-agent` and `hope-agent-update.path` are active and enabled; the queue directory is `hope-agent:hope-agent 0700`; the updater and pinned installer are root-owned and not writable by the agent account; the server sees the agent and its working updater |
+| update all | Publishing a newer signed release and asking for updates replaces the agent through the real path unit and `hope-agent-update.service` (`Result=success`): installed SHA-256 equals the signed manifest, the new `MainPID` runs the installed binary, the request file and transaction are gone, `update-result` says `updated`, the server clears the request and shows "Updated to ..." |
+| no-op | A request written by the agent account (`runuser`) for an up-to-date agent is consumed and answered `current`; the service is not restarted |
+| wrong key | The release directory is switched to one signed by another key and an update is requested: the pinned installer refuses it (`MANIFEST_INVALID`), the agent and its `MainPID` are untouched, and the failure reaches the console |
+| rollback | A correctly signed release is installed, then the server becomes unreachable at `phase=wait-report`: the updater times out (`FIRST_REPORT_TIMEOUT`), rolls back, the previous binary runs again, no transaction is left, and once the server returns the agent reports and the console shows the failure |
+| uninstall | The pinned installer's `uninstall` removes the agent, the updater script, the pinned installer and both units |
+
+Variables: `HOPEGATE_UPDATER_IMAGE` (a prebuilt image providing systemd as PID 1, `curl` and `openssl`, instead of building `updater.Dockerfile`), `HOPEGATE_WORK`, `HOPEGATE_KEEP=1`, `HOPEGATE_SKIP_BUILD=1`, `HOPEGATE_TLS_PORT` and `HOPEGATE_BACKEND_PORT` (default 18443 and 18080). CI runs it as the `updater-gate` job. Limits: one distribution (Debian 13, systemd 257), one architecture per run, `--network host`, no launchd and no user-mode (no updater is installed there by design).

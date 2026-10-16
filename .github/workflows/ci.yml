@@ -154,6 +154,22 @@ jobs:
       - run: cd dist/server && sha256sum -c SHA256SUMS-server
       - run: python3 -I -m unittest discover -s tests/installer -p 'test_server_installer.py' -v
 
+  updater-gate:
+    # The agent updater under real systemd: a Debian 13 container with systemd as PID 1, the real
+    # server behind a TLS proxy with a throwaway CA, and releases signed with throwaway keys. Installs
+    # an agent with the console's command, updates it from the console, and checks the no-op, wrong-key,
+    # rollback and uninstall paths. The container is privileged; the runner is disposable.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+      - run: tests/gates/run.sh updater
+
   release-build-smoke:
     uses: ./.github/workflows/build-agent.yml
 
