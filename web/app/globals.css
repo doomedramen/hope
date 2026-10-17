@@ -1156,6 +1156,11 @@ kbd.key {
   background: var(--muted);
   color: var(--muted-foreground);
 }
+.host-avatar img {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
 .host-avatar[data-tone="good"] {
   background: var(--status-good-soft);
   color: var(--status-good-foreground);
