@@ -224,10 +224,17 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_checks_use_live_connectivity() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        assert!(port_up(&[address.ip()], address.port()).await);
-        drop(listener);
-        assert!(!port_up(&[address.ip()], address.port()).await);
+        // Other tests run in parallel and can immediately re-bind a freed
+        // ephemeral port, so retry with a fresh port until one stays closed.
+        for _ in 0..10 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            assert!(port_up(&[address.ip()], address.port()).await);
+            drop(listener);
+            if !port_up(&[address.ip()], address.port()).await {
+                return;
+            }
+        }
+        panic!("a freed ephemeral port stayed reachable on every attempt");
     }
 }
