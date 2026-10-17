@@ -21,6 +21,7 @@ const metrics: Metrics = {
   services: [],
   service_summary: null,
   monitors: [],
+  containers: [],
   disks: [],
   gpus: [],
 };

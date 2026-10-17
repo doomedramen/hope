@@ -8,6 +8,7 @@ import {
   Bot,
   Check,
   Copy,
+  Boxes,
   Cpu,
   GitMerge,
   MemoryStick,
@@ -245,6 +246,9 @@ export function HostDetails({
             {host.agent_id && (
               <TabsTrigger value="metrics">Metrics</TabsTrigger>
             )}
+            {host.agent_id && (
+              <TabsTrigger value="containers">Containers</TabsTrigger>
+            )}
             <TabsTrigger value="services">Services</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
@@ -281,18 +285,13 @@ export function HostDetails({
             )}
             {host.agent_id && (
               <section aria-label="Current readings" className="host-readings">
-                <div>
-                  <span>CPU</span>
-                  <strong>{percent0(cpuPercent(host))}</strong>
-                </div>
-                <div>
-                  <span>Memory</span>
-                  <strong>{percent0(memoryUsage(host))}</strong>
-                </div>
-                <div>
-                  <span>Fullest filesystem</span>
-                  <strong>{percent0(worstDisk(host)?.percent)}</strong>
-                </div>
+                <ReadingMeter label="CPU" value={cpuPercent(host)} />
+                <ReadingMeter label="Memory" value={memoryUsage(host)} />
+                <ReadingMeter
+                  label="Fullest filesystem"
+                  value={worstDisk(host)?.percent ?? null}
+                  detail={worstDisk(host)?.disk.mount}
+                />
                 <p className="text-xs text-muted-foreground">
                   Latest reported values
                   {state.key !== "reporting" ? " · Agent is not reporting" : ""}
@@ -432,6 +431,59 @@ export function HostDetails({
                 />
               </section>
             )}
+          </TabsContent>
+          <TabsContent value="containers" className="host-tab-content">
+            <section aria-label="Docker containers">
+              <h3 className="detail-heading">
+                <Boxes />
+                Docker containers
+                <span className="spacer" />
+                <span className="text-xs font-normal text-muted-foreground">
+                  {metrics?.containers.length ?? 0}
+                </span>
+              </h3>
+              {(metrics?.containers.length ?? 0) > 0 ? (
+                <div className="container-grid">
+                  {metrics?.containers.map((container) => (
+                    <article className="container-card" key={container.id}>
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <strong className="block truncate">
+                            {container.name}
+                          </strong>
+                          <span className="mono block truncate text-xs text-muted-foreground">
+                            {container.image}
+                          </span>
+                        </div>
+                        <span
+                          className="status-pill shrink-0"
+                          data-tone={
+                            container.state === "running" ? "good" : "neutral"
+                          }
+                        >
+                          {container.state}
+                        </span>
+                      </div>
+                      <div className="container-meta">
+                        <span>{container.status}</span>
+                        {container.ports && <span>{container.ports}</span>}
+                        <span className="mono">
+                          {container.id.slice(0, 12)}
+                        </span>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  {host.collectors.find(
+                    (collector) => collector.name === "docker_containers",
+                  )?.available
+                    ? "No containers found."
+                    : "Docker is unavailable or its daemon is not running."}
+                </p>
+              )}
+            </section>
           </TabsContent>
           <TabsContent value="services" className="host-tab-content">
             {metrics?.service_summary && (
@@ -862,5 +914,48 @@ function DeviceSection({
         </SelectContent>
       </Select>
     </section>
+  );
+}
+
+function ReadingMeter({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: number | null;
+  detail?: string;
+}) {
+  const bounded = value == null ? null : Math.min(100, Math.max(0, value));
+  const tone =
+    bounded == null
+      ? "unknown"
+      : bounded >= 90
+        ? "critical"
+        : bounded >= 75
+          ? "warning"
+          : "good";
+  return (
+    <div className="reading-meter-card">
+      <div className="reading-meter-heading">
+        <span>{label}</span>
+        <strong>{percent0(value)}</strong>
+      </div>
+      <div
+        className="reading-meter-track"
+        role="progressbar"
+        aria-label={`${label} usage`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={bounded ?? undefined}
+        aria-valuetext={
+          value == null ? "Unavailable" : `${Math.round(value)} percent`
+        }
+        data-tone={tone}
+      >
+        {bounded != null && <span style={{ width: `${bounded}%` }} />}
+      </div>
+      <span className="reading-meter-detail">{detail || "Current usage"}</span>
+    </div>
   );
 }

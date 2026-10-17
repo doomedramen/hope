@@ -175,6 +175,11 @@ kind: string, up: boolean, latency_ms: number | null, status_code: number | null
  * Short failure reason; never remote response bodies.
  */
 detail: string | null, };
+export type Container = { id: string, name: string, image: string,
+/**
+ * Docker state such as running, exited, or created.
+ */
+state: string, status: string, ports: string, };
 export type Metrics = { cpu_percent: number | null, memory_used_bytes: number | null, memory_total_bytes: number | null,
 /**
  * Page cache plus buffers and reclaimable slab; part of the kernel's reclaimable memory.
@@ -183,7 +188,7 @@ memory_cached_bytes: number | null,
 /**
  * ZFS ARC size; counted as used by the kernel, released under pressure.
  */
-memory_zfs_arc_bytes: number | null, swap_used_bytes: number | null, swap_total_bytes: number | null, load_average: LoadAverage | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null, network_interfaces: Array<NetworkCounter>, disk_read_bytes_per_second: number | null, disk_write_bytes_per_second: number | null, disks: Array<Disk>, disk_io: Array<DiskIo>, pools: Array<StoragePool>, gpus: Array<Gpu>, temperatures: Array<Temperature>, services: Array<ServiceUnit>, service_summary: ServiceSummary | null, monitors: Array<MonitorResult>, };
+memory_zfs_arc_bytes: number | null, swap_used_bytes: number | null, swap_total_bytes: number | null, load_average: LoadAverage | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null, network_interfaces: Array<NetworkCounter>, disk_read_bytes_per_second: number | null, disk_write_bytes_per_second: number | null, disks: Array<Disk>, disk_io: Array<DiskIo>, pools: Array<StoragePool>, gpus: Array<Gpu>, temperatures: Array<Temperature>, services: Array<ServiceUnit>, service_summary: ServiceSummary | null, monitors: Array<MonitorResult>, containers: Array<Container>, };
 export type AgentReport = { schema_version: number, report_id: string, agent_id: string, collected_at: number, inventory: Inventory | null, metrics: Metrics, collectors: Array<CollectorStatus>, };
 export type EnrollmentRequest = { schema_version: number, token: string, agent_id: string,
 /**

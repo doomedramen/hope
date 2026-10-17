@@ -423,6 +423,18 @@ pub struct MonitorResult {
     pub detail: Option<String>,
 }
 
+/// A container discovered through the local Docker CLI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct Container {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    /// Docker state such as running, exited, or created.
+    pub state: String,
+    pub status: String,
+    pub ports: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, Default)]
 pub struct Metrics {
     pub cpu_percent: Option<f64>,
@@ -460,6 +472,8 @@ pub struct Metrics {
     pub service_summary: Option<ServiceSummary>,
     #[serde(default)]
     pub monitors: Vec<MonitorResult>,
+    #[serde(default)]
+    pub containers: Vec<Container>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -825,6 +839,7 @@ pub fn typescript() -> String {
         ServiceUnit::decl(),
         ServiceSummary::decl(),
         MonitorResult::decl(),
+        Container::decl(),
         Metrics::decl(),
         AgentReport::decl(),
         EnrollmentRequest::decl(),

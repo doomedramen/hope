@@ -1,5 +1,7 @@
 use crate::extras;
-use hope_protocol::{CollectorStatus, Disk, Gpu, Interface, Inventory, Metrics, NetworkCounter};
+use hope_protocol::{
+    CollectorStatus, Container, Disk, Gpu, Interface, Inventory, Metrics, NetworkCounter,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -7,6 +9,54 @@ use std::{
 };
 use sysinfo::{Disks, Networks, System};
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
+
+#[derive(serde::Deserialize)]
+struct DockerContainer {
+    #[serde(rename = "ID")]
+    id: String,
+    #[serde(rename = "Names")]
+    names: String,
+    #[serde(rename = "Image")]
+    image: String,
+    #[serde(rename = "State")]
+    state: String,
+    #[serde(rename = "Status")]
+    status: String,
+    #[serde(rename = "Ports")]
+    ports: String,
+}
+
+fn parse_docker_output(output: &str) -> Vec<Container> {
+    output
+        .lines()
+        .take(128)
+        .filter_map(|line| serde_json::from_str::<DockerContainer>(line).ok())
+        .filter(|item| {
+            !item.id.is_empty()
+                && !item.names.is_empty()
+                && !item.image.is_empty()
+                && !item.state.is_empty()
+        })
+        .map(|item| Container {
+            id: item.id,
+            name: item.names,
+            image: item.image,
+            state: item.state,
+            status: item.status,
+            ports: item.ports,
+        })
+        .collect()
+}
+
+async fn docker_containers() -> Option<Vec<Container>> {
+    command(
+        "docker",
+        &["ps", "--all", "--no-trunc", "--format", "{{json .}}"],
+        2,
+    )
+    .await
+    .map(|output| parse_docker_output(&output))
+}
 
 #[derive(Clone, serde::Serialize)]
 pub struct CollectorCost {
@@ -140,6 +190,9 @@ impl Collector {
         if let Some(disks) = &disk_sample {
             self.disk_inventory = disks.clone();
         }
+        let started = Instant::now();
+        let containers = docker_containers().await;
+        self.cost("docker_containers", started);
         let started = Instant::now();
         let gateway = default_gateway().await;
         self.cost("gateway", started);
@@ -321,6 +374,11 @@ impl Collector {
                 services.is_some(),
                 Some("Service units need systemd (systemctl list-units)"),
             ),
+            status(
+                "docker_containers",
+                containers.is_some(),
+                Some("Docker CLI is unavailable or the daemon cannot be reached"),
+            ),
         ];
         if self.monitors.configured() > 0 {
             collectors.push(status(
@@ -376,6 +434,7 @@ impl Collector {
             service_summary: services.as_ref().map(|s| s.summary),
             services: services.map(|s| s.units).unwrap_or_default(),
             monitors,
+            containers: containers.unwrap_or_default(),
         };
         self.cost("inventory", started);
         self.first = false;
@@ -675,6 +734,19 @@ async fn read_number(path: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn docker_output_keeps_container_fields_and_ignores_bad_lines() {
+        let containers = parse_docker_output(
+            r#"{"ID":"abc123","Names":"web","Image":"nginx:latest","State":"running","Status":"Up 2 hours","Ports":"0.0.0.0:8080->80/tcp"}
+not json
+{"ID":"def456","Names":"db","Image":"postgres:16","State":"exited","Status":"Exited (0)","Ports":""}"#,
+        );
+        assert_eq!(containers.len(), 2);
+        assert_eq!(containers[0].name, "web");
+        assert_eq!(containers[0].image, "nginx:latest");
+        assert_eq!(containers[0].ports, "0.0.0.0:8080->80/tcp");
+        assert_eq!(containers[1].state, "exited");
+    }
     #[tokio::test]
     async fn hanging_filesystems_do_not_accumulate_workers() {
         use std::sync::{

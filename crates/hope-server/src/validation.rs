@@ -161,6 +161,21 @@ fn extended(value: &Metrics) -> Result<(), &'static str> {
     {
         return Err("Invalid service units");
     }
+    if value.containers.len() > 128
+        || value.containers.iter().any(|container| {
+            container.id.is_empty()
+                || !text(&container.id, 128)
+                || container.name.is_empty()
+                || !text(&container.name, 256)
+                || container.image.is_empty()
+                || !text(&container.image, 512)
+                || !text(&container.state, 32)
+                || !text(&container.status, 256)
+                || !text(&container.ports, 512)
+        })
+    {
+        return Err("Invalid containers");
+    }
     if value.monitors.len() > 32
         || !unique(value.monitors.iter().map(|m| m.target.as_str()))
         || value.monitors.iter().any(|m| {
