@@ -12,6 +12,7 @@ import {
   worstDisk,
 } from "../lib/fleet";
 import { deviceAppIcon, deviceFingerprintId } from "../lib/devices";
+import { searchIcons } from "../lib/icon-matching";
 import { findSelfHostedIcon } from "../lib/icon-matching";
 import type { Host, Metrics } from "../lib/protocol";
 
@@ -89,6 +90,8 @@ function host(overrides: Partial<Host>): Host {
     parent_id: null,
     parent_reason: null,
     ...overrides,
+    name_override: overrides.name_override ?? null,
+    icon_override: overrides.icon_override ?? null,
   };
 }
 
@@ -115,6 +118,18 @@ test("consumer device labels map to UniFi fingerprint icons", () => {
   );
   expect(deviceFingerprintId(host({ name: "Xbox One X" }))).toBe("22");
   expect(deviceFingerprintId(host({ name: "unidentified device" }))).toBeNull();
+});
+
+test("manual icon search finds catalog entries and fuzzy device names", () => {
+  expect(searchIcons("Plex").some((icon) => icon.key === "selfhst:plex")).toBe(
+    true,
+  );
+  expect(searchIcons("Xbox").some((icon) => /Xbox/i.test(icon.name))).toBe(
+    true,
+  );
+  expect(
+    searchIcons("Grafan").some((icon) => icon.key === "selfhst:grafana"),
+  ).toBe(true);
 });
 
 test("recognizable self-hosted app hosts use app artwork", () => {

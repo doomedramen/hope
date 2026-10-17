@@ -633,10 +633,22 @@ pub struct DeviceTypeUpdate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct HostIdentityUpdate {
+    /// Administrator-chosen name, or null to use discovery data.
+    pub name: Option<String>,
+    /// `selfhst:<slug>` or `unifi:<fingerprint id>`, or null for automatic matching.
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Host {
     pub id: String,
     pub agent_id: Option<String>,
     pub name: String,
+    #[serde(default)]
+    pub name_override: Option<String>,
+    #[serde(default)]
+    pub icon_override: Option<String>,
     pub addresses: Vec<String>,
     pub macs: Vec<String>,
     pub network_ids: Vec<String>,
@@ -686,6 +698,8 @@ impl Host {
             id,
             agent_id: None,
             name,
+            name_override: None,
+            icon_override: None,
             addresses: vec![],
             macs: vec![],
             network_ids: vec![],
@@ -831,6 +845,7 @@ pub fn typescript() -> String {
         DeviceEvidence::decl(),
         DeviceGuess::decl(),
         DeviceTypeUpdate::decl(),
+        HostIdentityUpdate::decl(),
         AuthStatus::decl(),
         OkResponse::decl(),
         ReportResponse::decl(),

@@ -20,6 +20,7 @@ import {
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { StatusPill } from "@/components/status-pill";
 import { matchesSearch } from "@/lib/fleet";
+import { hostDisplayName } from "@/lib/devices";
 import type { Host } from "@/lib/protocol";
 
 export type Command = {
@@ -201,7 +202,7 @@ function PaletteBody({
               onClick={() => choose(i)}
             >
               <Server />
-              <span className="truncate">{host.name}</span>
+              <span className="truncate">{hostDisplayName(host)}</span>
               <StatusPill host={host} />
               <span className="meta">{host.addresses[0] ?? ""}</span>
             </button>

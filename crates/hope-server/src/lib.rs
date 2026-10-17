@@ -42,6 +42,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/notifications/test", post(notify::test))
         .route("/settings/reporting", put(api::set_reporting))
         .route("/hosts/{id}/type", put(api::set_device_type))
+        .route("/hosts/{id}/identity", put(api::set_host_identity))
         .route("/logout", post(auth::logout))
         .route("/networks", post(api::add_network))
         .route(

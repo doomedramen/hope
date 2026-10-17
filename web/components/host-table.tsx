@@ -30,10 +30,32 @@ import {
   deviceFingerprintId,
   deviceIcon,
   deviceLabel,
+  hostDisplayName,
 } from "@/lib/devices";
 
 /** A glyph for what the host most likely is (the server's device guess). */
 export function HostIcon({ host, size }: { host: Host; size: number }) {
+  const override = host.icon_override?.split(":", 2);
+  if (override?.[0] === "unifi" && override[1]) {
+    return (
+      <FingerprintIcon
+        key={host.icon_override}
+        fingerprint={override[1]}
+        host={host}
+        size={size}
+      />
+    );
+  }
+  if (override?.[0] === "selfhst" && override[1]) {
+    return (
+      <HostAppIcon
+        key={host.icon_override}
+        slug={override[1]}
+        host={host}
+        size={size}
+      />
+    );
+  }
   const fingerprint = deviceFingerprintId(host);
   if (fingerprint) {
     return (
@@ -197,7 +219,7 @@ export function HostTable({
                         select(h.id);
                       }}
                     >
-                      {h.name}
+                      {hostDisplayName(h)}
                     </Button>
                     <div className="sub">
                       {h.agent_id && (

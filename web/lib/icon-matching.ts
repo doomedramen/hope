@@ -9,6 +9,18 @@ const UNIFI: Array<UniFiIcon & { tokens: string[]; normalized: string }> =
   catalog.unifi.map((icon) => ({ ...icon, ...prepare(icon.name) }));
 const APP_TOKENS = tokenIndex(APPS);
 const UNIFI_TOKENS = tokenIndex(UNIFI);
+const ICON_OPTIONS: IconOption[] = [
+  ...APPS.map((icon) => ({
+    key: `selfhst:${icon.slug}`,
+    name: icon.name,
+    source: "selfhst" as const,
+  })),
+  ...UNIFI.map((icon) => ({
+    key: `unifi:${icon.id}`,
+    name: icon.name,
+    source: "unifi" as const,
+  })),
+].sort((left, right) => left.name.localeCompare(right.name));
 
 const GENERIC = new Set([
   "access",
@@ -83,6 +95,23 @@ function editDistance(left: string, right: string): number {
   return row[right.length];
 }
 
+function editDistanceWithSwap(left: string, right: string): number {
+  const distance = editDistance(left, right);
+  if (distance <= 1 || left.length !== right.length) return distance;
+  const differences = Array.from(left, (_, index) => index).filter(
+    (index) => left[index] !== right[index],
+  );
+  if (
+    differences.length === 2 &&
+    differences[1] === differences[0] + 1 &&
+    left[differences[0]] === right[differences[1]] &&
+    left[differences[1]] === right[differences[0]]
+  ) {
+    return 1;
+  }
+  return distance;
+}
+
 function score(
   source: string[],
   candidate: string[],
@@ -100,12 +129,12 @@ function score(
   const exact = useful.filter((token) => candidate.includes(token)).length;
   const fuzzy = useful.filter((token) =>
     candidate.some((word) => {
-      if (token.length < 5 || word.length < 5) return false;
-      const distance = editDistance(token, word);
+      if (token.length < 4 || word.length < 4) return false;
+      const distance = editDistanceWithSwap(token, word);
       return (
         distance > 0 &&
         distance <= 1 &&
-        distance / Math.max(token.length, word.length) <= 0.2
+        distance / Math.max(token.length, word.length) <= 0.25
       );
     }),
   ).length;
@@ -155,4 +184,64 @@ export function findSelfHostedIcon(inputs: string[]): string | null {
 
 export function findUniFiIcon(inputs: string[]): string | null {
   return bestMatch(inputs, UNIFI_TOKENS)?.id ?? null;
+}
+
+export type IconOption = {
+  key: string;
+  name: string;
+  source: "selfhst" | "unifi";
+};
+
+export function iconOption(key: string | null | undefined): IconOption | null {
+  if (!key) return null;
+  const [source, id] = key.split(":", 2);
+  if (source === "selfhst") {
+    const icon = APPS.find((entry) => entry.slug === id);
+    return icon ? { key, name: icon.name, source } : null;
+  }
+  if (source === "unifi") {
+    const icon = UNIFI.find((entry) => entry.id === id);
+    return icon ? { key, name: icon.name, source } : null;
+  }
+  return null;
+}
+
+/** Search both checked-in icon catalogs for the host settings picker. */
+export function searchIcons(query: string, limit = 20): IconOption[] {
+  const { tokens } = prepare(query);
+  if (tokens.length === 0) return ICON_OPTIONS.slice(0, limit);
+  const candidates = new Set<(typeof APPS)[number] | (typeof UNIFI)[number]>();
+  for (const token of tokens) {
+    for (const candidate of APP_TOKENS.get(token) ?? [])
+      candidates.add(candidate);
+    for (const candidate of UNIFI_TOKENS.get(token) ?? [])
+      candidates.add(candidate);
+    for (const key of deletionKeys(token)) {
+      for (const candidate of APP_TOKENS.get(key) ?? [])
+        candidates.add(candidate);
+      for (const candidate of UNIFI_TOKENS.get(key) ?? [])
+        candidates.add(candidate);
+    }
+  }
+  const normalizedQuery = tokens.join("");
+  const ranked = [...candidates]
+    .map((icon) => ({
+      icon,
+      score: score(tokens, icon.tokens, icon.normalized),
+    }))
+    .filter(
+      ({ icon, score: value }) =>
+        value >= 0.2 || icon.normalized.includes(normalizedQuery),
+    )
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.icon.name.localeCompare(right.icon.name),
+    )
+    .slice(0, limit);
+  return ranked.map(({ icon }) => ({
+    key: "slug" in icon ? `selfhst:${icon.slug}` : `unifi:${icon.id}`,
+    name: icon.name,
+    source: "slug" in icon ? "selfhst" : "unifi",
+  }));
 }

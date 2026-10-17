@@ -65,6 +65,10 @@ export function deviceIcon(host: Host): LucideIcon {
   return BY_KIND.get(deviceKind(host))?.icon ?? CircleHelp;
 }
 
+export function hostDisplayName(host: Host): string {
+  return host.name_override?.trim() || host.name;
+}
+
 /** UniFi fingerprint artwork for common consumer devices we can identify from network evidence. */
 export function deviceFingerprintId(host: Host): string | null {
   const evidence = host.evidence;

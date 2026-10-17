@@ -22,7 +22,7 @@ import type { Host, MapEdit, MapState, Network } from "@/lib/protocol";
 import { percent0 } from "@/lib/api";
 import { Meter } from "@/components/ui/meter";
 import { HostIcon } from "@/components/host-table";
-import { deviceLabel } from "@/lib/devices";
+import { deviceLabel, hostDisplayName } from "@/lib/devices";
 import {
   cpuPercent,
   hostState,
@@ -270,9 +270,9 @@ export function NetworkMap({
         position: { x: 0, y: 0 },
         selected: selected === host.id,
         data: {
-          label: host.name,
+          label: hostDisplayName(host),
           subtitle:
-            host.name === address
+            hostDisplayName(host) === address
               ? (label ?? describe(host))
               : [label, host.addresses.join(", ")].filter(Boolean).join(" · "),
           host,

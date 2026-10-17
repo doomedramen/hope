@@ -1,6 +1,6 @@
 "use client";
 import { Age } from "@/components/age";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -14,6 +14,7 @@ import {
   MemoryStick,
   Network,
   Radio,
+  Search,
   ShieldOff,
   Tag,
   Waypoints,
@@ -22,6 +23,15 @@ import {
   Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -67,6 +77,8 @@ import {
   type Tone,
 } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
+import { searchIcons, type IconOption } from "@/lib/icon-matching";
+import { hostDisplayName } from "@/lib/devices";
 
 export function HostDetails({
   host,
@@ -116,6 +128,7 @@ export function HostDetails({
   const update = updatePlan(host, agentRelease);
   const [copied, setCopied] = useState(false);
   const state = hostState(host);
+  const displayName = hostDisplayName(host);
   const issues = hostIssues(host);
   const history = useHistory(
     host.id,
@@ -129,7 +142,7 @@ export function HostDetails({
     try {
       await post(`/agents/${host.agent_id}/revoke`);
       setConfirmRevoke(false);
-      notify(`Revoked the agent credential for ${host.name}.`, "warning");
+      notify(`Revoked the agent credential for ${displayName}.`, "warning");
       refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -139,7 +152,7 @@ export function HostDetails({
     try {
       await post(`/hosts/${host.id}/update-agent`);
       notify(
-        `Asked ${host.name} to update to ${update?.target ?? "the latest release"}.`,
+        `Asked ${displayName} to update to ${update?.target ?? "the latest release"}.`,
         "good",
       );
       refresh();
@@ -153,8 +166,8 @@ export function HostDetails({
       await put(`/hosts/${host.id}/type`, { kind });
       notify(
         kind
-          ? `${host.name} is now marked as ${kindLabel(kind).toLowerCase()}.`
-          : `${host.name} is back to automatic detection.`,
+          ? `${displayName} is now marked as ${kindLabel(kind).toLowerCase()}.`
+          : `${displayName} is back to automatic detection.`,
         "good",
       );
       refresh();
@@ -168,7 +181,10 @@ export function HostDetails({
     try {
       await post(`/hosts/${host.id}/merge`, { source_id: source });
       setSource(null);
-      notify(`Merged ${merged?.name ?? "host"} into ${host.name}.`, "good");
+      notify(
+        `Merged ${merged ? hostDisplayName(merged) : "host"} into ${displayName}.`,
+        "good",
+      );
       refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -192,16 +208,20 @@ export function HostDetails({
               Back
             </Button>
           )}
-          <span className="host-avatar" data-tone={state.tone}>
-            <HostIcon host={host} size={17} />
-          </span>
+          <HostIconPicker
+            key={`${host.id}:${host.icon_override ?? ""}`}
+            host={host}
+            tone={state.tone}
+            notify={notify}
+            refresh={refresh}
+          />
           <div className="min-w-0 flex-1">
             <h2
               ref={heading}
               tabIndex={-1}
               className="truncate text-lg font-semibold tracking-tight"
             >
-              {host.name}
+              {displayName}
             </h2>
             <p className="mono mt-0.5 break-all text-muted-foreground">
               {host.addresses.join(" · ")}
@@ -653,6 +673,12 @@ export function HostDetails({
             </section>
           </TabsContent>
           <TabsContent value="settings" className="host-tab-content">
+            <HostIdentitySettings
+              key={`${host.id}:${host.name_override ?? ""}`}
+              host={host}
+              notify={notify}
+              refresh={refresh}
+            />
             {update && (
               <div
                 className="rounded-xl border p-3.5"
@@ -772,7 +798,7 @@ export function HostDetails({
                             .filter((h) => !h.agent_id && h.id !== host.id)
                             .map((h) => (
                               <SelectItem key={h.id} value={h.id}>
-                                {h.name} ({h.addresses[0]})
+                                {hostDisplayName(h)} ({h.addresses[0]})
                               </SelectItem>
                             ))}
                         </SelectGroup>
@@ -844,6 +870,218 @@ export function HostDetails({
   );
 }
 
+function HostIdentitySettings({
+  host,
+  notify,
+  refresh,
+}: {
+  host: Host;
+  notify: (message: string, tone?: Tone) => void;
+  refresh: () => void;
+}) {
+  const [name, setName] = useState(host.name_override ?? "");
+  const [error, setError] = useState("");
+  async function saveName() {
+    try {
+      await put(`/hosts/${host.id}/identity`, {
+        name: name.trim() || null,
+        icon: host.icon_override ?? null,
+      });
+      notify("Name saved.", "good");
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  return (
+    <section className="flex flex-col gap-3">
+      <h3 className="detail-heading">Name</h3>
+      <label className="flex flex-col gap-1.5 text-sm">
+        Name (Alias)
+        <Input
+          aria-label="Name (Alias)"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          placeholder={host.name}
+          maxLength={80}
+        />
+      </label>
+      <p className="text-xs text-muted-foreground">
+        Leave empty to use the discovered name.
+      </p>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      <Button size="sm" className="self-start" onClick={() => void saveName()}>
+        <Check data-icon="inline-start" />
+        Save name
+      </Button>
+    </section>
+  );
+}
+
+function HostIconPicker({
+  host,
+  tone,
+  notify,
+  refresh,
+}: {
+  host: Host;
+  tone: Tone;
+  notify: (message: string, tone?: Tone) => void;
+  refresh: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(host.icon_override ?? null);
+  const [resultCount, setResultCount] = useState(48);
+  const [error, setError] = useState("");
+  const options = useMemo(
+    () => searchIcons(query, resultCount),
+    [query, resultCount],
+  );
+  async function apply() {
+    try {
+      await put(`/hosts/${host.id}/identity`, {
+        name: host.name_override ?? null,
+        icon: selected,
+      });
+      setOpen(false);
+      notify("Icon changed.", "good");
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  return (
+    <>
+      <button
+        type="button"
+        className="host-icon-edit"
+        aria-label="Change icon"
+        onClick={() => {
+          setSelected(host.icon_override ?? null);
+          setQuery("");
+          setResultCount(48);
+          setError("");
+          setOpen(true);
+        }}
+      >
+        <span className="host-avatar" data-tone={tone}>
+          <HostIcon host={host} size={22} />
+        </span>
+        <span className="host-icon-edit-label">Change icon</span>
+      </button>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (!next) {
+            setSelected(host.icon_override ?? null);
+            setQuery("");
+            setResultCount(48);
+            setError("");
+          }
+        }}
+      >
+        <DialogContent className="host-icon-dialog" showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Change icon</DialogTitle>
+            <DialogDescription>
+              Choose an icon from selfh.st or UniFi.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="relative">
+            <Search className="pointer-events-none absolute top-2.5 left-2.5 size-4 text-muted-foreground" />
+            <Input
+              autoFocus
+              aria-label="Search icons"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setResultCount(48);
+              }}
+              placeholder="Search"
+              className="pl-8"
+            />
+          </div>
+          <div className="icon-picker-grid" role="listbox" aria-label="Icons">
+            {options.map((option) => (
+              <IconChoice
+                key={option.key}
+                host={host}
+                option={option}
+                selected={selected === option.key}
+                onSelect={() => setSelected(option.key)}
+              />
+            ))}
+            {options.length === 0 && (
+              <p className="col-span-3 p-4 text-center text-sm text-muted-foreground">
+                No matching icons.
+              </p>
+            )}
+          </div>
+          {options.length === resultCount && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="justify-self-center"
+              onClick={() => setResultCount((count) => count + 48)}
+            >
+              Show more icons
+            </Button>
+          )}
+          {selected && (
+            <button
+              type="button"
+              className="self-start text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+              onClick={() => setSelected(null)}
+            >
+              Use automatic icon
+            </button>
+          )}
+          {error && <p className="text-xs text-destructive">{error}</p>}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => void apply()}>Change</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function IconChoice({
+  host,
+  option,
+  selected,
+  onSelect,
+}: {
+  host: Host;
+  option: IconOption;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      className="icon-picker-choice"
+      data-selected={selected || undefined}
+      onClick={onSelect}
+    >
+      <span className="icon-picker-art">
+        <HostIcon host={{ ...host, icon_override: option.key }} size={40} />
+      </span>
+      <span className="icon-picker-name" title={option.name}>
+        {option.name}
+      </span>
+    </button>
+  );
+}
+
 /** What the device is, why the server thinks so, and a way to correct it. */
 function DeviceSection({
   host,
@@ -895,8 +1133,8 @@ function DeviceSection({
           <>
             <dt>Behind</dt>
             <dd title={host.parent_reason ?? undefined}>
-              {parent.name}
-              {parent.name !== parent.addresses[0] && (
+              {hostDisplayName(parent)}
+              {hostDisplayName(parent) !== parent.addresses[0] && (
                 <span className="mono ml-1.5 text-muted-foreground">
                   {parent.addresses[0]}
                 </span>

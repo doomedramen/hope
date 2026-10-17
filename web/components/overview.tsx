@@ -29,6 +29,7 @@ import {
   type Issue,
 } from "@/lib/fleet";
 import type { Bootstrap, Host } from "@/lib/protocol";
+import { hostDisplayName } from "@/lib/devices";
 
 export function Overview({
   data,
@@ -540,7 +541,7 @@ function IssueRow({
         aria-label={issue.severity}
       />
       <span className="min-w-0">
-        <span className="issue-host">{issue.host.name}</span>
+        <span className="issue-host">{hostDisplayName(issue.host)}</span>
         <span className="issue-message block">{issue.message}</span>
       </span>
       <span className="issue-when">
@@ -591,7 +592,7 @@ function Leaders({
                 onClick={() => onSelect(host)}
               >
                 <span className="leader-name">
-                  {host.name}
+                  {hostDisplayName(host)}
                   {detail?.(host) && (
                     <span className="ml-1.5 text-muted-foreground">
                       {detail(host)}

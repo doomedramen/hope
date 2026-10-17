@@ -860,12 +860,13 @@ test.describe.serial("H.O.P.E console", () => {
 
   test("devices show their type and evidence, and the type can be corrected", async ({
     page,
+    request,
   }) => {
     await page.goto("/?view=hosts");
-    await page
-      .getByRole("table")
-      .getByText("atlas-nas", { exact: true })
-      .click();
+    const atlasRow = page.getByRole("row").filter({ hasText: "atlas-nas" });
+    if ((await atlasRow.getAttribute("data-state")) !== "selected") {
+      await atlasRow.click();
+    }
     const device = page.getByTestId("device");
     // Its name says what it is.
     await expect(device).toContainText("NAS");
@@ -890,6 +891,36 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByText("atlas-nas is back to automatic detection."),
     ).toBeVisible();
     await expect(device).not.toContainText("set by you");
+
+    await page.getByRole("button", { name: "Change icon" }).click();
+    const iconDialog = page.getByRole("dialog", { name: "Change icon" });
+    await iconDialog
+      .getByRole("textbox", { name: "Search icons" })
+      .fill("Xbox");
+    await iconDialog.getByRole("option", { name: /Xbox/ }).first().click();
+    await iconDialog
+      .getByRole("button", { name: "Change", exact: true })
+      .click();
+    await expect(iconDialog).toHaveCount(0);
+
+    await page.getByRole("tab", { name: "Settings", exact: true }).click();
+    await page
+      .getByRole("textbox", { name: "Name (Alias)" })
+      .fill("Cinema Xbox");
+    await page.getByRole("button", { name: "Save name" }).click();
+    await expect(
+      page.getByRole("row").filter({ hasText: "Cinema Xbox" }),
+    ).toBeVisible();
+    const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+    const renamed = bootstrap.hosts.find(
+      (host: { name: string }) => host.name === "atlas-nas",
+    );
+    expect(renamed.name_override).toBe("Cinema Xbox");
+    expect(renamed.icon_override).toMatch(/^(?:selfhst:[a-z0-9-]+|unifi:\d+)$/);
+    const reset = await request.put(`/api/v1/hosts/${renamed.id}/identity`, {
+      data: { name: null, icon: null },
+    });
+    expect(reset.ok()).toBeTruthy();
   });
   test("each range chooses how often it is scanned in the background", async ({
     page,

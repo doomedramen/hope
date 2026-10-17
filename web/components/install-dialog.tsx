@@ -20,6 +20,7 @@ import {
   FieldDescription,
 } from "@/components/ui/field";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { hostDisplayName } from "@/lib/devices";
 import {
   Select,
   SelectTrigger,
@@ -586,7 +587,7 @@ function SshInstall({ host }: { host: Host }) {
             disabled={!verified || !username || (!password && !key) || busy}
             onClick={install}
           >
-            Install on {host.name}
+            Install on {hostDisplayName(host)}
           </Button>
           {history.length > 0 && (
             <div className="flex flex-col gap-2" data-testid="ssh-history">

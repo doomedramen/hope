@@ -467,3 +467,41 @@ pub async fn set_device_type(
     state.changed();
     Ok(Json(host))
 }
+
+/// Set a host's display name and icon, or clear either override with null.
+pub async fn set_host_identity(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+    Json(mut body): Json<hope_protocol::HostIdentityUpdate>,
+) -> ApiResult<Json<Host>> {
+    if let Some(name) = &mut body.name {
+        *name = name.trim().to_string();
+        if name.is_empty() || name.chars().count() > 80 {
+            return Err(ApiError::bad("Name must be between 1 and 80 characters"));
+        }
+    }
+    if let Some(icon) = &body.icon {
+        let valid = icon.strip_prefix("selfhst:").is_some_and(|slug| {
+            !slug.is_empty()
+                && slug.len() <= 80
+                && slug
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        }) || icon
+            .strip_prefix("unifi:")
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()));
+        if !valid {
+            return Err(ApiError::bad(
+                "Icon must be a selfh.st slug or UniFi fingerprint ID",
+            ));
+        }
+    }
+
+    let _guard = state.0.writes.lock().await;
+    let mut host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
+    host.name_override = body.name;
+    host.icon_override = body.icon;
+    state.save_host(&host).await?;
+    state.changed();
+    Ok(Json(host))
+}

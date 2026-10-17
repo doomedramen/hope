@@ -208,7 +208,9 @@ export function fleetIssues(hosts: Host[], now = Date.now() / 1000): Issue[] {
     .sort(
       (a, b) =>
         rank(a.severity) - rank(b.severity) ||
-        a.host.name.localeCompare(b.host.name),
+        (a.host.name_override || a.host.name).localeCompare(
+          b.host.name_override || b.host.name,
+        ),
     );
 }
 
@@ -373,6 +375,7 @@ export function matchesSearch(host: Host, query: string) {
   if (!needle) return true;
   return [
     host.name,
+    host.name_override ?? "",
     ...host.addresses,
     ...host.macs,
     host.inventory?.os ?? "",

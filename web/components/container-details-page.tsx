@@ -15,6 +15,7 @@ import { ContainerAppIcon } from "@/components/container-app-icon";
 import { Button } from "@/components/ui/button";
 import type { Container, Host } from "@/lib/protocol";
 import { bytes, percentage } from "@/lib/api";
+import { hostDisplayName } from "@/lib/devices";
 
 export function ContainerDetailsPage({
   host,
@@ -34,12 +35,12 @@ export function ContainerDetailsPage({
     <section className="container-page" aria-label="Container details">
       <Button variant="outline" size="sm" onClick={onBack}>
         <ArrowLeft data-icon="inline-start" />
-        Back to {host.name}
+        Back to {hostDisplayName(host)}
       </Button>
       <header className="container-page-header">
         <ContainerAppIcon image={container.image} name={container.name} />
         <div className="min-w-0 flex-1">
-          <p className="eyebrow">Container on {host.name}</p>
+          <p className="eyebrow">Container on {hostDisplayName(host)}</p>
           <h1 className="truncate">{container.name}</h1>
           <p className="mono break-all text-sm text-muted-foreground">
             {container.image}
@@ -101,7 +102,7 @@ export function ContainerDetailsPage({
         <dl className="container-info-grid">
           <div>
             <dt>Host</dt>
-            <dd>{host.name}</dd>
+            <dd>{hostDisplayName(host)}</dd>
           </div>
           <div>
             <dt>Status</dt>

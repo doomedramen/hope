@@ -88,6 +88,15 @@ export type DeviceTypeUpdate = {
  * A `DeviceGuess::kind`, or null to return to automatic detection.
  */
 kind: string | null, };
+export type HostIdentityUpdate = {
+/**
+ * Administrator-chosen name, or null to use discovery data.
+ */
+name: string | null,
+/**
+ * `selfhst:<slug>` or `unifi:<fingerprint id>`, or null for automatic matching.
+ */
+icon: string | null, };
 export type AuthStatus = { setup_required: boolean, authenticated: boolean, };
 export type OkResponse = { ok: boolean, };
 export type ReportResponse = { accepted: boolean, duplicate: boolean,
@@ -203,7 +212,7 @@ export type Network = { id: string, name: string, cidr: string, enabled: boolean
 interval_minutes: number, };
 export type ScanJob = { id: string, network_id: string, cidr: string, status: ScanStatus, scanned: number, total: number, discovered: number, started_at: number, finished_at: number | null, error: string | null, };
 export type Service = { port: number, name: string, observed_at: number, };
-export type Host = { id: string, agent_id: string | null, name: string, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>,
+export type Host = { id: string, agent_id: string | null, name: string, name_override: string | null, icon_override: string | null, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>,
 /**
  * Manufacturer registered for the MAC address prefix (IEEE OUI).
  */

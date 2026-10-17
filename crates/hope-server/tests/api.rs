@@ -1398,6 +1398,39 @@ async fn device_types_can_be_set_by_hand_and_scan_intervals_are_validated() {
     .await;
     assert_eq!(automatic["device"]["kind"], "hypervisor");
     assert_eq!(automatic["device"]["manual"], false);
+    let (status, identity) = request(
+        &app,
+        "PUT",
+        "/api/v1/hosts/box/identity",
+        json!({"name":"  Plex  ","icon":"selfhst:plex"}),
+        auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(identity["name_override"], "Plex");
+    assert_eq!(identity["icon_override"], "selfhst:plex");
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/api/v1/hosts/box/identity",
+            json!({"name":"Plex","icon":"https://example.com/icon.png"}),
+            auth,
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, cleared) = request(
+        &app,
+        "PUT",
+        "/api/v1/hosts/box/identity",
+        json!({"name":null,"icon":null}),
+        auth,
+    )
+    .await;
+    assert_eq!(cleared["name_override"], Value::Null);
+    assert_eq!(cleared["icon_override"], Value::Null);
     assert_eq!(
         request(
             &app,

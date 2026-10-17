@@ -14,6 +14,7 @@ import {
   worstDisk,
 } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
+import { hostDisplayName } from "@/lib/devices";
 
 const FILTERS = [
   ["all", "All agents"],
@@ -44,7 +45,12 @@ export function AgentsPage({
   const agents = hosts.filter((host) => host.agent_id);
   const matching = agents
     .filter((host) =>
-      [host.name, host.agent_id, host.agent_version, ...host.addresses]
+      [
+        hostDisplayName(host),
+        host.agent_id,
+        host.agent_version,
+        ...host.addresses,
+      ]
         .join(" ")
         .toLowerCase()
         .includes(search.trim().toLowerCase()),
@@ -112,7 +118,7 @@ export function AgentsPage({
               <article
                 key={host.id}
                 className="panel agent-card"
-                aria-label={host.name}
+                aria-label={hostDisplayName(host)}
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Button
@@ -121,7 +127,7 @@ export function AgentsPage({
                     onClick={() => onSelect(host)}
                   >
                     <Bot />
-                    {host.name}
+                    {hostDisplayName(host)}
                   </Button>
                   <span className="status-pill" data-tone={tone}>
                     {FILTERS.find(([key]) => key === state)?.[1]}
