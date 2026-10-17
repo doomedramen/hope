@@ -107,6 +107,15 @@ function extended(sample: number) {
         state: "running",
         status: "Up 2 days",
         ports: "2283/tcp",
+        cpu_percent: 33.4,
+        memory_used_bytes: 321 * 1024 * 1024,
+        memory_limit_bytes: 2 * 1024 * 1024 * 1024,
+        memory_percent: 15.7,
+        network_rx_bytes: 64 * 1024 * 1024,
+        network_tx_bytes: 8 * 1024 * 1024,
+        block_read_bytes: 1 * 1024 * 1024 * 1024,
+        block_write_bytes: 2 * 1024 * 1024,
+        pids: 18,
       },
     ],
     monitors: [
@@ -179,7 +188,7 @@ async function seed(request: APIRequestContext) {
         inventory,
       },
     });
-    expect(enrolled.ok()).toBeTruthy();
+    expect(enrolled.ok(), await enrolled.text()).toBeTruthy();
     const credential = (await enrolled.json()).credential;
     for (let sample = 0; sample < 5; sample++) {
       const response = await request.post("/api/v1/agent/report", {
@@ -310,6 +319,21 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByAltText("immich-server application icon"),
     ).toBeVisible();
+    await expect(
+      hostDetails.getByRole("columnheader", { name: "CPU" }),
+    ).toBeVisible();
+    await expect(hostDetails.getByText("33.4%", { exact: true })).toBeVisible();
+    await hostDetails.getByRole("button", { name: "immich-server" }).click();
+    await expect(page).toHaveURL(/view=container/);
+    await expect(
+      page.getByRole("heading", { name: "immich-server" }),
+    ).toBeVisible();
+    await expect(page.getByText("321.0 MiB / 2.0 GiB")).toBeVisible();
+    await page.getByRole("button", { name: "Back to atlas-nas" }).click();
+    await expect(
+      hostDetails.getByRole("tab", { name: "Containers" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Close host details" }).click();
     await page
       .getByRole("row")
       .filter({ hasText: "studio-mac" })

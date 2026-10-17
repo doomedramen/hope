@@ -433,6 +433,24 @@ pub struct Container {
     pub state: String,
     pub status: String,
     pub ports: String,
+    #[serde(default)]
+    pub cpu_percent: Option<f64>,
+    #[serde(default)]
+    pub memory_used_bytes: Option<f64>,
+    #[serde(default)]
+    pub memory_limit_bytes: Option<f64>,
+    #[serde(default)]
+    pub memory_percent: Option<f64>,
+    #[serde(default)]
+    pub network_rx_bytes: Option<f64>,
+    #[serde(default)]
+    pub network_tx_bytes: Option<f64>,
+    #[serde(default)]
+    pub block_read_bytes: Option<f64>,
+    #[serde(default)]
+    pub block_write_bytes: Option<f64>,
+    #[serde(default)]
+    pub pids: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, Default)]

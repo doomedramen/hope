@@ -25,7 +25,12 @@ import {
   type SortKey,
 } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
-import { deviceFingerprintId, deviceIcon, deviceLabel } from "@/lib/devices";
+import {
+  deviceAppIcon,
+  deviceFingerprintId,
+  deviceIcon,
+  deviceLabel,
+} from "@/lib/devices";
 
 /** A glyph for what the host most likely is (the server's device guess). */
 export function HostIcon({ host, size }: { host: Host; size: number }) {
@@ -40,10 +45,42 @@ export function HostIcon({ host, size }: { host: Host; size: number }) {
       />
     );
   }
+  const appIcon = deviceAppIcon(host);
+  if (appIcon) {
+    return <HostAppIcon key={appIcon} slug={appIcon} host={host} size={size} />;
+  }
   return createElement(deviceIcon(host), {
     size,
     "aria-label": deviceLabel(host) ?? undefined,
   });
+}
+
+function HostAppIcon({
+  slug,
+  host,
+  size,
+}: {
+  slug: string;
+  host: Host;
+  size: number;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return createElement(deviceIcon(host), {
+      size,
+      "aria-label": deviceLabel(host) ?? undefined,
+    });
+  }
+  return (
+    <Image
+      src={`https://cdn.jsdelivr.net/gh/selfhst/icons@main/png/${slug}.png`}
+      width={size}
+      height={size}
+      alt={`${slug} application icon`}
+      unoptimized
+      onError={() => setFailed(true)}
+    />
+  );
 }
 
 function FingerprintIcon({

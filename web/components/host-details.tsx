@@ -37,12 +37,20 @@ import { StatusPill } from "@/components/status-pill";
 import { HostIcon } from "@/components/host-table";
 import { ContainerAppIcon } from "@/components/container-app-icon";
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
   HistoryRange,
   MetricHistory,
   useHistory,
   type HistoryWindow,
 } from "@/components/metric-history";
-import { bytes, percent0, post, put, rate } from "@/lib/api";
+import { bytes, percent0, percentage, post, put, rate } from "@/lib/api";
 import {
   DEVICE_KINDS,
   confidenceLabel,
@@ -71,6 +79,7 @@ export function HostDetails({
   install,
   refresh,
   notify,
+  onOpenContainer,
 }: {
   host: Host;
   hosts: Host[];
@@ -86,6 +95,7 @@ export function HostDetails({
   install: () => void;
   refresh: () => void;
   notify: (message: string, tone?: Tone) => void;
+  onOpenContainer: (containerId: string) => void;
 }) {
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
@@ -453,43 +463,70 @@ export function HostDetails({
                     {metrics?.containers.length ?? 0}
                   </span>
                 </h3>
-                <div className="container-grid">
-                  {containers.map((container) => (
-                    <article className="container-card" key={container.id}>
-                      <div className="flex min-w-0 items-start justify-between gap-3">
-                        <div className="flex min-w-0 items-start gap-2.5">
-                          <ContainerAppIcon
-                            image={container.image}
-                            name={container.name}
-                          />
-                          <div className="min-w-0">
-                            <strong className="block truncate">
-                              {container.name}
-                            </strong>
-                            <span className="mono block truncate text-xs text-muted-foreground">
-                              {container.image}
-                            </span>
+                <Table className="container-table">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Container</TableHead>
+                      <TableHead>State</TableHead>
+                      <TableHead>CPU</TableHead>
+                      <TableHead>Memory</TableHead>
+                      <TableHead>Network I/O</TableHead>
+                      <TableHead>Block I/O</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {containers.map((container) => (
+                      <TableRow key={container.id}>
+                        <TableCell>
+                          <div className="container-table-name">
+                            <ContainerAppIcon
+                              image={container.image}
+                              name={container.name}
+                            />
+                            <div className="min-w-0">
+                              <Button
+                                variant="link"
+                                className="container-name-link"
+                                onClick={() => onOpenContainer(container.id)}
+                              >
+                                {container.name}
+                              </Button>
+                              <span className="mono block max-w-64 truncate text-xs text-muted-foreground">
+                                {container.image}
+                              </span>
+                            </div>
                           </div>
-                        </div>
-                        <span
-                          className="status-pill shrink-0"
-                          data-tone={
-                            container.state === "running" ? "good" : "neutral"
-                          }
-                        >
-                          {container.state}
-                        </span>
-                      </div>
-                      <div className="container-meta">
-                        <span>{container.status}</span>
-                        {container.ports && <span>{container.ports}</span>}
-                        <span className="mono">
-                          {container.id.slice(0, 12)}
-                        </span>
-                      </div>
-                    </article>
-                  ))}
-                </div>
+                        </TableCell>
+                        <TableCell>
+                          <span
+                            className="status-pill"
+                            data-tone={
+                              container.state === "running" ? "good" : "neutral"
+                            }
+                          >
+                            {container.state}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          {percentage(container.cpu_percent)}
+                        </TableCell>
+                        <TableCell>
+                          {container.memory_used_bytes == null
+                            ? "—"
+                            : `${bytes(container.memory_used_bytes)} / ${bytes(container.memory_limit_bytes)} (${percentage(container.memory_percent)})`}
+                        </TableCell>
+                        <TableCell>
+                          ↓ {bytes(container.network_rx_bytes)} · ↑{" "}
+                          {bytes(container.network_tx_bytes)}
+                        </TableCell>
+                        <TableCell>
+                          ↓ {bytes(container.block_read_bytes)} · ↑{" "}
+                          {bytes(container.block_write_bytes)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               </section>
             </TabsContent>
           )}

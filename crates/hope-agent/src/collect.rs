@@ -26,6 +26,76 @@ struct DockerContainer {
     ports: String,
 }
 
+#[derive(serde::Deserialize)]
+struct DockerStats {
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "CPUPerc")]
+    cpu_percent: String,
+    #[serde(rename = "MemUsage")]
+    memory_usage: String,
+    #[serde(rename = "MemPerc")]
+    memory_percent: String,
+    #[serde(rename = "NetIO")]
+    network_io: String,
+    #[serde(rename = "BlockIO")]
+    block_io: String,
+    #[serde(rename = "PIDs")]
+    pids: String,
+}
+
+fn docker_percent(value: &str) -> Option<f64> {
+    value.trim().strip_suffix('%')?.trim().parse().ok()
+}
+
+fn docker_bytes(value: &str) -> Option<f64> {
+    let value = value.trim();
+    let split = value.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let number = value[..split].parse::<f64>().ok()?;
+    let unit = value[split..].trim();
+    let multiplier = match unit {
+        "B" => 1.0,
+        "kB" | "KB" => 1_000.0,
+        "KiB" => 1_024.0,
+        "MB" => 1_000_000.0,
+        "MiB" => 1_048_576.0,
+        "GB" => 1_000_000_000.0,
+        "GiB" => 1_073_741_824.0,
+        "TB" => 1_000_000_000_000.0,
+        "TiB" => 1_099_511_627_776.0,
+        _ => return None,
+    };
+    Some(number * multiplier)
+}
+
+fn docker_pair(value: &str, parse: fn(&str) -> Option<f64>) -> (Option<f64>, Option<f64>) {
+    let Some((left, right)) = value.split_once('/') else {
+        return (None, None);
+    };
+    (parse(left), parse(right))
+}
+
+fn apply_docker_stats(containers: &mut [Container], output: &str) {
+    for stats in output
+        .lines()
+        .take(128)
+        .filter_map(|line| serde_json::from_str::<DockerStats>(line).ok())
+    {
+        let Some(container) = containers.iter_mut().find(|c| c.name == stats.name) else {
+            continue;
+        };
+        container.cpu_percent = docker_percent(&stats.cpu_percent);
+        (container.memory_used_bytes, container.memory_limit_bytes) =
+            docker_pair(&stats.memory_usage, docker_bytes);
+        container.memory_percent = docker_percent(&stats.memory_percent);
+        (container.network_rx_bytes, container.network_tx_bytes) =
+            docker_pair(&stats.network_io, docker_bytes);
+        (container.block_read_bytes, container.block_write_bytes) =
+            docker_pair(&stats.block_io, docker_bytes);
+        container.pids = stats.pids.trim().parse().ok();
+    }
+}
+
 fn parse_docker_output(output: &str) -> Vec<Container> {
     output
         .lines()
@@ -44,18 +114,40 @@ fn parse_docker_output(output: &str) -> Vec<Container> {
             state: item.state,
             status: item.status,
             ports: item.ports,
+            cpu_percent: None,
+            memory_used_bytes: None,
+            memory_limit_bytes: None,
+            memory_percent: None,
+            network_rx_bytes: None,
+            network_tx_bytes: None,
+            block_read_bytes: None,
+            block_write_bytes: None,
+            pids: None,
         })
         .collect()
 }
 
 async fn docker_containers() -> Option<Vec<Container>> {
-    command(
+    let output = command(
         "docker",
         &["ps", "--all", "--no-trunc", "--format", "{{json .}}"],
         2,
     )
-    .await
-    .map(|output| parse_docker_output(&output))
+    .await?;
+    let mut containers = parse_docker_output(&output);
+    if containers
+        .iter()
+        .any(|container| container.state == "running")
+        && let Some(output) = command(
+            "docker",
+            &["stats", "--no-stream", "--format", "{{json .}}"],
+            5,
+        )
+        .await
+    {
+        apply_docker_stats(&mut containers, &output);
+    }
+    Some(containers)
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -746,6 +838,26 @@ not json
         assert_eq!(containers[0].image, "nginx:latest");
         assert_eq!(containers[0].ports, "0.0.0.0:8080->80/tcp");
         assert_eq!(containers[1].state, "exited");
+        assert_eq!(containers[0].cpu_percent, None);
+    }
+
+    #[test]
+    fn docker_stats_attach_current_usage_to_running_containers() {
+        let mut containers = parse_docker_output(
+            r#"{"ID":"abc123","Names":"web","Image":"nginx:latest","State":"running","Status":"Up 2 hours","Ports":""}
+{"ID":"def456","Names":"db","Image":"postgres:16","State":"exited","Status":"Exited (0)","Ports":""}"#,
+        );
+        apply_docker_stats(
+            &mut containers,
+            r#"{"Name":"web","CPUPerc":"0.50%","MemUsage":"12.5MiB / 1GiB","MemPerc":"1.22%","NetIO":"1.5kB / 2MiB","BlockIO":"3MB / 4KiB","PIDs":"7"}"#,
+        );
+        assert_eq!(containers[0].cpu_percent, Some(0.5));
+        assert_eq!(containers[0].memory_used_bytes, Some(12.5 * 1_048_576.0));
+        assert_eq!(containers[0].memory_limit_bytes, Some(1_073_741_824.0));
+        assert_eq!(containers[0].network_rx_bytes, Some(1_500.0));
+        assert_eq!(containers[0].block_write_bytes, Some(4_096.0));
+        assert_eq!(containers[0].pids, Some(7));
+        assert_eq!(containers[1].cpu_percent, None);
     }
     #[tokio::test]
     async fn hanging_filesystems_do_not_accumulate_workers() {

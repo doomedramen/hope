@@ -96,6 +96,41 @@ export function deviceFingerprintId(host: Host): string | null {
   return null;
 }
 
+/** selfh.st artwork for hosts that are clearly named after a self-hosted app. */
+export function deviceAppIcon(host: Host): string | null {
+  const evidence = host.evidence;
+  const description = [
+    host.name,
+    host.device?.label,
+    evidence.mdns_name,
+    ...evidence.mdns_instances,
+    evidence.mdns_model,
+    evidence.upnp_friendly_name,
+    ...(host.metrics?.containers ?? []).flatMap((container) => [
+      container.name,
+      container.image,
+    ]),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  const apps: [RegExp, string][] = [
+    [/\bplex\b/, "plex"],
+    [/\bjellyfin\b/, "jellyfin"],
+    [/\bemby\b/, "emby"],
+    [/\bhome[ -]?assistant\b/, "home-assistant"],
+    [/\bimmich\b/, "immich"],
+    [/\bnextcloud\b/, "nextcloud"],
+    [/\bjellyseerr\b/, "jellyseerr"],
+    [/\bsonarr\b/, "sonarr"],
+    [/\bradarr\b/, "radarr"],
+    [/\bprowlarr\b/, "prowlarr"],
+    [/\bqbittorrent\b/, "qbittorrent"],
+  ];
+  return apps.find(([pattern]) => pattern.test(description))?.[1] ?? null;
+}
+
 /** What the device is, as specifically as known ("Proxmox VE", "Dishwasher"), or null. */
 export function deviceLabel(host: Host): string | null {
   if (host.device && host.device.kind !== "unknown") return host.device.label;

@@ -52,6 +52,7 @@ import {
 } from "@/components/settings-dialog";
 import { NetworksPage, INTERVALS } from "@/components/networks-page";
 import { AgentsPage } from "@/components/agents-page";
+import { ContainerDetailsPage } from "@/components/container-details-page";
 import { AccountDialog } from "@/components/account-dialog";
 import { NotificationsDialog } from "@/components/notifications-dialog";
 import { DiscoveryMenu } from "@/components/discovery-menu";
@@ -88,13 +89,15 @@ const NetworkMap = dynamic(
   { ssr: false, loading: () => <Skeleton className="h-[65vh] w-full" /> },
 );
 
-type View = "overview" | "map" | "hosts" | "host" | "networks" | "agents";
+type View =
+  "overview" | "map" | "hosts" | "host" | "container" | "networks" | "agents";
 type Mode = "topology" | "subnets" | "health";
 const VIEWS: View[] = [
   "overview",
   "map",
   "hosts",
   "host",
+  "container",
   "networks",
   "agents",
 ];
@@ -103,23 +106,35 @@ const TITLES: Record<View, string> = {
   map: "Devices",
   hosts: "Devices",
   host: "Host",
+  container: "Container",
   networks: "Networks",
   agents: "Agents",
 };
 
-function readLocation(): { view: View; host: string | null } {
-  if (typeof window === "undefined") return { view: "overview", host: null };
+function readLocation(): {
+  view: View;
+  host: string | null;
+  container: string | null;
+} {
+  if (typeof window === "undefined")
+    return { view: "overview", host: null, container: null };
   const params = new URLSearchParams(window.location.search);
   const view = params.get("view");
   const host = params.get("host");
+  const container = params.get("container");
+  const requestedView = VIEWS.includes(view as View)
+    ? (view as View)
+    : host
+      ? "host"
+      : "overview";
   // A shared host link without a view opens that host's page.
   return {
-    view: VIEWS.includes(view as View)
-      ? (view as View)
-      : host
+    view:
+      requestedView === "container" && (!host || !container)
         ? "host"
-        : "overview",
+        : requestedView,
     host,
+    container,
   };
 }
 
@@ -311,7 +326,13 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     };
   }, [refresh]);
   const go = useCallback(
-    (next: Partial<{ view: View; host: string | null }>) => {
+    (
+      next: Partial<{
+        view: View;
+        host: string | null;
+        container: string | null;
+      }>,
+    ) => {
       if (
         next.view === "map" ||
         next.view === "hosts" ||
@@ -325,6 +346,11 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
         else url.searchParams.set("view", target.view);
         if (target.host) url.searchParams.set("host", target.host);
         else url.searchParams.delete("host");
+        if (target.view !== "container" || !target.container)
+          target.container = null;
+        if (target.container)
+          url.searchParams.set("container", target.container);
+        else url.searchParams.delete("container");
         if (url.href !== window.location.href)
           window.history.pushState({}, "", url);
         return target;
@@ -630,7 +656,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       aria-label={label}
       aria-current={
         view === target ||
-        (target === "agents" && view === "host" && lastInventory === "agents")
+        (target === "agents" &&
+          (view === "host" || view === "container") &&
+          lastInventory === "agents")
           ? "page"
           : undefined
       }
@@ -654,7 +682,8 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             aria-current={
               view === "map" ||
               view === "hosts" ||
-              (view === "host" && lastInventory !== "agents")
+              ((view === "host" || view === "container") &&
+                lastInventory !== "agents")
                 ? "page"
                 : undefined
             }
@@ -893,6 +922,53 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             onSelect={selectHost}
             onInstall={() => setInstallOpen(true)}
           />
+        ) : view === "container" ? (
+          <div className="page">
+            {host && location.container ? (
+              (() => {
+                const container = host.metrics?.containers.find(
+                  (item) => item.id === location.container,
+                );
+                return container ? (
+                  <ContainerDetailsPage
+                    host={host}
+                    container={container}
+                    onBack={() => go({ view: "host", host: host.id })}
+                  />
+                ) : (
+                  <Empty className="min-h-[400px]">
+                    <EmptyHeader>
+                      <EmptyTitle>
+                        Container not in the latest report
+                      </EmptyTitle>
+                      <EmptyDescription>
+                        It may have stopped or been removed. Refresh the host
+                        report and try again.
+                      </EmptyDescription>
+                    </EmptyHeader>
+                    <Button
+                      variant="outline"
+                      onClick={() => go({ view: "host", host: host.id })}
+                    >
+                      Back to host
+                    </Button>
+                  </Empty>
+                );
+              })()
+            ) : (
+              <Empty className="min-h-[400px]">
+                <EmptyHeader>
+                  <EmptyTitle>Host not found</EmptyTitle>
+                  <EmptyDescription>
+                    The host is not in the inventory.
+                  </EmptyDescription>
+                </EmptyHeader>
+                <Button variant="outline" onClick={closeHostPage}>
+                  Back to devices
+                </Button>
+              </Empty>
+            )}
+          </div>
         ) : view === "host" ? (
           <div className="page">
             {host ? (
@@ -909,6 +985,13 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                   void refresh();
                 }}
                 notify={toast}
+                onOpenContainer={(containerId) =>
+                  go({
+                    view: "container",
+                    host: host.id,
+                    container: containerId,
+                  })
+                }
               />
             ) : (
               <Empty className="min-h-[400px]">
@@ -1188,6 +1271,13 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     void refresh();
                   }}
                   notify={toast}
+                  onOpenContainer={(containerId) =>
+                    go({
+                      view: "container",
+                      host: host.id,
+                      container: containerId,
+                    })
+                  }
                 />
               )}
             </div>

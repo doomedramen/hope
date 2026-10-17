@@ -172,6 +172,14 @@ fn extended(value: &Metrics) -> Result<(), &'static str> {
                 || !text(&container.state, 32)
                 || !text(&container.status, 256)
                 || !text(&container.ports, 512)
+                || !optional(container.cpu_percent, 1e6)
+                || !optional(container.memory_used_bytes, 1e18)
+                || !optional(container.memory_limit_bytes, 1e18)
+                || !optional(container.memory_percent, 1e6)
+                || !optional(container.network_rx_bytes, 1e18)
+                || !optional(container.network_tx_bytes, 1e18)
+                || !optional(container.block_read_bytes, 1e18)
+                || !optional(container.block_write_bytes, 1e18)
         })
     {
         return Err("Invalid containers");
@@ -226,6 +234,34 @@ pub fn metrics(value: &Metrics) -> ApiResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hope_protocol::Container;
+    #[test]
+    fn container_stats_must_be_finite_and_nonnegative() {
+        let mut report = Metrics {
+            containers: vec![Container {
+                id: "id".into(),
+                name: "web".into(),
+                image: "web:latest".into(),
+                state: "running".into(),
+                status: "Up".into(),
+                ports: String::new(),
+                cpu_percent: Some(1.5),
+                memory_used_bytes: Some(10.0),
+                memory_limit_bytes: Some(100.0),
+                memory_percent: Some(10.0),
+                network_rx_bytes: Some(1.0),
+                network_tx_bytes: Some(2.0),
+                block_read_bytes: Some(3.0),
+                block_write_bytes: Some(4.0),
+                pids: Some(1),
+            }],
+            ..Default::default()
+        };
+        assert!(metrics(&report).is_ok());
+        report.containers[0].memory_used_bytes = Some(-1.0);
+        assert!(metrics(&report).is_err());
+    }
+
     #[test]
     fn missing_is_valid_but_invalid_numbers_are_rejected() {
         assert!(metrics(&Metrics::default()).is_ok());

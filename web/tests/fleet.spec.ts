@@ -11,7 +11,7 @@ import {
   updatePlan,
   worstDisk,
 } from "../lib/fleet";
-import { deviceFingerprintId } from "../lib/devices";
+import { deviceAppIcon, deviceFingerprintId } from "../lib/devices";
 import type { Host, Metrics } from "../lib/protocol";
 
 const now = 1_700_000_000;
@@ -110,6 +110,11 @@ test("consumer device labels map to UniFi fingerprint icons", () => {
   expect(deviceFingerprintId(host({ name: "Kindle Paperwhite" }))).toBe("41");
   expect(deviceFingerprintId(host({ name: "Kindle Fire tablet" }))).toBe("67");
   expect(deviceFingerprintId(host({ name: "unidentified device" }))).toBeNull();
+});
+
+test("recognizable self-hosted app hosts use app artwork", () => {
+  expect(deviceAppIcon(host({ name: "Plex Media Server" }))).toBe("plex");
+  expect(deviceAppIcon(host({ name: "ordinary server" }))).toBeNull();
 });
 
 test("issues cover silent agents and full resources, most severe first", () => {

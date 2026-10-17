@@ -179,7 +179,7 @@ export type Container = { id: string, name: string, image: string,
 /**
  * Docker state such as running, exited, or created.
  */
-state: string, status: string, ports: string, };
+state: string, status: string, ports: string, cpu_percent: number | null, memory_used_bytes: number | null, memory_limit_bytes: number | null, memory_percent: number | null, network_rx_bytes: number | null, network_tx_bytes: number | null, block_read_bytes: number | null, block_write_bytes: number | null, pids: number | null, };
 export type Metrics = { cpu_percent: number | null, memory_used_bytes: number | null, memory_total_bytes: number | null,
 /**
  * Page cache plus buffers and reclaimable slab; part of the kernel's reclaimable memory.
