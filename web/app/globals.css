@@ -2367,6 +2367,9 @@ kbd.key {
     padding: 0 10px;
     gap: 6px;
   }
+  .sidebar nav {
+    flex-wrap: wrap;
+  }
   .sidebar .nav-item span {
     display: inline;
     font-size: 12px;
