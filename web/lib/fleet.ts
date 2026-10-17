@@ -23,7 +23,7 @@ export function hostState(
       : { key: "stale", label: "Agent stale", tone: "critical" };
   return now - host.last_seen < OBSERVED_SECONDS
     ? { key: "observed", label: "Observed", tone: "good" }
-    : { key: "unobserved", label: "Not recently observed", tone: "warning" };
+    : { key: "unobserved", label: "Not recently seen", tone: "neutral" };
 }
 
 export function sensorTone(celsius: number): Tone {
@@ -88,7 +88,6 @@ export type Issue = {
   severity: "critical" | "warning";
   kind:
     | "agent"
-    | "observation"
     | "cpu"
     | "memory"
     | "disk"
@@ -117,13 +116,6 @@ export function hostIssues(host: Host, now = Date.now() / 1000): Issue[] {
       message: host.last_report
         ? `Agent silent for ${duration(now - host.last_report)}`
         : "Agent has never reported",
-    });
-  if (state.key === "unobserved")
-    issues.push({
-      host,
-      severity: "warning",
-      kind: "observation",
-      message: `Not observed for ${duration(now - host.last_seen)}`,
     });
   if (state.key === "reporting") {
     const cpu = cpuPercent(host);
@@ -315,13 +307,13 @@ export const HOST_FILTERS: { key: HostFilter; label: string }[] = [
   { key: "reporting", label: "Reporting" },
   { key: "observed", label: "Observed" },
   { key: "stale", label: "Agent stale" },
-  { key: "unobserved", label: "Unobserved" },
+  { key: "unobserved", label: "Not recently seen" },
   { key: "revoked", label: "Revoked" },
 ];
 export const HOST_FILTER_HINTS: Partial<Record<HostFilter, string>> = {
   attention:
-    "Includes devices not seen recently, agents not reporting, and reported resource, service or monitor problems.",
-  unobserved: `Devices without an agent that have not been seen for ${OBSERVED_SECONDS / 60} minutes or more. These also appear under Needs attention; this does not prove they are offline.`,
+    "Agents not reporting, and reported resource, service or monitor problems.",
+  unobserved: `Devices without an agent that have not been seen for ${OBSERVED_SECONDS / 60} minutes or more. This does not mean the device is offline; it may be asleep or away from Wi-Fi.`,
 };
 export function matchesFilter(
   host: Host,

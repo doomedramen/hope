@@ -103,7 +103,7 @@ test("host state distinguishes reporting, stale, revoked, observed and unobserve
   ).toBe("neutral");
 });
 
-test("issues cover silent agents, unobserved hosts and full resources, most severe first", () => {
+test("issues cover silent agents and full resources, most severe first", () => {
   const full = host({
     id: "full",
     name: "full",
@@ -121,9 +121,7 @@ test("issues cover silent agents, unobserved hosts and full resources, most seve
   expect(
     hostIssues(host({ agent_id: "a", last_report: null }), now)[0].message,
   ).toBe("Agent has never reported");
-  expect(hostIssues(host({ last_seen: now - 7200 }), now)[0].message).toBe(
-    "Not observed for 2 h",
-  );
+  expect(hostIssues(host({ last_seen: now - 7200 }), now)).toEqual([]);
   // Stale metrics never raise resource issues.
   expect(
     hostIssues(
@@ -306,7 +304,7 @@ test("filters, search and sorting", () => {
   expect(matchesFilter(b, "unobserved", now)).toBeTruthy();
   expect(matchesFilter(a, "attention", now)).toBeTruthy();
   expect(matchesFilter(a, "unobserved", now)).toBeFalsy();
-  expect(matchesFilter(b, "attention", now)).toBeTruthy();
+  expect(matchesFilter(b, "attention", now)).toBeFalsy();
   expect(matchesSearch(b, "macos")).toBeTruthy();
   expect(matchesSearch(a, "22 ssh")).toBeTruthy();
   expect(matchesSearch(a, "nothing")).toBeFalsy();

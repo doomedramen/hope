@@ -158,13 +158,13 @@ export function Overview({
 
       <div className="stat-grid">
         <StatTile
-          label="Hosts responding"
+          label="Hosts recently seen"
           icon={<Server />}
           value={summary.online}
           unit={`/ ${hosts.length}`}
           hint={
             hosts.length
-              ? `${hosts.length - summary.online} quiet or stale`
+              ? `${hosts.length - summary.online} not seen recently`
               : "No hosts discovered yet"
           }
           onClick={() => onView("hosts")}
@@ -294,7 +294,7 @@ export function Overview({
                     <TriangleAlert />
                     Needs attention
                   </h3>
-                  <p>Stale agents, unobserved hosts and resources above 90%.</p>
+                  <p>Agents not reporting and reported resource, service or monitor problems.</p>
                 </div>
                 {summary.issues.length > 0 && (
                   <Button

@@ -8,7 +8,7 @@ Home network discovery, host monitoring and a lightweight reporting agent for up
 
 ![Overview: fleet health at a glance](docs/screenshots/overview.png)
 
-- **Overview**: hosts responding, agents reporting, what needs attention (stale agents, unobserved hosts, CPU, memory or filesystems above 90%), fleet-wide usage, the busiest hosts and a getting-started checklist until the first agent reports. Every figure comes from the latest sample; nothing is invented for missing data.
+- **Overview**: recently seen hosts, reporting agents, what needs attention (stale agents, CPU, memory or filesystems above 90%), fleet-wide usage, the busiest hosts and a getting-started checklist until the first agent reports. Devices not recently seen remain available in their own filter and do not count as an issue by themselves.
 - **Hosts**: status filters, sortable columns and inline CPU, memory and disk meters; click a host for details.
 - **Network map**: topology, subnet and health modes with provenance for reported, inferred and manual links, a minimap for large fleets, and drag-to-link.
 - **Host details**: live usage tiles with sparklines, hardware, storage meters and ZFS pools, per-device throughput, temperature sensors, interfaces and counters, systemd units, network monitors, GPUs, and 1 h / 6 h / 24 h / 7 d history that draws outages as gaps. Open a host's full page for a two-column chart dashboard: CPU, load average, memory (used, ZFS ARC, cache and buffers under the total), bandwidth, disk I/O, pool usage and I/O, temperatures, monitor latency, filesystem and GPU usage.

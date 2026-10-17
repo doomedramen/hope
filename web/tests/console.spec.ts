@@ -629,7 +629,7 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByRole("heading", { name: "Overview", exact: true }),
     ).toBeVisible();
     await expect(page.getByTestId("tile-hosts")).toContainText(
-      "Hosts responding",
+      "Hosts recently seen",
     );
     await expect(page.getByTestId("tile-attention")).toContainText(
       "3 critical",
