@@ -1,0 +1,20 @@
+assert_lefthook_installed: true
+
+pre-commit:
+  parallel: true
+  jobs:
+    - name: Rust formatting
+      run: cargo fmt --all -- --check
+    - name: Web formatting
+      run: npm --prefix web run format:check
+    - name: Web lint
+      run: npm --prefix web run lint
+
+pre-push:
+  jobs:
+    - name: Workspace checks
+      run: make check
+    - name: Shell checks
+      run: make shell-checks
+    - name: Web production build
+      run: npm --prefix web run build

@@ -45,7 +45,7 @@ export function HostTable({
   select: (id: string) => void;
 }) {
   const [sort, setSort] = useState<{ key: SortKey; descending: boolean }>({
-    key: "status",
+    key: "address",
     descending: false,
   });
   const sorted = useMemo(() => {

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Meter } from "@/components/ui/meter";
 import { percent0 } from "@/lib/api";
 import {
+  compareHosts,
   cpuPercent,
   hostState,
   memoryUsage,
@@ -41,12 +42,14 @@ export function AgentsPage({
   const [search, setSearch] = useState("");
   // Enrollment creates the host record before any report arrives. Keep revoked records too.
   const agents = hosts.filter((host) => host.agent_id);
-  const matching = agents.filter((host) =>
-    [host.name, host.agent_id, host.agent_version, ...host.addresses]
-      .join(" ")
-      .toLowerCase()
-      .includes(search.trim().toLowerCase()),
-  );
+  const matching = agents
+    .filter((host) =>
+      [host.name, host.agent_id, host.agent_version, ...host.addresses]
+        .join(" ")
+        .toLowerCase()
+        .includes(search.trim().toLowerCase()),
+    )
+    .sort(compareHosts("address"));
   const visible = matching.filter(
     (host) => filter === "all" || agentState(host) === filter,
   );

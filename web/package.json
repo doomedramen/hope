@@ -8,6 +8,7 @@
     "build": "next build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
+    "hooks:install": "lefthook install",
     "test:e2e": "playwright test",
     "format": "prettier --write app components/*.tsx lib tests playwright.config.ts",
     "format:check": "prettier --check app components/*.tsx lib tests playwright.config.ts"
@@ -35,6 +36,7 @@
     "@types/react-dom": "^19.2.0",
     "eslint": "^9.39.0",
     "eslint-config-next": "^16.2.0",
+    "lefthook": "2.2.2",
     "prettier": "^3.9.9",
     "tailwindcss": "^4.2.0",
     "typescript": "^5.9.3"

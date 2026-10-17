@@ -100,10 +100,14 @@ Agent installation needs a signed release published to `./releases` first ([Sign
 
 Requirements: Rust 1.96 (edition 2024), Node 26 with npm, and for the installer/release tests Python 3 and OpenSSL; ShellCheck is used for shell linting.
 
+Install the project Git hooks once after installing web dependencies. Pre-commit checks Rust formatting and web formatting/lint; pre-push runs workspace tests and lint, shell checks, and the web production build.
+
 ```sh
 make types                          # regenerate web/lib/protocol.ts from the Rust protocol (never overlap with a web build)
+npm --prefix web ci
+npm --prefix web run hooks:install  # Lefthook: pre-commit and pre-push
 cargo build --release --locked --workspace
-npm --prefix web ci && npm --prefix web run build     # static export in web/out
+npm --prefix web run build             # static export in web/out
 HOPE_SERVER_URL=http://localhost:8080 target/release/hope-server
 ```
 

@@ -280,7 +280,11 @@ if [ -d "$state" ] && [ ! -L "$state" ]; then
         mv -f "$out" "$state/update-result"
     } || true
 fi
-exit "$rc"
+exit_rc=$rc
+# Retry only downloads, which can fail transiently. Signature, state and installer failures need an
+# operator or a new server request; restarting those automatically can delay a later valid update.
+if [ "$rc" -ne 0 ] && [ "$code" = DOWNLOAD_FAILED ]; then exit_rc=75; fi
+exit "$exit_rc"
 UPDATER_SCRIPT_END
     } > "$updater_bin.new" && chmod 755 "$updater_bin.new" && mv -f "$updater_bin.new" "$updater_bin" || return 1
     if is_linux; then
@@ -304,6 +308,7 @@ ExecStart="$updater_bin"
 TimeoutStartSec=1800
 Restart=on-failure
 RestartSec=5min
+RestartPreventExitStatus=1
 EOF
         mv -f "$updater_path_unit.new" "$updater_path_unit" && mv -f "$updater_service_unit.new" "$updater_service_unit" || return 1
         [ "$no_manager" = 0 ] || return 0

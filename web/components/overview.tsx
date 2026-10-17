@@ -294,7 +294,10 @@ export function Overview({
                     <TriangleAlert />
                     Needs attention
                   </h3>
-                  <p>Agents not reporting and reported resource, service or monitor problems.</p>
+                  <p>
+                    Agents not reporting and reported resource, service or
+                    monitor problems.
+                  </p>
                 </div>
                 {summary.issues.length > 0 && (
                   <Button

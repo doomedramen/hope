@@ -795,6 +795,10 @@ class Updater(Base):
         service_unit = (root / 'etc/systemd/system/hope-agent-update.service').read_text()
         self.assertIn('Type=oneshot', service_unit)
         self.assertIn(f'ExecStart="{wrapper}"', service_unit)
+        self.assertIn('Restart=on-failure', service_unit)
+        self.assertIn('RestartSec=5min', service_unit)
+        self.assertIn('RestartPreventExitStatus=1', service_unit)
+        self.assertIn('exit_rc=75', wrapper.read_text())
         self.assertIn('systemctl[system] enable --now hope-agent-update.path', self.env.log())
 
     def test_the_updater_holds_no_secret(self):
