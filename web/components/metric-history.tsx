@@ -207,6 +207,10 @@ export function MetricHistory({
     (p) => p.metrics.memory_cached_bytes != null,
   );
   const hasArc = points.some((p) => p.metrics.memory_zfs_arc_bytes != null);
+  const hasSwap = points.some(
+    (p) =>
+      p.metrics.swap_used_bytes != null || p.metrics.swap_total_bytes != null,
+  );
   const hasLoad = points.some((p) => p.metrics.load_average);
   return (
     <div className="charts flex flex-col gap-5">
@@ -256,8 +260,9 @@ export function MetricHistory({
           ...(hasBreakdown
             ? [{ key: "cache", label: "Cache and buffers", color: SLOTS[2] }]
             : []),
+          ...(hasSwap ? [{ key: "swap", label: "Swap", color: SLOTS[3] }] : []),
         ]}
-        total={{ key: "total", label: "Total" }}
+        total={{ key: "total", label: hasSwap ? "RAM + swap" : "Total" }}
         data={series((m) => {
           const arc = m.memory_zfs_arc_bytes;
           const used = m.memory_used_bytes;
@@ -268,8 +273,12 @@ export function MetricHistory({
               m.memory_cached_bytes == null
                 ? null
                 : m.memory_cached_bytes / GIB,
+            swap: m.swap_used_bytes == null ? null : m.swap_used_bytes / GIB,
             total:
-              m.memory_total_bytes == null ? null : m.memory_total_bytes / GIB,
+              m.memory_total_bytes == null ||
+              (hasSwap && m.swap_total_bytes == null)
+                ? null
+                : (m.memory_total_bytes + (m.swap_total_bytes ?? 0)) / GIB,
           };
         })}
         format={gib}

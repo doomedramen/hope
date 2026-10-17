@@ -749,6 +749,8 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(details.getByTestId("chart-Memory")).toContainText(
       "Cache and buffers5.59 GiB",
     );
+    await expect(details.getByTestId("chart-Memory")).toContainText("Swap");
+    await expect(details.getByTestId("chart-Memory")).toContainText("0.09 GiB");
     await expect(details.getByTestId("chart-Disk I/O")).toContainText(
       "nvme0n1 (root) · 12% busy",
     );

@@ -62,11 +62,14 @@ export function isGuestStorage(disk: Disk): boolean {
 
 /** The fullest filesystem a host reports, or null without any usable mount. */
 export function worstDisk(host: Host): { disk: Disk; percent: number } | null {
-  const disks = host.metrics?.disks.length
-    ? host.metrics.disks
-    : (host.inventory?.disks ?? []);
+  const byMount = new Map<string, Disk>();
+  for (const disk of host.inventory?.disks ?? []) byMount.set(disk.mount, disk);
+  // A metrics sample can omit mounts if the OS mount list is truncated. Keep
+  // inventory mounts as a fallback, while letting the latest reading replace
+  // the same mount when both sources contain it.
+  for (const disk of host.metrics?.disks ?? []) byMount.set(disk.mount, disk);
   let worst: { disk: Disk; percent: number } | null = null;
-  for (const disk of disks) {
+  for (const disk of byMount.values()) {
     if (isGuestStorage(disk)) continue;
     const percent = diskPercent(disk);
     if (percent != null && (!worst || percent > worst.percent))

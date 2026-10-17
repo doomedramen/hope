@@ -175,6 +175,42 @@ test("issues cover silent agents and full resources, most severe first", () => {
   ).toEqual(["agent"]);
 });
 
+test("fullest filesystem keeps the root disk when the latest sample omits it", () => {
+  const root = {
+    name: "/dev/mapper/vg-root",
+    mount: "/",
+    filesystem: "ext4",
+    total_bytes: 30 * 1024 ** 3,
+    available_bytes: 13.37 * 1024 ** 3,
+  };
+  const shared = {
+    name: "shared",
+    mount: "/mnt/shared",
+    filesystem: "nfs4",
+    total_bytes: 100 * 1024 ** 3,
+    available_bytes: 96 * 1024 ** 3,
+  };
+  const result = worstDisk(
+    host({
+      metrics: { ...metrics, disks: [shared] },
+      inventory: {
+        hostname: "container",
+        os: "Linux",
+        architecture: "x86_64",
+        cpu_model: "CPU",
+        cpu_cores: 3,
+        memory_total_bytes: 5.42 * 1024 ** 3,
+        interfaces: [],
+        disks: [root],
+        gpus: [],
+        collectors: [],
+      },
+    }),
+  );
+  expect(result?.disk.mount).toBe("/");
+  expect(result?.percent).toBeCloseTo(55.43, 1);
+});
+
 test("pools, sensors, failed units and down monitors raise issues only while reporting", () => {
   const rich = host({
     agent_id: "a",
