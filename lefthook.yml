@@ -21,6 +21,6 @@ pre-push:
     - name: Generated protocol
       run: make protocol-check
     - name: Installer and release tests
-      run: make installer-tests release-tests docs-tests
+      run: make script-checks docs-tests
     - name: Web build and browser tests
       run: make browser-checks

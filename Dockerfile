@@ -36,6 +36,21 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && mkdir -p /build/dist \
     && cp /build/target/retention-benchmark.json /build/dist/retention-benchmark.json
 
+# The installer harness relies on Linux tools and uname, even when hooks run on macOS.
+FROM debian:bookworm-slim AS script-checks
+RUN apt-get update && apt-get install -y --no-install-recommends python3 openssl make ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY Makefile Cargo.toml ./
+COPY scripts ./scripts
+COPY install ./install
+COPY ct ./ct
+COPY json ./json
+COPY .github ./.github
+COPY crates ./crates
+COPY tests/installer ./tests/installer
+COPY tests/release ./tests/release
+RUN make installer-tests release-tests
+
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libcap2-bin libc-bin && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 hope && useradd --uid 10001 --gid hope --no-create-home hope \

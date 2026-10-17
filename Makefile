@@ -1,4 +1,4 @@
-.PHONY: check build run types test installer-tests release-tests docs-tests bench-agent shell-checks linux-checks browser-checks protocol-check
+.PHONY: check build run types test installer-tests release-tests docs-tests bench-agent shell-checks linux-checks browser-checks protocol-check script-checks
 types:
 	./scripts/generate-types.sh
 check:
@@ -39,3 +39,5 @@ browser-checks:
 	npm --prefix web run build
 	cargo build --locked -p hope-server
 	npm --prefix web run test:e2e
+script-checks:
+	docker build --target script-checks -t hope:script-checks .
