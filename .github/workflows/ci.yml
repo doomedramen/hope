@@ -88,6 +88,7 @@ jobs:
       - run: npm --prefix web run typecheck
       - run: npm --prefix web run lint
       - run: npm --prefix web run build
+      - run: cargo build --locked -p hope-server
       - run: npx playwright install --with-deps chromium
         working-directory: web
       - run: npm --prefix web run test:e2e
