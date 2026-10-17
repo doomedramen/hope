@@ -2347,6 +2347,42 @@ kbd.key {
   min-width: 0;
   padding: 20px;
 }
+.agent-usage {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.agent-usage-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.agent-usage-heading h3 {
+  font-size: 13px;
+  font-weight: 600;
+}
+.agent-usage-heading > span,
+.agent-usage-note {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.agent-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.agent-usage-grid .metric-cell {
+  min-width: 0;
+}
+.agent-usage-grid .metric-cell > span {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.agent-usage-note {
+  margin-top: 10px;
+}
 @media (max-width: 1000px) {
   .agent-grid {
     grid-template-columns: minmax(0, 1fr);

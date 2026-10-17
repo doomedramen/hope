@@ -4,7 +4,14 @@ import { Bot, Plus } from "lucide-react";
 import { Age } from "@/components/age";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { hostState } from "@/lib/fleet";
+import { Meter } from "@/components/ui/meter";
+import { percent0 } from "@/lib/api";
+import {
+  cpuPercent,
+  hostState,
+  memoryUsage,
+  worstDisk,
+} from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
 
 const FILTERS = [
@@ -89,6 +96,9 @@ export function AgentsPage({
         <div className="agent-grid">
           {visible.map((host) => {
             const state = agentState(host);
+            const cpu = cpuPercent(host);
+            const memory = memoryUsage(host);
+            const storage = worstDisk(host);
             const tone =
               state === "reporting"
                 ? "good"
@@ -132,6 +142,49 @@ export function AgentsPage({
                   <dt>Agent ID</dt>
                   <dd className="mono break-all">{host.agent_id}</dd>
                 </dl>
+                <section className="agent-usage" aria-label="Resource usage">
+                  <div className="agent-usage-heading">
+                    <h3>Resource usage</h3>
+                    <span>
+                      {state === "reporting"
+                        ? "Latest report"
+                        : host.last_report
+                          ? "Last report"
+                          : "No report yet"}
+                    </span>
+                  </div>
+                  <div className="agent-usage-grid">
+                    <div className="metric-cell">
+                      <span>CPU {percent0(cpu)}</span>
+                      <Meter value={cpu} thin label="CPU usage" />
+                    </div>
+                    <div className="metric-cell">
+                      <span>Memory {percent0(memory)}</span>
+                      <Meter value={memory} thin label="Memory usage" />
+                    </div>
+                    <div className="metric-cell">
+                      <span title={storage?.disk.mount ?? undefined}>
+                        Storage {percent0(storage?.percent)}
+                      </span>
+                      <Meter
+                        value={storage?.percent}
+                        thin
+                        label="Storage usage"
+                      />
+                    </div>
+                  </div>
+                  {state !== "reporting" && host.last_report != null && (
+                    <p className="agent-usage-note">
+                      Values may be out of date; last report{" "}
+                      <Age value={host.last_report} />.
+                    </p>
+                  )}
+                  {!host.last_report && (
+                    <p className="agent-usage-note">
+                      CPU and memory readings appear after the first report.
+                    </p>
+                  )}
+                </section>
                 {state === "never" && (
                   <p className="mt-3 text-xs text-muted-foreground">
                     Enrolled, but no reports have been received.
