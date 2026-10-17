@@ -1,3 +1,5 @@
+ARG RUST_VERSION=1.96.0
+
 FROM node:26-bookworm-slim AS web
 WORKDIR /build/web
 COPY web/package*.json ./
@@ -5,30 +7,33 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM rust:1.96-bookworm AS rust
+FROM rust:${RUST_VERSION}-bookworm AS rust-source
 RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 RUN rustup component add clippy rustfmt
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY scripts ./scripts
+
+FROM rust-source AS rust
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release --locked --workspace \
     && mkdir -p /build/dist \
     && cp target/release/hope-server target/release/hope-agent /build/dist/
 
-FROM rust AS checks
+FROM rust-source AS checks
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo fmt --all -- --check \
     && cargo test --workspace --locked \
-    && cargo clippy --workspace --all-targets --all-features -- -D warnings
+    && cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 FROM checks AS load-checks
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo test --release --locked -p hope-server --test retention_load -- --ignored --nocapture \
+    && mkdir -p /build/dist \
     && cp /build/target/retention-benchmark.json /build/dist/retention-benchmark.json
 
 FROM debian:bookworm-slim AS runtime

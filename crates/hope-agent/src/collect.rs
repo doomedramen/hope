@@ -280,10 +280,10 @@ fn read_cgroup_cpu_sample(fallback_cores: usize) -> Option<CgroupCpuSample> {
             if let Some(sample) = read_v2_cpu_sample(group, fallback_cores) {
                 return Some(sample);
             }
-        } else if controllers.split(',').any(|name| name == "cpuacct") {
-            if let Some(sample) = read_v1_cpu_sample(group, fallback_cores) {
-                return Some(sample);
-            }
+        } else if controllers.split(',').any(|name| name == "cpuacct")
+            && let Some(sample) = read_v1_cpu_sample(group, fallback_cores)
+        {
+            return Some(sample);
         }
     }
     None

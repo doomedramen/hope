@@ -1,10 +1,10 @@
-.PHONY: check build run types test installer-tests release-tests docs-tests bench-agent shell-checks
+.PHONY: check build run types test installer-tests release-tests docs-tests bench-agent shell-checks linux-checks browser-checks protocol-check
 types:
 	./scripts/generate-types.sh
 check:
 	cargo fmt --all --check
-	cargo clippy --workspace --all-targets --all-features -- -D warnings
-	cargo test --workspace
+	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+	cargo test --workspace --locked
 	cd web && npm run typecheck && npm run lint
 shell-checks:
 	for f in scripts/*.sh; do sh -n $$f || exit 1; done
@@ -29,3 +29,13 @@ test: check
 	cd web && npm run build
 	cargo build -p hope-server
 	cd web && npm run test:e2e
+
+# Native checks cannot compile cfg(target_os = "linux") on macOS.
+linux-checks:
+	docker build --target checks -t hope:checks .
+protocol-check:
+	./scripts/generate-types.sh --check
+browser-checks:
+	npm --prefix web run build
+	cargo build --locked -p hope-server
+	npm --prefix web run test:e2e

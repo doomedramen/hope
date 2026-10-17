@@ -372,7 +372,8 @@ impl Fixture {
     async fn run(&self, body: Value) -> Value {
         let (status, job) = self.call("POST", "/api/v1/ssh/install", body).await;
         assert_eq!(status, StatusCode::OK, "{job}");
-        assert_eq!(job["status"], "running");
+        // The worker starts before POST returns its database snapshot. A fast failure (including
+        // the injected panic) may already be terminal; verify the outcome through the job endpoint.
         self.wait(job["id"].as_str().unwrap()).await
     }
     async fn wait(&self, id: &str) -> Value {

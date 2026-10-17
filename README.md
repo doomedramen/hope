@@ -100,7 +100,7 @@ Agent installation needs a signed release published to `./releases` first ([Sign
 
 Requirements: Rust 1.96 (edition 2024), Node 26 with npm, and for the installer/release tests Python 3 and OpenSSL; ShellCheck is used for shell linting.
 
-Install the project Git hooks once after installing web dependencies. Pre-commit checks Rust formatting and web formatting/lint; pre-push runs workspace tests and lint, shell checks, and the web production build.
+Install the project Git hooks once after installing web dependencies. Pre-commit checks Rust formatting and web formatting/lint; pre-push runs native and Linux workspace tests/lint, generated-protocol validation, shell and installer/release tests, and the web production build plus browser tests. Linux checks require a running Docker-compatible engine (Docker Desktop or OrbStack on macOS); they fail rather than silently skipping when it is unavailable. Install Chromium once with `cd web && npx playwright install chromium`. Privileged discovery/systemd fixtures and release build matrices remain outside pre-push.
 
 ```sh
 make types                          # regenerate web/lib/protocol.ts from the Rust protocol (never overlap with a web build)
@@ -118,6 +118,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --locked
 make installer-tests release-tests shell-checks
+make linux-checks protocol-check browser-checks
 tests/gates/run.sh all      # real systemd/sshd/Caddy gate fixture in disposable Docker containers (tests/gates/README.md)
 python3 -I -m unittest discover -s tests/docs
 npm --prefix web run typecheck && npm --prefix web run lint && npm --prefix web run test:e2e
