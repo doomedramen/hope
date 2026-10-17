@@ -116,6 +116,7 @@ function score(
   source: string[],
   candidate: string[],
   normalized: string,
+  allowPrefixes = true,
 ): number {
   const useful = source.filter((token) => !GENERIC.has(token));
   if (useful.length === 0) return 0;
@@ -127,6 +128,13 @@ function score(
     return 0.94 - (candidate.length - useful.length) * 0.015;
 
   const exact = useful.filter((token) => candidate.includes(token)).length;
+  const prefix = allowPrefixes
+    ? useful.filter(
+        (token) =>
+          !candidate.includes(token) &&
+          candidate.some((word) => word.startsWith(token)),
+      ).length
+    : 0;
   const fuzzy = useful.filter((token) =>
     candidate.some((word) => {
       if (token.length < 4 || word.length < 4) return false;
@@ -138,7 +146,7 @@ function score(
       );
     }),
   ).length;
-  const matched = exact + fuzzy;
+  const matched = exact + prefix * 0.9 + fuzzy;
   if (matched === 0) return 0;
   return (matched / Math.max(useful.length, candidate.length)) * 0.88;
 }
@@ -163,7 +171,7 @@ function bestMatch<T extends { tokens: string[]; normalized: string }>(
       entry,
       score: Math.max(
         ...sources.map(({ tokens }) =>
-          score(tokens, entry.tokens, entry.normalized),
+          score(tokens, entry.tokens, entry.normalized, false),
         ),
       ),
     }))
@@ -224,6 +232,19 @@ export function searchIcons(query: string, limit = 20): IconOption[] {
     }
   }
   const normalizedQuery = tokens.join("");
+  // Prefix searches are common in the picker. The token index handles exact
+  // and misspelled terms; a short catalog scan adds partial words such as
+  // "kin" → "Kindle" and "un" → "UniFi" without indexing every prefix.
+  for (const icon of [...APPS, ...UNIFI]) {
+    if (
+      icon.normalized.includes(normalizedQuery) ||
+      tokens.every((token) =>
+        icon.tokens.some((word) => word.startsWith(token)),
+      )
+    ) {
+      candidates.add(icon);
+    }
+  }
   const ranked = [...candidates]
     .map((icon) => ({
       icon,

@@ -130,6 +130,10 @@ test("manual icon search finds catalog entries and fuzzy device names", () => {
   expect(
     searchIcons("Grafan").some((icon) => icon.key === "selfhst:grafana"),
   ).toBe(true);
+  expect(searchIcons("kin").some((icon) => icon.name === "Amazon Kindle")).toBe(
+    true,
+  );
+  expect(searchIcons("un").some((icon) => /UniFi/i.test(icon.name))).toBe(true);
 });
 
 test("recognizable self-hosted app hosts use app artwork", () => {

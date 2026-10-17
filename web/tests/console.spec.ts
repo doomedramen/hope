@@ -894,6 +894,14 @@ test.describe.serial("H.O.P.E console", () => {
 
     await page.getByRole("button", { name: "Change icon" }).click();
     const iconDialog = page.getByRole("dialog", { name: "Change icon" });
+    await iconDialog.getByRole("textbox", { name: "Search icons" }).fill("kin");
+    await expect(
+      iconDialog.getByRole("option", { name: /Amazon Kindle/ }).first(),
+    ).toBeVisible();
+    await iconDialog.getByRole("textbox", { name: "Search icons" }).fill("un");
+    await expect(
+      iconDialog.getByRole("option", { name: /UniFi/ }).first(),
+    ).toBeVisible();
     await iconDialog
       .getByRole("textbox", { name: "Search icons" })
       .fill("Xbox");
