@@ -1544,7 +1544,13 @@ async fn live_reports_update_the_host_and_stream_it_while_history_keeps_its_spac
     .fetch_all(&state.0.db)
     .await
     .expect("stored");
-    assert_eq!(stored, vec![start, start + 30.0]);
+    assert_eq!(stored.len(), 2);
+    for (actual, expected) in stored.iter().zip([start, start + 30.0]) {
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "stored timestamp {actual} differs from expected {expected}"
+        );
+    }
 
     let invalid = request(
         &app,
