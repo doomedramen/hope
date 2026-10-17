@@ -64,6 +64,38 @@ export function deviceIcon(host: Host): LucideIcon {
   return BY_KIND.get(deviceKind(host))?.icon ?? CircleHelp;
 }
 
+/** UniFi fingerprint artwork for common consumer devices we can identify from network evidence. */
+export function deviceFingerprintId(host: Host): string | null {
+  const evidence = host.evidence;
+  const description = [
+    host.name,
+    host.vendor,
+    host.device?.label,
+    evidence.mdns_name,
+    ...evidence.mdns_instances,
+    evidence.mdns_model,
+    evidence.upnp_manufacturer,
+    evidence.upnp_model,
+    evidence.upnp_friendly_name,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (/\bkindle fire\b/.test(description)) return "67";
+  if (/\bkindle\b/.test(description)) return "41";
+  if (/\biphone\b/.test(description)) return "91";
+  if (/\bipad\b/.test(description)) return "92";
+  if (/\bapple watch\b/.test(description)) return "54";
+  if (/\bfire ?(?:tv|stick)\b/.test(description)) return "31";
+  if (/\bchromecast\b/.test(description)) return "39";
+  if (/\broku\b/.test(description)) return "27";
+  if (/\bpixel\b/.test(description)) return "20";
+  if (/\bgalaxy\b/.test(description)) return "2";
+  if (/\bsonos\b/.test(description)) return "293";
+  return null;
+}
+
 /** What the device is, as specifically as known ("Proxmox VE", "Dishwasher"), or null. */
 export function deviceLabel(host: Host): string | null {
   if (host.device && host.device.kind !== "unknown") return host.device.label;

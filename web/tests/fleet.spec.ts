@@ -11,6 +11,7 @@ import {
   updatePlan,
   worstDisk,
 } from "../lib/fleet";
+import { deviceFingerprintId } from "../lib/devices";
 import type { Host, Metrics } from "../lib/protocol";
 
 const now = 1_700_000_000;
@@ -102,6 +103,13 @@ test("host state distinguishes reporting, stale, revoked, observed and unobserve
   expect(
     hostState(host({ agent_id: "a", agent_revoked: true }), now).tone,
   ).toBe("neutral");
+});
+
+test("consumer device labels map to UniFi fingerprint icons", () => {
+  expect(deviceFingerprintId(host({ name: "iPhone" }))).toBe("91");
+  expect(deviceFingerprintId(host({ name: "Kindle Paperwhite" }))).toBe("41");
+  expect(deviceFingerprintId(host({ name: "Kindle Fire tablet" }))).toBe("67");
+  expect(deviceFingerprintId(host({ name: "unidentified device" }))).toBeNull();
 });
 
 test("issues cover silent agents and full resources, most severe first", () => {

@@ -18,6 +18,9 @@ test("console is served with hardening headers and no CSP violations", async ({
   expect(headers["content-security-policy"]).toContain(
     "frame-ancestors 'none'",
   );
+  expect(headers["content-security-policy"]).toContain(
+    "img-src 'self' data: blob: https://cdn.jsdelivr.net https://static.ui.com",
+  );
   await page.waitForLoadState("networkidle");
   // Hydration requires the inline Next.js bootstrap scripts the policy allows.
   await expect(page.getByRole("textbox").first()).toBeVisible();

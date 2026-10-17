@@ -139,3 +139,7 @@ Targets: below 30 MB resident memory and below 0.5% of one core on average durin
 ## License
 
 MIT. See [LICENSE](LICENSE); the workspace `Cargo.toml` declares the same.
+
+Container application icons are provided by [selfh.st/icons](https://github.com/selfhst/icons)
+under the [CC BY 4.0 license](https://creativecommons.org/licenses/by/4.0/). Device fingerprint
+icons are served from Ubiquiti's `static.ui.com` CDN.

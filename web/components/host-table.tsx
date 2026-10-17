@@ -1,5 +1,6 @@
 "use client";
 import { Age } from "@/components/age";
+import Image from "next/image";
 import { createElement, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown, Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -24,15 +25,53 @@ import {
   type SortKey,
 } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
-import { deviceIcon, deviceLabel } from "@/lib/devices";
+import { deviceFingerprintId, deviceIcon, deviceLabel } from "@/lib/devices";
 
 /** A glyph for what the host most likely is (the server's device guess). */
 export function HostIcon({ host, size }: { host: Host; size: number }) {
-  // The icons are module-level components; only the choice between them depends on the host.
+  const fingerprint = deviceFingerprintId(host);
+  if (fingerprint) {
+    return (
+      <FingerprintIcon
+        key={fingerprint}
+        fingerprint={fingerprint}
+        host={host}
+        size={size}
+      />
+    );
+  }
   return createElement(deviceIcon(host), {
     size,
     "aria-label": deviceLabel(host) ?? undefined,
   });
+}
+
+function FingerprintIcon({
+  fingerprint,
+  host,
+  size,
+}: {
+  fingerprint: string;
+  host: Host;
+  size: number;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return createElement(deviceIcon(host), {
+      size,
+      "aria-label": deviceLabel(host) ?? undefined,
+    });
+  }
+  return (
+    <Image
+      src={`https://static.ui.com/fingerprint/0/${fingerprint}_${size <= 18 ? 101 : 257}x${size <= 18 ? 101 : 257}.png`}
+      width={size}
+      height={size}
+      alt={deviceLabel(host) ?? ""}
+      unoptimized
+      onError={() => setFailed(true)}
+    />
+  );
 }
 
 export function HostTable({

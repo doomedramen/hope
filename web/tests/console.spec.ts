@@ -99,6 +99,16 @@ function extended(sample: number) {
       },
     ],
     service_summary: { active: 40, failed: 1, total: 42 },
+    containers: [
+      {
+        id: "a1b2c3d4e5f6",
+        name: "immich-server",
+        image: "ghcr.io/immich-app/immich-server:release",
+        state: "running",
+        status: "Up 2 days",
+        ports: "2283/tcp",
+      },
+    ],
     monitors: [
       {
         target: "tcp://192.168.1.1:22",
@@ -290,6 +300,24 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
     ).toBeVisible();
+    const hostDetails = page.getByRole("complementary", {
+      name: "Host details",
+    });
+    await hostDetails.getByRole("tab", { name: "Containers" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Docker containers" }),
+    ).toBeVisible();
+    await expect(
+      page.getByAltText("immich-server application icon"),
+    ).toBeVisible();
+    await page
+      .getByRole("row")
+      .filter({ hasText: "studio-mac" })
+      .first()
+      .click();
+    await expect(
+      hostDetails.getByRole("tab", { name: "Containers" }),
+    ).toHaveCount(0);
     await page.getByLabel("Search hosts").fill("workshop");
     await expect(page.getByRole("table").getByRole("row")).toHaveCount(2);
     await page.getByLabel("Search hosts").fill("");

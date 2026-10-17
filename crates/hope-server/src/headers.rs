@@ -2,8 +2,8 @@
 //!
 //! The console is a Next.js static export. Its pages embed inline bootstrap scripts whose bodies
 //! differ per page and build, so `script-src` allows `'unsafe-inline'`; every other source stays
-//! `'self'`, objects/framing/base-URI are denied and no remote origin may load or receive
-//! anything. React Flow and charts set inline `style` attributes, hence `style-src
+//! `'self'` except for the explicitly used device and application icon CDNs; objects/framing/base-URI
+//! are denied and scripts/API connections stay same-origin. React Flow and charts set inline `style` attributes, hence `style-src
 //! 'unsafe-inline'`. Tightening scripts to hashes needs a build step that hashes each exported page.
 use crate::state::State;
 use axum::{
@@ -13,7 +13,7 @@ use axum::{
     response::Response,
 };
 
-pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://cdn.jsdelivr.net https://static.ui.com; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 pub async fn apply(Extract(state): Extract<State>, request: Request, next: Next) -> Response {
     let api = request.uri().path().starts_with("/api/");

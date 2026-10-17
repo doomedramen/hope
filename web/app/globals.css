@@ -2386,6 +2386,25 @@ kbd.key {
   border: 1px solid var(--border);
   border-radius: 10px;
 }
+.container-app-icon {
+  display: inline-flex;
+  width: 2.125rem;
+  height: 2.125rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+.container-app-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 0.25rem;
+}
 .container-meta {
   display: flex;
   flex-wrap: wrap;

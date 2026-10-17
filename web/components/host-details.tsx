@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/select";
 import { StatusPill } from "@/components/status-pill";
 import { HostIcon } from "@/components/host-table";
+import { ContainerAppIcon } from "@/components/container-app-icon";
 import {
   HistoryRange,
   MetricHistory,
@@ -99,6 +100,9 @@ export function HostDetails({
   const [hours, setHours] = useState<HistoryWindow>("1");
   const inventory = host.inventory;
   const metrics = host.metrics;
+  const containers = metrics?.containers ?? [];
+  const hasContainers = containers.length > 0;
+  const [activeTab, setActiveTab] = useState("summary");
   const update = updatePlan(host, agentRelease);
   const [copied, setCopied] = useState(false);
   const state = hostState(host);
@@ -109,6 +113,8 @@ export function HostDetails({
     host.last_collected_at,
     host.metrics,
   );
+  const selectedTab =
+    !hasContainers && activeTab === "containers" ? "summary" : activeTab;
   async function revoke() {
     try {
       await post(`/agents/${host.agent_id}/revoke`);
@@ -240,13 +246,17 @@ export function HostDetails({
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
-        <Tabs defaultValue="summary" className="host-tabs">
+        <Tabs
+          value={selectedTab}
+          onValueChange={(value) => setActiveTab(value ?? "summary")}
+          className="host-tabs"
+        >
           <TabsList aria-label="Host sections" className="host-tab-list">
             <TabsTrigger value="summary">Summary</TabsTrigger>
             {host.agent_id && (
               <TabsTrigger value="metrics">Metrics</TabsTrigger>
             )}
-            {host.agent_id && (
+            {host.agent_id && hasContainers && (
               <TabsTrigger value="containers">Containers</TabsTrigger>
             )}
             <TabsTrigger value="services">Services</TabsTrigger>
@@ -432,28 +442,34 @@ export function HostDetails({
               </section>
             )}
           </TabsContent>
-          <TabsContent value="containers" className="host-tab-content">
-            <section aria-label="Docker containers">
-              <h3 className="detail-heading">
-                <Boxes />
-                Docker containers
-                <span className="spacer" />
-                <span className="text-xs font-normal text-muted-foreground">
-                  {metrics?.containers.length ?? 0}
-                </span>
-              </h3>
-              {(metrics?.containers.length ?? 0) > 0 ? (
+          {hasContainers && (
+            <TabsContent value="containers" className="host-tab-content">
+              <section aria-label="Docker containers">
+                <h3 className="detail-heading">
+                  <Boxes />
+                  Docker containers
+                  <span className="spacer" />
+                  <span className="text-xs font-normal text-muted-foreground">
+                    {metrics?.containers.length ?? 0}
+                  </span>
+                </h3>
                 <div className="container-grid">
-                  {metrics?.containers.map((container) => (
+                  {containers.map((container) => (
                     <article className="container-card" key={container.id}>
                       <div className="flex min-w-0 items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <strong className="block truncate">
-                            {container.name}
-                          </strong>
-                          <span className="mono block truncate text-xs text-muted-foreground">
-                            {container.image}
-                          </span>
+                        <div className="flex min-w-0 items-start gap-2.5">
+                          <ContainerAppIcon
+                            image={container.image}
+                            name={container.name}
+                          />
+                          <div className="min-w-0">
+                            <strong className="block truncate">
+                              {container.name}
+                            </strong>
+                            <span className="mono block truncate text-xs text-muted-foreground">
+                              {container.image}
+                            </span>
+                          </div>
                         </div>
                         <span
                           className="status-pill shrink-0"
@@ -474,17 +490,9 @@ export function HostDetails({
                     </article>
                   ))}
                 </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  {host.collectors.find(
-                    (collector) => collector.name === "docker_containers",
-                  )?.available
-                    ? "No containers found."
-                    : "Docker is unavailable or its daemon is not running."}
-                </p>
-              )}
-            </section>
-          </TabsContent>
+              </section>
+            </TabsContent>
+          )}
           <TabsContent value="services" className="host-tab-content">
             {metrics?.service_summary && (
               <section data-testid="service-units">
