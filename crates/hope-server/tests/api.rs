@@ -1878,3 +1878,126 @@ async fn an_agent_without_an_updater_is_pointed_at_the_upgrade_command() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn uptime_is_opt_in_validated_and_notifies_port_transitions() {
+    let (_dir, state, app, cookie) = setup().await;
+    let auth = Some(("cookie", cookie.as_str()));
+    let (server, seen) = fake_ntfy(200).await;
+    let mut notification_settings = settings(&server, Value::Null);
+    notification_settings["notify_offline"] = json!(false);
+    notification_settings["notify_resources"] = json!(false);
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        notification_settings,
+        auth,
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut host = Host::new("uptime-box".into(), "Box".into(), "icmp");
+    host.addresses = vec!["127.0.0.1".into()];
+    state.save_host(&host).await.unwrap();
+    for _ in 0..2 {
+        hope_server::notify::evaluate(&state).await.unwrap();
+    }
+    assert!(seen.lock().await.is_empty(), "off by default");
+    let path = "/api/v1/hosts/uptime-box/uptime";
+    let config = json!({"enabled":true,"device":false,"ports":[port, port]});
+    assert_eq!(
+        request(&app, "PUT", path, config.clone(), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    for ports in [json!([0]), json!([]), json!(vec![80; 33])] {
+        assert_eq!(
+            request(
+                &app,
+                "PUT",
+                path,
+                json!({"enabled":true,"device":false,"ports":ports}),
+                auth
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let (status, saved) = request(&app, "PUT", path, config, auth).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["uptime"]["ports"], json!([port]));
+    hope_server::notify::evaluate(&state).await.unwrap();
+    assert!(seen.lock().await.is_empty(), "first failure is debounced");
+    for _ in 0..2 {
+        hope_server::notify::evaluate(&state).await.unwrap();
+    }
+    assert_eq!(
+        seen.lock().await.len(),
+        1,
+        "one alert, independent of legacy categories"
+    );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    assert_eq!(seen.lock().await.len(), 2, "recovery");
+    drop(listener);
+    for _ in 0..2 {
+        hope_server::notify::evaluate(&state).await.unwrap();
+    }
+    assert_eq!(seen.lock().await.len(), 3, "new outage");
+    request(
+        &app,
+        "PUT",
+        path,
+        json!({"enabled":false,"device":false,"ports":[port]}),
+        auth,
+    )
+    .await;
+    hope_server::notify::evaluate(&state).await.unwrap();
+    assert_eq!(seen.lock().await.len(), 3, "disabling is silent");
+}
+
+#[tokio::test]
+async fn uptime_device_alerts_respect_connector_and_recovery_switches() {
+    let (_dir, state, app, cookie) = setup().await;
+    let auth = Some(("cookie", cookie.as_str()));
+    let (server, seen) = fake_ntfy(200).await;
+    let mut config = settings(&server, Value::Null);
+    config["notify_offline"] = json!(false);
+    config["notify_recovery"] = json!(false);
+    request(&app, "PUT", "/api/v1/notifications", config.clone(), auth).await;
+    let mut host = Host::new("device-monitor".into(), "Device".into(), "agent");
+    host.agent_id = Some("agent".into());
+    host.last_report = Some(now() - 1000.0);
+    state.save_host(&host).await.unwrap();
+    let (status, _) = request(
+        &app,
+        "PUT",
+        "/api/v1/hosts/device-monitor/uptime",
+        json!({"enabled":true,"device":true,"ports":[]}),
+        auth,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..3 {
+        hope_server::notify::evaluate(&state).await.unwrap();
+    }
+    assert_eq!(seen.lock().await.len(), 1);
+    assert_eq!(seen.lock().await[0].1["title"], "Device is down");
+    host = state.host(&host.id).await.unwrap().unwrap();
+    host.last_report = Some(now());
+    state.save_host(&host).await.unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    assert_eq!(seen.lock().await.len(), 1, "recovery disabled");
+    config["ntfy_enabled"] = json!(false);
+    request(&app, "PUT", "/api/v1/notifications", config, auth).await;
+    host.last_report = Some(now() - 1000.0);
+    state.save_host(&host).await.unwrap();
+    for _ in 0..2 {
+        hope_server::notify::evaluate(&state).await.unwrap();
+    }
+    assert_eq!(seen.lock().await.len(), 1, "connector disabled");
+}

@@ -397,20 +397,24 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
         }
     }
     let now = now();
-    let current: HashMap<String, (Problem, String)> = hosts
+    let mut current: HashMap<String, (Problem, String)> = hosts
         .iter()
         .flat_map(|h| {
             problems(h, now, &last_scan)
                 .into_iter()
+                .filter(|p| !(p.offline && h.uptime.enabled && h.uptime.device))
                 .map(|p| (p.key.clone(), (p, h.id.clone())))
         })
         .collect();
-    let open: HashMap<String, (String, bool)> =
+    for (problem, host_id) in crate::uptime::problems(state, &hosts, now, &last_scan).await? {
+        current.insert(problem.key.clone(), (problem, host_id));
+    }
+    let open: HashMap<String, (String, String)> =
         sqlx::query_as::<_, (String, String, String)>("SELECT key, message, kind FROM alerts")
             .fetch_all(&state.0.db)
             .await?
             .into_iter()
-            .map(|(key, message, kind)| (key, (message, kind == "offline")))
+            .map(|(key, message, kind)| (key, (message, kind)))
             .collect();
     let enabled = settings.ntfy_enabled && !settings.ntfy_topic.is_empty();
     for (key, (problem, host_id)) in &current {
@@ -422,7 +426,9 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
         )
         .bind(key)
         .bind(host_id)
-        .bind(if problem.offline {
+        .bind(if key.contains(":uptime:") {
+            "uptime"
+        } else if problem.offline {
             "offline"
         } else {
             "resource"
@@ -431,7 +437,9 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
         .bind(now)
         .execute(&state.0.db)
         .await?;
-        let wanted = if problem.offline {
+        let wanted = if key.contains(":uptime:") {
+            true
+        } else if problem.offline {
             settings.notify_offline
         } else {
             settings.notify_resources
@@ -457,7 +465,7 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
             }
         }
     }
-    for (key, (message, offline)) in &open {
+    for (key, (message, kind)) in &open {
         if current.contains_key(key) {
             continue;
         }
@@ -465,8 +473,15 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
             .bind(key)
             .execute(&state.0.db)
             .await?;
-        let wanted = if *offline {
+        let wanted = if kind == "uptime" {
+            hosts
+                .iter()
+                .any(|h| h.uptime.enabled && key.starts_with(&format!("{}:uptime:", h.id)))
+        } else if kind == "offline" {
             settings.notify_offline
+                && !hosts.iter().any(|h| {
+                    h.uptime.enabled && h.uptime.device && key.starts_with(&format!("{}:", h.id))
+                })
         } else {
             settings.notify_resources
         };

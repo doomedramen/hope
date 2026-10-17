@@ -52,6 +52,7 @@ const metrics: Metrics = {
 function host(overrides: Partial<Host>): Host {
   return {
     id: "h",
+    uptime: { enabled: false, device: false, ports: [] },
     agent_id: null,
     agent_version: null,
     update_requested_at: null,

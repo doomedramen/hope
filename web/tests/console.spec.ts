@@ -914,6 +914,30 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(iconDialog).toHaveCount(0);
 
     await page.getByRole("tab", { name: "Settings", exact: true }).click();
+    const uptime = page.getByRole("region", { name: "Uptime monitoring" });
+    await expect(
+      uptime.getByLabel("Enable uptime monitoring"),
+    ).not.toBeChecked();
+    await uptime.getByLabel("Enable uptime monitoring").check();
+    await uptime.getByLabel("Monitor device downtime").check();
+    await uptime.getByLabel("TCP ports to monitor").fill("443, 8080");
+    await uptime
+      .getByRole("button", { name: "Save uptime monitoring" })
+      .click();
+    await expect(page.getByText("Uptime monitoring saved.")).toBeVisible();
+    const uptimeBootstrap = await (
+      await request.get("/api/v1/bootstrap")
+    ).json();
+    expect(
+      uptimeBootstrap.hosts.find(
+        (host: { name: string }) => host.name === "atlas-nas",
+      ).uptime,
+    ).toEqual({ enabled: true, device: true, ports: [443, 8080] });
+    await uptime.getByLabel("Enable uptime monitoring").uncheck();
+    await uptime
+      .getByRole("button", { name: "Save uptime monitoring" })
+      .click();
+    await expect(uptime.getByLabel("TCP ports to monitor")).toBeDisabled();
     await page
       .getByRole("textbox", { name: "Name (Alias)" })
       .fill("Cinema Xbox");

@@ -19,6 +19,7 @@ pub mod scanner;
 pub mod ssh;
 pub mod state;
 pub mod topology;
+pub mod uptime;
 pub mod validation;
 pub mod vendor;
 
@@ -43,6 +44,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/settings/reporting", put(api::set_reporting))
         .route("/hosts/{id}/type", put(api::set_device_type))
         .route("/hosts/{id}/identity", put(api::set_host_identity))
+        .route("/hosts/{id}/uptime", put(uptime::configure))
         .route("/logout", post(auth::logout))
         .route("/networks", post(api::add_network))
         .route(

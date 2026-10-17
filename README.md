@@ -145,3 +145,24 @@ and served under the [CC BY 4.0 license](https://creativecommons.org/licenses/by
 Device fingerprint artwork is matched against [Ubiquiti's device catalog](https://static.ui.com/fingerprint/0/devicelist.json)
 and served from its `static.ui.com` CDN. Refresh the checked-in matching data with
 `python3 scripts/update-icon-catalogs.py`.
+
+### Uptime monitoring
+
+Open a device's **Settings → Uptime monitoring** to opt in. Enable device downtime,
+enter specific TCP ports, or use both. Monitoring is disabled by default for every device.
+Configure and enable the existing **Notifications** ntfy connector to receive alerts.
+Uptime alerts use the per-device selection independently of the connector's legacy
+Offline and Resource categories; the connector's recovery setting still applies.
+
+Checks run roughly once per minute and require two consecutive failures before an
+alert opens. TCP checks connect from the server to the device's known IP addresses;
+any successful connection makes that port healthy. These check TCP availability,
+not HTTP responses or application health. Up to 32 ports can be selected per device.
+
+Device downtime uses an agent's reports (stale after two minutes), or completed
+scans of enabled discovery ranges. Discovered devices must be unseen for at least
+two scan intervals and 15 minutes before they count as down. No completed scan
+means no evidence of downtime. Enable an appropriate discovery range for devices
+without agents. A recovery sends one follow-up when enabled; changing or disabling
+monitoring clears its previous alerts silently. Existing general notification rules
+remain available for devices without uptime monitoring.

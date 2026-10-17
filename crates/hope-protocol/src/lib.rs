@@ -640,8 +640,18 @@ pub struct HostIdentityUpdate {
     pub icon: Option<String>,
 }
 
+/// Per-device uptime monitoring. Disabled until explicitly enabled by an administrator.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq, Default)]
+pub struct UptimeSettings {
+    pub enabled: bool,
+    pub device: bool,
+    pub ports: Vec<u16>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Host {
+    #[serde(default)]
+    pub uptime: UptimeSettings,
     pub id: String,
     pub agent_id: Option<String>,
     pub name: String,
@@ -698,6 +708,7 @@ impl Host {
             id,
             agent_id: None,
             name,
+            uptime: UptimeSettings::default(),
             name_override: None,
             icon_override: None,
             addresses: vec![],
@@ -880,6 +891,7 @@ pub fn typescript() -> String {
         Network::decl(),
         ScanJob::decl(),
         Service::decl(),
+        UptimeSettings::decl(),
         Host::decl(),
         MetricPoint::decl(),
         Position::decl(),

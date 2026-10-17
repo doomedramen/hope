@@ -1,4 +1,5 @@
 "use client";
+import { UptimeSettings } from "@/components/uptime-settings";
 import { Age } from "@/components/age";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -673,6 +674,12 @@ export function HostDetails({
             </section>
           </TabsContent>
           <TabsContent value="settings" className="host-tab-content">
+            <UptimeSettings
+              key={`${host.id}:${JSON.stringify(host.uptime)}`}
+              host={host}
+              notify={notify}
+              refresh={refresh}
+            />
             <HostIdentitySettings
               key={`${host.id}:${host.name_override ?? ""}`}
               host={host}

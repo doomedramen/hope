@@ -212,7 +212,8 @@ export type Network = { id: string, name: string, cidr: string, enabled: boolean
 interval_minutes: number, };
 export type ScanJob = { id: string, network_id: string, cidr: string, status: ScanStatus, scanned: number, total: number, discovered: number, started_at: number, finished_at: number | null, error: string | null, };
 export type Service = { port: number, name: string, observed_at: number, };
-export type Host = { id: string, agent_id: string | null, name: string, name_override: string | null, icon_override: string | null, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>,
+export type UptimeSettings = { enabled: boolean, device: boolean, ports: Array<number>, };
+export type Host = { uptime: UptimeSettings, id: string, agent_id: string | null, name: string, name_override: string | null, icon_override: string | null, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>,
 /**
  * Manufacturer registered for the MAC address prefix (IEEE OUI).
  */
