@@ -10,6 +10,11 @@ on:
         type: string
         required: false
         default: ""
+      ref:
+        description: Git ref to build (defaults to the calling workflow commit)
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -31,6 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - name: Install musl toolchain
         if: matrix.linux

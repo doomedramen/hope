@@ -88,7 +88,6 @@ jobs:
       - run: npm --prefix web run typecheck
       - run: npm --prefix web run lint
       - run: npm --prefix web run build
-      - run: cargo build --locked -p hope-server
       - run: npx playwright install --with-deps chromium
         working-directory: web
       - run: npm --prefix web run test:e2e
@@ -138,6 +137,7 @@ jobs:
   server-package:
     # Proves scripts/package-server.sh (what install-hope.sh downloads) builds on a clean runner,
     # then exercises the installer's download, checksum and layout paths from the package.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -171,11 +171,13 @@ jobs:
       - run: tests/gates/run.sh updater
 
   release-build-smoke:
+    if: github.event_name != 'push'
     uses: ./.github/workflows/build-agent.yml
 
   verify-signing-flow:
     # Exercises assemble-release.sh with a throwaway key generated on the runner, from the smoke
     # build's artifacts. Four platforms are required, so this also proves the full matrix built.
+    if: github.event_name != 'push'
     needs: release-build-smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15

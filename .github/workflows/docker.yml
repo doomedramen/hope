@@ -5,7 +5,7 @@ name: Docker image
 # Registry as ghcr.io/<owner>/hope-server. Not ghcr.io/<owner>/hope: that package already belongs to
 # another repository, and a workflow's token can only push to packages linked to its own repository. Native runners instead of QEMU: a Rust workspace under
 # emulation takes hours. Pull requests are covered by the `docker build` in ci.yml; this workflow
-# runs on pushes to main (tags `main` and `sha-<commit>`), on version tags (`<version>`,
+# runs after CI succeeds on pushes to main (tags `main` and `sha-<commit>`), on version tags (`<version>`,
 # `<major>.<minor>`, `latest`, `sha-<commit>`) and on manual dispatch.
 #
 # Note: ubuntu-24.04-arm runners are free for public repositories only; a private repository needs
@@ -14,8 +14,11 @@ name: Docker image
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -33,6 +36,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main')
     name: Build ${{ matrix.platform }}
     strategy:
       fail-fast: false
@@ -43,6 +47,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
       - id: platform
         env:
           PLATFORM: ${{ matrix.platform }}
@@ -50,6 +57,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
+          context: git
           images: ${{ env.IMAGE }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -101,9 +109,12 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
+          context: git
           images: ${{ env.IMAGE }}
           tags: |
             type=ref,event=branch
+            type=raw,value=main,enable=${{ github.event_name == 'workflow_run' }}
+            type=raw,value=${{ github.ref_name }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
