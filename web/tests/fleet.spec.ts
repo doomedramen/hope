@@ -109,6 +109,9 @@ test("consumer device labels map to UniFi fingerprint icons", () => {
   expect(deviceFingerprintId(host({ name: "iPhone" }))).toBe("91");
   expect(deviceFingerprintId(host({ name: "Kindle Paperwhite" }))).toBe("41");
   expect(deviceFingerprintId(host({ name: "Kindle Fire tablet" }))).toBe("67");
+  expect(deviceFingerprintId(host({ name: "XBOX", vendor: "Microsoft" }))).toBe(
+    "2271",
+  );
   expect(deviceFingerprintId(host({ name: "unidentified device" }))).toBeNull();
 });
 

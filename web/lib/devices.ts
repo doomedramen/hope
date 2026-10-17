@@ -90,6 +90,7 @@ export function deviceFingerprintId(host: Host): string | null {
   if (/\bfire ?(?:tv|stick)\b/.test(description)) return "31";
   if (/\bchromecast\b/.test(description)) return "39";
   if (/\broku\b/.test(description)) return "27";
+  if (/\bxbox\b/.test(description)) return "2271";
   if (/\bpixel\b/.test(description)) return "20";
   if (/\bgalaxy\b/.test(description)) return "2";
   if (/\bsonos\b/.test(description)) return "293";
