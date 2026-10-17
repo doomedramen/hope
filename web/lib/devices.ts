@@ -22,6 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { Host } from "@/lib/protocol";
+import { findSelfHostedIcon, findUniFiIcon } from "@/lib/icon-matching";
 
 /** Device kinds the server can guess, in the order the console offers them (mirrors the server). */
 export const DEVICE_KINDS: { kind: string; label: string; icon: LucideIcon }[] =
@@ -90,11 +91,20 @@ export function deviceFingerprintId(host: Host): string | null {
   if (/\bfire ?(?:tv|stick)\b/.test(description)) return "31";
   if (/\bchromecast\b/.test(description)) return "39";
   if (/\broku\b/.test(description)) return "27";
-  if (/\bxbox\b/.test(description)) return "2271";
   if (/\bpixel\b/.test(description)) return "20";
   if (/\bgalaxy\b/.test(description)) return "2";
   if (/\bsonos\b/.test(description)) return "293";
-  return null;
+  return findUniFiIcon([
+    host.name,
+    host.vendor ?? "",
+    host.device?.label ?? "",
+    evidence.mdns_name ?? "",
+    ...evidence.mdns_instances,
+    evidence.mdns_model ?? "",
+    evidence.upnp_manufacturer ?? "",
+    evidence.upnp_model ?? "",
+    evidence.upnp_friendly_name ?? "",
+  ]);
 }
 
 /** selfh.st artwork for hosts that are clearly named after a self-hosted app. */
@@ -129,7 +139,21 @@ export function deviceAppIcon(host: Host): string | null {
     [/\bprowlarr\b/, "prowlarr"],
     [/\bqbittorrent\b/, "qbittorrent"],
   ];
-  return apps.find(([pattern]) => pattern.test(description))?.[1] ?? null;
+  return (
+    apps.find(([pattern]) => pattern.test(description))?.[1] ??
+    findSelfHostedIcon([
+      host.name,
+      host.device?.label ?? "",
+      evidence.mdns_name ?? "",
+      ...evidence.mdns_instances,
+      evidence.mdns_model ?? "",
+      evidence.upnp_friendly_name ?? "",
+      ...(host.metrics?.containers ?? []).flatMap((container) => [
+        container.name,
+        container.image,
+      ]),
+    ])
+  );
 }
 
 /** What the device is, as specifically as known ("Proxmox VE", "Dishwasher"), or null. */

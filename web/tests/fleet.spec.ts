@@ -12,6 +12,7 @@ import {
   worstDisk,
 } from "../lib/fleet";
 import { deviceAppIcon, deviceFingerprintId } from "../lib/devices";
+import { findSelfHostedIcon } from "../lib/icon-matching";
 import type { Host, Metrics } from "../lib/protocol";
 
 const now = 1_700_000_000;
@@ -112,11 +113,14 @@ test("consumer device labels map to UniFi fingerprint icons", () => {
   expect(deviceFingerprintId(host({ name: "XBOX", vendor: "Microsoft" }))).toBe(
     "2271",
   );
+  expect(deviceFingerprintId(host({ name: "Xbox One X" }))).toBe("22");
   expect(deviceFingerprintId(host({ name: "unidentified device" }))).toBeNull();
 });
 
 test("recognizable self-hosted app hosts use app artwork", () => {
   expect(deviceAppIcon(host({ name: "Plex Media Server" }))).toBe("plex");
+  expect(deviceAppIcon(host({ name: "Grafan" }))).toBe("grafana");
+  expect(findSelfHostedIcon(["lscr.io/linuxserver/plex:latest"])).toBe("plex");
   expect(deviceAppIcon(host({ name: "ordinary server" }))).toBeNull();
 });
 

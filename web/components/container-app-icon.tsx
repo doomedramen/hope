@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useState } from "react";
 import { Boxes } from "lucide-react";
+import { findSelfHostedIcon } from "@/lib/icon-matching";
 
 const ICON_ALIASES: Record<string, string> = {
   homeassistant: "home-assistant",
@@ -28,7 +29,7 @@ export function ContainerAppIcon({
   name: string;
 }) {
   const [failed, setFailed] = useState(false);
-  const slug = iconSlug(image);
+  const slug = findSelfHostedIcon([image, name]) ?? iconSlug(image);
   if (!slug || failed) {
     return (
       <span className="container-app-icon" aria-hidden="true">
