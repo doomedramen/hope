@@ -673,7 +673,10 @@ export function HostDetails({
               )}
             </section>
           </TabsContent>
-          <TabsContent value="settings" className="host-tab-content">
+          <TabsContent
+            value="settings"
+            className="host-tab-content host-settings"
+          >
             <UptimeSettings
               key={`${host.id}:${JSON.stringify(host.uptime)}`}
               host={host}

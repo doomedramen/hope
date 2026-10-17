@@ -305,7 +305,7 @@ export function fleetSummary(
   };
 }
 
-export type HostFilter = "all" | "attention" | StateKey;
+export type HostFilter = "all" | "attention" | "monitored" | StateKey;
 export const HOST_FILTERS: { key: HostFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "attention", label: "Needs attention" },
@@ -316,6 +316,8 @@ export const HOST_FILTERS: { key: HostFilter; label: string }[] = [
   { key: "revoked", label: "Revoked" },
 ];
 export const HOST_FILTER_HINTS: Partial<Record<HostFilter, string>> = {
+  monitored:
+    "Devices opted in to uptime monitoring. Configure checks in each device’s Settings tab.",
   attention:
     "Agents not reporting, and reported resource, service or monitor problems.",
   unobserved: `Devices without an agent that have not been seen for ${OBSERVED_SECONDS / 60} minutes or more. This does not mean the device is offline; it may be asleep or away from Wi-Fi.`,
@@ -326,6 +328,7 @@ export function matchesFilter(
   now = Date.now() / 1000,
 ) {
   if (filter === "all") return true;
+  if (filter === "monitored") return host.uptime?.enabled ?? false;
   if (filter === "attention") return hostIssues(host, now).length > 0;
   return hostState(host, now).key === filter;
 }

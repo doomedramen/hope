@@ -7,6 +7,7 @@ import {
   Bot,
   Network,
   CircleHelp,
+  ChevronDown,
   LayoutDashboard,
   LayoutList,
   LogOut,
@@ -671,6 +672,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   );
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">
+        Skip to main content
+      </a>
       <aside className="sidebar">
         <Brand />
         <nav aria-label="Main navigation">
@@ -749,11 +753,19 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           </button>
         </div>
       </aside>
-      <main className="workspace">
+      <main className="workspace" id="main-content" tabIndex={-1}>
         <header className="topbar">
           <div className="topbar-title">
             <h1>{TITLES[view]}</h1>
-            <span className="connection">
+            <span
+              className="connection"
+              role="status"
+              title={
+                connected
+                  ? "Connected to live server updates"
+                  : "Connection interrupted. Displayed data may be out of date."
+              }
+            >
               <i
                 className={`status-dot ${connected ? "live pulse" : "stale"}`}
                 aria-hidden="true"
@@ -1030,11 +1042,36 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           />
         ) : (
           <div className="page">
-            {data.capabilities.limitations.length > 0 && (
-              <div className="capability-notice" role="note">
-                <CircleHelp size={15} />
-                <span>{data.capabilities.limitations.join(" ")}</span>
+            <div className="page-heading inventory-heading">
+              <div>
+                <h2>Your devices</h2>
+                <p>
+                  Find a device, inspect its health, or configure uptime alerts.
+                </p>
               </div>
+              <Button
+                variant="outline"
+                size="sm"
+                aria-pressed={statusFilter === "monitored"}
+                onClick={() =>
+                  setStatusFilter(
+                    statusFilter === "monitored" ? "all" : "monitored",
+                  )
+                }
+              >
+                <BellRing data-icon="inline-start" />
+                {hosts.filter((h) => h.uptime?.enabled).length} uptime monitored
+              </Button>
+            </div>
+            {data.capabilities.limitations.length > 0 && (
+              <details className="capability-notice capability-disclosure">
+                <summary>
+                  <CircleHelp size={15} aria-hidden="true" />
+                  <span>Discovery has limited network visibility</span>
+                  <ChevronDown size={15} aria-hidden="true" />
+                </summary>
+                <p>{data.capabilities.limitations.join(" ")}</p>
+              </details>
             )}
             <div className="inventory-layout">
               <section className="inventory-main">
@@ -1078,7 +1115,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                       </ToggleGroup>
                     )}
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="inventory-filters flex flex-wrap items-center gap-2">
                     <Select value={network} onValueChange={setNetwork}>
                       <SelectTrigger aria-label="Filter by network">
                         <SelectValue>
@@ -1103,7 +1140,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                       <input
                         ref={searchRef}
                         aria-label="Search hosts"
-                        placeholder="Search hosts…  /"
+                        placeholder="Name, IP, or service…"
                         value={filter}
                         onChange={(e) => setFilter(e.target.value)}
                       />
@@ -1254,7 +1291,13 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     {hosts.length > 0 &&
                       ` · ${hosts.filter((h) => hostState(h).tone === "good").length} responding`}
                   </span>
-                  <span>Manage scan schedules on the Networks page.</span>
+                  <button
+                    type="button"
+                    className="inventory-footer-link"
+                    onClick={() => setView("networks")}
+                  >
+                    Manage scan schedules
+                  </button>
                 </footer>
               </section>
               {host && (

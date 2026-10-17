@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { put } from "@/lib/api";
@@ -15,6 +15,7 @@ export function UptimeSettings({
   refresh: () => void;
   notify: (message: string, tone?: Tone) => void;
 }) {
+  const helpId = useId();
   const [enabled, setEnabled] = useState(host.uptime?.enabled ?? false);
   const [device, setDevice] = useState(host.uptime?.device ?? false);
   const [ports, setPorts] = useState(host.uptime?.ports.join(", ") ?? "");
@@ -53,9 +54,10 @@ export function UptimeSettings({
   return (
     <section className="flex flex-col gap-3" aria-label="Uptime monitoring">
       <h3 className="detail-heading">Uptime monitoring</h3>
-      <label className="flex items-center gap-2 text-sm">
+      <label className="monitor-option">
         <input
           type="checkbox"
+          disabled={busy}
           checked={enabled}
           onChange={(event) => setEnabled(event.target.checked)}
         />
@@ -65,7 +67,7 @@ export function UptimeSettings({
         disabled={!enabled || busy}
         className="flex flex-col gap-3 disabled:opacity-50"
       >
-        <label className="flex items-center gap-2 text-sm">
+        <label className="monitor-option">
           <input
             type="checkbox"
             checked={device}
@@ -73,29 +75,41 @@ export function UptimeSettings({
           />
           Monitor device downtime
         </label>
-        <p className="text-xs text-muted-foreground">
-          Uses agent reports (silent for 2 minutes) or completed discovery scans
-          (unseen for at least 15 minutes and two scan intervals). Devices
-          without an active agent need an enabled discovery range.
-        </p>
         <label className="flex flex-col gap-1.5 text-sm">
           TCP ports to monitor
           <Input
+            aria-describedby={helpId}
             value={ports}
             onChange={(event) => setPorts(event.target.value)}
             placeholder="22, 443, 8080"
           />
         </label>
-        <p className="text-xs text-muted-foreground">
-          Checks connections from the H.O.P.E server to any known IP address.
-          Leave ports empty to monitor only device downtime.
+        <p id={helpId} className="monitor-help">
+          Separate ports with commas. Leave empty for device downtime only.
         </p>
       </fieldset>
-      <p className="text-xs text-muted-foreground">
-        Checks run about once a minute. Two failed checks trigger an alert.
-        Enable the ntfy connector in Notifications to receive alerts; its
-        recovery setting controls follow-up messages.
+      <p className="monitor-help">
+        Alerts use your ntfy connector. Enable Notifications in the top bar to
+        receive them.
       </p>
+      <details className="monitor-help">
+        <summary>How checks and alerts work</summary>
+        <p>
+          Checks run about once a minute. Two failures open an alert; the
+          connector’s recovery setting controls follow-ups.
+        </p>
+        <p className="mt-2">
+          Device downtime uses agent reports (silent for 2 minutes) or completed
+          discovery scans (unseen for at least 15 minutes and two scan
+          intervals). Devices without an active agent need an enabled discovery
+          range.
+        </p>
+        <p className="mt-2">
+          TCP checks connect from the H.O.P.E server to any known device IP. An
+          open connection confirms the port is reachable, not that its
+          application is healthy.
+        </p>
+      </details>
       {error && (
         <p role="alert" className="text-xs text-destructive">
           {error}

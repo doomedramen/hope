@@ -2,7 +2,7 @@
 import { Age } from "@/components/age";
 import Image from "next/image";
 import { createElement, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, Bot } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, BellRing, Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -221,7 +221,16 @@ export function HostTable({
                     >
                       {hostDisplayName(h)}
                     </Button>
+                    <div className="host-mobile-address mono">
+                      {h.addresses[0] ?? "Unknown address"}
+                    </div>
                     <div className="sub">
+                      {h.uptime?.enabled && (
+                        <BellRing
+                          size={12}
+                          aria-label="Uptime monitoring enabled"
+                        />
+                      )}
                       {h.agent_id && (
                         <Bot size={12} aria-label="Agent installed" />
                       )}

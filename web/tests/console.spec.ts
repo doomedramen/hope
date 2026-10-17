@@ -933,6 +933,14 @@ test.describe.serial("H.O.P.E console", () => {
         (host: { name: string }) => host.name === "atlas-nas",
       ).uptime,
     ).toEqual({ enabled: true, device: true, ports: [443, 8080] });
+    await page.getByRole("button", { name: "1 uptime monitored" }).click();
+    await expect(
+      page.getByRole("button", { name: "1 uptime monitored" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator(".host-table tbody tr")).toHaveCount(1);
+    await page
+      .getByRole("button", { name: "Clear filters", exact: true })
+      .click();
     await uptime.getByLabel("Enable uptime monitoring").uncheck();
     await uptime
       .getByRole("button", { name: "Save uptime monitoring" })
@@ -956,6 +964,64 @@ test.describe.serial("H.O.P.E console", () => {
     });
     expect(reset.ok()).toBeTruthy();
   });
+  test("console stays readable across sizes and supports keyboard navigation", async ({
+    page,
+  }) => {
+    await page.goto("/?view=hosts");
+    await expect(
+      page.getByRole("navigation", { name: "Main navigation" }),
+    ).toBeVisible();
+    await page.keyboard.press("Tab");
+    await expect(
+      page.getByRole("link", { name: "Skip to main content" }),
+    ).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#main-content")).toBeFocused();
+    await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    for (const width of [375, 768, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => document.documentElement.scrollWidth <= window.innerWidth,
+          ),
+        )
+        .toBeTruthy();
+      if (width === 375) {
+        const table = page.locator(".host-table");
+        await expect(
+          table.getByRole("columnheader", { name: "Status" }),
+        ).toBeVisible();
+        expect(
+          await table.evaluate(
+            (element) =>
+              element.scrollWidth <= element.parentElement!.clientWidth,
+          ),
+        ).toBeTruthy();
+      }
+      const readings = page.locator(".reading-meter-card");
+      for (const reading of await readings.all()) {
+        expect(
+          await reading.evaluate(
+            (element) => element.scrollWidth <= element.clientWidth,
+          ),
+        ).toBeTruthy();
+      }
+      await page.screenshot({
+        path: `test-results/hope-polish-${width}.png`,
+        fullPage: true,
+      });
+    }
+    await page.getByRole("button", { name: "Dark", exact: true }).click();
+    await expect(page.locator("html")).toHaveClass(/dark/);
+    await page.screenshot({
+      path: "test-results/hope-polish-dark.png",
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Auto", exact: true }).click();
+  });
+
   test("each range chooses how often it is scanned in the background", async ({
     page,
     request,
