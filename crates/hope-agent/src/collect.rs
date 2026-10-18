@@ -165,6 +165,7 @@ pub struct CollectorCost {
 pub struct Collector {
     pub costs: Vec<CollectorCost>,
     system: System,
+    memory_total_bytes: f64,
     cpu_probe: CgroupCpuProbe,
     guest_cpu: Option<bool>,
     networks: Networks,
@@ -334,7 +335,6 @@ impl Collector {
     pub fn new(settings: extras::Settings) -> Self {
         let mut system = System::new();
         system.refresh_cpu_usage();
-        system.refresh_memory();
         Self {
             monitors: extras::Monitors::new(&settings),
             settings,
@@ -343,6 +343,7 @@ impl Collector {
             previous_pools: HashMap::new(),
             costs: Vec::with_capacity(20),
             system,
+            memory_total_bytes: 0.0,
             cpu_probe: CgroupCpuProbe::default(),
             guest_cpu: None,
             networks: Networks::new_with_refreshed_list(),
@@ -393,7 +394,10 @@ impl Collector {
         };
         self.cost("cpu", started);
         let started = Instant::now();
-        self.system.refresh_memory();
+        let memory = crate::memory::sample();
+        if let Some(total) = memory.total {
+            self.memory_total_bytes = total;
+        }
         self.cost("memory", started);
         let started = Instant::now();
         // A fresh snapshot also clears removed addresses. sysinfo 0.37's
@@ -540,7 +544,7 @@ impl Collector {
                     "Host CPU usage from system counters"
                 }.into()),
             },
-            status("memory", true, None),
+            status("memory", memory.used.is_some(), Some("Memory counters are unavailable or inconsistent")),
             status("network", true, None),
             status(
                 "storage",
@@ -632,7 +636,7 @@ impl Collector {
                 .map(|c| c.brand().to_string())
                 .unwrap_or_else(|| "Unknown CPU".into()),
             cpu_cores: cpu_cores as u32,
-            memory_total_bytes: self.system.total_memory() as f64,
+            memory_total_bytes: self.memory_total_bytes,
             interfaces,
             disks: self.disk_inventory.clone(),
             gpus: gpus.clone(),
@@ -641,13 +645,12 @@ impl Collector {
         let mut metrics = Metrics {
             system_uptime,
             cpu_percent,
-            memory_used_bytes: Some(self.system.used_memory() as f64),
-            memory_total_bytes: Some(self.system.total_memory() as f64),
+            memory_used_bytes: memory.used,
+            memory_total_bytes: memory.total,
             memory_cached_bytes: breakdown.cached_bytes,
             memory_zfs_arc_bytes: breakdown.zfs_arc_bytes,
-            swap_used_bytes: (self.system.total_swap() > 0).then(|| self.system.used_swap() as f64),
-            swap_total_bytes: (self.system.total_swap() > 0)
-                .then(|| self.system.total_swap() as f64),
+            swap_used_bytes: memory.swap_used,
+            swap_total_bytes: memory.swap_total,
             load_average,
             network_rx_bytes_per_second: has_rate.then_some(receive),
             network_tx_bytes_per_second: has_rate.then_some(transmit),

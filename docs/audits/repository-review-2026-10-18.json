@@ -175,8 +175,9 @@
     {
       "path": "crates/hope-agent/src/telemetry.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Whole source and tests read; all scalar/collection groups now isolated with shared validation. Invalid-core regression reproduced failure before fix and passes after, preserving unrelated boot metadata. Payload shedding and existing regressions pass."
     },
     {
       "path": "crates/hope-agent/src/updates.rs",
@@ -1291,6 +1292,13 @@
       "pass_1": "reviewed",
       "pass_2": "pending",
       "evidence": "Full source inspected. Stable bounded/default-route interface selection, deduplicated address budget, IPv6 scope policy and shared sysinfo snapshot. Fifty-two agent tests and workspace Clippy pass; native addresses match on 29 interfaces. Actual Linux address removal and resource comparison unverified."
+    },
+    {
+      "path": "crates/hope-agent/src/memory.rs",
+      "kind": "source/config/docs",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Fresh sysinfo snapshots avoid reuse after failed refreshes; unknown/zero totals and inconsistent RAM/swap counters checked. Native inspection valid. Agent tests and workspace Clippy pass; Linux read-failure/runtime and resource comparisons pending."
     }
   ],
   "milestones": [
@@ -1336,7 +1344,12 @@
     },
     {
       "subject": "Deterministic bounded network inventory from sysinfo; remove redundant if-addrs dependency",
-      "verification": "52 agent tests and workspace Clippy passed; native before/after address sets equal across 29 interfaces. Fresh snapshots prevent stale-address reuse identified in installed library source. Actual Linux removal and CPU/RSS comparisons pending."
+      "verification": "52 agent tests and workspace Clippy passed; native before/after address sets equal across 29 interfaces. Fresh snapshots prevent stale-address reuse identified in installed library source. Actual Linux removal and CPU/RSS comparisons pending.",
+      "commit": "a51cfd1"
+    },
+    {
+      "subject": "Preserve heartbeats through invalid core counters and make unavailable memory explicit",
+      "verification": "Invalid-core isolation regression fails before fix and passes after. Fifty-four agent tests, workspace Clippy, frontend types/lint/build pass; native memory observation valid. Linux fault injection and memory snapshot resource comparison pending."
     }
   ]
 }

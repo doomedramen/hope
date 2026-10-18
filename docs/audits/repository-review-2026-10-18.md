@@ -35,6 +35,8 @@ Pass one traces implementation and error cases, reproduces findings and implemen
 
 ## Work queue from evidence
 
+Latest milestone: memory is sampled from a fresh sysinfo instance to avoid retaining old values after a failed refresh; zero/unavailable totals and inconsistent used counters become unknown, while inventory retains the last known capacity. The hardware view treats a legacy zero capacity as unavailable. CPU, RAM, memory breakdown, swap, load and aggregate network/disk rates now share per-group failure isolation. An invalid-core regression failed before the fix and passes afterward without dropping unrelated boot metadata. Agent 54 tests, workspace Clippy and frontend types/lint/export pass; native memory inspection is valid. Actual Linux read-failure injection and snapshot resource comparisons remain pending.
+
 - Server future-clock watermark freezes live state after a backward correction; needs robust ordering across restarts/backlog, not receipt-time replacement of every historical report.
 - Container aggregation and charts are implemented; review the remaining non-container keyed-series lifecycle and history resource costs.
 - Missing reboot events/reasons and agent process uptime, queue/transport/collector health, CPU breakdown/allocation, filesystem inodes/health, NIC errors/state, expected service state, container health and sustained alerts. OS uptime/boot identity are implemented with scope limitations. Work through the complete reporting-gap table in the agent audit.
@@ -42,7 +44,7 @@ Pass one traces implementation and error cases, reproduces findings and implemen
 - Review raw-point resolution/freshness semantics and remaining keyed-series lifecycle behavior beyond the fixed live cache and container paths.
 - History/retention SQL loads full metric JSON; the existing 250-host fixture uses minimal CPU-only reports. Measure populated collections and storage growth before treating its results as representative of a full monitoring installation.
 - Operator notes in `.agent-notes/inbox.md`: host cleanup, multi-address identity, deleted-network history and raw-ARP recovery. Verify current behavior before choosing a correction.
-- Additional source-path findings to reproduce/fix: `extras::parse_units` caps failed/watched units before sorting, so 128 earlier failed units can hide a watched unit; it skips `not-found` rows and cannot observe unloaded watched units from `list-units` alone. `Collector` is constructed before enrollment/CA updates, so the first manual enrollment report can use a monitor client built without the newly saved CA. Memory collector availability is unconditional and zero totals are emitted as known readings; its failure/invalid-counter path needs explicit unknown values. These remain open, not runtime-confirmed production diagnoses.
+- Additional source-path findings to reproduce/fix: `extras::parse_units` caps failed/watched units before sorting, so 128 earlier failed units can hide a watched unit; it skips `not-found` rows and cannot observe unloaded watched units from `list-units` alone. `Collector` is constructed before enrollment/CA updates, so the first manual enrollment report can use a monitor client built without the newly saved CA. These remain open, not runtime-confirmed production diagnoses. Memory's unknown/failure isolation path is now fixed as described above.
 
 ## Environment limits
 

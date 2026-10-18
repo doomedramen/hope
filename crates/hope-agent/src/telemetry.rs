@@ -67,39 +67,46 @@ pub fn isolate(
     // Validate each group on its own so one optional source cannot suppress the
     // heartbeat, CPU, memory, or unrelated collectors. Move values instead of cloning them.
     macro_rules! group {
-        ($field:ident, $name:literal) => {{
+        ($name:literal, $($field:ident),+) => {{
             let mut probe = Metrics {
-                $field: std::mem::take(&mut metrics.$field),
+                $($field: std::mem::take(&mut metrics.$field),)+
                 ..Default::default()
             };
             match validation::metrics(&probe) {
-                Ok(()) => metrics.$field = std::mem::take(&mut probe.$field),
+                Ok(()) => { $(metrics.$field = std::mem::take(&mut probe.$field);)+ }
                 Err(reason) => degraded(collectors, $name, reason),
             }
         }};
     }
-    group!(containers, "docker_containers");
-    group!(monitors, "monitors");
-    group!(disks, "storage");
-    group!(gpus, "gpu_metrics");
-    group!(disk_io, "disk_devices");
-    group!(pools, "storage_pools");
-    group!(temperatures, "temperatures");
-    group!(network_interfaces, "network");
-    group!(system_uptime, "uptime");
-
-    let mut services = Metrics {
-        services: std::mem::take(&mut metrics.services),
-        service_summary: metrics.service_summary.take(),
-        ..Default::default()
-    };
-    match validation::metrics(&services) {
-        Ok(()) => {
-            metrics.services = std::mem::take(&mut services.services);
-            metrics.service_summary = services.service_summary;
-        }
-        Err(reason) => degraded(collectors, "services", reason),
-    }
+    group!("cpu", cpu_percent);
+    group!("memory", memory_used_bytes, memory_total_bytes);
+    group!(
+        "memory_breakdown",
+        memory_cached_bytes,
+        memory_zfs_arc_bytes
+    );
+    group!("swap", swap_used_bytes, swap_total_bytes);
+    group!("load_average", load_average);
+    group!(
+        "network",
+        network_rx_bytes_per_second,
+        network_tx_bytes_per_second
+    );
+    group!(
+        "disk_io",
+        disk_read_bytes_per_second,
+        disk_write_bytes_per_second
+    );
+    group!("docker_containers", containers);
+    group!("monitors", monitors);
+    group!("storage", disks);
+    group!("gpu_metrics", gpus);
+    group!("disk_devices", disk_io);
+    group!("storage_pools", pools);
+    group!("temperatures", temperatures);
+    group!("network", network_interfaces);
+    group!("uptime", system_uptime);
+    group!("services", services, service_summary);
     if !validation::disks(&inventory.disks) {
         inventory.disks.clear();
         degraded(collectors, "storage", "invalid filesystem inventory");
@@ -114,6 +121,62 @@ pub fn isolate(
 mod tests {
     use super::*;
     use hope_protocol::{Container, Disk, Gpu, SCHEMA_VERSION};
+
+    #[test]
+    fn invalid_core_readings_do_not_reject_the_entire_heartbeat() {
+        let mut inventory: Inventory = serde_json::from_value(serde_json::json!({
+            "hostname":"fixture","os":"Linux","architecture":"test","cpu_model":"test",
+            "cpu_cores":1,"memory_total_bytes":100,"interfaces":[],"disks":[],"gpus":[],"collectors":[]
+        })).unwrap();
+        let mut metrics = Metrics {
+            cpu_percent: Some(f64::NAN),
+            memory_total_bytes: Some(100.0),
+            memory_used_bytes: Some(101.0),
+            memory_cached_bytes: Some(f64::INFINITY),
+            swap_total_bytes: Some(100.0),
+            swap_used_bytes: Some(101.0),
+            load_average: Some(hope_protocol::LoadAverage {
+                one: -1.0,
+                five: 0.0,
+                fifteen: 0.0,
+            }),
+            network_rx_bytes_per_second: Some(f64::INFINITY),
+            disk_read_bytes_per_second: Some(-1.0),
+            system_uptime: Some(hope_protocol::SystemUptime {
+                seconds: 100.0,
+                boot_time: None,
+                boot_id: None,
+                scope: hope_protocol::UptimeScope::System,
+            }),
+            ..Default::default()
+        };
+        let mut collectors = vec![];
+        isolate(&mut inventory, &mut metrics, &mut collectors);
+        assert!(
+            validation::metrics(&metrics).is_ok(),
+            "One bad core counter must not suppress reporting"
+        );
+        assert!(
+            metrics.system_uptime.is_some(),
+            "Unrelated boot metadata remains available"
+        );
+        for name in [
+            "cpu",
+            "memory",
+            "memory_breakdown",
+            "swap",
+            "load_average",
+            "network",
+            "disk_io",
+        ] {
+            assert!(
+                collectors
+                    .iter()
+                    .any(|status| status.name == name && !status.available),
+                "Missing coverage loss for {name}"
+            );
+        }
+    }
 
     #[test]
     fn an_oversized_optional_collection_preserves_the_heartbeat() {

@@ -370,7 +370,13 @@ export function HostDetails({
                     {inventory.cpu_model} · {inventory.cpu_cores} cores
                   </dd>
                   <dt>Memory</dt>
-                  <dd>{bytes(inventory.memory_total_bytes)}</dd>
+                  <dd>
+                    {bytes(
+                      inventory.memory_total_bytes > 0
+                        ? inventory.memory_total_bytes
+                        : null,
+                    )}
+                  </dd>
                   <dt>
                     {host.metrics?.system_uptime?.scope === "container_kernel"
                       ? "Kernel uptime"
