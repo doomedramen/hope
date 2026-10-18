@@ -21,13 +21,18 @@ Pass one traces implementation and error cases, reproduces findings and implemen
 ## Verified milestones
 
 - Initial agent reliability and hosted inspection: see [agent reporting audit](agent-reporting-2026-10-18.md) and [crate research](agent-crates-2026-10-18.md). Native Rust 182 passing, installer 108 distinct checks, docs 8 passing, frontend fleet 14 passing, type checking and Clippy passing. The privileged Linux/systemd gate and complete Linux target build remain unverified locally because Docker/musl C tooling is unavailable.
+- `1b05bdb`: committed the initial reliability fixes and review ledger. `make check` and frontend formatting passed before the checkpoint.
+- Container history: CPU/RAM gauges now use per-ID sums/counts, preserve unknown readings and retain observed containers within a bounded bucket. Both retention and display aggregation preserve each container's latest metadata across late arrivals. Migration 6 adds a host metadata timestamp. Legacy container rollups without gauge statistics expose unknowns. The details page has four history windows and retains charts when the latest report omits the container. Native Rust 186 passing (plus one separately passing updated validation regression), Clippy, frontend types/lint/format/export, protocol generation, docs 8 and browser suite 41 passing. Desktop and mobile screenshots reviewed. A release-mode 250-host retention run is in progress; no performance result is claimed yet.
 
 ## Work queue from evidence
 
 - Server future-clock watermark freezes live state after a backward correction; needs robust ordering across restarts/backlog, not receipt-time replacement of every historical report.
-- Container statistics are copied from the last sample rather than aggregated; container history lacks series.
+- Container aggregation and charts are implemented; review the remaining non-container keyed-series lifecycle and history resource costs.
 - Missing uptime/boot identity, agent queue/transport/collector health, CPU breakdown/allocation, filesystem inodes/health, NIC errors/state, expected service state, container health and sustained alerts. Work through the complete reporting-gap table in the agent audit.
 - Agent state writes and spool serialization costs, duplicated/expensive collection, release cross-request consistency and updater-attempt visibility.
+- `useHistory` retains up to seven days of full live reports despite reloading stored/aggregated history; bound that cache to the actual reload interval. Review raw-point resolution/freshness semantics alongside it.
+- GPU history hides its selector when the selected adapter has no values; this prevents selecting a different adapter that does have history. Keep selection available in the unavailable state.
+- History/retention SQL loads full metric JSON; the existing 250-host fixture uses minimal CPU-only reports. Measure populated collections and storage growth before treating its results as representative of a full monitoring installation.
 - Operator notes in `.agent-notes/inbox.md`: host cleanup, multi-address identity, deleted-network history and raw-ARP recovery. Verify current behavior before choosing a correction.
 
 ## Environment limits

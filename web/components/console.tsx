@@ -941,30 +941,13 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                 const container = host.metrics?.containers.find(
                   (item) => item.id === location.container,
                 );
-                return container ? (
+                return (
                   <ContainerDetailsPage
                     host={host}
                     container={container}
+                    containerId={location.container}
                     onBack={() => go({ view: "host", host: host.id })}
                   />
-                ) : (
-                  <Empty className="min-h-[400px]">
-                    <EmptyHeader>
-                      <EmptyTitle>
-                        Container not in the latest report
-                      </EmptyTitle>
-                      <EmptyDescription>
-                        It may have stopped or been removed. Refresh the host
-                        report and try again.
-                      </EmptyDescription>
-                    </EmptyHeader>
-                    <Button
-                      variant="outline"
-                      onClick={() => go({ view: "host", host: host.id })}
-                    >
-                      Back to host
-                    </Button>
-                  </Empty>
                 );
               })()
             ) : (

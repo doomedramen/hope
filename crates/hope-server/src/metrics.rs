@@ -20,6 +20,13 @@ struct Statistic {
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Statistics(BTreeMap<String, Statistic>);
 impl Statistics {
+    fn observe_containers(&mut self, metrics: &Metrics, at: f64) {
+        for container in &metrics.containers {
+            self.0
+                .entry(container_observed_key(&container.id))
+                .or_insert(Statistic { sum: at, count: 1 });
+        }
+    }
     fn sample(metrics: &Metrics) -> Self {
         let mut result = Self::default();
         macro_rules! scalar { ($($field:ident),*) => { $(result.add(stringify!($field), metrics.$field);)* }; }
@@ -83,6 +90,18 @@ impl Statistics {
             result.add(&format!("{key}:total"), gpu.memory_total_bytes);
             result.add(&format!("{key}:temperature"), gpu.temperature_celsius);
         }
+        for container in &metrics.containers {
+            let key = format!("container:{}", serde_json::json!(container.id));
+            macro_rules! gauge {
+                ($($field:ident),*) => { $(result.add(&format!("{key}:{}", stringify!($field)), container.$field);)* };
+            }
+            gauge!(
+                cpu_percent,
+                memory_used_bytes,
+                memory_limit_bytes,
+                memory_percent
+            );
+        }
         for disk in &metrics.disks {
             let key = disk_key(&disk.name, &disk.mount, &disk.filesystem);
             result.add(&format!("{key}:available"), Some(disk.available_bytes));
@@ -100,6 +119,11 @@ impl Statistics {
     fn merge(&mut self, other: &Self) {
         for (key, value) in &other.0 {
             let entry = self.0.entry(key.clone()).or_default();
+            if key.starts_with("container:") && key.ends_with(":observed_at") {
+                entry.sum = entry.sum.max(value.sum);
+                entry.count = 1;
+                continue;
+            }
             entry.sum += value.sum;
             entry.count += value.count;
         }
@@ -109,6 +133,20 @@ impl Statistics {
             .get(key)
             .filter(|s| s.count > 0)
             .map(|s| s.sum / s.count as f64)
+    }
+    fn apply_container_gauges(&self, metrics: &mut Metrics) {
+        for container in &mut metrics.containers {
+            let key = format!("container:{}", serde_json::json!(container.id));
+            macro_rules! gauge {
+                ($($field:ident),*) => { $(container.$field = self.mean(&format!("{key}:{}", stringify!($field)));)* };
+            }
+            gauge!(
+                cpu_percent,
+                memory_used_bytes,
+                memory_limit_bytes,
+                memory_percent
+            );
+        }
     }
     fn apply(&self, mut latest: Metrics) -> Metrics {
         macro_rules! scalar { ($($field:ident),*) => { $(latest.$field = self.mean(stringify!($field));)* }; }
@@ -182,6 +220,8 @@ impl Statistics {
             gpu.memory_total_bytes = self.mean(&format!("{key}:total"));
             gpu.temperature_celsius = self.mean(&format!("{key}:temperature"));
         }
+        // Cumulative counters and state remain the latest observed metadata.
+        self.apply_container_gauges(&mut latest);
         for disk in &mut latest.disks {
             let key = disk_key(&disk.name, &disk.mount, &disk.filesystem);
             if let Some(value) = self.mean(&format!("{key}:available")) {
@@ -202,6 +242,42 @@ fn disk_key(name: &str, mount: &str, filesystem: &str) -> String {
     format!("disk:{}", serde_json::json!([name, mount, filesystem]))
 }
 
+fn container_observed_key(id: &str) -> String {
+    format!("container:{}:observed_at", serde_json::json!(id))
+}
+/// Keep containers observed earlier in a bucket when its last sample omits
+/// them. Prefer each container's newest metadata and bound churn to the list limit.
+fn keep_observed_containers(
+    latest: &mut Metrics,
+    previous: &Metrics,
+    latest_statistics: &Statistics,
+    previous_statistics: &Statistics,
+) {
+    let previous_by_id: std::collections::HashMap<_, _> = previous
+        .containers
+        .iter()
+        .map(|container| (container.id.as_str(), container))
+        .collect();
+    for container in &mut latest.containers {
+        let key = container_observed_key(&container.id);
+        if previous_statistics.mean(&key) > latest_statistics.mean(&key)
+            && let Some(previous) = previous_by_id.get(container.id.as_str())
+        {
+            *container = (*previous).clone();
+        }
+    }
+    let mut seen: std::collections::HashSet<_> =
+        latest.containers.iter().map(|c| c.id.clone()).collect();
+    for container in &previous.containers {
+        if latest.containers.len() == 128 {
+            break;
+        }
+        if seen.insert(container.id.clone()) {
+            latest.containers.push(container.clone());
+        }
+    }
+}
+
 pub async fn history(
     Extract(state): Extract<State>,
     Path(id): Path<String>,
@@ -213,11 +289,11 @@ pub async fn history(
     };
     let hours = window.hours.unwrap_or(24).clamp(1, 168);
     let since = now() - hours as f64 * 3600.0;
-    let rows = sqlx::query("SELECT collected_at,resolution,body,statistics FROM metrics WHERE agent_id=? AND (collected_at>=? OR (resolution>30 AND collected_at+resolution>?)) ORDER BY collected_at DESC LIMIT 10000")
+    let rows = sqlx::query("SELECT collected_at,resolution,body,statistics,latest_collected_at FROM metrics WHERE agent_id=? AND (collected_at>=? OR (resolution>30 AND collected_at+resolution>?)) ORDER BY collected_at DESC LIMIT 10000")
         .bind(agent).bind(since).bind(since).fetch_all(&state.0.db).await?;
     let mut points = vec![];
     for row in rows.into_iter().rev() {
-        let point = MetricPoint {
+        let mut point = MetricPoint {
             collected_at: row.get("collected_at"),
             resolution_seconds: row.get::<i64, _>("resolution") as u32,
             metrics: serde_json::from_str(row.get("body"))?,
@@ -229,7 +305,23 @@ pub async fn history(
         let statistics = statistics.or_else(|| {
             (point.resolution_seconds == 30).then(|| Statistics::sample(&point.metrics))
         });
-        points.push((point, statistics));
+        if point.resolution_seconds > 30 {
+            // Pre-upgrade rollups copied the final container sample without
+            // gauge sums/counts. They cannot truthfully be displayed as averages.
+            statistics
+                .as_ref()
+                .unwrap_or(&Statistics::default())
+                .apply_container_gauges(&mut point.metrics);
+        }
+        let latest_at = row.get::<Option<f64>, _>("latest_collected_at").unwrap_or(
+            point.collected_at
+                + if point.resolution_seconds > 30 {
+                    point.resolution_seconds as f64
+                } else {
+                    0.0
+                },
+        );
+        points.push((point, statistics, latest_at));
     }
     let seconds = if hours > 24 {
         900
@@ -240,28 +332,37 @@ pub async fn history(
     };
     // Legacy rollups have no recoverable per-metric counts. Preserve their values rather
     // than inventing weights; they expire naturally after seven days.
-    if seconds == 0 || points.iter().any(|(_, statistics)| statistics.is_none()) {
-        return Ok(Json(points.into_iter().map(|(point, _)| point).collect()));
+    if seconds == 0 || points.iter().any(|(_, statistics, _)| statistics.is_none()) {
+        return Ok(Json(
+            points.into_iter().map(|(point, _, _)| point).collect(),
+        ));
     }
     Ok(Json(weighted_bucket(points, seconds)))
 }
 fn weighted_bucket(
-    points: Vec<(MetricPoint, Option<Statistics>)>,
+    points: Vec<(MetricPoint, Option<Statistics>, f64)>,
     seconds: u32,
 ) -> Vec<MetricPoint> {
-    let mut groups: BTreeMap<i64, (Metrics, Statistics)> = BTreeMap::new();
-    for (point, statistics) in points {
+    let mut groups: BTreeMap<i64, (Metrics, Statistics, f64)> = BTreeMap::new();
+    for (point, statistics, latest_at) in points {
         let entry = groups
             .entry((point.collected_at / seconds as f64).floor() as i64)
             .or_default();
-        entry.0 = point.metrics;
-        if let Some(statistics) = statistics {
-            entry.1.merge(&statistics);
+        let mut latest = point.metrics;
+        let mut statistics = statistics.unwrap_or_default();
+        statistics.observe_containers(&latest, latest_at);
+        if latest_at >= entry.2 {
+            keep_observed_containers(&mut latest, &entry.0, &statistics, &entry.1);
+            entry.0 = latest;
+            entry.2 = latest_at;
+        } else {
+            keep_observed_containers(&mut entry.0, &latest, &entry.1, &statistics);
         }
+        entry.1.merge(&statistics);
     }
     groups
         .into_iter()
-        .map(|(time, (latest, statistics))| MetricPoint {
+        .map(|(time, (latest, statistics, _))| MetricPoint {
             collected_at: (time * seconds as i64) as f64,
             resolution_seconds: seconds,
             metrics: statistics.apply(latest),
@@ -270,10 +371,16 @@ fn weighted_bucket(
 }
 pub fn aggregate(values: &[Metrics]) -> Metrics {
     let mut statistics = Statistics::default();
-    for value in values {
-        statistics.merge(&Statistics::sample(value));
+    let mut latest = Metrics::default();
+    for (index, value) in values.iter().enumerate() {
+        let mut sample_statistics = Statistics::sample(value);
+        sample_statistics.observe_containers(value, index as f64);
+        let mut next = value.clone();
+        keep_observed_containers(&mut next, &latest, &sample_statistics, &statistics);
+        statistics.merge(&sample_statistics);
+        latest = next;
     }
-    statistics.apply(values.last().cloned().unwrap_or_default())
+    statistics.apply(latest)
 }
 pub async fn retain(state: &State) -> anyhow::Result<()> {
     retain_at(state, now()).await
@@ -294,13 +401,14 @@ async fn retain_at(state: &State, reference: f64) -> anyhow::Result<()> {
         let from = (bucket * 300) as f64;
         let mut tx = state.0.db.begin().await?;
         let existing =
-            sqlx::query("SELECT body,statistics FROM metrics WHERE agent_id=? AND report_id=?")
+            sqlx::query("SELECT body,statistics,latest_collected_at FROM metrics WHERE agent_id=? AND report_id=?")
                 .bind(&agent)
                 .bind(format!("rollup-{bucket}"))
                 .fetch_optional(&mut *tx)
                 .await?;
         let mut statistics = Statistics::default();
         let mut latest = Metrics::default();
+        let mut latest_at = f64::NEG_INFINITY;
         if let Some(existing) = existing {
             let stored: Option<String> = existing.get("statistics");
             let Some(stored) = stored else {
@@ -311,15 +419,31 @@ async fn retain_at(state: &State, reference: f64) -> anyhow::Result<()> {
             };
             statistics = serde_json::from_str(&stored)?;
             latest = serde_json::from_str(existing.get("body"))?;
+            // Older rollups did not retain the metadata timestamp. Preserve
+            // their known counters rather than letting a late sample rewind them.
+            latest_at = existing
+                .get::<Option<f64>, _>("latest_collected_at")
+                .unwrap_or(from + 300.0);
+            statistics.observe_containers(&latest, latest_at);
         }
-        let rows = sqlx::query("SELECT body FROM metrics WHERE agent_id=? AND resolution=30 AND collected_at>=? AND collected_at<? ORDER BY collected_at")
+        let rows = sqlx::query("SELECT body,collected_at FROM metrics WHERE agent_id=? AND resolution=30 AND collected_at>=? AND collected_at<? ORDER BY collected_at")
             .bind(&agent).bind(from).bind(from+300.0).fetch_all(&mut *tx).await?;
         for row in rows {
-            latest = serde_json::from_str(row.get("body"))?;
-            statistics.merge(&Statistics::sample(&latest));
+            let mut sample = serde_json::from_str(row.get("body"))?;
+            let at: f64 = row.get("collected_at");
+            let mut sample_statistics = Statistics::sample(&sample);
+            sample_statistics.observe_containers(&sample, at);
+            if at >= latest_at {
+                keep_observed_containers(&mut sample, &latest, &sample_statistics, &statistics);
+                latest = sample;
+                latest_at = at;
+            } else {
+                keep_observed_containers(&mut latest, &sample, &statistics, &sample_statistics);
+            }
+            statistics.merge(&sample_statistics);
         }
-        sqlx::query("INSERT OR REPLACE INTO metrics(agent_id,report_id,collected_at,resolution,body,statistics) VALUES(?,?,?,300,?,?)")
-            .bind(&agent).bind(format!("rollup-{bucket}")).bind(from).bind(serde_json::to_string(&statistics.apply(latest))?).bind(serde_json::to_string(&statistics)?).execute(&mut *tx).await?;
+        sqlx::query("INSERT OR REPLACE INTO metrics(agent_id,report_id,collected_at,resolution,body,statistics,latest_collected_at) VALUES(?,?,?,300,?,?,?)")
+            .bind(&agent).bind(format!("rollup-{bucket}")).bind(from).bind(serde_json::to_string(&statistics.apply(latest))?).bind(serde_json::to_string(&statistics)?).bind(latest_at).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM metrics WHERE agent_id=? AND resolution=30 AND collected_at>=? AND collected_at<?")
             .bind(&agent).bind(from).bind(from+300.0).execute(&mut *tx).await?;
         tx.commit().await?;
@@ -344,6 +468,218 @@ async fn retain_at(state: &State, reference: f64) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn container_gauges_average_by_id_with_missing_samples_and_counter_totals_preserved() {
+        let container = |id: &str, cpu, received| {
+            serde_json::from_value(serde_json::json!({
+                "id":id,"name":"same name","image":"fixture:latest",
+                "state":"running","status":"Up","ports":"",
+                "cpu_percent":cpu,"memory_used_bytes":cpu,
+                "network_rx_bytes":received
+            }))
+            .unwrap()
+        };
+        let samples = [
+            Metrics {
+                containers: vec![
+                    container("a", Some(20.0), 100.0),
+                    container("b", Some(90.0), 5.0),
+                ],
+                ..Default::default()
+            },
+            Metrics {
+                containers: vec![
+                    container("b", None, 10.0),
+                    container("a", Some(80.0), 400.0),
+                ],
+                ..Default::default()
+            },
+            Metrics::default(),
+        ];
+        let result = aggregate(&samples);
+        let a = result.containers.iter().find(|c| c.id == "a").unwrap();
+        let b = result.containers.iter().find(|c| c.id == "b").unwrap();
+        assert_eq!(a.cpu_percent, Some(50.0));
+        assert_eq!(a.memory_used_bytes, Some(50.0));
+        assert_eq!(a.memory_percent, None);
+        assert_eq!(a.network_rx_bytes, Some(400.0));
+        assert_eq!(b.cpu_percent, Some(90.0));
+        assert_eq!(b.network_rx_bytes, Some(10.0));
+
+        let mut old_statistics = Statistics::default();
+        for sample in &samples {
+            old_statistics.merge(&Statistics::sample(sample));
+        }
+        let next = Metrics {
+            containers: vec![container("a", Some(100.0), 500.0)],
+            ..Default::default()
+        };
+        let combined = weighted_bucket(
+            vec![
+                (
+                    MetricPoint {
+                        collected_at: 300.0,
+                        resolution_seconds: 300,
+                        metrics: result,
+                    },
+                    Some(old_statistics),
+                    540.0,
+                ),
+                (
+                    MetricPoint {
+                        collected_at: 610.0,
+                        resolution_seconds: 30,
+                        metrics: next.clone(),
+                    },
+                    Some(Statistics::sample(&next)),
+                    610.0,
+                ),
+            ],
+            900,
+        );
+        let a = combined[0]
+            .metrics
+            .containers
+            .iter()
+            .find(|c| c.id == "a")
+            .unwrap();
+        assert_eq!(a.cpu_percent, Some(200.0 / 3.0));
+        assert_eq!(a.network_rx_bytes, Some(500.0));
+        assert_eq!(combined[0].metrics.containers.len(), 2);
+    }
+
+    #[test]
+    fn container_churn_keeps_the_newest_metadata_with_a_bounded_bucket() {
+        let sample = |index| Metrics {
+            containers: vec![
+                serde_json::from_value(serde_json::json!({
+                    "id":format!("container-{index}"),"name":"fixture","image":"fixture:latest",
+                    "state":"running","status":"Up","ports":""
+                }))
+                .unwrap(),
+            ],
+            ..Default::default()
+        };
+        let result = aggregate(&(0..150).map(sample).collect::<Vec<_>>());
+        assert_eq!(result.containers.len(), 128);
+        assert_eq!(result.containers[0].id, "container-149");
+        assert!(hope_protocol::validation::metrics(&result).is_ok());
+    }
+
+    #[tokio::test]
+    async fn late_reports_do_not_rewind_retained_or_displayed_container_counters() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = State::open(
+            directory.path().join("history.db").to_str().unwrap(),
+            "http://localhost:8080".into(),
+            "releases".into(),
+            hope_protocol::Capabilities {
+                platform: "test".into(),
+                discovery_mode: "limited".into(),
+                arp: false,
+                icmp: false,
+                limitations: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let reference = 1_700_000_200.0;
+        let from = ((reference - 90_000.0) / 300.0_f64).floor() * 300.0;
+        let sample = |cpu, received, status| {
+            Metrics {containers:vec![serde_json::from_value(serde_json::json!({
+            "id":"stable-id","name":"fixture","image":"fixture:latest","state":"running","status":status,"ports":"",
+            "cpu_percent":cpu,"network_rx_bytes":received
+        })).unwrap()], ..Default::default()}
+        };
+        let newer = sample(80.0, 500.0, "newer");
+        sqlx::query(
+            "INSERT INTO metrics(agent_id,report_id,collected_at,body) VALUES('agent','newer',?,?)",
+        )
+        .bind(from + 240.0)
+        .bind(serde_json::to_string(&newer).unwrap())
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+        retain_at(&state, reference).await.unwrap();
+        let older = sample(20.0, 100.0, "older");
+        sqlx::query(
+            "INSERT INTO metrics(agent_id,report_id,collected_at,body) VALUES('agent','late',?,?)",
+        )
+        .bind(from + 30.0)
+        .bind(serde_json::to_string(&older).unwrap())
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+        let display = weighted_bucket(
+            vec![
+                (
+                    MetricPoint {
+                        collected_at: from,
+                        resolution_seconds: 300,
+                        metrics: newer.clone(),
+                    },
+                    Some(Statistics::sample(&newer)),
+                    from + 240.0,
+                ),
+                (
+                    MetricPoint {
+                        collected_at: from + 30.0,
+                        resolution_seconds: 30,
+                        metrics: older.clone(),
+                    },
+                    Some(Statistics::sample(&older)),
+                    from + 30.0,
+                ),
+            ],
+            900,
+        );
+        assert_eq!(
+            display[0].metrics.containers[0].network_rx_bytes,
+            Some(500.0)
+        );
+        assert_eq!(display[0].metrics.containers[0].status, "newer");
+        retain_at(&state, reference).await.unwrap();
+        let (body, latest_at): (String, f64) = sqlx::query_as("SELECT body,latest_collected_at FROM metrics WHERE agent_id='agent' AND resolution=300")
+            .fetch_one(&state.0.db).await.unwrap();
+        let result: Metrics = serde_json::from_str(&body).unwrap();
+        assert_eq!(result.containers[0].cpu_percent, Some(50.0));
+        assert_eq!(result.containers[0].network_rx_bytes, Some(500.0));
+        assert_eq!(result.containers[0].status, "newer");
+        assert_eq!(latest_at, from + 240.0);
+
+        // A late observation can be newer for an individual container even
+        // when another container supplied the bucket's newest host report.
+        let mut other = sample(10.0, 50.0, "other");
+        other.containers[0].id = "other-id".into();
+        sqlx::query(
+            "INSERT INTO metrics(agent_id,report_id,collected_at,body) VALUES('agent','other',?,?)",
+        )
+        .bind(from + 270.0)
+        .bind(serde_json::to_string(&other).unwrap())
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+        retain_at(&state, reference).await.unwrap();
+        let late_newer = sample(60.0, 700.0, "newer for this container");
+        sqlx::query("INSERT INTO metrics(agent_id,report_id,collected_at,body) VALUES('agent','late-newer',?,?)")
+            .bind(from+250.0).bind(serde_json::to_string(&late_newer).unwrap()).execute(&state.0.db).await.unwrap();
+        retain_at(&state, reference).await.unwrap();
+        let body: String = sqlx::query_scalar(
+            "SELECT body FROM metrics WHERE agent_id='agent' AND resolution=300",
+        )
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+        let result: Metrics = serde_json::from_str(&body).unwrap();
+        let container = result
+            .containers
+            .iter()
+            .find(|container| container.id == "stable-id")
+            .unwrap();
+        assert_eq!(container.network_rx_bytes, Some(700.0));
+        assert_eq!(container.status, "newer for this container");
+    }
+
     #[tokio::test]
     async fn retention_boundaries_and_restart_preserve_partial_buckets() {
         let directory = tempfile::tempdir().expect("temporary");
@@ -548,6 +884,7 @@ mod tests {
                     metrics: aggregate(&samples),
                 },
                 Some(stats),
+                540.0,
             ),
             (
                 MetricPoint {
@@ -562,6 +899,7 @@ mod tests {
                     cpu_percent: Some(80.0),
                     ..Default::default()
                 })),
+                610.0,
             ),
         ];
         let result = weighted_bucket(points, 900);

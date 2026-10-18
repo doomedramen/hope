@@ -329,6 +329,12 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByRole("heading", { name: "immich-server" }),
     ).toBeVisible();
     await expect(page.getByText("321.0 MiB / 2.0 GiB")).toBeVisible();
+    await expect(page.getByTestId("chart-Container CPU")).toBeVisible();
+    await expect(page.getByTestId("chart-Container memory")).toBeVisible();
+    await page.screenshot({
+      path: "test-results/container-history.png",
+      fullPage: true,
+    });
     await page.getByRole("button", { name: "Back to atlas-nas" }).click();
     await expect(
       hostDetails.getByRole("tab", { name: "Containers" }),
@@ -537,6 +543,46 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByRole("complementary", { name: "Host details" }),
     ).toContainText("atlas-nas");
   });
+  test("a container omitted from the latest report keeps its history on mobile", async ({
+    page,
+    request,
+  }) => {
+    const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+    const host = bootstrap.hosts.find(
+      (item: { name: string }) => item.name === "atlas-nas",
+    );
+    expect(host).toBeTruthy();
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const item = body.hosts.find(
+        (item: { id: string }) => item.id === host.id,
+      );
+      item.metrics.containers = [];
+      await route.fulfill({ response, json: body });
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`/?view=container&host=${host.id}&container=a1b2c3d4e5f6`);
+    await expect(
+      page.getByRole("heading", { name: "Container not in the latest report" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("chart-Container CPU")).toBeVisible();
+    await expect(page.getByTestId("chart-Container memory")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => document.documentElement.scrollWidth <= window.innerWidth,
+        ),
+      )
+      .toBe(true);
+    await page.screenshot({
+      path: "test-results/container-history-mobile.png",
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "7d", exact: true }).click();
+    await expect(page.getByTestId("chart-Container CPU")).toBeVisible();
+  });
+
   test("expired session returns to login and mobile logout is reachable", async ({
     page,
   }) => {

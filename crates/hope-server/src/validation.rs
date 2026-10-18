@@ -38,6 +38,12 @@ mod tests {
             ..Default::default()
         };
         assert!(metrics(&report).is_ok());
+        report.containers.push(report.containers[0].clone());
+        assert!(
+            metrics(&report).is_err(),
+            "duplicate container IDs cannot be aggregated independently"
+        );
+        report.containers.pop();
         report.containers[0].memory_used_bytes = Some(-1.0);
         assert!(metrics(&report).is_err());
     }

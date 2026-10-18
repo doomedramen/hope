@@ -489,6 +489,50 @@ async fn retention_averages_old_samples_and_deletes_expired_history() {
     );
 }
 #[tokio::test]
+async fn legacy_container_rollups_are_unknown_while_raw_gauges_remain_available() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, _, _) = enrolled(&state, &app).await;
+    let host: String = sqlx::query_scalar("SELECT id FROM hosts WHERE agent_id=?")
+        .bind(&agent)
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    let metrics = Metrics {
+        containers: vec![
+            serde_json::from_value(json!({
+                "id":"container","name":"fixture","image":"fixture:latest",
+                "state":"running","status":"Up","ports":"", "cpu_percent":35.0,
+                "memory_used_bytes":100.0,"network_rx_bytes":500.0
+            }))
+            .unwrap(),
+        ],
+        ..Default::default()
+    };
+    for (report, age, resolution) in [("legacy", 90000.0, 300), ("raw", 10.0, 30)] {
+        sqlx::query("INSERT INTO metrics(agent_id,report_id,collected_at,resolution,body) VALUES(?,?,?,?,?)")
+            .bind(&agent).bind(report).bind(now()-age).bind(resolution)
+            .bind(serde_json::to_string(&metrics).unwrap()).execute(&state.0.db).await.unwrap();
+    }
+    let (status, points) = request(
+        &app,
+        "GET",
+        &format!("/api/v1/hosts/{host}/metrics?hours=168"),
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(points.as_array().unwrap().len(), 2);
+    assert!(points[0]["metrics"]["containers"][0]["cpu_percent"].is_null());
+    assert!(points[0]["metrics"]["containers"][0]["memory_used_bytes"].is_null());
+    assert_eq!(
+        points[0]["metrics"]["containers"][0]["network_rx_bytes"],
+        500.0
+    );
+    assert_eq!(points[1]["metrics"]["containers"][0]["cpu_percent"], 35.0);
+}
+
+#[tokio::test]
 async fn deleting_a_network_keeps_hosts_and_cancels_its_scan() {
     let (_dir, state, app, cookie) = setup().await;
     let (status, created) = request(

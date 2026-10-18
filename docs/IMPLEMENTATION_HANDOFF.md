@@ -1,5 +1,7 @@
 # H.O.P.E implementation handoff
 
+Current review, 2026-10-18: the operator requested **two complete repository review passes**, fixing correctness, code quality, performance, potential defects, UX/UI and reporting gaps, with regular commits. This work is active and tracked in [the review ledger](audits/repository-review-2026-10-18.md) and its per-file JSON inventory. `1b05bdb` commits agent reporting/CPU/updater reliability fixes and the hosted-inspection findings. The subsequent container-history milestone adds per-ID averages, late-metadata ordering, legacy unknowns and desktop/mobile charts. Follow that ledger for current evidence and remaining work; the dated tickets below retain historical context. No production deployment has been performed by this review.
+
 Audit date: 2026-10-08. Audience: an implementation model continuing this repository.
 
 ## Start here

@@ -12,6 +12,7 @@ Home network discovery, host monitoring and a lightweight reporting agent for up
 - **Hosts**: status filters, sortable columns and inline CPU, memory and disk meters; click a host for details.
 - **Network map**: topology, subnet and health modes with provenance for reported, inferred and manual links, a minimap for large fleets, and drag-to-link.
 - **Host details**: live usage tiles with sparklines, hardware, storage meters and ZFS pools, per-device throughput, temperature sensors, interfaces and counters, systemd units, network monitors, GPUs, and 1 h / 6 h / 24 h / 7 d history that draws outages as gaps. Open a host's full page for a two-column chart dashboard: CPU, load average, memory (used, ZFS ARC, cache and buffers under the total), bandwidth, disk I/O, pool usage and I/O, temperatures, monitor latency, filesystem and GPU usage.
+- **Container history**: open a Docker container for CPU and memory charts over the same history windows. Container IDs keep recreated workloads separate; missing readings remain gaps, and stored history is still accessible when the container disappears from the latest report.
 - **Command palette** (`⌘K` / `Ctrl+K`, or `/`): jump to any host or run any action from the keyboard.
 - Light, dark and automatic themes; everything works at phone width.
 

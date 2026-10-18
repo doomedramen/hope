@@ -6,8 +6,9 @@
     {
       "path": ".agent-notes/inbox.md",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Source inspected; applicable migration/legacy history or browser regressions passed; operator notes captured in work queue."
     },
     {
       "path": ".claude/launch.json",
@@ -198,8 +199,9 @@
     {
       "path": "crates/hope-protocol/src/validation.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in progress",
+      "pass_2": "pending",
+      "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
     {
       "path": "crates/hope-server/Cargo.toml",
@@ -312,20 +314,23 @@
     {
       "path": "crates/hope-server/src/metrics.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in progress",
+      "pass_2": "pending",
+      "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
     {
       "path": "crates/hope-server/src/migrations.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Source inspected; applicable migration/legacy history or browser regressions passed; operator notes captured in work queue."
     },
     {
       "path": "crates/hope-server/src/migrations/0002_statistics_and_reset.sql",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Source inspected; applicable migration/legacy history or browser regressions passed; operator notes captured in work queue."
     },
     {
       "path": "crates/hope-server/src/migrations/0003_install_jobs.sql",
@@ -338,6 +343,13 @@
       "kind": "source/config/docs",
       "pass_1": "pending",
       "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/migrations/0006_metric_metadata_time.sql",
+      "kind": "source/config/docs",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Source inspected; applicable migration/legacy history or browser regressions passed; operator notes captured in work queue."
     },
     {
       "path": "crates/hope-server/src/notify.rs",
@@ -360,8 +372,9 @@
     {
       "path": "crates/hope-server/src/schema.sql",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Source inspected; applicable migration/legacy history or browser regressions passed; operator notes captured in work queue."
     },
     {
       "path": "crates/hope-server/src/ssh.rs",
@@ -402,8 +415,9 @@
     {
       "path": "crates/hope-server/tests/api.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in progress",
+      "pass_2": "pending",
+      "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
     {
       "path": "crates/hope-server/tests/hardening.rs",
@@ -449,6 +463,42 @@
     },
     {
       "path": "docs/architecture.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/audits/agent-crates-2026-10-18.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/audits/agent-crates-2026-10-18.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/audits/agent-reporting-2026-10-18.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/audits/agent-reporting-2026-10-18.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/audits/repository-review-2026-10-18.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/audits/repository-review-2026-10-18.md",
       "kind": "source/config/docs",
       "pass_1": "pending",
       "pass_2": "pending"
@@ -816,8 +866,9 @@
     {
       "path": "web/components/console.tsx",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in progress",
+      "pass_2": "pending",
+      "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
     {
       "path": "web/components/container-app-icon.tsx",
@@ -828,8 +879,9 @@
     {
       "path": "web/components/container-details-page.tsx",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Source inspected; applicable migration/legacy history or browser regressions passed; operator notes captured in work queue."
     },
     {
       "path": "web/components/discovery-menu.tsx",
@@ -858,8 +910,9 @@
     {
       "path": "web/components/metric-history.tsx",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in progress",
+      "pass_2": "pending",
+      "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
     {
       "path": "web/components/network-dialog.tsx",
@@ -1164,8 +1217,9 @@
     {
       "path": "web/tests/console.spec.ts",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in progress",
+      "pass_2": "pending",
+      "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
     {
       "path": "web/tests/fleet.spec.ts",
@@ -1196,6 +1250,16 @@
       "kind": "source/config/docs",
       "pass_1": "pending",
       "pass_2": "pending"
+    }
+  ],
+  "milestones": [
+    {
+      "commit": "1b05bdb",
+      "subject": "Agent reporting, CPU, optional telemetry and updater reliability"
+    },
+    {
+      "subject": "Container history, weighted gauges, late metadata ordering and legacy compatibility",
+      "verification": "186 native Rust tests, Clippy, 41 browser tests, frontend build/types/lint/format, docs and protocol checks; 250-host load check in progress"
     }
   ]
 }

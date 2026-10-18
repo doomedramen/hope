@@ -142,7 +142,12 @@ mod tests {
             collectors: vec![],
             metrics: Metrics {
                 cpu_percent: Some(42.0),
-                containers: vec![container; 128],
+                containers: (0..128)
+                    .map(|index| hope_protocol::Container {
+                        id: format!("{index:0128x}"),
+                        ..container.clone()
+                    })
+                    .collect(),
                 disks: vec![
                     Disk {
                         name: "disk".into(),

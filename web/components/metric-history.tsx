@@ -162,6 +162,98 @@ export function HistoryRange({
   );
 }
 
+/** Container identity is its daemon ID, never its mutable/reusable name. */
+export function ContainerMetricHistory({
+  containerId,
+  hostId,
+  collectedAt,
+  latest,
+}: {
+  containerId: string;
+  hostId: string;
+  collectedAt: number | null;
+  latest: Metrics | null;
+}) {
+  const [hours, setHours] = useState<HistoryWindow>("1");
+  const history = useHistory(hostId, hours, collectedAt, latest);
+  const { points, error, windowStart: start, windowEnd: end } = history;
+  const frame = {
+    start,
+    end,
+    timeLabel: (value: number) =>
+      new Date(value).toLocaleString([], {
+        ...(Number(hours) > 24 ? { month: "short", day: "numeric" } : {}),
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+  };
+  const select = (metrics: Metrics) =>
+    metrics.containers.find((item) => item.id === containerId);
+  return (
+    <section className="container-info-section" aria-label="Container history">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2>Resource history</h2>
+        <HistoryRange value={hours} onChange={setHours} />
+      </div>
+      {error ? (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : !points ? (
+        <Skeleton className="h-40 w-full" />
+      ) : !points.some((point) => select(point.metrics)) ? (
+        <p className="text-sm text-muted-foreground">
+          No samples for this container in this window.
+        </p>
+      ) : (
+        <div className="charts flex flex-col gap-5">
+          <ChartBlock
+            title="Container CPU"
+            unit="% of one core"
+            series={[{ key: "cpu", label: "CPU", color: SLOTS[0] }]}
+            data={historySeries(points, start, end, (metrics) => ({
+              cpu: select(metrics)?.cpu_percent ?? null,
+            }))}
+            format={percent}
+            height="h-40"
+            {...frame}
+          />
+          <ChartBlock
+            title="Container memory"
+            unit="GiB"
+            kind="line"
+            series={[
+              { key: "used", label: "Used", color: SLOTS[0] },
+              { key: "limit", label: "Limit", color: SLOTS[1] },
+            ]}
+            data={historySeries(points, start, end, (metrics) => {
+              const container = select(metrics);
+              return {
+                used:
+                  container?.memory_used_bytes == null
+                    ? null
+                    : container.memory_used_bytes / GIB,
+                limit:
+                  container?.memory_limit_bytes == null
+                    ? null
+                    : container.memory_limit_bytes / GIB,
+              };
+            })}
+            format={gib}
+            height="h-40"
+            {...frame}
+          />
+          <p className="text-sm text-muted-foreground">
+            CPU uses 100% per core. Missing readings remain gaps. Longer windows
+            average CPU and memory by container ID; cumulative I/O totals remain
+            in the latest report.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function MetricHistory({
   points,
   error,

@@ -3,8 +3,8 @@ use anyhow::{Result, ensure};
 use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
-/// The newest schema version; above the SQL migrations, version 5 is a data cleanup.
-const LATEST: i64 = 5;
+/// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
+const LATEST: i64 = 6;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin().await?;
@@ -32,6 +32,14 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
     if version < 5 {
         forget_refusal_only_hosts(&mut tx).await?;
         sqlx::query("PRAGMA user_version = 5")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 6 {
+        sqlx::raw_sql(include_str!("migrations/0006_metric_metadata_time.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 6")
             .execute(&mut *tx)
             .await?;
     }

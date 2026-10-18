@@ -160,6 +160,12 @@ fn extended(value: &Metrics) -> Result<(), &'static str> {
         return Err("Invalid service units");
     }
     if value.containers.len() > 128
+        || !unique(
+            value
+                .containers
+                .iter()
+                .map(|container| container.id.as_str()),
+        )
         || value.containers.iter().any(|container| {
             container.id.is_empty()
                 || !text(&container.id, 128)

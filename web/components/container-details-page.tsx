@@ -16,16 +16,42 @@ import { Button } from "@/components/ui/button";
 import type { Container, Host } from "@/lib/protocol";
 import { bytes, percentage } from "@/lib/api";
 import { hostDisplayName } from "@/lib/devices";
+import { ContainerMetricHistory } from "@/components/metric-history";
 
 export function ContainerDetailsPage({
   host,
   container,
+  containerId,
   onBack,
 }: {
   host: Host;
-  container: Container;
+  container?: Container;
+  containerId: string;
   onBack: () => void;
 }) {
+  const history = (
+    <ContainerMetricHistory
+      containerId={containerId}
+      hostId={host.id}
+      collectedAt={host.last_collected_at}
+      latest={host.metrics}
+    />
+  );
+  if (!container)
+    return (
+      <section className="container-page" aria-label="Container details">
+        <Button variant="outline" size="sm" onClick={onBack}>
+          <ArrowLeft data-icon="inline-start" />
+          Back to {hostDisplayName(host)}
+        </Button>
+        <h1>Container not in the latest report</h1>
+        <p className="text-muted-foreground">
+          It may have stopped, been removed, or its collector may be
+          unavailable. Its stored history remains available below.
+        </p>
+        {history}
+      </section>
+    );
   const memory =
     container.memory_used_bytes == null
       ? "Unavailable"
@@ -130,6 +156,7 @@ export function ContainerDetailsPage({
         <Waypoints size={14} /> Stats reflect the agent’s latest report. Network
         and block I/O are totals since the container started.
       </p>
+      {history}
     </section>
   );
 }
