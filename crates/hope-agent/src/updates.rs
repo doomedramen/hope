@@ -12,6 +12,7 @@ use std::{
     path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::io::AsyncWriteExt;
 
 const QUEUE: &str = "update-queue";
 const REQUEST: &str = "request";
@@ -31,15 +32,15 @@ pub struct Requests;
 impl Requests {
     /// Leaves a request for the updater when the server asks for `version`, unless the same release
     /// was asked for within the last hour. Returns whether a file was written.
-    pub fn handle_now(&mut self, dir: &Path, version: &str) -> bool {
+    pub async fn handle_now(&mut self, dir: &Path, version: &str) -> bool {
         let seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs());
-        self.handle(dir, version, seconds)
+        self.handle(dir, version, seconds).await
     }
 
     /// As `handle_now`, at `now` seconds since the epoch.
-    pub fn handle(&mut self, dir: &Path, version: &str, now: u64) -> bool {
+    pub async fn handle(&mut self, dir: &Path, version: &str, now: u64) -> bool {
         if !plain_version(version) || !queue_ready(dir) || recently_asked(dir, version, now) {
             return false;
         }
@@ -48,11 +49,34 @@ impl Requests {
         if path.symlink_metadata().is_ok() {
             return false;
         }
-        let written = std::fs::write(&path, format!("{version}\n")).is_ok();
-        if written {
-            let _ = std::fs::write(dir.join(ASKED), format!("{version} {now}\n"));
+        // Creating the request can immediately stop this process. Persist the
+        // rollback/restart cooldown first; never start an update if that fails.
+        let asked = dir.join(ASKED);
+        if crate::config::write_private(&asked, format!("{version} {now}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            return false;
         }
-        written
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&path).await {
+            Ok(mut request) => {
+                // Only the file's existence wakes the updater; its contents
+                // are deliberately ignored. It may be consumed before this
+                // optional version annotation is written.
+                let _ = request.write_all(format!("{version}\n").as_bytes()).await;
+                let _ = request.flush().await;
+                true
+            }
+            Err(_) => {
+                // No update started. Do not hold off a later repaired queue.
+                let _ = tokio::fs::remove_file(asked).await;
+                false
+            }
+        }
     }
 }
 
@@ -172,44 +196,56 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn a_request_is_left_once_and_retried_hourly() {
+    #[tokio::test]
+    async fn a_request_is_left_once_and_retried_hourly() {
         let dir = installed();
         let request = dir.path().join(QUEUE).join(REQUEST);
         let mut requests = Requests;
         let start = 1_000_000;
-        assert!(requests.handle(dir.path(), "0.1.60", start));
+        assert!(requests.handle(dir.path(), "0.1.60", start).await);
         assert_eq!(
             std::fs::read_to_string(&request).expect("request"),
             "0.1.60\n"
         );
         // The updater consumes the file; a failed update is not retried on the next report.
         std::fs::remove_file(&request).expect("consumed");
-        assert!(!requests.handle(dir.path(), "0.1.60", start + 10));
+        assert!(!requests.handle(dir.path(), "0.1.60", start + 10).await);
         assert!(!request.exists());
-        assert!(requests.handle(dir.path(), "0.1.60", start + RETRY_AFTER.as_secs()));
+        assert!(
+            requests
+                .handle(dir.path(), "0.1.60", start + RETRY_AFTER.as_secs())
+                .await
+        );
         // A newer release is asked for at once.
         std::fs::remove_file(&request).expect("consumed");
-        assert!(requests.handle(dir.path(), "0.1.61", start + RETRY_AFTER.as_secs()));
+        assert!(
+            requests
+                .handle(dir.path(), "0.1.61", start + RETRY_AFTER.as_secs())
+                .await
+        );
     }
 
-    #[test]
-    fn a_restarted_agent_does_not_ask_again_for_a_release_that_just_failed() {
+    #[tokio::test]
+    async fn a_restarted_agent_does_not_ask_again_for_a_release_that_just_failed() {
         // A failed update rolls back by restarting the agent; the new process has no memory of its own.
         let dir = installed();
         let request = dir.path().join(QUEUE).join(REQUEST);
         let start = 1_000_000;
-        assert!(Requests.handle(dir.path(), "0.1.60", start));
+        assert!(Requests.handle(dir.path(), "0.1.60", start).await);
         std::fs::remove_file(&request).expect("consumed");
-        assert!(!Requests.handle(dir.path(), "0.1.60", start + 150));
+        assert!(!Requests.handle(dir.path(), "0.1.60", start + 150).await);
         assert!(!request.exists());
-        assert!(Requests.handle(dir.path(), "0.1.61", start + 150));
+        assert!(Requests.handle(dir.path(), "0.1.61", start + 150).await);
         std::fs::remove_file(&request).expect("consumed");
-        assert!(Requests.handle(dir.path(), "0.1.61", start + 150 + RETRY_AFTER.as_secs()));
+        assert!(
+            Requests
+                .handle(dir.path(), "0.1.61", start + 150 + RETRY_AFTER.as_secs())
+                .await
+        );
     }
 
-    #[test]
-    fn a_future_or_damaged_memory_of_asking_does_not_hold_requests_off() {
+    #[tokio::test]
+    async fn a_future_or_damaged_memory_of_asking_does_not_hold_requests_off() {
         let dir = installed();
         let request = dir.path().join(QUEUE).join(REQUEST);
         let now = 1_000_000;
@@ -221,33 +257,60 @@ mod tests {
             "",
         ] {
             std::fs::write(dir.path().join(ASKED), written).expect("memory");
-            assert!(Requests.handle(dir.path(), "0.1.60", now), "{written:?}");
+            assert!(
+                Requests.handle(dir.path(), "0.1.60", now).await,
+                "{written:?}"
+            );
             std::fs::remove_file(&request).expect("consumed");
         }
         std::fs::write(dir.path().join(ASKED), "x".repeat(500)).expect("memory");
-        assert!(Requests.handle(dir.path(), "0.1.60", now));
+        assert!(Requests.handle(dir.path(), "0.1.60", now).await);
     }
 
-    #[test]
-    fn a_waiting_request_is_not_duplicated() {
+    #[tokio::test]
+    async fn a_waiting_request_is_not_duplicated() {
         let dir = installed();
         let mut requests = Requests;
         let start = 1_000_000;
-        assert!(requests.handle(dir.path(), "0.1.60", start));
+        assert!(requests.handle(dir.path(), "0.1.60", start).await);
         std::fs::remove_file(dir.path().join(ASKED)).expect("forget");
-        assert!(!Requests.handle(dir.path(), "0.1.60", start));
+        assert!(!Requests.handle(dir.path(), "0.1.60", start).await);
     }
 
-    #[test]
-    fn nothing_is_written_without_an_updater_or_for_a_strange_version() {
+    #[tokio::test]
+    async fn cooldown_must_be_durable_before_a_request_can_wake_the_updater() {
+        let dir = installed();
+        let asked = dir.path().join(ASKED);
+        // A failed cooldown write used to leave a live update request anyway,
+        // allowing rollback to restart an agent with no memory of asking.
+        std::fs::create_dir(&asked).expect("blocked cooldown path");
+        assert!(!Requests.handle(dir.path(), "0.1.60", 1_000_000).await);
+        assert!(!dir.path().join(QUEUE).join(REQUEST).exists());
+        std::fs::remove_dir(&asked).expect("repair state");
+        assert!(Requests.handle(dir.path(), "0.1.60", 1_000_000).await);
+        assert_eq!(
+            std::fs::read_to_string(&asked).expect("cooldown"),
+            "0.1.60 1000000\n"
+        );
+        // No staged file is left in a directory launchd watches for contents.
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(QUEUE))
+                .expect("queue")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_is_written_without_an_updater_or_for_a_strange_version() {
         let bare = tempfile::tempdir().expect("state directory");
         let mut requests = Requests;
-        assert!(!requests.handle(bare.path(), "0.1.60", 1_000_000));
+        assert!(!requests.handle(bare.path(), "0.1.60", 1_000_000).await);
         assert!(!bare.path().join(QUEUE).exists());
         let dir = installed();
         for version in ["", "../../x", "1.0; rm -rf /", "a b", &"9".repeat(65)] {
             assert!(
-                !requests.handle(dir.path(), version, 1_000_000),
+                !requests.handle(dir.path(), version, 1_000_000).await,
                 "{version:?}"
             );
         }
@@ -260,12 +323,12 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn a_linked_queue_is_not_written_through() {
+    #[tokio::test]
+    async fn a_linked_queue_is_not_written_through() {
         let dir = tempfile::tempdir().expect("state directory");
         let elsewhere = tempfile::tempdir().expect("elsewhere");
         std::os::unix::fs::symlink(elsewhere.path(), dir.path().join(QUEUE)).expect("link");
-        assert!(!Requests.handle(dir.path(), "0.1.60", 1_000_000));
+        assert!(!Requests.handle(dir.path(), "0.1.60", 1_000_000).await);
         assert_eq!(std::fs::read_dir(elsewhere.path()).expect("dir").count(), 0);
     }
 

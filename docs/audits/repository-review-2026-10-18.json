@@ -177,8 +177,9 @@
     {
       "path": "crates/hope-agent/src/updates.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Full source and installer wakeup contract inspected. Durable cooldown precedes exclusive request creation; persistence-failure/repair and existing retry/rollback regressions passed in 49 agent tests; workspace Clippy passed. Rich attempt visibility and updater readiness verification remain queued; actual service managers unverified."
     },
     {
       "path": "crates/hope-agent/tests/configure.rs",

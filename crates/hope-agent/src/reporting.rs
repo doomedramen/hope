@@ -158,7 +158,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                     Outcome::Accepted(response) => {
                         debug_assert!(response.accepted);
                         spool.remove(&report.report_id); failures=0; retry_at=Instant::now();
-                        if let Some(version)=&response.update_to { update_requests.handle_now(dir,version); }
+                        if let Some(version)=&response.update_to { update_requests.handle_now(dir,version).await; }
                         if let Some(seconds)=response.report_interval_seconds { period_tx.send_if_modified(|period| { let next=Duration::from_secs(seconds.clamp(MIN_INTERVAL_SECONDS,MAX_INTERVAL_SECONDS).into()); if *period==next { false } else { *period=next; true } }); }
                         inventory_delivery.accept(&report)?;
                         if current_reports.remove(&report.report_id) {
