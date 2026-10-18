@@ -263,6 +263,8 @@ At each report interval (with jitter) an agent sends CPU, memory (used, total, c
 
 Agents also send observed system uptime and boot time using sysinfo, plus Linux's boot UUID when readable. Host details label these as values at the last sample; they do not keep ticking during an outage. Containers show **Kernel uptime** and a scope explanation because their visible counters and boot ID may describe the host kernel. Older agents have unavailable uptime. Historical aggregates retain the latest boot observation, without averaging across reboots. This supplies boot metadata, not a reboot reason or a reboot notification.
 
+Network counters and inventory share a deterministic selection of at most 128 non-loopback interfaces, prioritizing the default-route interface and then physical interfaces under the existing name-based fallback policy. Each interface has at most 64 distinct, sorted addresses; IPv6 link-local addresses are excluded because the protocol has no interface-zone field. The `network_inventory` collector marks truncation explicitly. Addresses and counters come from the same refreshed sysinfo snapshot.
+
 Two settings are read at agent start, from environment variables on the service (`systemctl edit hope-agent` adds a drop-in) or from `settings.json` in the agent state directory (`{"monitors": [...], "watch_services": [...]}`; the variables win when set):
 
 | Variable | Purpose |

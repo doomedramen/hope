@@ -1,7 +1,5 @@
 use crate::{cpu::CgroupCpuProbe, extras};
-use hope_protocol::{
-    CollectorStatus, Container, Disk, Gpu, Interface, Inventory, Metrics, NetworkCounter,
-};
+use hope_protocol::{CollectorStatus, Container, Disk, Gpu, Inventory, Metrics, NetworkCounter};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -398,7 +396,10 @@ impl Collector {
         self.system.refresh_memory();
         self.cost("memory", started);
         let started = Instant::now();
-        self.networks.refresh(true);
+        // A fresh snapshot also clears removed addresses. sysinfo 0.37's
+        // in-place refresh can retain old IPs when an interface loses its last one.
+        // Our rate baselines are held separately in previous_network.
+        self.networks = Networks::new_with_refreshed_list();
         self.cost("network_refresh", started);
         let started = Instant::now();
         let disk_sample = self.disks.sample(Duration::from_millis(500)).await;
@@ -411,6 +412,10 @@ impl Collector {
         self.cost("docker_containers", started);
         let started = Instant::now();
         let gateway = default_gateway().await;
+        let selected_networks = crate::network::select(
+            &self.networks,
+            gateway.as_ref().map(|(name, _)| name.as_str()),
+        );
         self.cost("gateway", started);
         let started = Instant::now();
         let mut receive = 0.0;
@@ -419,12 +424,10 @@ impl Collector {
         let mut selected = 0;
         let mut network_interfaces = vec![];
         let mut current_network = HashMap::new();
-        for (name, network) in self
-            .networks
-            .iter()
-            .filter(|(name, _)| *name != "lo" && *name != "lo0")
-            .take(128)
-        {
+        for name in &selected_networks.names {
+            let Some(network) = self.networks.get(name) else {
+                continue;
+            };
             let counters = (network.total_received(), network.total_transmitted());
             let mac = network.mac_address().to_string();
             let previous = self.previous_network.get(name).filter(|old| old.2 == mac);
@@ -436,14 +439,7 @@ impl Collector {
             let included = gateway
                 .as_ref()
                 .map(|(interface, _)| interface == name)
-                .unwrap_or_else(|| {
-                    ![
-                        "veth", "docker", "br-", "bridge", "virbr", "tap", "tun", "utun", "wg",
-                        "bond",
-                    ]
-                    .iter()
-                    .any(|prefix| name.starts_with(prefix))
-                });
+                .unwrap_or_else(|| !crate::network::virtual_interface(name));
             if included {
                 selected += 1;
                 if let (Some(rx), Some(tx)) = (rx, tx) {
@@ -614,7 +610,13 @@ impl Collector {
             ));
         }
         let started = Instant::now();
-        let interfaces = interfaces(&self.networks, gateway);
+        let (interfaces, network_limited) =
+            crate::network::inventory(&self.networks, &selected_networks, gateway.as_ref());
+        collectors.push(status(
+            "network_inventory",
+            !network_limited,
+            Some("Interface inventory limited to 128 interfaces and 64 addresses per interface"),
+        ));
         let mut inventory = Inventory {
             hostname: System::host_name().unwrap_or_else(|| "Unnamed host".into()),
             os: format!(
@@ -704,29 +706,6 @@ pub fn stable_inventory(mut inventory: Inventory) -> Inventory {
     inventory
 }
 
-fn interfaces(networks: &Networks, gateway: Option<(String, String)>) -> Vec<Interface> {
-    let addresses = if_addrs::get_if_addrs().unwrap_or_default();
-    let mut interfaces: Vec<_> = networks
-        .iter()
-        .filter(|(name, _)| *name != "lo" && *name != "lo0")
-        .take(128)
-        .map(|(name, data)| Interface {
-            name: name.clone(),
-            mac: (!data.mac_address().is_unspecified()).then(|| data.mac_address().to_string()),
-            addresses: addresses
-                .iter()
-                .filter(|a| a.name == *name)
-                .map(|a| a.ip().to_string())
-                .collect(),
-            gateway: gateway
-                .as_ref()
-                .filter(|(interface, _)| interface == name)
-                .map(|(_, ip)| ip.clone()),
-        })
-        .collect();
-    interfaces.sort_by(|a, b| a.name.cmp(&b.name));
-    interfaces
-}
 async fn default_gateway() -> Option<(String, String)> {
     if cfg!(target_os = "linux") {
         let text = tokio::fs::read_to_string("/proc/net/route").await.ok()?;

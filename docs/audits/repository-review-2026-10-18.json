@@ -121,8 +121,9 @@
     {
       "path": "crates/hope-agent/src/collect.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in_progress",
+      "pass_2": "pending",
+      "evidence": "Sampling/source scopes, rate baselines, interface bounds, filesystem worker and optional telemetry reviewed in targeted paths. Uptime and network regressions pass; full collector review/actual Linux platform comparisons remain pending."
     },
     {
       "path": "crates/hope-agent/src/config.rs",
@@ -1283,6 +1284,13 @@
       "pass_1": "reviewed",
       "pass_2": "pending",
       "evidence": "Existing sysinfo API/source checked, Linux boot UUID read bounded and validated; zero/unavailable and container kernel scope covered. Native inspect, workspace tests/Clippy and 47 browser tests passed. Linux execution not validated locally."
+    },
+    {
+      "path": "crates/hope-agent/src/network.rs",
+      "kind": "source/config/docs",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Full source inspected. Stable bounded/default-route interface selection, deduplicated address budget, IPv6 scope policy and shared sysinfo snapshot. Fifty-two agent tests and workspace Clippy pass; native addresses match on 29 interfaces. Actual Linux address removal and resource comparison unverified."
     }
   ],
   "milestones": [
@@ -1323,7 +1331,12 @@
     },
     {
       "subject": "Observed OS uptime, boot time and Linux boot UUID with container scope and latest-boot history semantics",
-      "verification": "191 Rust tests passed, one retention test ignored; Clippy, protocol generation, frontend build/types/lint/format, 8 docs tests and 47 browser/pure tests passed. Native collector inspection and desktop/mobile rendering checked; actual Linux execution unverified."
+      "verification": "191 Rust tests passed, one retention test ignored; Clippy, protocol generation, frontend build/types/lint/format, 8 docs tests and 47 browser/pure tests passed. Native collector inspection and desktop/mobile rendering checked; actual Linux execution unverified.",
+      "commit": "3991f62"
+    },
+    {
+      "subject": "Deterministic bounded network inventory from sysinfo; remove redundant if-addrs dependency",
+      "verification": "52 agent tests and workspace Clippy passed; native before/after address sets equal across 29 interfaces. Fresh snapshots prevent stale-address reuse identified in installed library source. Actual Linux removal and CPU/RSS comparisons pending."
     }
   ]
 }

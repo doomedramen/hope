@@ -3,6 +3,7 @@ mod config;
 mod cpu;
 mod delivery;
 mod extras;
+mod network;
 mod reporting;
 mod status;
 mod telemetry;
