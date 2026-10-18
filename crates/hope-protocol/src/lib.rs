@@ -439,7 +439,7 @@ pub struct MonitorResult {
     pub detail: Option<String>,
 }
 
-/// A container discovered through the local Docker CLI.
+/// A container discovered through the local Docker Engine API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct Container {
     pub id: String,
@@ -449,6 +449,26 @@ pub struct Container {
     pub state: String,
     pub status: String,
     pub ports: String,
+    /// Docker creation time as Unix seconds.
+    #[serde(default)]
+    pub created_at: Option<f64>,
+    /// Health-check state, when a health check is configured.
+    #[serde(default)]
+    pub health: Option<String>,
+    /// Docker Compose project and service labels, when present.
+    #[serde(default)]
+    pub compose_project: Option<String>,
+    #[serde(default)]
+    pub compose_service: Option<String>,
+    /// Docker network attachments. Addresses stay scoped to their network.
+    #[serde(default)]
+    pub networks: Vec<ContainerNetwork>,
+    /// Structured host-to-container port mappings.
+    #[serde(default)]
+    pub published_ports: Vec<ContainerPort>,
+    /// Docker restart count. Unavailable when the daemon summary omits it.
+    #[serde(default)]
+    pub restart_count: Option<u32>,
     #[serde(default)]
     pub cpu_percent: Option<f64>,
     #[serde(default)]
@@ -467,6 +487,29 @@ pub struct Container {
     pub block_write_bytes: Option<f64>,
     #[serde(default)]
     pub pids: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ContainerNetwork {
+    pub name: String,
+    #[serde(default)]
+    pub network_id: Option<String>,
+    #[serde(default)]
+    pub ipv4: Option<String>,
+    #[serde(default)]
+    pub ipv6: Option<String>,
+    #[serde(default)]
+    pub mac: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ContainerPort {
+    #[serde(default)]
+    pub host_ip: Option<String>,
+    pub container_port: u16,
+    #[serde(default)]
+    pub host_port: Option<u16>,
+    pub protocol: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -920,6 +963,8 @@ pub fn typescript() -> String {
         ServiceUnit::decl(),
         ServiceSummary::decl(),
         MonitorResult::decl(),
+        ContainerNetwork::decl(),
+        ContainerPort::decl(),
         Container::decl(),
         UptimeScope::decl(),
         SystemUptime::decl(),

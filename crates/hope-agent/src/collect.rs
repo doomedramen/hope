@@ -1,5 +1,13 @@
 use crate::{cpu::CgroupCpuProbe, extras};
-use hope_protocol::{CollectorStatus, Container, Disk, Gpu, Inventory, Metrics, NetworkCounter};
+use bollard::{
+    Docker,
+    query_parameters::{ListContainersOptionsBuilder, StatsOptionsBuilder},
+};
+use futures_util::{StreamExt, stream};
+use hope_protocol::{
+    CollectorStatus, Container, ContainerNetwork, ContainerPort, Disk, Gpu, Inventory, Metrics,
+    NetworkCounter,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -10,149 +18,279 @@ use std::{ffi::CString, mem::MaybeUninit};
 use sysinfo::{Disks, Networks, System};
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
-#[derive(serde::Deserialize)]
-struct DockerContainer {
-    #[serde(rename = "ID")]
-    id: String,
-    #[serde(rename = "Names")]
-    names: String,
-    #[serde(rename = "Image")]
-    image: String,
-    #[serde(rename = "State")]
-    state: String,
-    #[serde(rename = "Status")]
-    status: String,
-    #[serde(rename = "Ports")]
-    ports: String,
-}
-
-#[derive(serde::Deserialize)]
-struct DockerStats {
-    #[serde(rename = "Name")]
-    name: String,
-    #[serde(rename = "CPUPerc")]
-    cpu_percent: String,
-    #[serde(rename = "MemUsage")]
-    memory_usage: String,
-    #[serde(rename = "MemPerc")]
-    memory_percent: String,
-    #[serde(rename = "NetIO")]
-    network_io: String,
-    #[serde(rename = "BlockIO")]
-    block_io: String,
-    #[serde(rename = "PIDs")]
-    pids: String,
-}
-
-fn docker_percent(value: &str) -> Option<f64> {
+fn clean_option(value: Option<&str>, max: usize) -> Option<String> {
     value
-        .trim()
-        .strip_suffix('%')?
-        .trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite() && (0.0..=1e6).contains(value))
+        .map(|value| extras::clean(value, max))
+        .filter(|value| !value.is_empty())
 }
 
-fn docker_bytes(value: &str) -> Option<f64> {
-    let value = value.trim();
-    let split = value.find(|c: char| !c.is_ascii_digit() && c != '.')?;
-    let number = value[..split].parse::<f64>().ok()?;
-    let unit = value[split..].trim();
-    let multiplier = match unit {
-        "B" => 1.0,
-        "kB" | "KB" => 1_000.0,
-        "KiB" => 1_024.0,
-        "MB" => 1_000_000.0,
-        "MiB" => 1_048_576.0,
-        "GB" => 1_000_000_000.0,
-        "GiB" => 1_073_741_824.0,
-        "TB" => 1_000_000_000_000.0,
-        "TiB" => 1_099_511_627_776.0,
-        _ => return None,
-    };
-    let bytes = number * multiplier;
-    (bytes.is_finite() && (0.0..=1e18).contains(&bytes)).then_some(bytes)
-}
-
-fn docker_pair(value: &str, parse: fn(&str) -> Option<f64>) -> (Option<f64>, Option<f64>) {
-    let Some((left, right)) = value.split_once('/') else {
-        return (None, None);
-    };
-    (parse(left), parse(right))
-}
-
-fn apply_docker_stats(containers: &mut [Container], output: &str) {
-    for stats in output
-        .lines()
-        .take(128)
-        .filter_map(|line| serde_json::from_str::<DockerStats>(line).ok())
-    {
-        let Some(container) = containers.iter_mut().find(|c| c.name == stats.name) else {
-            continue;
-        };
-        container.cpu_percent = docker_percent(&stats.cpu_percent);
-        (container.memory_used_bytes, container.memory_limit_bytes) =
-            docker_pair(&stats.memory_usage, docker_bytes);
-        container.memory_percent = docker_percent(&stats.memory_percent);
-        (container.network_rx_bytes, container.network_tx_bytes) =
-            docker_pair(&stats.network_io, docker_bytes);
-        (container.block_read_bytes, container.block_write_bytes) =
-            docker_pair(&stats.block_io, docker_bytes);
-        container.pids = stats.pids.trim().parse().ok();
+fn docker_summary(item: bollard::models::ContainerSummary) -> Option<Container> {
+    let id = clean_option(item.id.as_deref(), 128)?;
+    let name = item
+        .names
+        .as_ref()?
+        .first()
+        .map(|name| name.trim_start_matches('/'))?;
+    if name.is_empty() {
+        return None;
     }
+    let labels = item.labels.as_ref();
+    let mut networks = item
+        .network_settings
+        .as_ref()
+        .and_then(|settings| settings.networks.as_ref())
+        .map(|networks| {
+            networks
+                .iter()
+                .map(|(name, endpoint)| ContainerNetwork {
+                    name: extras::clean(name, 128),
+                    network_id: clean_option(endpoint.network_id.as_deref(), 128),
+                    ipv4: clean_option(endpoint.ip_address.as_deref(), 64),
+                    ipv6: clean_option(endpoint.global_ipv6_address.as_deref(), 128),
+                    mac: clean_option(endpoint.mac_address.as_deref(), 32),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    networks.sort_by(|a, b| a.name.cmp(&b.name));
+    networks.truncate(16);
+    let mut published_ports = item
+        .ports
+        .unwrap_or_default()
+        .into_iter()
+        .map(|port| ContainerPort {
+            host_ip: clean_option(port.ip.as_deref(), 64),
+            container_port: port.private_port,
+            host_port: port.public_port,
+            protocol: port
+                .typ
+                .map(|kind| kind.to_string())
+                .unwrap_or_else(|| "tcp".into()),
+        })
+        .collect::<Vec<_>>();
+    published_ports.sort_by(|a, b| {
+        (
+            a.host_ip.as_deref(),
+            a.host_port,
+            a.container_port,
+            &a.protocol,
+        )
+            .cmp(&(
+                b.host_ip.as_deref(),
+                b.host_port,
+                b.container_port,
+                &b.protocol,
+            ))
+    });
+    published_ports.truncate(64);
+    let state = item
+        .state
+        .map(|state| format!("{state:?}").to_ascii_lowercase())
+        .unwrap_or_else(|| "unknown".into());
+    let health = item.health.as_ref().and_then(|health| {
+        health
+            .status
+            .map(|status| format!("{status:?}").to_ascii_lowercase())
+    });
+    let compose_project = clean_option(
+        labels.and_then(|labels| labels.get("com.docker.compose.project").map(String::as_str)),
+        128,
+    );
+    let compose_service = clean_option(
+        labels.and_then(|labels| labels.get("com.docker.compose.service").map(String::as_str)),
+        128,
+    );
+    Some(Container {
+        id,
+        name: extras::clean(name, 256),
+        image: extras::clean(
+            item.image
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .or(item.image_id.as_deref())
+                .unwrap_or("unknown"),
+            512,
+        ),
+        state,
+        status: extras::clean(item.status.as_deref().unwrap_or(""), 256),
+        ports: published_ports
+            .iter()
+            .map(|port| match (&port.host_ip, port.host_port) {
+                (Some(ip), Some(host)) => {
+                    format!("{ip}:{host}->{}:{}", port.container_port, port.protocol)
+                }
+                (_, Some(host)) => format!("{host}->{}:{}", port.container_port, port.protocol),
+                _ => format!("{}:{}", port.container_port, port.protocol),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        created_at: item.created.map(|created| created as f64),
+        health,
+        compose_project,
+        compose_service,
+        networks,
+        published_ports,
+        restart_count: None,
+        cpu_percent: None,
+        memory_used_bytes: None,
+        memory_limit_bytes: None,
+        memory_percent: None,
+        network_rx_bytes: None,
+        network_tx_bytes: None,
+        block_read_bytes: None,
+        block_write_bytes: None,
+        pids: None,
+    })
 }
 
-fn parse_docker_output(output: &str) -> Vec<Container> {
-    output
-        .lines()
-        .take(128)
-        .filter_map(|line| serde_json::from_str::<DockerContainer>(line).ok())
-        .filter(|item| {
-            !item.id.is_empty()
-                && !item.names.is_empty()
-                && !item.image.is_empty()
-                && !item.state.is_empty()
-        })
-        .map(|item| Container {
-            id: extras::clean(&item.id, 128),
-            name: extras::clean(&item.names, 256),
-            image: extras::clean(&item.image, 512),
-            state: extras::clean(&item.state, 32),
-            status: extras::clean(&item.status, 256),
-            ports: extras::clean(&item.ports, 512),
-            cpu_percent: None,
-            memory_used_bytes: None,
-            memory_limit_bytes: None,
-            memory_percent: None,
-            network_rx_bytes: None,
-            network_tx_bytes: None,
-            block_read_bytes: None,
-            block_write_bytes: None,
-            pids: None,
-        })
-        .collect()
+fn docker_cpu_percent(stats: &bollard::models::ContainerStatsResponse) -> Option<f64> {
+    let current = stats.cpu_stats.as_ref()?;
+    let previous = stats.precpu_stats.as_ref()?;
+    let cpu_delta = current
+        .cpu_usage
+        .as_ref()?
+        .total_usage?
+        .checked_sub(previous.cpu_usage.as_ref()?.total_usage?)?;
+    let system_delta = current
+        .system_cpu_usage?
+        .checked_sub(previous.system_cpu_usage?)?;
+    let cpu_count = current.online_cpus.unwrap_or_else(|| {
+        current
+            .cpu_usage
+            .as_ref()
+            .and_then(|usage| usage.percpu_usage.as_ref())
+            .map(Vec::len)
+            .unwrap_or(0) as u32
+    });
+    (system_delta > 0 && cpu_count > 0)
+        .then(|| cpu_delta as f64 / system_delta as f64 * cpu_count as f64 * 100.0)
+        .filter(|value| value.is_finite() && (0.0..=100_000.0).contains(value))
+}
+
+fn apply_docker_api_stats(
+    container: &mut Container,
+    stats: &bollard::models::ContainerStatsResponse,
+) {
+    container.cpu_percent = docker_cpu_percent(stats);
+    if let Some(memory) = stats.memory_stats.as_ref() {
+        let inactive = memory
+            .stats
+            .as_ref()
+            .and_then(|values| values.get("inactive_file").or_else(|| values.get("cache")))
+            .copied()
+            .unwrap_or(0);
+        container.memory_used_bytes = memory
+            .usage
+            .map(|usage| usage.saturating_sub(inactive) as f64);
+        container.memory_limit_bytes = memory.limit.map(|limit| limit as f64);
+        container.memory_percent = container
+            .memory_used_bytes
+            .zip(container.memory_limit_bytes)
+            .filter(|(_, limit)| *limit > 0.0)
+            .map(|(used, limit)| used / limit * 100.0);
+    }
+    if let Some(networks) = stats.networks.as_ref() {
+        let (rx, tx) = networks
+            .values()
+            .fold((Some(0u64), Some(0u64)), |(rx, tx), net| {
+                (
+                    rx.zip(net.rx_bytes)
+                        .map(|(sum, value)| sum.saturating_add(value)),
+                    tx.zip(net.tx_bytes)
+                        .map(|(sum, value)| sum.saturating_add(value)),
+                )
+            });
+        container.network_rx_bytes = rx.map(|value| value as f64);
+        container.network_tx_bytes = tx.map(|value| value as f64);
+    }
+    if let Some(entries) = stats
+        .blkio_stats
+        .as_ref()
+        .and_then(|io| io.io_service_bytes_recursive.as_ref())
+    {
+        let mut read = 0u64;
+        let mut write = 0u64;
+        let mut has_read = false;
+        let mut has_write = false;
+        for entry in entries {
+            match entry.op.as_deref().map(str::to_ascii_lowercase).as_deref() {
+                Some("read") => {
+                    read = read.saturating_add(entry.value.unwrap_or_default());
+                    has_read = true;
+                }
+                Some("write") => {
+                    write = write.saturating_add(entry.value.unwrap_or_default());
+                    has_write = true;
+                }
+                _ => {}
+            }
+        }
+        container.block_read_bytes = has_read.then_some(read as f64);
+        container.block_write_bytes = has_write.then_some(write as f64);
+    }
+    container.pids = stats
+        .pids_stats
+        .as_ref()
+        .and_then(|pids| pids.current)
+        .and_then(|pids| u32::try_from(pids).ok());
+}
+
+async fn docker_stats(
+    docker: &Docker,
+    id: String,
+) -> (String, Option<bollard::models::ContainerStatsResponse>) {
+    let options = StatsOptionsBuilder::default()
+        .stream(false)
+        .one_shot(true)
+        .build();
+    let result = timeout(Duration::from_secs(3), async {
+        docker.stats(&id, Some(options)).next().await?.ok()
+    })
+    .await
+    .ok()
+    .flatten();
+    (id, result)
 }
 
 async fn docker_containers() -> Option<Vec<Container>> {
-    let output = command(
-        "docker",
-        &["ps", "--all", "--no-trunc", "--format", "{{json .}}"],
-        2,
+    let docker = Docker::connect_with_local_defaults()
+        .ok()?
+        .with_timeout(Duration::from_secs(3));
+    let options = ListContainersOptionsBuilder::default().all(true).build();
+    let listed = timeout(
+        Duration::from_secs(3),
+        docker.list_containers(Some(options)),
     )
-    .await?;
-    let mut containers = parse_docker_output(&output);
-    if containers
+    .await
+    .ok()?
+    .ok()?;
+    let mut containers = listed
+        .into_iter()
+        .take(128)
+        .filter_map(docker_summary)
+        .collect::<Vec<_>>();
+    let running = containers
         .iter()
-        .any(|container| container.state == "running")
-        && let Some(output) = command(
-            "docker",
-            &["stats", "--no-stream", "--format", "{{json .}}"],
-            5,
-        )
-        .await
-    {
-        apply_docker_stats(&mut containers, &output);
+        .filter(|container| container.state == "running")
+        .take(64)
+        .map(|container| container.id.clone())
+        .collect::<Vec<_>>();
+    let samples = timeout(
+        Duration::from_secs(5),
+        stream::iter(running)
+            .map(|id| docker_stats(&docker, id))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap_or_default();
+    for (id, stats) in samples {
+        if let (Some(stats), Some(container)) = (
+            stats,
+            containers.iter_mut().find(|container| container.id == id),
+        ) {
+            apply_docker_api_stats(container, &stats);
+        }
     }
     Some(containers)
 }
@@ -967,52 +1105,52 @@ mod tests {
     }
 
     #[test]
-    fn docker_output_keeps_container_fields_and_ignores_bad_lines() {
-        let containers = parse_docker_output(
-            r#"{"ID":"abc123","Names":"web","Image":"nginx:latest","State":"running","Status":"Up 2 hours","Ports":"0.0.0.0:8080->80/tcp"}
-not json
-{"ID":"def456","Names":"db","Image":"postgres:16","State":"exited","Status":"Exited (0)","Ports":""}"#,
+    fn docker_engine_inventory_is_structured_and_keeps_network_scope() {
+        let item: bollard::models::ContainerSummary = serde_json::from_value(serde_json::json!({
+            "Id":"abc123", "Names":["/web"], "Image":"nginx:latest", "State":"running",
+            "Status":"Up 2 hours", "Created":1234, "Labels":{"com.docker.compose.project":"stack","com.docker.compose.service":"web","secret":"do-not-copy"},
+            "Health":{"Status":"healthy"}, "Ports":[{"IP":"0.0.0.0","PrivatePort":80,"PublicPort":8080,"Type":"tcp"}],
+            "NetworkSettings":{"Networks":{"front":{"NetworkID":"net-1","IPAddress":"10.0.0.2","MacAddress":"02:00:00:00:00:01"}}}
+        })).expect("Docker API summary");
+        let container = docker_summary(item).expect("container identity");
+        assert_eq!(container.id, "abc123");
+        assert_eq!(container.name, "web");
+        assert_eq!(container.created_at, Some(1234.0));
+        assert_eq!(container.health.as_deref(), Some("healthy"));
+        assert_eq!(container.compose_project.as_deref(), Some("stack"));
+        assert_eq!(container.compose_service.as_deref(), Some("web"));
+        assert_eq!(container.networks[0].ipv4.as_deref(), Some("10.0.0.2"));
+        assert_eq!(container.published_ports[0].host_port, Some(8080));
+        assert!(
+            !serde_json::to_string(&container)
+                .unwrap()
+                .contains("do-not-copy")
         );
-        assert_eq!(containers.len(), 2);
-        assert_eq!(containers[0].name, "web");
-        assert_eq!(containers[0].image, "nginx:latest");
-        assert_eq!(containers[0].ports, "0.0.0.0:8080->80/tcp");
-        assert_eq!(containers[1].state, "exited");
+    }
+
+    #[test]
+    fn docker_stats_use_engine_counters_and_ids_instead_of_display_names() {
+        let summary = |id: &str| {
+            docker_summary(serde_json::from_value(serde_json::json!({
+            "Id":id, "Names":["/duplicate"], "Image":"image", "State":"running", "Status":"Up"
+        })).unwrap()).unwrap()
+        };
+        let mut containers = [summary("id-a"), summary("id-b")];
+        let stats: bollard::models::ContainerStatsResponse = serde_json::from_value(serde_json::json!({
+            "id":"id-b", "cpu_stats":{"cpu_usage":{"total_usage":300},"system_cpu_usage":4000,"online_cpus":2},
+            "precpu_stats":{"cpu_usage":{"total_usage":100},"system_cpu_usage":3000,"online_cpus":2},
+            "memory_stats":{"usage":1000,"limit":2000,"stats":{"inactive_file":200}},
+            "networks":{"eth0":{"rx_bytes":100,"tx_bytes":50}},"pids_stats":{"current":7},
+            "blkio_stats":{"io_service_bytes_recursive":[{"op":"read","value":1000},{"op":"write","value":2000}]}
+        })).unwrap();
+        apply_docker_api_stats(&mut containers[1], &stats);
         assert_eq!(containers[0].cpu_percent, None);
-    }
-
-    #[test]
-    fn docker_metadata_fits_the_report_contract_and_stats_reject_bad_numbers() {
-        let row = serde_json::json!({
-            "ID":"id", "Names":"web", "Image":"nginx", "State":"running",
-            "Status":"Up\nhealthy", "Ports":"🔌".repeat(200),
-        });
-        let containers = parse_docker_output(&row.to_string());
-        assert_eq!(containers.len(), 1);
-        assert!(containers[0].ports.len() <= 512);
-        assert!(!containers[0].status.contains('\n'));
-        assert_eq!(docker_percent("NaN%"), None);
-        assert_eq!(docker_percent("-1%"), None);
-        assert_eq!(docker_bytes("999999999999999999TB"), None);
-    }
-
-    #[test]
-    fn docker_stats_attach_current_usage_to_running_containers() {
-        let mut containers = parse_docker_output(
-            r#"{"ID":"abc123","Names":"web","Image":"nginx:latest","State":"running","Status":"Up 2 hours","Ports":""}
-{"ID":"def456","Names":"db","Image":"postgres:16","State":"exited","Status":"Exited (0)","Ports":""}"#,
-        );
-        apply_docker_stats(
-            &mut containers,
-            r#"{"Name":"web","CPUPerc":"0.50%","MemUsage":"12.5MiB / 1GiB","MemPerc":"1.22%","NetIO":"1.5kB / 2MiB","BlockIO":"3MB / 4KiB","PIDs":"7"}"#,
-        );
-        assert_eq!(containers[0].cpu_percent, Some(0.5));
-        assert_eq!(containers[0].memory_used_bytes, Some(12.5 * 1_048_576.0));
-        assert_eq!(containers[0].memory_limit_bytes, Some(1_073_741_824.0));
-        assert_eq!(containers[0].network_rx_bytes, Some(1_500.0));
-        assert_eq!(containers[0].block_write_bytes, Some(4_096.0));
-        assert_eq!(containers[0].pids, Some(7));
-        assert_eq!(containers[1].cpu_percent, None);
+        assert_eq!(containers[1].cpu_percent, Some(40.0));
+        assert_eq!(containers[1].memory_used_bytes, Some(800.0));
+        assert_eq!(containers[1].memory_limit_bytes, Some(2000.0));
+        assert_eq!(containers[1].network_rx_bytes, Some(100.0));
+        assert_eq!(containers[1].block_write_bytes, Some(2000.0));
+        assert_eq!(containers[1].pids, Some(7));
     }
     #[tokio::test]
     async fn hanging_filesystems_do_not_accumulate_workers() {

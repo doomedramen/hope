@@ -176,6 +176,42 @@ fn extended(value: &Metrics) -> Result<(), &'static str> {
                 || !text(&container.state, 32)
                 || !text(&container.status, 256)
                 || !text(&container.ports, 512)
+                || container.created_at.is_some_and(|value| {
+                    !value.is_finite() || !(0.0..=4_102_444_800.0).contains(&value)
+                })
+                || container
+                    .health
+                    .as_ref()
+                    .is_some_and(|value| !text(value, 32))
+                || container
+                    .compose_project
+                    .as_ref()
+                    .is_some_and(|value| !text(value, 128))
+                || container
+                    .compose_service
+                    .as_ref()
+                    .is_some_and(|value| !text(value, 128))
+                || container.networks.len() > 16
+                || container.networks.iter().any(|network| {
+                    network.name.is_empty()
+                        || !text(&network.name, 128)
+                        || network
+                            .network_id
+                            .as_ref()
+                            .is_some_and(|value| !text(value, 128))
+                        || network.ipv4.as_ref().is_some_and(|value| !text(value, 64))
+                        || network.ipv6.as_ref().is_some_and(|value| !text(value, 128))
+                        || network.mac.as_ref().is_some_and(|value| !text(value, 32))
+                })
+                || container.published_ports.len() > 64
+                || container.published_ports.iter().any(|port| {
+                    port.protocol.is_empty()
+                        || !text(&port.protocol, 8)
+                        || port.host_ip.as_ref().is_some_and(|value| !text(value, 64))
+                })
+                || container
+                    .restart_count
+                    .is_some_and(|value| value > 1_000_000_000)
                 || !optional(container.cpu_percent, 1e6)
                 || !optional(container.memory_used_bytes, 1e18)
                 || !optional(container.memory_limit_bytes, 1e18)

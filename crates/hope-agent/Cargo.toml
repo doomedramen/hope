@@ -18,6 +18,8 @@ sysinfo = "0.37"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 httpdate = "1"
 libc = "0.2"
+bollard = "=0.21.1"
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

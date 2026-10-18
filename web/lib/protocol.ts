@@ -189,11 +189,37 @@ kind: string, up: boolean, latency_ms: number | null, status_code: number | null
  * Short failure reason; never remote response bodies.
  */
 detail: string | null, };
+export type ContainerNetwork = { name: string, network_id: string | null, ipv4: string | null, ipv6: string | null, mac: string | null, };
+export type ContainerPort = { host_ip: string | null, container_port: number, host_port: number | null, protocol: string, };
 export type Container = { id: string, name: string, image: string,
 /**
  * Docker state such as running, exited, or created.
  */
-state: string, status: string, ports: string, cpu_percent: number | null, memory_used_bytes: number | null, memory_limit_bytes: number | null, memory_percent: number | null, network_rx_bytes: number | null, network_tx_bytes: number | null, block_read_bytes: number | null, block_write_bytes: number | null, pids: number | null, };
+state: string, status: string, ports: string,
+/**
+ * Docker creation time as Unix seconds.
+ */
+created_at: number | null,
+/**
+ * Health-check state, when a health check is configured.
+ */
+health: string | null,
+/**
+ * Docker Compose project and service labels, when present.
+ */
+compose_project: string | null, compose_service: string | null,
+/**
+ * Docker network attachments. Addresses stay scoped to their network.
+ */
+networks: Array<ContainerNetwork>,
+/**
+ * Structured host-to-container port mappings.
+ */
+published_ports: Array<ContainerPort>,
+/**
+ * Docker restart count. Unavailable when the daemon summary omits it.
+ */
+restart_count: number | null, cpu_percent: number | null, memory_used_bytes: number | null, memory_limit_bytes: number | null, memory_percent: number | null, network_rx_bytes: number | null, network_tx_bytes: number | null, block_read_bytes: number | null, block_write_bytes: number | null, pids: number | null, };
 export type UptimeScope = "system" | "container_kernel";
 export type SystemUptime = { seconds: number, boot_time: number | null,
 /**
