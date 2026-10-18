@@ -1,0 +1,1 @@
+Test-only TLS fixtures for the loopback enrollment/monitor regression. The server key is intentionally public test data and grants no access to a deployed service. The private CA signing key was discarded. Certificates are valid for 100 years from October 2026 and contain localhost/127.0.0.1 SANs. The tests use rustls directly; no OpenSSL command is needed at test runtime.

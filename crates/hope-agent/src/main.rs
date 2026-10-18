@@ -82,18 +82,18 @@ async fn execute() -> Result<()> {
         println!("Previous settings restored; enrollment identity retained");
         return Ok(());
     }
-    let mut collector = collect::Collector::new(extras::Settings::load(&dir).await);
-    if operation == "inspect" {
-        let (inventory, metrics, collectors) = collector.sample().await;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(
-                &serde_json::json!({"inventory":inventory,"metrics":metrics,"collectors":collectors})
-            )?
-        );
-        return Ok(());
-    }
-    if operation == "benchmark" {
+    if matches!(operation.as_str(), "inspect" | "benchmark") {
+        let mut collector = collect::Collector::new(extras::Settings::load(&dir).await);
+        if operation == "inspect" {
+            let (inventory, metrics, collectors) = collector.sample().await;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"inventory":inventory,"metrics":metrics,"collectors":collectors})
+                )?
+            );
+            return Ok(());
+        }
         let samples: u32 = std::env::args()
             .nth(2)
             .and_then(|s| s.parse().ok())
@@ -176,7 +176,14 @@ async fn execute() -> Result<()> {
         }
         config::save(&dir, &configuration).await?;
     }
-    if configuration.credential.is_none() || reset_credential {
+    let needs_enrollment = configuration.credential.is_none() || reset_credential;
+    if operation == "configure" && !needs_enrollment {
+        return configured(&configuration);
+    }
+    // Monitor clients must see the CA/configuration just persisted above. Also
+    // defer collector setup until after ownership and configuration validation.
+    let mut collector = collect::Collector::new(extras::Settings::load(&dir).await);
+    if needs_enrollment {
         let client = config::client(&configuration)?;
         anyhow::ensure!(
             matches!(operation.as_str(), "enroll" | "configure"),
@@ -222,9 +229,7 @@ async fn execute() -> Result<()> {
         config::save(&dir, &configuration).await?;
     }
     if operation == "configure" {
-        let _ = config::client(&configuration)?;
-        println!("Agent configuration ready; service reporting has not been confirmed");
-        return Ok(());
+        return configured(&configuration);
     }
     let bytes = config::read_bounded(&dir.join("spool.json"), delivery::MAX_BYTES)
         .await
@@ -240,4 +245,10 @@ async fn execute() -> Result<()> {
         config::shutdown(),
     )
     .await
+}
+
+fn configured(configuration: &Config) -> Result<()> {
+    let _ = config::client(configuration)?;
+    println!("Agent configuration ready; service reporting has not been confirmed");
+    Ok(())
 }

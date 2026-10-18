@@ -156,7 +156,7 @@
       "kind": "source/config/docs",
       "pass_1": "reviewed",
       "pass_2": "pending",
-      "evidence": "Full CLI/enrollment/run entrypoint read; identity/credential/CA/rollback and bounded restore traced. Agent integration tests and workspace checks passed. Collection construction before enrollment/locking remains a cost follow-up; full Linux service gate unavailable."
+      "evidence": "Full entrypoint reviewed. Collectors are constructed after state ownership and CA/config saves; existing configuration skips hardware setup for configure. Fifty-five agent unit/integration tests and workspace Clippy pass, including actual CLI HTTPS monitor regression for new/existing enrollments."
     },
     {
       "path": "crates/hope-agent/src/reporting.rs",
@@ -1299,6 +1299,41 @@
       "pass_1": "reviewed",
       "pass_2": "pending",
       "evidence": "Fresh sysinfo snapshots avoid reuse after failed refreshes; unknown/zero totals and inconsistent RAM/swap counters checked. Native inspection valid. Agent tests and workspace Clippy pass; Linux read-failure/runtime and resource comparisons pending."
+    },
+    {
+      "path": "crates/hope-agent/tests/enroll.rs",
+      "kind": "source/test TLS fixture",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Actual CLI loopback TLS regression: first enrollment and existing-agent CA update both report the HTTPS monitor healthy. Original code reports connection failure. Public test-only key/certificates decode and perform TLS handshake; no production credential or CA signing key is included."
+    },
+    {
+      "path": "crates/hope-agent/tests/fixtures/tls/README.md",
+      "kind": "source/test TLS fixture",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Actual CLI loopback TLS regression: first enrollment and existing-agent CA update both report the HTTPS monitor healthy. Original code reports connection failure. Public test-only key/certificates decode and perform TLS handshake; no production credential or CA signing key is included."
+    },
+    {
+      "path": "crates/hope-agent/tests/fixtures/tls/ca.pem",
+      "kind": "source/test TLS fixture",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Actual CLI loopback TLS regression: first enrollment and existing-agent CA update both report the HTTPS monitor healthy. Original code reports connection failure. Public test-only key/certificates decode and perform TLS handshake; no production credential or CA signing key is included."
+    },
+    {
+      "path": "crates/hope-agent/tests/fixtures/tls/server.der",
+      "kind": "source/test TLS fixture",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Actual CLI loopback TLS regression: first enrollment and existing-agent CA update both report the HTTPS monitor healthy. Original code reports connection failure. Public test-only key/certificates decode and perform TLS handshake; no production credential or CA signing key is included."
+    },
+    {
+      "path": "crates/hope-agent/tests/fixtures/tls/server-key.der",
+      "kind": "source/test TLS fixture",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Actual CLI loopback TLS regression: first enrollment and existing-agent CA update both report the HTTPS monitor healthy. Original code reports connection failure. Public test-only key/certificates decode and perform TLS handshake; no production credential or CA signing key is included."
     }
   ],
   "milestones": [
@@ -1349,7 +1384,12 @@
     },
     {
       "subject": "Preserve heartbeats through invalid core counters and make unavailable memory explicit",
-      "verification": "Invalid-core isolation regression fails before fix and passes after. Fifty-four agent tests, workspace Clippy, frontend types/lint/build pass; native memory observation valid. Linux fault injection and memory snapshot resource comparison pending."
+      "verification": "Invalid-core isolation regression fails before fix and passes after. Fifty-four agent tests, workspace Clippy, frontend types/lint/build pass; native memory observation valid. Linux fault injection and memory snapshot resource comparison pending.",
+      "commit": "d80235a"
+    },
+    {
+      "subject": "Initialize monitor clients after enrollment CA updates and avoid unnecessary collector setup",
+      "verification": "CLI loopback HTTPS regression failed on baseline and passes for new enrollment and existing-agent CA update. Fifty-five agent tests and workspace Clippy pass; Axum/tokio-rustls are existing resolved test-only dependencies."
     }
   ]
 }
