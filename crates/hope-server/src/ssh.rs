@@ -37,7 +37,7 @@ use tokio::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-pub const SERVER_RESTARTED_MESSAGE: &str = "The server stopped or restarted while this installation was running. The remote host's state is unknown: it may be partly installed, and its agent may still enroll later. Inspect the host before retrying.";
+pub const SERVER_RESTARTED_MESSAGE: &str = "The server stopped or restarted while this agent job was running. The remote host's state is unknown; installation or removal may be incomplete. Inspect the host before retrying.";
 const MAX_CONCURRENT_JOBS: usize = 4;
 const MAX_HISTORY: i64 = 100;
 const HISTORY_SECONDS: f64 = 30.0 * 86400.0;
@@ -128,6 +128,12 @@ const REMOTE_CODES: &[CodeInfo] = &[
         false,
         "No usable service manager was found on the host.",
         "Use a host with running systemd (or launchd on macOS). For a user service, log in normally so a user manager exists, then retry.",
+    ),
+    info(
+        "UNINSTALL_STOP_FAILED",
+        true,
+        "The agent service could not be stopped. Installation files were kept.",
+        "Stop the agent service on the device, then retry uninstalling it.",
     ),
     info(
         "LOCK_UNAVAILABLE",
@@ -307,6 +313,12 @@ const REMOTE_CODES: &[CodeInfo] = &[
 /// Codes the server itself produces (never taken from remote text).
 const SERVER_CODES: &[CodeInfo] = &[
     info(
+        "UNINSTALL_REVOKE_FAILED",
+        true,
+        "The remote uninstaller finished, but the server could not revoke the agent credential.",
+        "Revoke access from the host settings, then inspect the device before retrying.",
+    ),
+    info(
         "HOST_KEY_MISMATCH",
         false,
         "The host key differs from the fingerprint you confirmed. No credentials were sent.",
@@ -321,7 +333,7 @@ const SERVER_CODES: &[CodeInfo] = &[
     info(
         "AUTH_FAILED",
         false,
-        "The host rejected the credentials. Nothing was installed.",
+        "The host rejected the credentials. No remote command was run.",
         "Check the username and password or key, then start a new job.",
     ),
     info(
@@ -334,7 +346,7 @@ const SERVER_CODES: &[CodeInfo] = &[
         "CONNECTION_LOST",
         true,
         "The SSH connection ended before the installer reported a result. Remote state is unknown.",
-        "Inspect the host to see whether the agent was installed or the previous installation was kept, then retry.",
+        "Inspect the host to see whether the agent is installed or removed, then retry.",
     ),
     info(
         "INACTIVITY_TIMEOUT",
@@ -345,7 +357,7 @@ const SERVER_CODES: &[CodeInfo] = &[
     info(
         "TOTAL_TIMEOUT",
         true,
-        "The installation exceeded its time limit. Remote state is unknown.",
+        "The agent job exceeded its time limit. Remote state is unknown.",
         "Inspect the host, which may still be running the installer, before retrying.",
     ),
     info(
@@ -358,13 +370,13 @@ const SERVER_CODES: &[CodeInfo] = &[
         "INSTALLER_FAILED",
         true,
         "The installer exited with an error but gave no recognized reason. Remote state is unknown.",
-        "Inspect the host, or run the manual installation command there to see the full output.",
+        "Inspect the host, or run the matching manual install or uninstall command there to see the full output.",
     ),
     info(
         "INSTALLER_INCOMPLETE",
         true,
         "The installer ended without confirming completion. Remote state is unknown.",
-        "Inspect the host, or run the manual installation command there to see the full output.",
+        "Inspect the host, or run the matching manual install or uninstall command there to see the full output.",
     ),
     info(
         "IDENTITY_MISMATCH",
@@ -443,11 +455,11 @@ const NOTICES: &[(&str, &str)] = &[
     ),
     (
         "Using non-interactive sudo for a system service.",
-        "Installing a system service with passwordless sudo.",
+        "Using passwordless sudo for the system agent service.",
     ),
     (
         "Installing a user service. Reporting may stop after logout (systemd lingering) or outside a macOS GUI session.",
-        "Installing a user service. Reporting may stop after logout (systemd lingering) or outside a macOS GUI session.",
+        "Managing a user service. Reporting may stop after logout (systemd lingering) or outside a macOS GUI session.",
     ),
     (
         "USER_SERVICE_NOT_PERSISTENT",
@@ -783,6 +795,21 @@ pub async fn install(
     Extract(state): Extract<State>,
     Json(request): Json<InstallRequest>,
 ) -> ApiResult<Json<InstallJob>> {
+    start_job(state, request, false).await
+}
+
+pub async fn uninstall(
+    Extract(state): Extract<State>,
+    Json(request): Json<InstallRequest>,
+) -> ApiResult<Json<InstallJob>> {
+    start_job(state, request, true).await
+}
+
+async fn start_job(
+    state: State,
+    request: InstallRequest,
+    uninstall: bool,
+) -> ApiResult<Json<InstallJob>> {
     if state.0.shutdown.is_cancelled() {
         return Err(ApiError::bad("The server is shutting down"));
     }
@@ -806,6 +833,16 @@ pub async fn install(
         return Err(ApiError::bad("Provide a password or private key"));
     }
     let (mode, bound_agent) = match host.agent_id {
+        Some(agent) if uninstall => {
+            Uuid::parse_str(&agent)
+                .map_err(|_| ApiError::bad("Invalid enrolled agent identity"))?;
+            (InstallMode::Uninstall, Some(agent))
+        }
+        None if uninstall => {
+            return Err(ApiError::bad(
+                "This host has no enrolled agent to uninstall",
+            ));
+        }
         Some(agent) => (InstallMode::Reinstall, Some(agent)),
         None => (InstallMode::Install, None),
     };
@@ -814,7 +851,7 @@ pub async fn install(
         let mut running = state.0.installs.lock().await;
         if running.len() >= MAX_CONCURRENT_JOBS {
             return Err(ApiError::bad(
-                "At most four SSH installations may run concurrently",
+                "At most four SSH agent jobs may run concurrently",
             ));
         }
         let busy: i64 = sqlx::query_scalar(
@@ -827,7 +864,7 @@ pub async fn install(
         .await?;
         if busy > 0 {
             return Err(ApiError::bad(
-                "An installation is already running for this host or SSH address; wait for it to finish",
+                "An agent job is already running for this host or SSH address; wait for it to finish",
             ));
         }
         sqlx::query("DELETE FROM install_jobs WHERE status<>'running' AND created_at<?")
@@ -845,7 +882,7 @@ pub async fn install(
             .bind(i64::from(port))
             .bind(&request.fingerprint)
             .bind(&request.username)
-            .bind(if mode == InstallMode::Reinstall { "reinstall" } else { "install" })
+            .bind(match mode { InstallMode::Install => "install", InstallMode::Reinstall => "reinstall", InstallMode::Uninstall => "uninstall" })
             .bind(bound_agent.as_deref())
             .bind(bound_agent.as_deref())
             .bind(now())
@@ -1004,29 +1041,44 @@ async fn provision(
         Ok(Ok(false)) => return Outcome::code("AUTH_FAILED"),
         _ => return Outcome::code("CONNECT_FAILED"),
     }
-    let reset = match plan.bound_agent.as_deref() {
-        Some(agent) => {
-            sqlx::query_scalar::<_, bool>("SELECT revoked FROM agents WHERE id=?")
-                .bind(agent)
-                .fetch_optional(&state.0.db)
-                .await
-                .ok()
-                .flatten()
-                == Some(true)
-        }
-        None => false,
+    let (command, token_hash) = if plan.mode == InstallMode::Uninstall {
+        let Some(agent) = plan.bound_agent.as_deref() else {
+            return Outcome::code("IDENTITY_MISMATCH");
+        };
+        (
+            Zeroizing::new(format!(
+                "export HOPE_EXPECT_AGENT_ID={}\n{}",
+                agents::shell_quote(agent),
+                agents::uninstall_command(state)
+            )),
+            String::new(),
+        )
+    } else {
+        let reset = match plan.bound_agent.as_deref() {
+            Some(agent) => {
+                sqlx::query_scalar::<_, bool>("SELECT revoked FROM agents WHERE id=?")
+                    .bind(agent)
+                    .fetch_optional(&state.0.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    == Some(true)
+            }
+            None => false,
+        };
+        let Ok(token) = agents::issue_token_for_reset(
+            state,
+            reset.then_some(plan.bound_agent.as_deref()).flatten(),
+        )
+        .await
+        else {
+            return Outcome::code("TOKEN_FAILED");
+        };
+        let command = Zeroizing::new(agents::install_command_for(state, &token, reset, true));
+        let token_hash = hash(&token);
+        drop(token);
+        (command, token_hash)
     };
-    let Ok(token) = agents::issue_token_for_reset(
-        state,
-        reset.then_some(plan.bound_agent.as_deref()).flatten(),
-    )
-    .await
-    else {
-        return Outcome::code("TOKEN_FAILED");
-    };
-    let command = Zeroizing::new(agents::install_command_for(state, &token, reset, true));
-    let token_hash = hash(&token);
-    drop(token);
     exec_started.store(true, Ordering::SeqCst);
     let mut channel = match session.channel_open_session().await {
         Ok(channel) => channel,
@@ -1133,6 +1185,27 @@ async fn provision(
     }
     if !complete || remote_error.is_some() {
         return Outcome::code(remote_error.unwrap_or("INSTALLER_INCOMPLETE"));
+    }
+    if plan.mode == InstallMode::Uninstall {
+        if !progress
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::Phase(InstallStage::Uninstall)))
+        {
+            return Outcome::code("INSTALLER_INCOMPLETE");
+        }
+        let Some(agent) = plan.bound_agent.as_deref() else {
+            return Outcome::code("IDENTITY_MISMATCH");
+        };
+        if agents::revoke_by_id(state, agent).await.is_err() {
+            return Outcome::code("UNINSTALL_REVOKE_FAILED");
+        }
+        return Outcome {
+            status: InstallStatus::Completed,
+            code: None,
+            message: "Agent service, updater and binary removed. Access revoked; identity and device history retained.".into(),
+            agent_id: Some(agent.into()),
+        };
     }
     // Without a stop/replacement phase any report could be from the previous service.
     let Some(boundary) = boundary else {

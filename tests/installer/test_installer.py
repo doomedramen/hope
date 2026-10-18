@@ -488,14 +488,29 @@ class Linux(Base):
         self.ok(self.env.run('uninstall', token=None, server=None, HOPE_AGENT_DIR=custom, HOPE_PURGE_IDENTITY=1))
         self.assertEqual(['unrelated.txt'], [p.name for p in custom.iterdir()])
 
-    def test_uninstall_works_without_running_service_manager(self):
+    def test_uninstall_keeps_files_without_running_service_manager(self):
         self.ok(self.env.run())
         self.env.set('fake/manager-system', 'offline')
         result = self.env.run('uninstall', token=None, server=None)
-        self.ok(result)
-        self.assertIn('warning=', result.err)
-        self.assertFalse(self.env.paths('system')['binary'].exists())
-        self.assertFalse(self.env.paths('system')['unit'].exists())
+        self.failed(result, 'NO_SERVICE_MANAGER')
+        self.assertTrue(self.env.paths('system')['binary'].exists())
+        self.assertTrue(self.env.paths('system')['unit'].exists())
+
+    def test_uninstall_does_not_remove_a_service_that_failed_to_stop(self):
+        self.ok(self.env.run())
+        self.env.fault('stop-fail')
+        self.failed(self.env.run('uninstall', token=None, server=None), 'UNINSTALL_STOP_FAILED')
+        self.assertTrue(self.env.paths('system')['binary'].exists())
+        self.assertTrue(self.env.paths('system')['unit'].exists())
+
+    def test_uninstall_refuses_while_an_updater_holds_the_install_lock(self):
+        import fcntl
+        self.ok(self.env.run())
+        with open(self.env.root / 'var/lib/hope-agent-update/update.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.failed(self.env.run('uninstall', token=None, server=None), 'INSTALL_BUSY')
+        self.assertTrue(self.env.paths('system')['binary'].exists())
+        self.assertTrue(self.env.paths('system')['unit'].exists())
 
     def test_curl_ignores_user_config_and_ambient_ca_variables(self):
         self.ok(self.env.run(CURL_CA_BUNDLE='/evil', SSL_CERT_FILE='/evil', SSL_CERT_DIR='/evil'))
@@ -551,6 +566,36 @@ class Linux(Base):
         self.ok(self.env.run())
         self.assertNotIn(TOKEN, self.env.log())
         self.assertNotIn(harness.CREDENTIAL, self.env.paths('system')['unit'].read_text())
+
+
+class UninstallIdentity(Base):
+    def test_ssh_uninstall_accepts_only_the_selected_identity_in_all_service_modes(self):
+        identity = '00000000-0000-4000-8000-000000000001'
+        for platform, arch in [('Linux', 'x86_64'), ('Darwin', 'arm64')]:
+            for mode, uid in [('system', 0), ('system', 1000), ('user', 1000)]:
+                with self.subTest(platform=platform, mode=mode, uid=uid):
+                    env = self.new_env(platform, arch)
+                    paths = env.preinstall(mode)
+                    (paths['state'] / 'config.json').write_text(json.dumps({'agent_id': identity}, indent=2))
+                    result = env.run('uninstall', uid=uid, mode=mode, token=None, server=None, HOPE_EXPECT_AGENT_ID=identity)
+                    self.ok(result)
+                    self.assertIn('uninstall', result.phases)
+                    self.assertIn('complete', result.phases)
+                    self.assertFalse(paths['binary'].exists())
+                    self.assertTrue((paths['state'] / 'config.json').exists())
+
+    def test_ssh_uninstall_rejects_other_missing_or_oversized_identity_before_service_changes(self):
+        identity = '00000000-0000-4000-8000-000000000001'
+        for config in [json.dumps({'agent_id': '00000000-0000-4000-8000-000000000002'}), '{}', 'broken', 'x' * 131073]:
+            with self.subTest(config=config[:80]):
+                env = self.new_env()
+                paths = env.preinstall()
+                (paths['state'] / 'config.json').write_text(config)
+                result = env.run('uninstall', token=None, server=None, HOPE_EXPECT_AGENT_ID=identity)
+                self.failed(result, 'EXISTING_IDENTITY_MISMATCH')
+                self.assertNotIn('systemctl[system] stop', env.log())
+                self.assertTrue(paths['binary'].exists())
+                self.assertTrue(paths['unit'].exists())
 
 
 class Manifest(Base):
@@ -666,6 +711,13 @@ class Manifest(Base):
 
 
 class MacOS(Base):
+    def test_uninstall_does_not_remove_a_service_that_failed_to_stop(self):
+        self.ok(self.env.run())
+        self.env.fault('stop-fail')
+        self.failed(self.env.run('uninstall', token=None, server=None), 'UNINSTALL_STOP_FAILED')
+        self.assertTrue(self.env.paths('system')['binary'].exists())
+        self.assertTrue(self.env.paths('system')['unit'].exists())
+
     def setUp(self):
         self.env = self.new_env('Darwin', 'arm64')
 

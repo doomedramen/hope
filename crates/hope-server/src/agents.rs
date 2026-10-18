@@ -23,6 +23,36 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+pub async fn uninstall_instructions(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<hope_protocol::AgentUninstallInstructions>> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agents WHERE id=?)")
+        .bind(id)
+        .fetch_one(&state.0.db)
+        .await?;
+    if !exists {
+        return Err(ApiError::not_found());
+    }
+    Ok(Json(hope_protocol::AgentUninstallInstructions {
+        command: uninstall_command(&state),
+        custom_ca_required: state.0.enrollment_ca.is_some(),
+    }))
+}
+
+pub fn uninstall_command(state: &State) -> String {
+    let url = shell_quote(&format!("{}/agent/uninstall", state.0.server_url));
+    let curl_ca = state
+        .0
+        .enrollment_ca
+        .as_ref()
+        .map(|path| format!(" --cacert {}", shell_quote(path)))
+        .unwrap_or_default();
+    format!(
+        "( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f \"$installer\"' EXIT; curl -q --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https'{curl_ca} {url} -o \"$installer\" && sh \"$installer\" uninstall )"
+    )
+}
+
 pub async fn issue_token(state: &State) -> ApiResult<String> {
     issue_token_for_reset(state, None).await
 }
@@ -541,14 +571,19 @@ pub async fn revoke(
     Extract(state): Extract<State>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<OkResponse>> {
+    revoke_by_id(&state, &id).await?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
+pub async fn revoke_by_id(state: &State, id: &str) -> ApiResult<()> {
     let _guard = state.0.writes.lock().await;
     let mut tx = state.0.db.begin().await?;
     sqlx::query("UPDATE agents SET revoked=1 WHERE id=?")
-        .bind(&id)
+        .bind(id)
         .execute(&mut *tx)
         .await?;
     for mut host in state.hosts().await? {
-        if host.agent_id.as_ref() == Some(&id) {
+        if host.agent_id.as_deref() == Some(id) {
             host.agent_revoked = true;
             sqlx::query("UPDATE hosts SET body=? WHERE id=?")
                 .bind(serde_json::to_string(&host)?)
@@ -559,7 +594,7 @@ pub async fn revoke(
     }
     tx.commit().await?;
     state.changed();
-    Ok(Json(OkResponse { ok: true }))
+    Ok(())
 }
 
 #[cfg(test)]

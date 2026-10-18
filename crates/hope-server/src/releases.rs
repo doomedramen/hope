@@ -11,6 +11,18 @@ use axum::{
 use serde::Deserialize;
 use std::path::Path;
 
+/// Uninstall never downloads or executes a release binary, so it must remain available even
+/// when no signed release is published. All service-manager and path handling stays shared.
+pub async fn uninstaller() -> impl IntoResponse {
+    (
+        [
+            ("content-type", "text/x-shellscript"),
+            ("cache-control", "no-store"),
+        ],
+        include_str!("../../../scripts/install-agent.sh").replace("@@HOPE_PUBLIC_KEY@@", ""),
+    )
+}
+
 pub async fn installer(Extract(state): Extract<State>) -> ApiResult<impl IntoResponse> {
     let directory = release_directory(&state.0.release_dir).await;
     let key = tokio::fs::read_to_string(directory.join("release-public.pem"))

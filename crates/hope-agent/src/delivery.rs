@@ -10,7 +10,7 @@ use std::{
 pub struct Revoked;
 impl std::fmt::Display for Revoked {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Agent credential was revoked or rejected; request an identity-bound replacement from the administrator")
+        formatter.write_str("Agent is disabled after credential revocation; request an identity-bound replacement from the administrator to re-enroll it")
     }
 }
 impl std::error::Error for Revoked {}

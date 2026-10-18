@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     pub server: String,
     pub agent_id: String,
@@ -11,6 +11,10 @@ pub struct Config {
     #[serde(default)]
     pub pending_credential: Option<String>,
     pub ca_pem: Option<String>,
+    /// An explicit server revocation survives service restarts and device reboots.
+    /// Only successful credential replacement clears this state.
+    #[serde(default)]
+    pub disabled: bool,
 }
 pub fn directory() -> PathBuf {
     std::env::var_os("HOPE_AGENT_DIR")
@@ -58,6 +62,7 @@ pub async fn restore_settings(directory: &Path, previous: &Path) -> Result<()> {
     // issued or pending credential when rolling back local package settings.
     old.credential = current.credential;
     old.pending_credential = current.pending_credential;
+    old.disabled = current.disabled;
     save(directory, &old).await
 }
 
@@ -243,6 +248,7 @@ mod tests {
             credential: Some("a".repeat(64)),
             pending_credential: None,
             ca_pem: None,
+            disabled: false,
         };
         let previous = directory.path().join("previous.json");
         write_private(&previous, &serde_json::to_vec(&old).expect("json"))
@@ -251,6 +257,7 @@ mod tests {
         let current = Config {
             credential: Some("b".repeat(64)),
             pending_credential: Some("c".repeat(64)),
+            disabled: true,
             ..old
         };
         save(directory.path(), &current).await.expect("current");
@@ -262,6 +269,7 @@ mod tests {
             restored.agent_id == identity
                 && restored.credential == current.credential
                 && restored.pending_credential == current.pending_credential
+                && restored.disabled
         );
         let foreign = Config {
             agent_id: uuid::Uuid::new_v4().to_string(),

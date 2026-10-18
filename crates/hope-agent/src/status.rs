@@ -64,6 +64,10 @@ impl Required {
 pub async fn show(directory: &Path, arguments: &[String]) -> Result<()> {
     let required = Required::parse(arguments)?;
     let configuration = config::read(directory).await?;
+    anyhow::ensure!(
+        !configuration.disabled,
+        "Agent is disabled after credential revocation; re-enroll it to resume reporting"
+    );
     let marker: Acceptance = serde_json::from_slice(
         &config::read_bounded(&directory.join("last-acceptance.json"), 4096)
             .await

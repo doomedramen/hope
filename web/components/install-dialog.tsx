@@ -251,8 +251,12 @@ function JobView({
     <div className="flex flex-col gap-3" data-testid="ssh-job">
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="font-medium">
-          {job.mode === "reinstall" ? "Reinstall" : "Install"} on {job.host}:
-          {job.port}
+          {job.mode === "uninstall"
+            ? "Uninstall"
+            : job.mode === "reinstall"
+              ? "Reinstall"
+              : "Install"}{" "}
+          on {job.host}:{job.port}
         </h3>
         <Badge variant={statusVariant(job.status)}>
           {STATUS_LABELS[job.status]}
@@ -265,7 +269,9 @@ function JobView({
       </p>
       <ol
         className="flex list-decimal flex-col gap-1 pl-5 text-sm"
-        aria-label="Installation stages"
+        aria-label={
+          job.mode === "uninstall" ? "Uninstall stages" : "Installation stages"
+        }
       >
         {job.stages.map((stage) => (
           <li
@@ -303,8 +309,8 @@ function JobView({
       )}
       {job.status === "running" && (
         <p className="text-xs text-muted-foreground">
-          Closing this dialog does not stop the installation. Reopen it to
-          follow progress.
+          Closing this dialog does not stop the job. Reopen it to follow
+          progress.
         </p>
       )}
       <div className="flex flex-wrap gap-2">
@@ -314,14 +320,20 @@ function JobView({
           </Button>
         )}
         <Button variant="ghost" onClick={onBack}>
-          {job.status === "running" ? "Installation history" : "Back"}
+          {job.status === "running" ? "Job history" : "Back"}
         </Button>
       </div>
     </div>
   );
 }
 
-function SshInstall({ host }: { host: Host }) {
+export function SshInstall({
+  host,
+  uninstall = false,
+}: {
+  host: Host;
+  uninstall?: boolean;
+}) {
   const [address, setAddress] = useState(
     host.addresses.find((a) => !a.includes(":")) ?? host.addresses[0] ?? "",
   );
@@ -355,21 +367,25 @@ function SshInstall({ host }: { host: Host }) {
   const loadHistory = useCallback(async () => {
     try {
       const jobs = await api<InstallJob[]>("/ssh/jobs");
-      const mine = jobs.filter((j) => j.host_id === host.id);
+      const mine = jobs.filter(
+        (j) => j.host_id === host.id && (j.mode === "uninstall") === uninstall,
+      );
       setHistory(mine);
       return mine;
     } catch (e) {
       setError((e as Error).message);
       return [];
     }
-  }, [host.id]);
+  }, [host.id, uninstall]);
   // Reopen a job that is still running; otherwise show the form with history.
   useEffect(() => {
     let alive = true;
     api<InstallJob[]>("/ssh/jobs")
       .then((jobs) => {
         if (!alive) return;
-        const mine = jobs.filter((j) => j.host_id === hostId);
+        const mine = jobs.filter(
+          (j) => j.host_id === hostId && (j.mode === "uninstall") === uninstall,
+        );
         setHistory(mine);
         const running = mine.find((j) => j.status === "running");
         if (running) setJob(running);
@@ -380,7 +396,7 @@ function SshInstall({ host }: { host: Host }) {
     return () => {
       alive = false;
     };
-  }, [hostId]);
+  }, [hostId, uninstall]);
   const jobId = job?.id;
   const running = job?.status === "running";
   useEffect(() => {
@@ -431,7 +447,7 @@ function SshInstall({ host }: { host: Host }) {
     setError("");
     try {
       setJob(
-        await post<InstallJob>("/ssh/install", {
+        await post<InstallJob>(uninstall ? "/ssh/uninstall" : "/ssh/install", {
           ...target,
           username,
           fingerprint,
@@ -562,7 +578,7 @@ function SshInstall({ host }: { host: Host }) {
                 onChange={(e) => setKey(e.target.value)}
               />
               <FieldDescription>
-                Credentials are used only for this installation job.
+                Credentials are used only for this job.
               </FieldDescription>
             </Field>
             {key && (
@@ -579,19 +595,25 @@ function SshInstall({ host }: { host: Host }) {
             )}
           </FieldGroup>
           <p className="text-xs text-muted-foreground">
-            System installation requires root or passwordless sudo. Otherwise
-            the installer attempts a user service. Custom CA deployments require
-            the certificate at the configured path on the remote host.
+            {uninstall
+              ? "Connect as the installation owner. Removing a system service requires root or passwordless sudo. The installed agent must match this host. Success also revokes its access; device history and identity are kept."
+              : "System installation requires root or passwordless sudo. Otherwise the installer attempts a user service."}{" "}
+            Custom CA deployments require the certificate at the configured path
+            on the remote host.
           </p>
           <Button
+            variant={uninstall ? "destructive" : "default"}
             disabled={!verified || !username || (!password && !key) || busy}
             onClick={install}
           >
-            Install on {hostDisplayName(host)}
+            {uninstall ? "Uninstall from" : "Install on"}{" "}
+            {hostDisplayName(host)}
           </Button>
           {history.length > 0 && (
             <div className="flex flex-col gap-2" data-testid="ssh-history">
-              <h3 className="text-sm font-medium">Previous installations</h3>
+              <h3 className="text-sm font-medium">
+                {uninstall ? "Previous uninstalls" : "Previous installations"}
+              </h3>
               <ul className="flex flex-col gap-1">
                 {history.map((entry) => (
                   <li key={entry.id}>

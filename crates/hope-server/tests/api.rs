@@ -18,8 +18,14 @@ async fn setup() -> (TempDir, State, Router, String) {
     setup_with("releases".into()).await
 }
 async fn setup_with(release_dir: String) -> (TempDir, State, Router, String) {
+    setup_with_ca(release_dir, None).await
+}
+async fn setup_with_ca(
+    release_dir: String,
+    ca: Option<String>,
+) -> (TempDir, State, Router, String) {
     let dir = tempfile::tempdir().expect("temporary database");
-    let state = State::open(
+    let state = State::open_with_agent_ca(
         dir.path().join("test.db").to_str().expect("path"),
         "http://localhost:8080".into(),
         release_dir,
@@ -30,6 +36,7 @@ async fn setup_with(release_dir: String) -> (TempDir, State, Router, String) {
             icmp: false,
             limitations: vec![],
         },
+        ca,
     )
     .await
     .expect("state");
@@ -122,6 +129,71 @@ async fn enrolled(state: &State, app: &Router) -> (String, String, String) {
         body["credential"].as_str().expect("credential").into(),
         token,
     )
+}
+#[tokio::test]
+async fn uninstall_instructions_require_admin_and_work_without_published_releases() {
+    for ca in [None, Some("/etc/hope/owner's CA.pem".to_string())] {
+        let absent = tempfile::tempdir().unwrap();
+        let (_dir, state, app, cookie) =
+            setup_with_ca(absent.path().to_str().unwrap().into(), ca.clone()).await;
+        let (agent, _, _) = enrolled(&state, &app).await;
+        let path = format!("/api/v1/agents/{agent}/uninstall-instructions");
+        assert_eq!(
+            request(&app, "GET", &path, Value::Null, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, body) =
+            request(&app, "GET", &path, Value::Null, Some(("cookie", &cookie))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["custom_ca_required"], ca.is_some());
+        let command = body["command"].as_str().unwrap();
+        assert!(command.contains("/agent/uninstall"));
+        assert!(command.contains("sh \"$installer\" uninstall"));
+        assert!(!command.contains("HOPE_ENROLLMENT_TOKEN"));
+        assert!(!command.contains("HOPE_PURGE_IDENTITY"));
+        if let Some(ca) = ca {
+            assert!(command.contains(&format!("--cacert {}", agents::shell_quote(&ca))));
+        }
+        // Merely opening the dialog must not revoke or otherwise alter the agent.
+        assert!(!state.hosts().await.unwrap()[0].agent_revoked);
+        assert_eq!(
+            request(
+                &app,
+                "GET",
+                "/api/v1/agents/missing/uninstall-instructions",
+                Value::Null,
+                Some(("cookie", &cookie))
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        let script = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/uninstall")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(script.status(), StatusCode::OK);
+        assert_eq!(script.headers()["cache-control"], "no-store");
+        let script = String::from_utf8(
+            script
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(script.starts_with("#!/bin/sh"));
+        assert!(script.contains("phase uninstall"));
+        assert!(!script.contains("@@HOPE_PUBLIC_KEY@@"));
+    }
 }
 #[tokio::test]
 async fn authentication_setup_and_cross_site_protection() {

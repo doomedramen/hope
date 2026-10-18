@@ -278,6 +278,10 @@ Service summaries retain the full observed failed-unit count even when the detai
 
 ## Agent upgrade, rollback and uninstall
 
+In the console, open a host's **Settings** tab and choose **Uninstall agent → Uninstall over SSH**. Inspect and verify the host fingerprint, then supply the installation owner's SSH credentials (root or passwordless sudo for a system service). The job stops and removes the service, updater and binary while keeping the enrollment identity and server history. It requires the remote uninstall phase, completion marker and successful SSH exit before reporting success, then revokes the agent credential. It does not issue an enrollment token or wait for a report from the removed agent. Connection loss or incomplete output leaves the outcome uncertain; inspect the device before retrying. Install and uninstall jobs share concurrency limits and cannot run together on the same host or SSH address. Credentials are discarded after authentication.
+
+SSH uninstall sets `HOPE_EXPECT_AGENT_ID` so the uninstaller checks the selected identity against the device's configuration before changing any service. This works with older agents and refuses a different identity or missing configuration. Custom CA paths must exist on the device. For a custom state directory, use **Uninstall manually** and set `HOPE_AGENT_DIR` before running the command. The manual tab also lets you disable access before copying the command; manual removal is confirmed by its output on the device. The uninstall script is available even when no signed agent release is published. If no service manager is available or the service cannot be stopped, uninstall fails and keeps the installation files. Linux system uninstall also takes the updater's installation lock, so it cannot race an active update.
+
 Fetch the installer from the server (as above) and run it with an operation argument:
 
 ```sh
@@ -321,7 +325,9 @@ Linux system installations require `flock` from util-linux. To repair an older i
 
 ## Revocation
 
-In the console, open the host and choose **Revoke credential**. The agent's credential hash is marked revoked in the same transaction as the host flag; a report already queued behind the write lock cannot commit after revocation. The updated server returns the explicit `agent_revoked` error for a matching revoked credential, and the agent exits with status 0, so systemd `Restart=on-failure` does not restart it; its history stays. Generic HTTP 401/403 denials are retried because a reverse proxy can produce them transiently. Upgrade the server before deploying this agent behavior; an older server's generic revocation response will be retried rather than stopping the agent. To reconnect it, issue the identity-bound reset token from the console and reinstall. Signing-key compromise is a separate event, see [Rotation and revocation](#rotation-and-revocation).
+In the console, open the host's **Settings** tab and choose **Disable agent**. The agent's credential hash is marked revoked in the same transaction as the host flag; a report already queued behind the write lock cannot commit after revocation. Reports are blocked immediately, including for offline devices. At its next server contact, the updated agent receives the explicit `agent_revoked` error, saves `disabled: true` in its configuration, clears queued telemetry and exits with status 0. systemd `Restart=on-failure` and launchd's unsuccessful-exit policy do not restart it. A later service start or device reboot exits before collecting or sending anything; the service and binary remain installed until uninstalled. History stays.
+
+Generic HTTP 401/403 denials are retried because a reverse proxy can produce them transiently. Upgrade the server before deploying this agent behavior; an older server's generic revocation response will be retried rather than stopping the agent. Older agents may exit without remembering the disabled state, or keep retrying; uninstall removes their service as well. To reconnect a disabled agent, issue the identity-bound reset token from the console and reinstall. Only successful credential replacement clears the local disabled state; an upgrade, ordinary configure, or rollback does not. Signing-key compromise is a separate event, see [Rotation and revocation](#rotation-and-revocation).
 
 ## Shutdown
 
@@ -489,6 +495,8 @@ Origin `installer` means the script on the host emits it (so it also appears in 
 | `BINARY_INVALID` | installer | failed | The installed agent did not run on the host. | Check that the packaged release matches the host's platform and libc, then retry. |
 | `BINARY_NOT_EXECUTABLE` | installer | failed | The host cannot execute programs from its temporary directory. | Remount the temporary directory without noexec, or give this account an executable TMPDIR, then retry. |
 | `EXISTING_IDENTITY_MISMATCH` | installer | failed | The host already runs an agent with a different identity. | Reinstall from the host record that owns that agent, or uninstall the existing agent first. |
+| `UNINSTALL_STOP_FAILED` | installer | uncertain | The agent service is still loaded or running; installation files were kept. | Stop the service on the device, then retry uninstalling. |
+| `UNINSTALL_REVOKE_FAILED` | server | uncertain | Remote uninstall finished, but the server could not revoke the credential. | Disable agent access in host settings and inspect the device before retrying. |
 | `SERVICE_ACCOUNT_INVALID` | installer | failed | A pre-existing service account does not meet the installer's safety requirements. | Remove or repair the agent service account on the host, then retry. |
 | `CONFIGURE_FAILED` | installer | failed | The agent could not be configured or enrolled. | Check that the host reaches the server over HTTPS; the enrollment token lasts 15 minutes and is single use, so start a new job. |
 | `SERVICE_START_FAILED` | installer | failed | The agent service did not start on the host. | Inspect the service manager's logs on the host, then retry. |

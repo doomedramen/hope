@@ -204,6 +204,8 @@ elif name == 'systemctl':
         open(marker, 'w').write('%s %d' % (activation_from(unit), next_pid()))
     elif command == 'stop':
         hook('stop')
+        if flag('stop-fail'):
+            sys.exit(1)
         if os.path.exists(marker):
             os.unlink(marker)
     elif command == 'show':
@@ -230,6 +232,8 @@ elif name == 'launchctl':
         open(marker, 'w').write('%s %d' % (activation_from(args[2]), next_pid()))
     elif args[0] == 'bootout':
         hook('stop')
+        if flag('stop-fail'):
+            sys.exit(1)
         if os.path.exists(marker):
             os.unlink(marker)
 elif name == 'flock':

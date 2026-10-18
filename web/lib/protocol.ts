@@ -4,7 +4,7 @@ export type EnrichmentStatus = "pending" | "running" | "completed" | "failed" | 
 export type AgentStatus = "reporting" | "stale" | "revoked" | "unenrolled";
 export type InstallStatus = "running" | "completed" | "failed" | "interrupted" | "uncertain";
 export type InstallStage = "connecting" | "authenticating" | "preflight" | "recover" | "uninstall" | "stage" | "verify" | "stop" | "place_binary" | "configure" | "write_unit" | "activate" | "wait_report" | "rollback" | "complete" | "confirming_report";
-export type InstallMode = "install" | "reinstall";
+export type InstallMode = "install" | "reinstall" | "uninstall";
 export type LoginRequest = { password: string, setup_token: string | null, };
 export type PasswordChange = { current_password: string, new_password: string, };
 export type NotificationSettings = { ntfy_enabled: boolean, ntfy_server: string, ntfy_topic: string, ntfy_token: string | null, ntfy_token_set: boolean,
@@ -99,6 +99,11 @@ name: string | null,
 icon: string | null, };
 export type AuthStatus = { setup_required: boolean, authenticated: boolean, };
 export type OkResponse = { ok: boolean, };
+export type AgentUninstallInstructions = {
+/**
+ * Run on the device to stop and remove the service, updater and binary. Identity is retained.
+ */
+command: string, custom_ca_required: boolean, };
 export type ReportResponse = { accepted: boolean, duplicate: boolean,
 /**
  * Seconds the server asks the agent to wait between samples; older servers omit it.

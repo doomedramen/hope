@@ -113,6 +113,9 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
     period: Duration,
     shutdown: S,
 ) -> Result<()> {
+    if configuration.disabled {
+        return Err(delivery::Revoked.into());
+    }
     let client = config::client(configuration)?;
     let credential = configuration
         .credential
@@ -169,7 +172,14 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                         config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
                         if operation!="run" && first_report.as_ref()==Some(&report.report_id) { println!("Agent report accepted"); return Ok(()); }
                     }
-                    Outcome::Revoked => { config::write_private(&dir.join("spool.json"),&spool.encode()?).await?; return Err(delivery::Revoked.into()); }
+                    Outcome::Revoked => {
+                        let mut disabled = configuration.clone();
+                        disabled.disabled = true;
+                        config::save(dir, &disabled).await?;
+                        // Queued telemetry is no longer deliverable. Do not retain it on disable.
+                        config::write_private(&dir.join("spool.json"), b"[]").await?;
+                        return Err(delivery::Revoked.into());
+                    }
                     Outcome::Invalid(status) => {
                         current_reports.remove(&report.report_id);
                         spool.remove(&report.report_id);
@@ -311,6 +321,7 @@ mod tests {
             credential: Some("fixture-credential".into()),
             pending_credential: None,
             ca_pem: None,
+            disabled: false,
         }
     }
     struct SlowSampler {

@@ -1882,6 +1882,165 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("button", { name: "Close host details" }).click();
     await expect(page).toHaveURL(/view=agents/);
   });
+  test("agent uninstall keeps history and makes device removal explicit", async ({
+    page,
+    request,
+  }) => {
+    const data = await (await request.get("/api/v1/bootstrap")).json();
+    const host = data.hosts.find(
+      (entry: { agent_id: string | null; agent_revoked: boolean }) =>
+        entry.agent_id && !entry.agent_revoked,
+    );
+    await page.goto(`/?view=host&host=${host.id}`);
+    await page.getByRole("tab", { name: "Settings", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Uninstall agent", exact: true })
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Uninstall agent" });
+    await dialog.getByRole("tab", { name: "Uninstall manually" }).click();
+    await expect(dialog.locator("code")).toContainText("/agent/uninstall");
+    await expect(dialog.locator("code")).toContainText(
+      'sh "$installer" uninstall',
+    );
+    await expect(dialog).toContainText("Device history stays");
+    await expect(dialog).toContainText("cannot confirm it remotely");
+    const before = await (await request.get("/api/v1/bootstrap")).json();
+    expect(
+      before.hosts.find((entry: { id: string }) => entry.id === host.id)
+        .agent_revoked,
+    ).toBe(false);
+    await dialog
+      .getByRole("button", { name: "Disable agent", exact: true })
+      .click();
+    await expect(dialog).toContainText("Access revoked. Reports are blocked.");
+    await expect(
+      dialog.getByRole("button", { name: "Disable agent" }),
+    ).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(
+      dialog.getByRole("button", { name: "Copy uninstall command" }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+    await page.screenshot({
+      path: "test-results/hope-uninstall-mobile.png",
+      fullPage: true,
+    });
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await page.getByRole("tab", { name: "Settings", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "Re-enroll agent", exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Uninstall agent", exact: true })
+      .click();
+    await dialog.getByRole("tab", { name: "Uninstall manually" }).click();
+    await expect(dialog).toContainText("Access revoked. Reports are blocked.");
+    const after = await (await request.get("/api/v1/bootstrap")).json();
+    expect(
+      after.hosts.find((entry: { id: string }) => entry.id === host.id)
+        .last_report,
+    ).toBe(host.last_report);
+  });
+  test("SSH uninstall verifies the fingerprint and submits a removal job", async ({
+    page,
+    request,
+  }) => {
+    const data = await (await request.get("/api/v1/bootstrap")).json();
+    const host = data.hosts.find(
+      (entry: { agent_id: string | null }) => entry.agent_id,
+    );
+    let submitted: Record<string, unknown> | undefined;
+    await page.route("**/api/v1/ssh/jobs", (route) =>
+      route.fulfill({ json: [] }),
+    );
+    await page.route("**/api/v1/ssh/fingerprint", (route) =>
+      route.fulfill({
+        json: {
+          fingerprint: "SHA256:verified-test-key",
+          instruction: "Verify the host key",
+        },
+      }),
+    );
+    await page.route("**/api/v1/ssh/uninstall", async (route) => {
+      submitted = route.request().postDataJSON();
+      await route.fulfill({
+        json: {
+          id: "uninstall-job",
+          host_id: host.id,
+          host: host.addresses[0],
+          port: 22,
+          fingerprint: "SHA256:verified-test-key",
+          username: "root",
+          mode: "uninstall",
+          status: "completed",
+          stage: "complete",
+          stages: [
+            "connecting",
+            "authenticating",
+            "preflight",
+            "uninstall",
+            "complete",
+          ],
+          error_code: null,
+          message:
+            "Agent service, updater and binary removed. Access revoked; identity and device history retained.",
+          guidance: null,
+          notice: null,
+          agent_id: host.agent_id,
+          created_at: Date.now() / 1000,
+          finished_at: Date.now() / 1000,
+        },
+      });
+    });
+    await page.goto(`/?view=host&host=${host.id}`);
+    await page.getByRole("tab", { name: "Settings", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Uninstall agent", exact: true })
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Uninstall agent" });
+    await expect(
+      dialog.getByRole("tab", { name: "Uninstall over SSH" }),
+    ).toHaveAttribute("aria-selected", "true");
+    await dialog.getByLabel("Username", { exact: true }).fill("root");
+    await dialog
+      .getByLabel("Password", { exact: true })
+      .fill("ssh-test-password");
+    const remove = dialog.getByRole("button", { name: /^Uninstall from/ });
+    await expect(remove).toBeDisabled();
+    await dialog
+      .getByRole("button", { name: "Inspect host fingerprint" })
+      .click();
+    await expect(remove).toBeDisabled();
+    await dialog
+      .getByRole("button", { name: "I verified this fingerprint" })
+      .click();
+    await remove.click();
+    await expect(dialog.getByTestId("ssh-job")).toContainText("Uninstall on");
+    await expect(dialog).toContainText(
+      "Agent service, updater and binary removed.",
+    );
+    expect(submitted).toMatchObject({
+      host_id: host.id,
+      username: "root",
+      password: "ssh-test-password",
+      fingerprint: "SHA256:verified-test-key",
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+    await page.screenshot({
+      path: "test-results/hope-ssh-uninstall-mobile.png",
+      fullPage: true,
+    });
+  });
   test("the administrator changes the password and other browsers are signed out", async ({
     page,
     playwright,

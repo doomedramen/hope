@@ -1035,6 +1035,137 @@ async fn reinstall_keeps_credential_and_succeeds_without_consuming_the_new_token
 }
 
 #[tokio::test]
+async fn ssh_uninstall_succeeds_without_enrollment_or_a_new_report_and_revokes_access() {
+    let (agent, credential) = (Uuid::new_v4().to_string(), secret());
+    let f = fixture_with(Some((&agent, &credential)), None).await;
+    let before = f.state.host(&f.host_id).await.unwrap().unwrap();
+    let tokens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enrollment_tokens")
+        .fetch_one(&f.state.0.db)
+        .await
+        .unwrap();
+    let mut steps = phases(&["preflight", "uninstall", "complete"]);
+    steps.push(Step::Exit(0));
+    f.script(steps);
+    let (status, started) = f
+        .call("POST", "/api/v1/ssh/uninstall", f.password_request())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    let job = f.wait(started["id"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "completed", "{job}");
+    assert_eq!(job["mode"], "uninstall");
+    assert_eq!(job["agent_id"], agent);
+    assert!(
+        !job["stages"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("confirming_report"))
+    );
+    let after = f.state.host(&f.host_id).await.unwrap().unwrap();
+    assert!(after.agent_revoked);
+    assert_eq!(before.last_report, after.last_report);
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT revoked FROM agents WHERE id=?")
+            .bind(&agent)
+            .fetch_one(&f.state.0.db)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        tokens,
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM enrollment_tokens")
+            .fetch_one(&f.state.0.db)
+            .await
+            .unwrap()
+    );
+    let observed = f.shared.observed.lock().unwrap();
+    assert!(observed.commands[0].contains(&format!("HOPE_EXPECT_AGENT_ID='{agent}'")));
+    assert!(observed.commands[0].contains("/agent/uninstall"));
+    assert!(!observed.commands[0].contains("HOPE_ENROLLMENT_TOKEN"));
+}
+
+#[tokio::test]
+async fn ssh_uninstall_failure_or_incomplete_output_never_claims_removal_or_revokes_access() {
+    for steps in [
+        vec![
+            err("hope-install: phase=uninstall"),
+            err("hope-install: error=UNINSTALL_STOP_FAILED"),
+            Step::Exit(1),
+        ],
+        vec![err("hope-install: phase=complete"), Step::Exit(0)],
+        vec![err("hope-install: phase=uninstall"), Step::DropConnection],
+        vec![err("hope-install: phase=uninstall"), Step::Exit(0)],
+    ] {
+        let (agent, credential) = (Uuid::new_v4().to_string(), secret());
+        let f = fixture_with(Some((&agent, &credential)), None).await;
+        f.script(steps);
+        let (status, started) = f
+            .call("POST", "/api/v1/ssh/uninstall", f.password_request())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let job = f.wait(started["id"].as_str().unwrap()).await;
+        assert_ne!(job["status"], "completed", "{job}");
+        assert!(
+            !f.state
+                .host(&f.host_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .agent_revoked
+        );
+    }
+}
+
+#[tokio::test]
+async fn ssh_uninstall_requires_an_enrolled_agent_and_a_matching_host_key() {
+    let f = fixture().await;
+    assert_eq!(
+        f.call("POST", "/api/v1/ssh/uninstall", f.password_request())
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(f.shared.observed.lock().unwrap().connections, 0);
+    let (agent, credential) = (Uuid::new_v4().to_string(), secret());
+    let f = fixture_with(Some((&agent, &credential)), None).await;
+    let body = f.with("SHA256:wrong", json!({"password":PASSWORD}));
+    let (_, started) = f.call("POST", "/api/v1/ssh/uninstall", body).await;
+    let job = f.wait(started["id"].as_str().unwrap()).await;
+    assert_eq!(job["error_code"], "HOST_KEY_MISMATCH");
+    assert_eq!(f.shared.observed.lock().unwrap().auth_attempts, 0);
+    assert!(
+        !f.state
+            .host(&f.host_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .agent_revoked
+    );
+}
+
+#[tokio::test]
+async fn install_cannot_start_while_uninstall_is_running_for_the_host() {
+    let (agent, credential) = (Uuid::new_v4().to_string(), secret());
+    let f = fixture_with(Some((&agent, &credential)), None).await;
+    let mut steps = vec![Step::Sleep(Duration::from_millis(250))];
+    steps.extend(phases(&["preflight", "uninstall", "complete"]));
+    steps.push(Step::Exit(0));
+    f.script(steps);
+    let (status, started) = f
+        .call("POST", "/api/v1/ssh/uninstall", f.password_request())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = f
+        .call("POST", "/api/v1/ssh/install", f.password_request())
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.to_string().contains("already running"));
+    assert_eq!(
+        f.wait(started["id"].as_str().unwrap()).await["status"],
+        "completed"
+    );
+}
+
+#[tokio::test]
 async fn reinstall_does_not_trust_a_report_sent_before_activation() {
     let (agent, credential) = (Uuid::new_v4().to_string(), secret());
     let f = fixture_with(Some((&agent, &credential)), None).await;

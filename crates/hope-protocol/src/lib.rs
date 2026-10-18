@@ -68,12 +68,13 @@ pub enum InstallStage {
     ConfirmingReport,
 }
 
-/// A fresh install enrolls with the job's token; a reinstall is bound to the host's existing agent identity.
+/// Fresh installs enroll with a token; reinstalls and uninstalls are bound to the existing identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum InstallMode {
     Install,
     Reinstall,
+    Uninstall,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -137,6 +138,12 @@ pub struct AuthStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct OkResponse {
     pub ok: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct AgentUninstallInstructions {
+    /// Run on the device to stop and remove the service, updater and binary. Identity is retained.
+    pub command: String,
+    pub custom_ca_required: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ReportResponse {
@@ -888,6 +895,7 @@ pub fn typescript() -> String {
         HostIdentityUpdate::decl(),
         AuthStatus::decl(),
         OkResponse::decl(),
+        AgentUninstallInstructions::decl(),
         ReportResponse::decl(),
         ErrorResponse::decl(),
         NetworkInput::decl(),

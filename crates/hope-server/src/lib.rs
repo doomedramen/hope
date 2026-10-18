@@ -58,11 +58,16 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/hosts/{id}/metrics", get(metrics::history))
         .route("/enrollment-tokens", post(agents::token))
         .route("/agents/{id}/revoke", post(agents::revoke))
+        .route(
+            "/agents/{id}/uninstall-instructions",
+            get(agents::uninstall_instructions),
+        )
         .route("/agents/update", post(agents::request_all_updates))
         .route("/hosts/{id}/update-agent", post(agents::request_update))
         .route("/events", get(api::events))
         .route("/ssh/fingerprint", post(ssh::fingerprint))
         .route("/ssh/install", post(ssh::install))
+        .route("/ssh/uninstall", post(ssh::uninstall))
         .route("/ssh/jobs", get(ssh::jobs))
         .route("/ssh/jobs/{id}", get(ssh::job))
         .route("/releases", get(releases::availability))
@@ -83,6 +88,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
             get(|| async { axum::Json(serde_json::json!({"status":"ok"})) }),
         )
         .route("/agent/install", get(releases::installer))
+        .route("/agent/uninstall", get(releases::uninstaller))
         .nest_service(
             "/agent/releases",
             Router::new()

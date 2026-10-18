@@ -10,6 +10,7 @@
 #   HOPE_SERVER, HOPE_ENROLLMENT_TOKEN, HOPE_CA_CERT, HOPE_AGENT_DIR, HOPE_RESET_CREDENTIAL
 #   HOPE_INSTALL_MODE=auto|user|system  (auto detects an existing install, else root/sudo decides)
 #   HOPE_PURGE_IDENTITY=1               (uninstall: also delete the enrolled identity; revoke it in H.O.P.E)
+#   HOPE_EXPECT_AGENT_ID                (SSH uninstall: refuse to remove a different enrolled identity)
 #   HOPE_FIRST_REPORT_TIMEOUT=120       (seconds to wait for the service's first accepted report)
 #   HOPE_POLL_INTERVAL=2                (seconds between acceptance checks; test knob)
 #   HOPE_ALLOW_DOWNGRADE=1              (permit installing a release older than the installed agent)
@@ -52,7 +53,7 @@ txn=
 txn_active=0
 rb_ok=1
 no_manager=0
-preserve=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR,HOPE_RESET_CREDENTIAL,HOPE_PURGE_IDENTITY,HOPE_FIRST_REPORT_TIMEOUT,HOPE_POLL_INTERVAL,HOPE_INSTALL_ROOT,HOPE_REQUIRE_PERSISTENT_SERVICE,HOPE_ONLY_NEWER,HOPE_UPDATER
+preserve=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR,HOPE_RESET_CREDENTIAL,HOPE_PURGE_IDENTITY,HOPE_FIRST_REPORT_TIMEOUT,HOPE_POLL_INTERVAL,HOPE_INSTALL_ROOT,HOPE_REQUIRE_PERSISTENT_SERVICE,HOPE_ONLY_NEWER,HOPE_UPDATER,HOPE_EXPECT_AGENT_ID
 root=${HOPE_INSTALL_ROOT:-}
 root=${root%/}
 
@@ -475,8 +476,7 @@ else
 fi
 if [ -n "$manager_error" ]; then
     if [ "$operation" = uninstall ]; then
-        note "warning=$manager_error Files will be removed, but any running service must be stopped manually."
-        no_manager=1
+        fail NO_SERVICE_MANAGER "$manager_error Cannot confirm the service is stopped; installation files were kept."
     else fail NO_SERVICE_MANAGER "$manager_error"; fi
 fi
 
@@ -489,6 +489,20 @@ for target in "$(dirname "$binary")" "$(dirname "$unit")" "$state" "$(dirname "$
     writable_target "$target" || fail PATH_UNWRITABLE "Cannot write to $target."
 done
 state_safe || fail PATH_UNWRITABLE "$state or its config.json is a symbolic link; refusing to run privileged operations on it."
+
+if [ "$operation" = uninstall ]; then
+    lock_installation
+    if [ -n "${HOPE_EXPECT_AGENT_ID:-}" ]; then
+        # Config is written by serde_json, including on older agents. Read only the canonical
+        # UUID field, without executing the installed binary or requiring Python/jq on the host.
+        case "$HOPE_EXPECT_AGENT_ID" in *[!0-9a-fA-F-]*) fail INVALID_SETTING 'Invalid expected agent identity.';; esac
+        [ "${#HOPE_EXPECT_AGENT_ID}" = 36 ] || fail INVALID_SETTING 'Invalid expected agent identity.'
+        [ -f "$state/config.json" ] || fail EXISTING_IDENTITY_MISMATCH 'No enrolled identity was found for the selected agent.'
+        [ "$(wc -c < "$state/config.json")" -le 131072 ] || fail EXISTING_IDENTITY_MISMATCH 'Agent configuration exceeds the supported size.'
+        actual_agent=$(tr -d '\r\n' < "$state/config.json" | sed -n 's/.*"agent_id"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F-]*\)".*/\1/p')
+        [ "$actual_agent" = "$HOPE_EXPECT_AGENT_ID" ] || fail EXISTING_IDENTITY_MISMATCH 'The installed agent does not match the selected host. Nothing was removed.'
+    fi
+fi
 
 # Converge after an interrupted run: restore the previous installation first.
 if [ -d "$txn" ]; then
@@ -503,16 +517,19 @@ fi
 rm -rf "$txn.tmp"
 
 if [ "$operation" = uninstall ]; then
+    lock_installation
     phase uninstall
     svc_stop
+    if svc_loaded; then
+        fail UNINSTALL_STOP_FAILED 'The service is still loaded or running. Installation files were kept; stop it before retrying.'
+    fi
     svc_disable
     rm -f "$unit" "$binary" "$binary.new"
-    if is_system; then remove_updater; fi
     svc_reload || true
     if [ "${HOPE_PURGE_IDENTITY:-}" = 1 ]; then
         state_safe || fail PATH_UNWRITABLE 'Refusing to purge through a symbolic link.'
         # Remove only files the agent creates; never the whole (possibly shared) directory.
-        for name in config.json spool.json last-acceptance.json previous.json sample.json last-report agent.lock agent.log bootstrap-ca.pem update-queue update-result .install-transaction; do
+        for name in config.json spool.json last-acceptance.json previous.json sample.json last-report agent.lock agent.log bootstrap-ca.pem update-queue update-result update-asked .install-transaction; do
             rm -rf "${state:?}/$name"
         done
         rm -f "$state"/.hope-*.tmp "$state"/.update-result.*
@@ -521,6 +538,9 @@ if [ "$operation" = uninstall ]; then
     else
         echo "Service removed. Identity retained at $state. Revoke its credential in H.O.P.E before deleting that directory, or set HOPE_PURGE_IDENTITY=1."
     fi
+    # This removes the updater lock's directory too. Keep it until all agent-state changes
+    # finish, so another installer cannot create a new lock inode during a purge.
+    if is_system; then remove_updater; fi
     phase complete
     exit 0
 fi

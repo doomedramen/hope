@@ -142,6 +142,7 @@ async fn execute() -> Result<()> {
             credential: None,
             pending_credential: None,
             ca_pem,
+            disabled: false,
         };
         let _ = config::client(&config)?;
         config::save(&dir, &config).await?;
@@ -179,6 +180,9 @@ async fn execute() -> Result<()> {
     let needs_enrollment = configuration.credential.is_none() || reset_credential;
     if operation == "configure" && !needs_enrollment {
         return configured(&configuration);
+    }
+    if configuration.disabled && !needs_enrollment {
+        return Err(delivery::Revoked.into());
     }
     // Monitor clients must see the CA/configuration just persisted above. Also
     // defer collector setup until after ownership and configuration validation.
@@ -226,6 +230,7 @@ async fn execute() -> Result<()> {
         );
         configuration.credential = Some(enrolled.credential);
         configuration.pending_credential = None;
+        configuration.disabled = false;
         config::save(&dir, &configuration).await?;
     }
     if operation == "configure" {
@@ -248,6 +253,9 @@ async fn execute() -> Result<()> {
 }
 
 fn configured(configuration: &Config) -> Result<()> {
+    if configuration.disabled {
+        return Err(delivery::Revoked.into());
+    }
     let _ = config::client(configuration)?;
     println!("Agent configuration ready; service reporting has not been confirmed");
     Ok(())

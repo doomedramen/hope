@@ -1,5 +1,6 @@
 "use client";
 import { UptimeSettings } from "@/components/uptime-settings";
+import { UninstallAgentDialog } from "@/components/uninstall-agent-dialog";
 import { Age } from "@/components/age";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -17,6 +18,7 @@ import {
   Radio,
   Search,
   ShieldOff,
+  Trash2,
   Tag,
   Waypoints,
   Wifi,
@@ -128,6 +130,7 @@ export function HostDetails({
   const [error, setError] = useState("");
   const [source, setSource] = useState<string | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState(false);
+  const [uninstallOpen, setUninstallOpen] = useState(false);
   const [hours, setHours] = useState<HistoryWindow>("1");
   const inventory = host.inventory;
   const metrics = host.metrics;
@@ -151,7 +154,7 @@ export function HostDetails({
     try {
       await post(`/agents/${host.agent_id}/revoke`);
       setConfirmRevoke(false);
-      notify(`Revoked the agent credential for ${displayName}.`, "warning");
+      notify(`Disabled agent access for ${displayName}.`, "warning");
       refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -840,6 +843,20 @@ export function HostDetails({
             )}
             {host.agent_id && (
               <>
+                {uninstallOpen && (
+                  <UninstallAgentDialog
+                    key={host.agent_id}
+                    host={host}
+                    onOpenChange={setUninstallOpen}
+                    onDisabled={() => {
+                      refresh();
+                      notify(
+                        `Disabled agent access for ${displayName}.`,
+                        "warning",
+                      );
+                    }}
+                  />
+                )}
                 {host.collectors.some(
                   (c) => !c.available && c.name !== "agent_update",
                 ) && (
@@ -907,12 +924,14 @@ export function HostDetails({
                     {confirmRevoke ? (
                       <Alert>
                         <AlertDescription>
-                          This agent will no longer be able to send reports.
-                          History stays; a new installation command re-enrolls
-                          it.
+                          Reports are blocked immediately. Updated agents stop
+                          at their next server contact and stay disabled after
+                          reboot. Older agents may keep retrying until
+                          uninstalled. History stays; re-enroll the agent to
+                          resume reporting.
                           <div className="mt-3 flex gap-2">
                             <Button variant="destructive" onClick={revoke}>
-                              Revoke credential
+                              Disable agent
                             </Button>
                             <Button
                               variant="outline"
@@ -926,7 +945,7 @@ export function HostDetails({
                     ) : (
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="text-xs text-muted-foreground">
-                          Stop accepting reports from this agent.
+                          Block reports and ask the agent to stop.
                         </p>
                         <Button
                           variant="outline"
@@ -934,12 +953,31 @@ export function HostDetails({
                           onClick={() => setConfirmRevoke(true)}
                         >
                           <ShieldOff data-icon="inline-start" />
-                          Revoke agent access
+                          Disable agent
                         </Button>
                       </div>
                     )}
                   </section>
                 )}
+                <section className="danger-zone">
+                  <h3 className="detail-heading">
+                    <Trash2 />
+                    Remove agent
+                  </h3>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-muted-foreground">
+                      Remove the service and binary from this device.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setUninstallOpen(true)}
+                    >
+                      <Trash2 data-icon="inline-start" />
+                      Uninstall agent
+                    </Button>
+                  </div>
+                </section>
               </>
             )}
             {!host.agent_id && (
