@@ -130,6 +130,18 @@ const REMOTE_CODES: &[CodeInfo] = &[
         "Use a host with running systemd (or launchd on macOS). For a user service, log in normally so a user manager exists, then retry.",
     ),
     info(
+        "LOCK_UNAVAILABLE",
+        false,
+        "Linux system installation requires flock from util-linux.",
+        "Install util-linux on the host and retry.",
+    ),
+    info(
+        "INSTALL_BUSY",
+        false,
+        "Another agent installation or update is running.",
+        "Wait for the active installation or update to finish, then retry.",
+    ),
+    info(
         "SUDO_UNAVAILABLE",
         false,
         "A system installation needs root or passwordless sudo, which is unavailable.",

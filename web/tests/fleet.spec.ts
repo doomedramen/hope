@@ -363,6 +363,31 @@ test("guest volumes on a hypervisor never stand in for the host's own disks", ()
   expect(fleetSummary([proxmox], [], now).diskTotal).toBe(100);
 });
 
+test("a guest's own ZFS root counts toward storage usage and alerts", () => {
+  const guest = host({
+    agent_id: "guest",
+    last_report: now,
+    metrics: {
+      ...metrics,
+      disks: [
+        {
+          name: "rpool/data/subvol-122-disk-0",
+          mount: "/",
+          filesystem: "zfs",
+          total_bytes: 100,
+          available_bytes: 1,
+        },
+      ],
+    },
+  });
+  expect(worstDisk(guest)?.disk.mount).toBe("/");
+  expect(worstDisk(guest)?.percent).toBe(99);
+  expect(hostIssues(guest, now).some((issue) => issue.kind === "disk")).toBe(
+    true,
+  );
+  expect(fleetSummary([guest], [], now).diskTotal).toBe(100);
+});
+
 test("filters, search and sorting", () => {
   const a = host({
     id: "a",

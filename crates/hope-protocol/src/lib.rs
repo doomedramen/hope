@@ -2,7 +2,11 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod validation;
+
 pub const SCHEMA_VERSION: u32 = 1;
+/// Maximum JSON request body accepted by the server, including report metadata.
+pub const MAX_AGENT_REPORT_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -276,6 +280,11 @@ impl Disk {
     /// such as a Proxmox LXC subvolume (`rpool/data/subvol-123-disk-0`). Its
     /// usage belongs to the guest, not the host's own storage.
     pub fn is_guest_storage(&self) -> bool {
+        // Inside the guest, this is its own root filesystem even when the
+        // backing dataset retains the hypervisor's subvol/basevol name.
+        if self.mount == "/" {
+            return false;
+        }
         fn guest_volume(path: &str) -> bool {
             let leaf = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
             let Some(rest) = leaf
@@ -972,6 +981,8 @@ mod tests {
         }
         for (name, mount) in [
             ("rpool/ROOT/pve-1", "/"),
+            ("rpool/data/subvol-122-disk-0", "/"),
+            ("tank/basevol-9000-disk-1", "/"),
             ("rpool/data", "/rpool/data"),
             ("tank/subvol-backups", "/tank/subvol-backups"),
             ("tank/subvol-1-disk-0-old", "/tank/subvol-1-disk-0-old"),

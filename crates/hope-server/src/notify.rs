@@ -374,6 +374,43 @@ pub fn problems(host: &Host, now: f64, last_scan: &HashMap<String, (f64, u32)>) 
     out
 }
 
+/// Unknown telemetry is not evidence that an existing resource problem recovered.
+fn resource_observed(host: &Host, key: &str, at: f64) -> bool {
+    if host.agent_revoked
+        || host
+            .last_report
+            .is_none_or(|last| at - last > AGENT_STALE_SECONDS)
+    {
+        return false;
+    }
+    let Some(metrics) = &host.metrics else {
+        return false;
+    };
+    let Some(kind) = key.strip_prefix(&format!("{}:", host.id)) else {
+        return false;
+    };
+    let (collector, legacy_evidence) = if kind.starts_with("disk:") {
+        ("storage", !metrics.disks.is_empty())
+    } else if kind.starts_with("pool:") {
+        ("storage_pools", !metrics.pools.is_empty())
+    } else if kind == "service" {
+        ("services", metrics.service_summary.is_some())
+    } else if kind == "sensor" {
+        ("temperatures", !metrics.temperatures.is_empty())
+    } else if let Some(target) = kind.strip_prefix("monitor:") {
+        return metrics
+            .monitors
+            .iter()
+            .any(|monitor| monitor.target == target);
+    } else {
+        return false;
+    };
+    host.collectors
+        .iter()
+        .find(|status| status.name == collector)
+        .map_or(legacy_evidence, |status| status.available)
+}
+
 /// Open and close alerts, notifying as configured.
 pub async fn evaluate(state: &State) -> anyhow::Result<()> {
     let settings = settings(state).await?;
@@ -467,6 +504,14 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
     }
     for (key, (message, kind)) in &open {
         if current.contains_key(key) {
+            continue;
+        }
+        if kind == "resource"
+            && let Some(host) = hosts
+                .iter()
+                .find(|host| key.starts_with(&format!("{}:", host.id)))
+            && !resource_observed(host, key, now)
+        {
             continue;
         }
         sqlx::query("DELETE FROM alerts WHERE key=?")

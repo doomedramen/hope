@@ -8,7 +8,10 @@ use anyhow::{Context, Result};
 use hope_protocol::{AgentReport, CollectorStatus, Inventory, Metrics, SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, path::Path, pin::Pin, time::Duration};
-use tokio::time::{Instant, sleep_until};
+use tokio::{
+    sync::{mpsc, watch},
+    time::{Instant, sleep_until},
+};
 use uuid::Uuid;
 
 pub type Sample = (Inventory, Metrics, Vec<CollectorStatus>);
@@ -56,8 +59,8 @@ impl InventoryDelivery {
     }
 }
 type Request = Pin<Box<dyn Future<Output = (AgentReport, Outcome)> + Send>>;
-/// Collection deadlines race the in-flight HTTP request. Network draining cannot
-/// postpone sampling, and this single actor owns every spool write.
+/// Collection is polled independently of delivery. A bounded channel allows only
+/// one completed sample to wait, and this actor remains the sole spool writer.
 const MIN_INTERVAL_SECONDS: u32 = 5;
 const MAX_INTERVAL_SECONDS: u32 = 300;
 
@@ -69,6 +72,36 @@ fn jittered(period: Duration) -> Duration {
     }
     period - Duration::from_millis(spread)
         + Duration::from_millis(rand::random::<u64>() % (2 * spread + 1))
+}
+
+async fn sample_loop<C: Sampler>(
+    collector: &mut C,
+    sender: mpsc::Sender<(Sample, f64)>,
+    mut period: watch::Receiver<Duration>,
+) {
+    let mut next_sample = Instant::now();
+    loop {
+        tokio::select! {
+            _ = sleep_until(next_sample) => {}
+            changed = period.changed() => {
+                if changed.is_err() { return; }
+                next_sample = Instant::now() + jittered(*period.borrow_and_update());
+                continue;
+            }
+        }
+        let tick = Instant::now();
+        let sample = collector.sample().await;
+        let collected_at = now();
+        if sender.send((sample, collected_at)).await.is_err() {
+            return;
+        }
+        let interval = jittered(*period.borrow_and_update());
+        next_sample = tick + interval;
+        // Skip an overrun instead of repeatedly collecting against an expired deadline.
+        if next_sample <= Instant::now() {
+            next_sample = Instant::now() + interval;
+        }
+    }
 }
 
 pub async fn run<C: Sampler, S: Future<Output = ()>>(
@@ -90,32 +123,33 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
     if let Some(id) = &activation_id {
         Uuid::parse_str(id).context("Invalid service activation identifier")?;
     }
-    let started = now();
-    let mut next_sample = Instant::now();
+    let (sample_tx, mut samples) = mpsc::channel(1);
+    let (period_tx, period_rx) = watch::channel(period);
+    let sampling = sample_loop(collector, sample_tx, period_rx);
+    tokio::pin!(sampling);
+    let mut current_reports = std::collections::HashSet::new();
     let mut retry_at = Instant::now();
     let mut inflight: Option<Request> = None;
     let mut inventory_delivery = InventoryDelivery::default();
     let mut first_report: Option<String> = None;
     let mut failures = 0u32;
-    let mut marker_at = 0.0;
-    // The server may choose the sample interval in its responses; until then the default holds.
-    let mut server_period: Option<Duration> = None;
     let mut update_requests = crate::updates::Requests;
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
             _=&mut shutdown => { config::write_private(&dir.join("spool.json"),&spool.encode()?).await?; return Ok(()); }
-            _=sleep_until(next_sample) => {
-                let tick=Instant::now();
-                let (inventory,metrics,mut collectors)=collector.sample().await;
+            _=&mut sampling => { anyhow::bail!("Collector stopped unexpectedly"); }
+            Some(((inventory,metrics,mut collectors),collected_at))=samples.recv() => {
                 collectors.push(crate::updates::status(dir));
-                let changed=inventory_delivery.changed(&inventory,now())?;
-                let report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),collected_at:now(),inventory:changed.then_some(inventory),metrics,collectors };
+                let changed=inventory_delivery.changed(&inventory,collected_at)?;
+                let mut report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),collected_at,inventory:changed.then_some(inventory),metrics,collectors };
+                crate::telemetry::bound_report(&mut report)?;
                 if first_report.is_none() { first_report=Some(report.report_id.clone()); }
+                current_reports.insert(report.report_id.clone());
                 spool.push(report,now())?;
+                current_reports.retain(|id| spool.reports.iter().any(|report| &report.report_id == id));
                 config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
-                next_sample=tick+jittered(server_period.unwrap_or(period));
             }
             result=async { inflight.as_mut().expect("guarded request").await }, if inflight.is_some() => {
                 inflight=None;
@@ -125,10 +159,9 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                         debug_assert!(response.accepted);
                         spool.remove(&report.report_id); failures=0; retry_at=Instant::now();
                         if let Some(version)=&response.update_to { update_requests.handle_now(dir,version); }
-                        if let Some(seconds)=response.report_interval_seconds { server_period=Some(Duration::from_secs(seconds.clamp(MIN_INTERVAL_SECONDS,MAX_INTERVAL_SECONDS).into())); }
+                        if let Some(seconds)=response.report_interval_seconds { period_tx.send_if_modified(|period| { let next=Duration::from_secs(seconds.clamp(MIN_INTERVAL_SECONDS,MAX_INTERVAL_SECONDS).into()); if *period==next { false } else { *period=next; true } }); }
                         inventory_delivery.accept(&report)?;
-                        if report.collected_at>=started && report.collected_at>=marker_at {
-                            marker_at=report.collected_at;
+                        if current_reports.remove(&report.report_id) {
                             let accepted=now();
                             config::write_private(&dir.join("last-report"),accepted.to_string().as_bytes()).await?;
                             config::write_private(&dir.join("last-acceptance.json"),&serde_json::to_vec(&Acceptance { agent_id:configuration.agent_id.clone(),report_id:report.report_id.clone(),run_id:run_id.clone(),process_id:std::process::id(),operation:operation.into(),activation_id:activation_id.clone(),collected_at:report.collected_at,accepted_at:accepted })?).await?;
@@ -138,6 +171,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                     }
                     Outcome::Revoked => { config::write_private(&dir.join("spool.json"),&spool.encode()?).await?; return Err(delivery::Revoked.into()); }
                     Outcome::Invalid(status) => {
+                        current_reports.remove(&report.report_id);
                         spool.remove(&report.report_id);
                         config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
                         if operation!="run" { anyhow::bail!("First report rejected ({status}); no success was confirmed"); }
@@ -279,6 +313,109 @@ mod tests {
             ca_pem: None,
         }
     }
+    struct SlowSampler {
+        inner: FakeSampler,
+        delay: Duration,
+    }
+
+    #[tokio::test]
+    async fn only_explicit_revocation_is_terminal() {
+        for (status, body, revoked) in [
+            ("403 Forbidden", "access policy denied", false),
+            (
+                "401 Unauthorized",
+                r#"{"code":"authentication_required","error":"Authentication required"}"#,
+                false,
+            ),
+            (
+                "401 Unauthorized",
+                r#"{"code":"agent_revoked","error":"Agent credential revoked"}"#,
+                true,
+            ),
+        ] {
+            let (endpoint, task) = server(status, body, Duration::ZERO).await;
+            let config = configuration(endpoint.clone());
+            let client = config::client(&config).expect("client");
+            let report = AgentReport {
+                schema_version: SCHEMA_VERSION,
+                report_id: Uuid::new_v4().to_string(),
+                agent_id: config.agent_id,
+                collected_at: now(),
+                inventory: None,
+                metrics: Metrics::default(),
+                collectors: vec![],
+            };
+            let (_, outcome) =
+                delivery::send(client, endpoint, config.credential.unwrap(), report).await;
+            if revoked {
+                assert!(matches!(outcome, Outcome::Revoked));
+            } else {
+                assert!(matches!(outcome, Outcome::Retry(_)));
+            }
+            task.abort();
+        }
+    }
+    impl Sampler for SlowSampler {
+        fn sample(&mut self) -> Sampling<'_> {
+            Box::pin(async move {
+                tokio::time::sleep(self.delay).await;
+                self.inner.sample().await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_slower_than_the_interval_cannot_starve_delivery_or_shutdown() {
+        let (endpoint, task) = server(
+            "200 OK",
+            r#"{"accepted":true,"duplicate":false}"#,
+            Duration::from_millis(50),
+        )
+        .await;
+        let directory = tempfile::tempdir().expect("temporary");
+        let mut sampler = SlowSampler {
+            inner: FakeSampler {
+                count: 0,
+                stop_after_samples: None,
+            },
+            delay: Duration::from_millis(100),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            run(
+                &mut sampler,
+                &configuration(endpoint.clone()),
+                Spool::default(),
+                "once",
+                directory.path(),
+                Duration::from_millis(5),
+                std::future::pending(),
+            ),
+        )
+        .await
+        .expect("slow collection must not starve HTTP")
+        .expect("accepted");
+        assert!(directory.path().join("last-acceptance.json").exists());
+
+        sampler.delay = Duration::from_secs(60);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            run(
+                &mut sampler,
+                &configuration(endpoint),
+                Spool::default(),
+                "run",
+                directory.path(),
+                Duration::from_millis(5),
+                tokio::time::sleep(Duration::from_millis(20)),
+            ),
+        )
+        .await
+        .expect("shutdown must not wait for collection")
+        .expect("shutdown");
+        task.abort();
+    }
+
     #[tokio::test]
     async fn sampling_continues_during_slow_requests_and_spool_is_saved() {
         let (server, task) = server(

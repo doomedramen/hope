@@ -1,0 +1,1201 @@
+{
+  "objective": "Review all repository code twice; fix bugs, quality, performance, potential bugs, UX/UI and missing reporting features; make regular commits.",
+  "baseline_commit": "21d1413",
+  "state": "active",
+  "coverage": [
+    {
+      "path": ".agent-notes/inbox.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": ".claude/launch.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": ".dockerignore",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": ".env.example",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": ".github/workflows/build-agent.yml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": ".github/workflows/docker.yml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": ".github/workflows/server-build.yml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": ".gitignore",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "Cargo.lock",
+      "kind": "generated/data",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "Cargo.toml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "Dockerfile",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "LICENSE",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "Makefile",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "README.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "compose.desktop.yaml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "compose.yaml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/Cargo.toml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/collect.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/config.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/cpu.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/delivery.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/extras.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/main.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/reporting.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/status.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/telemetry.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/updates.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/tests/configure.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-protocol/Cargo.toml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-protocol/src/lib.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-protocol/src/validation.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/Cargo.toml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/data/OUI-NOTICE",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/data/oui.tsv",
+      "kind": "generated/data",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/agents.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/api.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/arp.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/auth.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/backup.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/classify.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/discovery.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/enrichment.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/error.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/fingerprint.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/headers.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/lib.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/lifecycle.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/limits.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/main.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/metrics.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/migrations.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/migrations/0002_statistics_and_reset.sql",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/migrations/0003_install_jobs.sql",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/migrations/0004_discovery_and_alerts.sql",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/notify.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/releases.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/scanner.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/schema.sql",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/ssh.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/state.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/topology.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/uptime.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/validation.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/src/vendor.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/tests/api.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/tests/hardening.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/tests/releases.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/tests/retention_load.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/tests/shutdown.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-server/tests/ssh_install.rs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "ct/hope.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/IMPLEMENTATION_HANDOFF.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/architecture.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/benchmarks/agent-linux-x86_64-lxc.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/benchmarks/agent-macos-arm64-apple-m4-pro.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/benchmarks/discovery-on-link.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/benchmarks/discovery-routed.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/benchmarks/retention-linux-arm64.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/benchmarks/retention-macos-arm64.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/operations.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/screenshots/host-details-dark.png",
+      "kind": "binary asset",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/screenshots/host-page.png",
+      "kind": "binary asset",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/screenshots/hosts.png",
+      "kind": "binary asset",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/screenshots/map-health.png",
+      "kind": "binary asset",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/screenshots/map-hierarchy.png",
+      "kind": "binary asset",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/screenshots/notifications.png",
+      "kind": "binary asset",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/screenshots/overview.png",
+      "kind": "binary asset",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "docs/validation.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "install/hope-install.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "json/hope.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "lefthook.yml",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/assemble-release.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/bench-agent.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/bench-agent.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/benchmark-discovery.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/build-agent-docker.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/build-agent.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/generate-types.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/install-agent.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/install-hope.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/package-agent.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/package-server.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/update-icon-catalogs.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "scripts/update-oui.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "test-results/.last-run.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/agent/Dockerfile",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/agent/https_proxy.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/agent/lxc_probe.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/agent/resource_sample.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/discovery/Dockerfile",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/docs/test_operations.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/gates/README.md",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/gates/gates.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/gates/run.sh",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/gates/target.Dockerfile",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/gates/updater.Dockerfile",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/gates/updater.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/installer/harness.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/installer/test_community_scripts.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/installer/test_installer.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/installer/test_server_installer.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "tests/release/test_assemble.py",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/.prettierignore",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/.prettierrc.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/app/globals.css",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/app/layout.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/app/page.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/account-dialog.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/age.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/agents-page.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/change-password.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/command-palette.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/console.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/container-app-icon.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/container-details-page.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/discovery-menu.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/host-details.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/host-table.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/install-dialog.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/metric-history.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/network-dialog.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/network-map.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/networks-page.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/notifications-dialog.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/overview.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/scan-progress.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/settings-dialog.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/sign-in.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/stat-tile.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/status-pill.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/toast.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/alert.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/badge.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/button.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/card.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/chart.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/dialog.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/empty.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/field.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/input.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/label.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/meter.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/progress.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/select.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/separator.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/sheet.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/skeleton.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/table.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/tabs.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/textarea.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/toggle-group.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/ui/toggle.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/components/uptime-settings.tsx",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/data/icon-catalog.json",
+      "kind": "generated/data",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/eslint.config.mjs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/lib/api.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/lib/clock.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/lib/devices.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/lib/fleet.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/lib/history.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/lib/icon-matching.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/lib/protocol.ts",
+      "kind": "generated/data",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/lib/theme.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/lib/utils.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/next-env.d.ts",
+      "kind": "generated/data",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/next.config.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/package-lock.json",
+      "kind": "generated/data",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/package.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/playwright.config.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/postcss.config.mjs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/tests/console.spec.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/tests/fleet.spec.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/tests/history.spec.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/tests/security.spec.ts",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/tests/server.mjs",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
+      "path": "web/tsconfig.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    }
+  ]
+}

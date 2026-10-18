@@ -232,6 +232,12 @@ elif name == 'launchctl':
         hook('stop')
         if os.path.exists(marker):
             os.unlink(marker)
+elif name == 'flock':
+    import fcntl
+    try:
+        fcntl.flock(int(args[-1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(1)
 elif name == 'curl':
     log('curl ' + ' '.join(args))
     leaked = [v for v in ('CURL_CA_BUNDLE', 'SSL_CERT_FILE', 'SSL_CERT_DIR') if v in os.environ]
@@ -352,7 +358,7 @@ class Env:
         for path in (self.root, self.home, self.bin, self.tmp, self.rel):
             path.mkdir()
         text = STUB.replace('@PYTHON@', sys.executable)
-        for command in ('uname', 'id', 'sudo', 'chown', 'useradd', 'getent', 'dscl', 'systemctl', 'loginctl', 'launchctl', 'curl'):
+        for command in ('uname', 'id', 'sudo', 'chown', 'useradd', 'getent', 'dscl', 'systemctl', 'loginctl', 'launchctl', 'curl', 'flock'):
             (self.bin / command).write_text(text)
             (self.bin / command).chmod(0o755)
         self.runs = []

@@ -1,9 +1,11 @@
 mod collect;
 mod config;
+mod cpu;
 mod delivery;
 mod extras;
 mod reporting;
 mod status;
+mod telemetry;
 mod updates;
 
 /// The agent's version: the build version CI compiles in (`HOPE_BUILD_VERSION`, for example

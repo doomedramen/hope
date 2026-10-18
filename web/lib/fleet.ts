@@ -53,6 +53,9 @@ const GUEST_VOLUME = /(?:^|\/)(?:subvol|basevol)-\d+-disk-\d+\/?$/;
  * Mirrors `Disk::is_guest_storage` in hope-protocol.
  */
 export function isGuestStorage(disk: Disk): boolean {
+  // A dataset named by the hypervisor is still this machine's own root
+  // filesystem when the agent is running inside the guest.
+  if (disk.mount === "/") return false;
   return (
     GUEST_VOLUME.test(disk.mount) ||
     GUEST_VOLUME.test(disk.name) ||

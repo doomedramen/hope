@@ -437,18 +437,16 @@ async fn reporting_deduplicates_and_keeps_identity_after_dhcp_and_rejects_revoca
         Some(("cookie", &cookie)),
     )
     .await;
-    assert_eq!(
-        request(
-            &app,
-            "POST",
-            "/api/v1/agent/report",
-            json!(report),
-            Some(("authorization", &bearer))
-        )
-        .await
-        .0,
-        StatusCode::UNAUTHORIZED
-    );
+    let (status, error) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/report",
+        json!(report),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error["code"], "agent_revoked");
 }
 #[tokio::test]
 async fn retention_averages_old_samples_and_deletes_expired_history() {
@@ -1346,6 +1344,72 @@ async fn alerts_notify_once_when_they_open_and_again_when_they_clear() {
         .await
         .expect("alerts");
     assert_eq!(open, 0);
+}
+
+#[tokio::test]
+async fn missing_storage_telemetry_does_not_send_a_false_recovery() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (server, seen) = fake_ntfy(200).await;
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        settings(&server, Value::Null),
+        Some(("cookie", cookie.as_str())),
+    )
+    .await;
+    let mut host = Host::new("storage".into(), "storage".into(), "agent");
+    host.agent_id = Some("storage-agent".into());
+    host.last_report = Some(now());
+    host.metrics = Some(Metrics {
+        disks: vec![Disk {
+            name: "rpool/data/subvol-122-disk-0".into(),
+            mount: "/".into(),
+            filesystem: "zfs".into(),
+            total_bytes: 100.0,
+            available_bytes: 1.0,
+        }],
+        ..Default::default()
+    });
+    host.collectors = vec![CollectorStatus {
+        name: "storage".into(),
+        available: true,
+        detail: None,
+    }];
+    state.save_host(&host).await.expect("host");
+    hope_server::notify::evaluate(&state)
+        .await
+        .expect("open disk alert");
+    assert_eq!(seen.lock().await.len(), 1);
+    host.metrics.as_mut().unwrap().disks.clear();
+    host.collectors[0].available = false;
+    state.save_host(&host).await.expect("unknown storage");
+    hope_server::notify::evaluate(&state)
+        .await
+        .expect("keep unknown alert");
+    assert_eq!(seen.lock().await.len(), 1, "unknown is not recovery");
+    let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE kind='resource'")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(open, 1);
+    host.metrics.as_mut().unwrap().disks.push(Disk {
+        name: "rpool/data/subvol-122-disk-0".into(),
+        mount: "/".into(),
+        filesystem: "zfs".into(),
+        total_bytes: 100.0,
+        available_bytes: 50.0,
+    });
+    host.collectors[0].available = true;
+    state.save_host(&host).await.expect("healthy storage");
+    hope_server::notify::evaluate(&state)
+        .await
+        .expect("recover");
+    assert_eq!(
+        seen.lock().await.len(),
+        2,
+        "a healthy reading resolves the alert"
+    );
 }
 
 #[tokio::test]

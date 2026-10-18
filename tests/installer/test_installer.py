@@ -944,9 +944,14 @@ class Updater(Base):
     def test_two_updates_do_not_run_at_once(self):
         self.installed()
         self.env.publish('v2')
-        (self.env.root / 'var/lib/hope-agent-update/lock').mkdir()
+        import fcntl
+        lock = open(self.env.root / 'var/lib/hope-agent-update/update.lock', 'a')
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        request = self.request()
         result = self.env.updater()
-        self.ok(result)
+        self.assertEqual(75, result.code)
+        self.assertTrue(request.exists(), 'a busy updater must retain the pending request')
         self.assertIn('already running', result.err)
         self.assertEqual('v1', self.version(self.env.paths('system')['binary']))
 
@@ -971,6 +976,53 @@ class Updater(Base):
         self.env.publish('v2')
         self.ok(self.env.updater())
         self.assertEqual(before, pinned.read_text())
+
+    def test_upgrade_command_repairs_updater_when_binary_is_already_current(self):
+        self.installed()
+        wrapper = self.env.root / 'usr/local/sbin/hope-agent-update'
+        wrapper.write_text('old updater')
+        result = self.env.run('upgrade', token=None, HOPE_ONLY_NEWER=1)
+        self.ok(result)
+        self.assertIn('result=current v1', result.err)
+        self.assertIn('flock -n 9', wrapper.read_text())
+        self.assertNotIn('phase=stop', result.err)
+        unit = (self.env.root / 'etc/systemd/system/hope-agent-update.path').read_text()
+        self.assertIn(f'PathExists={self.env.txn()}', unit)
+
+    def test_orphaned_kernel_lock_file_does_not_prevent_recovery(self):
+        self.installed()
+        (self.env.root / 'var/lib/hope-agent-update/update.lock').write_text('')
+        self.env.publish('v2')
+        result = self.env.updater()
+        self.ok(result)
+        self.assertEqual('updated', self.result_of()['status'])
+
+    def test_manual_install_does_not_recover_an_active_update_transaction(self):
+        import fcntl
+        self.installed()
+        lock = open(self.env.root / 'var/lib/hope-agent-update/update.lock', 'a')
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.env.publish('v2')
+        result = self.env.run('upgrade', token=None)
+        self.failed(result, 'INSTALL_BUSY')
+        self.assertNotIn('phase=stop', result.err)
+        self.assertTrue((self.env.base / 'service/system.active').exists())
+
+    def test_an_interrupted_update_can_recover_without_an_agent_request(self):
+        self.installed()
+        self.env.publish('v2')
+        self.env.fault('sigkill-at-place-binary')
+        interrupted = self.env.updater()
+        self.assertNotEqual(0, interrupted.code)
+        self.assertTrue(self.env.txn().exists())
+        self.assertFalse((self.env.base / 'service/system.active').exists())
+        # The transaction watcher invokes the updater; the agent is stopped and cannot queue work.
+        recovered = self.env.updater()
+        self.ok(recovered)
+        self.assertFalse(self.env.txn().exists())
+        self.assertTrue((self.env.base / 'service/system.active').exists())
+        self.assertEqual('updated', self.result_of()['status'])
 
     def test_a_full_installation_again_refreshes_the_pinned_key(self):
         self.installed()

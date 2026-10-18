@@ -60,7 +60,10 @@ impl Settings {
         settings
             .monitors
             .retain(|target| target.len() <= 255 && parse_monitor(target).is_some());
-        settings.monitors.dedup();
+        let mut seen = HashSet::new();
+        settings
+            .monitors
+            .retain(|target| seen.insert(target.clone()));
         settings.monitors.truncate(MAX_MONITORS);
         settings.watch_services.retain(|unit| {
             !unit.is_empty() && unit.len() <= 256 && !unit.chars().any(char::is_control)
@@ -81,14 +84,20 @@ pub struct MemoryBreakdown {
     pub cached_bytes: Option<f64>,
     pub zfs_arc_bytes: Option<f64>,
 }
-pub async fn memory_breakdown() -> MemoryBreakdown {
+pub async fn memory_breakdown(is_container: bool) -> MemoryBreakdown {
     if !cfg!(target_os = "linux") {
         return MemoryBreakdown::default();
     }
     let meminfo = tokio::fs::read_to_string("/proc/meminfo").await.ok();
-    let arc = tokio::fs::read_to_string("/proc/spl/kstat/zfs/arcstats")
-        .await
-        .ok();
+    // ZFS kstats can expose the host's ARC inside an LXC guest, whereas
+    // lxcfs virtualizes meminfo. Never subtract host ARC from guest memory.
+    let arc = if is_container {
+        None
+    } else {
+        tokio::fs::read_to_string("/proc/spl/kstat/zfs/arcstats")
+            .await
+            .ok()
+    };
     MemoryBreakdown {
         cached_bytes: meminfo.as_deref().and_then(parse_meminfo_cache),
         zfs_arc_bytes: arc.as_deref().and_then(parse_arc_size),
@@ -175,7 +184,7 @@ impl Sensors {
         result
     }
 }
-fn clean(text: &str, maximum: usize) -> String {
+pub(crate) fn clean(text: &str, maximum: usize) -> String {
     let mut value: String = text.chars().filter(|c| !c.is_control()).collect();
     value = value.trim().to_string();
     if value.len() > maximum {
@@ -706,6 +715,22 @@ async fn check(target: String, monitor: Monitor, client: Option<reqwest::Client>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn settings_remove_non_adjacent_duplicate_monitors() {
+        let directory = tempfile::tempdir().expect("state");
+        tokio::fs::write(
+            directory.path().join("settings.json"),
+            br#"{"monitors":["tcp://127.0.0.1:1","tcp://127.0.0.1:2","tcp://127.0.0.1:1"]}"#,
+        )
+        .await
+        .expect("settings");
+        let settings = Settings::load(directory.path()).await;
+        assert_eq!(
+            settings.monitors,
+            ["tcp://127.0.0.1:1", "tcp://127.0.0.1:2"]
+        );
+    }
     #[test]
     fn meminfo_cache_sums_cached_buffers_and_reclaimable_slab() {
         let text = "MemTotal:       16479424 kB\nBuffers:            1188 kB\nCached:           179412 kB\nSReclaimable:      20000 kB\n";

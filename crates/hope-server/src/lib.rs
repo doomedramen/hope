@@ -91,7 +91,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
                 .layer(middleware::from_fn(releases::cache_headers)),
         )
         .fallback_service(ServeDir::new(web_dir).append_index_html_on_directories(true))
-        .layer(DefaultBodyLimit::max(256 * 1024))
+        .layer(DefaultBodyLimit::max(hope_protocol::MAX_AGENT_REPORT_BYTES))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::check_origin,

@@ -1,0 +1,1026 @@
+{
+  "researched_on": "2026-10-18",
+  "audited_commit": "21d1413",
+  "project_release_rust": "1.96",
+  "production_dependencies_changed": false,
+  "metadata_only_not_build_or_benchmark_validation": true,
+  "crates": [
+    {
+      "name": "sysinfo",
+      "version": "0.39.6",
+      "published": "2026-07-09T10:46:59.210840Z",
+      "rust_version": "1.95",
+      "license": "MIT",
+      "yanked": false,
+      "repository": "https://github.com/GuillaumeGomez/sysinfo",
+      "metadata_source": "https://crates.io/api/v1/crates/sysinfo"
+    },
+    {
+      "name": "procfs",
+      "version": "0.18.0",
+      "published": "2025-08-30T01:07:56.244208Z",
+      "rust_version": "1.70",
+      "license": "MIT OR Apache-2.0",
+      "yanked": false,
+      "repository": "https://github.com/eminence/procfs",
+      "metadata_source": "https://crates.io/api/v1/crates/procfs"
+    },
+    {
+      "name": "procfs-core",
+      "version": "0.18.0",
+      "published": "2025-08-30T01:07:44.196620Z",
+      "rust_version": "1.70",
+      "license": "MIT OR Apache-2.0",
+      "yanked": false,
+      "repository": "https://github.com/eminence/procfs",
+      "metadata_source": "https://crates.io/api/v1/crates/procfs-core"
+    },
+    {
+      "name": "bollard",
+      "version": "0.21.1",
+      "published": "2026-08-16T12:20:14.052517Z",
+      "rust_version": null,
+      "license": "Apache-2.0",
+      "yanked": false,
+      "repository": "https://github.com/fussybeaver/bollard",
+      "metadata_source": "https://crates.io/api/v1/crates/bollard"
+    },
+    {
+      "name": "zbus",
+      "version": "6.0.0",
+      "published": "2026-10-16T13:20:17.335153Z",
+      "rust_version": "1.89",
+      "license": "MIT",
+      "yanked": false,
+      "repository": "https://github.com/z-galaxy/zbus/",
+      "metadata_source": "https://crates.io/api/v1/crates/zbus"
+    },
+    {
+      "name": "systemd-zbus",
+      "version": "5.3.2",
+      "published": "2025-05-20T15:18:39.008419Z",
+      "rust_version": null,
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "yanked": false,
+      "repository": "https://gitlab.com/flukejones/systemd-zbus",
+      "metadata_source": "https://crates.io/api/v1/crates/systemd-zbus"
+    },
+    {
+      "name": "libcgroups",
+      "version": "0.7.0",
+      "published": "2026-07-25T14:38:47.105356Z",
+      "rust_version": "1.85.0",
+      "license": "Apache-2.0",
+      "yanked": false,
+      "repository": "https://github.com/youki-dev/youki",
+      "metadata_source": "https://crates.io/api/v1/crates/libcgroups"
+    },
+    {
+      "name": "cgroups-rs",
+      "version": "0.5.1",
+      "published": "2026-07-14T10:07:50.834745Z",
+      "rust_version": null,
+      "license": "MIT OR Apache-2.0",
+      "yanked": false,
+      "repository": "https://github.com/kata-containers/cgroups-rs",
+      "metadata_source": "https://crates.io/api/v1/crates/cgroups-rs"
+    },
+    {
+      "name": "nvml-wrapper",
+      "version": "0.13.0",
+      "published": "2026-08-31T19:23:18.814532Z",
+      "rust_version": "1.60.0",
+      "license": "MIT OR Apache-2.0",
+      "yanked": false,
+      "repository": "https://github.com/Cldfire/nvml-wrapper",
+      "metadata_source": "https://crates.io/api/v1/crates/nvml-wrapper"
+    },
+    {
+      "name": "sd-notify",
+      "version": "0.5.0",
+      "published": "2026-03-09T11:20:12.228530Z",
+      "rust_version": "1.82",
+      "license": "MIT OR Apache-2.0",
+      "yanked": false,
+      "repository": "https://github.com/lnicola/sd-notify",
+      "metadata_source": "https://crates.io/api/v1/crates/sd-notify"
+    },
+    {
+      "name": "semver",
+      "version": "1.0.28",
+      "published": "2026-04-04T00:25:14.379075Z",
+      "rust_version": "1.68",
+      "license": "MIT OR Apache-2.0",
+      "yanked": false,
+      "repository": "https://github.com/dtolnay/semver",
+      "metadata_source": "https://crates.io/api/v1/crates/semver"
+    },
+    {
+      "name": "nix",
+      "version": "0.31.3",
+      "published": "2026-05-11T07:01:18.650221Z",
+      "rust_version": "1.69",
+      "license": "MIT",
+      "yanked": false,
+      "repository": "https://github.com/nix-rust/nix",
+      "metadata_source": "https://crates.io/api/v1/crates/nix"
+    },
+    {
+      "name": "rtnetlink",
+      "version": "0.23.0",
+      "published": "2026-08-18T09:11:44.507732Z",
+      "rust_version": "1.75",
+      "license": "MIT",
+      "yanked": false,
+      "repository": "https://github.com/rust-netlink/rtnetlink",
+      "metadata_source": "https://crates.io/api/v1/crates/rtnetlink"
+    },
+    {
+      "name": "tough",
+      "version": "0.24.0",
+      "published": "2026-07-10T22:19:31.946072Z",
+      "rust_version": null,
+      "license": "MIT OR Apache-2.0",
+      "yanked": false,
+      "repository": "https://github.com/awslabs/tough",
+      "metadata_source": "https://crates.io/api/v1/crates/tough"
+    },
+    {
+      "name": "self_update",
+      "version": "1.3.1",
+      "published": "2026-10-17T04:31:30.906575Z",
+      "rust_version": "1.88",
+      "license": "MIT",
+      "yanked": false,
+      "repository": "https://github.com/jaemk/self_update",
+      "metadata_source": "https://crates.io/api/v1/crates/self_update"
+    },
+    {
+      "name": "hdd",
+      "version": "0.10.3",
+      "published": "2020-06-22T23:01:17.565439Z",
+      "rust_version": null,
+      "license": "MPL-2.0",
+      "yanked": false,
+      "repository": "https://github.com/vthriller/hdd-rs",
+      "metadata_source": "https://crates.io/api/v1/crates/hdd"
+    },
+    {
+      "name": "smartctl",
+      "error": "HTTP Error 404: Not Found",
+      "metadata_source": "https://crates.io/api/v1/crates/smartctl"
+    },
+    {
+      "name": "heim",
+      "version": "0.0.11",
+      "published": "2020-11-02T16:47:23.515973Z",
+      "rust_version": null,
+      "license": "Apache-2.0 OR MIT",
+      "yanked": false,
+      "repository": "https://github.com/heim-rs/heim",
+      "metadata_source": "https://crates.io/api/v1/crates/heim"
+    },
+    {
+      "name": "psutil",
+      "version": "5.4.0",
+      "published": "2025-07-25T14:03:55.934899Z",
+      "rust_version": null,
+      "license": "MIT",
+      "yanked": false,
+      "repository": "https://github.com/rust-psutil/rust-psutil",
+      "metadata_source": "https://crates.io/api/v1/crates/psutil"
+    },
+    {
+      "name": "systemstat",
+      "version": "0.2.7",
+      "published": "2026-06-02T15:15:19.199784Z",
+      "rust_version": null,
+      "license": "Unlicense",
+      "yanked": false,
+      "repository": "https://github.com/valpackett/systemstat",
+      "metadata_source": "https://crates.io/api/v1/crates/systemstat"
+    },
+    {
+      "name": "atomic-write-file",
+      "version": "0.3.1",
+      "published": "2026-08-11T01:57:19.616357Z",
+      "rust_version": "1.85",
+      "license": "BSD-3-Clause",
+      "yanked": false,
+      "repository": "https://github.com/andreacorbellini/rust-atomic-write-file",
+      "metadata_source": "https://crates.io/api/v1/crates/atomic-write-file"
+    }
+  ],
+  "selected_dependency_metadata": [
+    {
+      "crate": "bollard",
+      "normal_dependencies": [
+        {
+          "name": "base64",
+          "version": "^0.22",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "bollard-stubs",
+          "version": "=1.53.1-rc.29.3.1",
+          "optional": false,
+          "default_features": false,
+          "features": []
+        },
+        {
+          "name": "bytes",
+          "version": "^1",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "futures-core",
+          "version": "^0.3",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "futures-util",
+          "version": "^0.3",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "hex",
+          "version": "^0.4",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "http",
+          "version": "^1.1",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "http-body-util",
+          "version": "^0.1",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "hyper",
+          "version": "^1.3",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "client",
+            "http1"
+          ]
+        },
+        {
+          "name": "log",
+          "version": "^0.4",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "pin-project-lite",
+          "version": "^0.2",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "serde",
+          "version": "^1.0",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "serde_derive",
+          "version": "^1.0",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "serde_json",
+          "version": "^1.0",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "serde_urlencoded",
+          "version": "^0.7",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "thiserror",
+          "version": "^2.0",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "tokio",
+          "version": "^1.47",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "time",
+            "net",
+            "io-util"
+          ]
+        },
+        {
+          "name": "tokio-util",
+          "version": "^0.7",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "codec"
+          ]
+        },
+        {
+          "name": "tower-service",
+          "version": "^0.3",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "url",
+          "version": "^2.5",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "winapi",
+          "version": "^0.3.9",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "winerror"
+          ]
+        },
+        {
+          "name": "async-stream",
+          "version": "^0.3.5",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "bitflags",
+          "version": "^2.6.0",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "bollard-buildkit-proto",
+          "version": "^0.8.1",
+          "optional": true,
+          "default_features": false,
+          "features": []
+        },
+        {
+          "name": "chrono",
+          "version": "^0.4",
+          "optional": true,
+          "default_features": false,
+          "features": [
+            "std",
+            "clock",
+            "serde"
+          ]
+        },
+        {
+          "name": "home",
+          "version": "^0.5",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "hyper-named-pipe",
+          "version": "^0.1.0",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "hyper-rustls",
+          "version": "^0.27",
+          "optional": true,
+          "default_features": false,
+          "features": [
+            "http1"
+          ]
+        },
+        {
+          "name": "hyper-util",
+          "version": "^0.1.5",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "http1",
+            "client-legacy",
+            "tokio"
+          ]
+        },
+        {
+          "name": "hyperlocal",
+          "version": "^0.9.0",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "num",
+          "version": "^0.4",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "openssh",
+          "version": "^0.11.5",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "rand",
+          "version": "^0.10",
+          "optional": true,
+          "default_features": false,
+          "features": [
+            "thread_rng"
+          ]
+        },
+        {
+          "name": "rustls",
+          "version": "^0.23",
+          "optional": true,
+          "default_features": false,
+          "features": [
+            "std"
+          ]
+        },
+        {
+          "name": "rustls-native-certs",
+          "version": "^0.8.0",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "rustls-pki-types",
+          "version": "^1.7",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "time",
+          "version": "^0.3",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "formatting",
+            "parsing",
+            "serde",
+            "serde-well-known"
+          ]
+        },
+        {
+          "name": "tokio-stream",
+          "version": "^0.1",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "net"
+          ]
+        },
+        {
+          "name": "tokio-tungstenite",
+          "version": "^0.29",
+          "optional": true,
+          "default_features": false,
+          "features": [
+            "handshake"
+          ]
+        },
+        {
+          "name": "tonic",
+          "version": "^0.14",
+          "optional": true,
+          "default_features": false,
+          "features": [
+            "channel"
+          ]
+        },
+        {
+          "name": "tower-service",
+          "version": "^0.3",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "webpki-roots",
+          "version": "^1.0",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        }
+      ]
+    },
+    {
+      "crate": "procfs-core",
+      "normal_dependencies": [
+        {
+          "name": "bitflags",
+          "version": "^2",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "hex",
+          "version": "^0.4",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "backtrace",
+          "version": "^0.3",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "chrono",
+          "version": "^0.4.20",
+          "optional": true,
+          "default_features": false,
+          "features": [
+            "clock"
+          ]
+        },
+        {
+          "name": "serde",
+          "version": "^1.0",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "derive"
+          ]
+        }
+      ]
+    },
+    {
+      "crate": "libcgroups",
+      "normal_dependencies": [
+        {
+          "name": "fixedbitset",
+          "version": "^0.5.7",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "nix",
+          "version": "^0.29.0",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "signal",
+            "user",
+            "fs"
+          ]
+        },
+        {
+          "name": "oci-spec",
+          "version": "^0.10.0",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "runtime"
+          ]
+        },
+        {
+          "name": "pathrs",
+          "version": "^0.2.4",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "procfs",
+          "version": "^0.18.0",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "serde",
+          "version": "^1.0",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "derive"
+          ]
+        },
+        {
+          "name": "thiserror",
+          "version": "^2.0.18",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "tracing",
+          "version": "^0.1.44",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "attributes"
+          ]
+        },
+        {
+          "name": "errno",
+          "version": "^0.3.14",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "libbpf-sys",
+          "version": "^1.6.4",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "libc",
+          "version": "^0.2.186",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "rbpf",
+          "version": "^0.4.1",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        }
+      ]
+    },
+    {
+      "crate": "cgroups-rs",
+      "normal_dependencies": [
+        {
+          "name": "bit-vec",
+          "version": "^0.6",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "libc",
+          "version": "^0.2",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "log",
+          "version": "^0.4",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "nix",
+          "version": "^0.25.0",
+          "optional": false,
+          "default_features": false,
+          "features": [
+            "event",
+            "fs",
+            "process"
+          ]
+        },
+        {
+          "name": "thiserror",
+          "version": "^1",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "zbus",
+          "version": "^5.8",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "oci-spec",
+          "version": "^0.10.0",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "serde",
+          "version": "^1.0",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "derive"
+          ]
+        }
+      ]
+    },
+    {
+      "crate": "systemd-zbus",
+      "normal_dependencies": [
+        {
+          "name": "serde",
+          "version": "^1.0",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "zbus",
+          "version": "^5.7.0",
+          "optional": false,
+          "default_features": false,
+          "features": []
+        }
+      ]
+    },
+    {
+      "crate": "zbus",
+      "normal_dependencies": [
+        {
+          "name": "endi",
+          "version": "^1.1.0",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "serde",
+          "version": "^1.0.200",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "derive"
+          ]
+        },
+        {
+          "name": "winnow",
+          "version": "^1.0",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "zbus_macros",
+          "version": "^6.0.0",
+          "optional": false,
+          "default_features": false,
+          "features": []
+        },
+        {
+          "name": "zbus_utils",
+          "version": "^6.0.0",
+          "optional": false,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "zcheapstr",
+          "version": "^1.0.0",
+          "optional": false,
+          "default_features": true,
+          "features": [
+            "serde"
+          ]
+        },
+        {
+          "name": "arrayvec",
+          "version": "^0.7.4",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "serde"
+          ]
+        },
+        {
+          "name": "async-trait",
+          "version": "^0.1.80",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "bitflags",
+          "version": "^2.13.2",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "camino",
+          "version": "^1.1.9",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "chrono",
+          "version": "^0.4.38",
+          "optional": true,
+          "default_features": false,
+          "features": [
+            "serde"
+          ]
+        },
+        {
+          "name": "futures-core",
+          "version": "^0.3.30",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "heapless",
+          "version": "^0.9.0",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "serde"
+          ]
+        },
+        {
+          "name": "hex",
+          "version": "^0.4.3",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "libc",
+          "version": "^0.2",
+          "optional": true,
+          "default_features": false,
+          "features": []
+        },
+        {
+          "name": "ordered-stream",
+          "version": "^0.2",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "rustix",
+          "version": "^1.1.2",
+          "optional": true,
+          "default_features": false,
+          "features": [
+            "net",
+            "process",
+            "std"
+          ]
+        },
+        {
+          "name": "serde_bytes",
+          "version": "^0.11.14",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "serde_repr",
+          "version": "^0.1.19",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "socket2",
+          "version": "^0.6.5",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "time",
+          "version": "^0.3.36",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "serde"
+          ]
+        },
+        {
+          "name": "tokio",
+          "version": "^1.53.3",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "rt",
+            "net",
+            "time",
+            "sync"
+          ]
+        },
+        {
+          "name": "tokio",
+          "version": "^1.53.3",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "process"
+          ]
+        },
+        {
+          "name": "tracing",
+          "version": "^0.1.40",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "uds_windows",
+          "version": "^1.1.0",
+          "optional": true,
+          "default_features": true,
+          "features": []
+        },
+        {
+          "name": "url",
+          "version": "^2.5.0",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "serde"
+          ]
+        },
+        {
+          "name": "uuid",
+          "version": "^1.8.0",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "serde"
+          ]
+        },
+        {
+          "name": "windows-sys",
+          "version": "^0.61",
+          "optional": true,
+          "default_features": true,
+          "features": [
+            "Win32_Foundation",
+            "Win32_Security_Authorization",
+            "Win32_System_Memory",
+            "Win32_System_WindowsProgramming",
+            "Win32_Networking",
+            "Win32_Networking_WinSock",
+            "Win32_NetworkManagement",
+            "Win32_NetworkManagement_IpHelper",
+            "Win32_System_IO",
+            "Win32_System_Threading"
+          ]
+        },
+        {
+          "name": "zruntime",
+          "version": "^0.2.0",
+          "optional": true,
+          "default_features": false,
+          "features": []
+        }
+      ]
+    }
+  ]
+}

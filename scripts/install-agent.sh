@@ -112,6 +112,19 @@ updater_paths() {
 }
 mkdir_public() { ( umask 022; mkdir -p "$1" ); }
 state_safe() { [ ! -L "$state" ] && [ ! -L "$state/config.json" ]; }
+install_lock_held=0
+lock_installation() {
+    # Share the updater's process-owned lock before recovering or starting a
+    # manual transaction. The updater's installer child already inherits fd 9.
+    if is_system && is_linux && [ "${HOPE_UPDATER:-}" != 1 ] && [ "$install_lock_held" = 0 ]; then
+        updater_paths
+        command -v flock >/dev/null 2>&1 || fail LOCK_UNAVAILABLE 'Install flock (util-linux) before installing a system agent.'
+        mkdir_public "$updater_dir"
+        exec 8>"$updater_dir/update.lock"
+        flock -n 8 || fail INSTALL_BUSY 'Another agent installation or update is running. Retry after it finishes.'
+        install_lock_held=1
+    fi
+}
 
 # --- service manager adapters -------------------------------------------------------------
 sc() { if is_system; then systemctl "$@"; else systemctl --user "$@"; fi; }
@@ -199,6 +212,13 @@ trap on_signal HUP INT TERM QUIT
 # Each step returns 1 on failure: the callers run these as `f || note warning`, where set -e is off.
 install_updater() {
     updater_paths
+    if is_linux && ! command -v flock >/dev/null 2>&1; then
+        note 'warning=UPDATER_NOT_INSTALLED Install flock (util-linux) to enable safe updater locking.'
+        return 1
+    fi
+    [ ! -L "$state/update-queue" ] || return 1
+    mkdir -p "$state/update-queue" && chmod 700 "$state/update-queue" \
+        && chown "$service_user:$service_group" "$state/update-queue" || return 1
     [ -f "$0" ] || { note 'warning=UPDATER_NOT_INSTALLED The installer was not run from a file, so it cannot be kept for updates.'; return 1; }
     pinned_ca=
     if [ -n "${HOPE_CA_CERT:-}" ]; then
@@ -218,7 +238,7 @@ install_updater() {
     else rm -f "$updater_dir/ca"; fi
     {
         printf '#!/bin/sh\n# H.O.P.E agent updater, written by install-agent.sh and owned by root.\n'
-        printf "dir='%s'\nstate='%s'\nroot='%s'\n" "$updater_dir" "$state" "$root"
+        printf "dir='%s'\nstate='%s'\nroot='%s'\nplatform='%s'\n" "$updater_dir" "$state" "$root" "$platform"
         cat <<'UPDATER_SCRIPT_END'
 # Runs the installer kept in $dir in upgrade mode when the server offers a newer agent. Started as
 # root by the service manager when the agent leaves a request, or by an administrator: sudo hope-agent-update
@@ -227,16 +247,27 @@ umask 077
 PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 queue=$state/update-queue
-# The request only wakes this script; nothing in it is read. The agent owns the directory, so it is
-# never followed through a symbolic link.
-if [ -d "$queue" ] && [ ! -L "$queue" ] && [ ! -L "$state" ]; then rm -f "$queue/request"; fi
+# Linux uses a process-owned lock: SIGKILL cannot leave it held. Keep the
+# legacy directory interlock during migration, and retain requests when busy.
 lock=$dir/lock
-if ! mkdir "$lock" 2>/dev/null; then
-    find "$lock" -maxdepth 0 -mmin +30 -exec rm -rf {} + 2>/dev/null || true
-    mkdir "$lock" 2>/dev/null || { echo 'hope-agent-update: another update is already running' >&2; exit 0; }
+if [ "$platform" = linux ]; then
+    exec 9>"$dir/update.lock"
+    flock -n 9 || { echo 'hope-agent-update: another update is already running' >&2; exit 75; }
+    if [ -d "$lock" ]; then
+        find "$lock" -maxdepth 0 -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+        [ ! -d "$lock" ] || { echo 'hope-agent-update: another update is already running' >&2; exit 75; }
+    fi
+    lock=
+else
+    if ! mkdir "$lock" 2>/dev/null; then
+        find "$lock" -maxdepth 0 -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+        mkdir "$lock" 2>/dev/null || { echo 'hope-agent-update: another update is already running' >&2; exit 75; }
+    fi
 fi
 log=$(mktemp)
-trap 'rm -rf "$lock" "$log"' EXIT
+trap 'if [ -n "$lock" ]; then rm -rf "$lock"; fi; rm -f "$log"' EXIT
+# The request only wakes this script; nothing in it is read or followed.
+if [ -d "$queue" ] && [ ! -L "$queue" ] && [ ! -L "$state" ]; then rm -f "$queue/request"; fi
 HOPE_SERVER=$(cat "$dir/server")
 HOPE_AGENT_DIR=$state
 HOPE_INSTALL_MODE=system
@@ -261,7 +292,7 @@ else
     { code=0; sh "$dir/install-agent.sh" upgrade 2>&1 || code=$?; echo "$code" > "$rcfile"; } | tee "$log" >&2
     rc=$(cat "$rcfile" 2>/dev/null || echo 1)
     rm -f "$rcfile"
-    outcome=$(sed -n 's/^hope-install: result=\(updated\|current\) \([A-Za-z0-9._+-]\{1,64\}\)$/\1 \2/p' "$log" | tail -n 1)
+    outcome=$(sed -En 's/^hope-install: result=(updated|current) ([A-Za-z0-9._+-]{1,64})$/\1 \2/p' "$log" | tail -n 1)
     code=$(sed -n 's/^hope-install: error=\([A-Z_]\{1,40\}\) .*/\1/p' "$log" | head -n 1)
 fi
 if [ "$rc" -eq 0 ] && [ -n "$outcome" ]; then
@@ -293,6 +324,7 @@ UPDATER_SCRIPT_END
 Description=H.O.P.E agent update requests
 [Path]
 PathExists=$state/update-queue/request
+PathExists=$txn
 Unit=hope-agent-update.service
 [Install]
 WantedBy=multi-user.target
@@ -301,7 +333,7 @@ EOF
 [Unit]
 Description=H.O.P.E agent update
 StartLimitIntervalSec=1h
-StartLimitBurst=4
+StartLimitBurst=12
 [Service]
 Type=oneshot
 ExecStart="$updater_bin"
@@ -460,6 +492,7 @@ state_safe || fail PATH_UNWRITABLE "$state or its config.json is a symbolic link
 
 # Converge after an interrupted run: restore the previous installation first.
 if [ -d "$txn" ]; then
+    lock_installation
     phase recover
     if [ -f "$txn/journal" ]; then
         rollback
@@ -592,6 +625,10 @@ if [ "${HOPE_ONLY_NEWER:-}" = 1 ]; then
     installed_version=$("$binary" --version 2>/dev/null | sed -n 's/^hope-agent //p' | head -n 1 || true)
     if version_ok "$installed_version" && ! version_lt "$installed_version" "$m_version"; then
         echo "hope-agent $installed_version is current; the server offers $m_version."
+        if is_system && [ "${HOPE_UPDATER:-}" != 1 ]; then
+            lock_installation
+            install_updater || note 'warning=UPDATER_NOT_INSTALLED The current agent was kept, but updater repair failed.'
+        fi
         note "result=current $installed_version"
         phase complete
         exit 0
@@ -758,6 +795,7 @@ if [ -f "$state/config.json" ]; then
 fi
 
 # =================================== transaction ==============================================
+lock_installation
 mkdir_public "$(dirname "$binary")"
 mkdir_public "$(dirname "$unit")"
 mkdir_public "$(dirname "$state")"

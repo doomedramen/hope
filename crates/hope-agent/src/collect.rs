@@ -1,4 +1,4 @@
-use crate::extras;
+use crate::{cpu::CgroupCpuProbe, extras};
 use hope_protocol::{
     CollectorStatus, Container, Disk, Gpu, Interface, Inventory, Metrics, NetworkCounter,
 };
@@ -8,11 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 #[cfg(target_os = "linux")]
-use std::{
-    ffi::CString,
-    mem::MaybeUninit,
-    path::{Component, Path, PathBuf},
-};
+use std::{ffi::CString, mem::MaybeUninit};
 use sysinfo::{Disks, Networks, System};
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
 
@@ -51,7 +47,13 @@ struct DockerStats {
 }
 
 fn docker_percent(value: &str) -> Option<f64> {
-    value.trim().strip_suffix('%')?.trim().parse().ok()
+    value
+        .trim()
+        .strip_suffix('%')?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && (0.0..=1e6).contains(value))
 }
 
 fn docker_bytes(value: &str) -> Option<f64> {
@@ -71,7 +73,8 @@ fn docker_bytes(value: &str) -> Option<f64> {
         "TiB" => 1_099_511_627_776.0,
         _ => return None,
     };
-    Some(number * multiplier)
+    let bytes = number * multiplier;
+    (bytes.is_finite() && (0.0..=1e18).contains(&bytes)).then_some(bytes)
 }
 
 fn docker_pair(value: &str, parse: fn(&str) -> Option<f64>) -> (Option<f64>, Option<f64>) {
@@ -114,12 +117,12 @@ fn parse_docker_output(output: &str) -> Vec<Container> {
                 && !item.state.is_empty()
         })
         .map(|item| Container {
-            id: item.id,
-            name: item.names,
-            image: item.image,
-            state: item.state,
-            status: item.status,
-            ports: item.ports,
+            id: extras::clean(&item.id, 128),
+            name: extras::clean(&item.names, 256),
+            image: extras::clean(&item.image, 512),
+            state: extras::clean(&item.state, 32),
+            status: extras::clean(&item.status, 256),
+            ports: extras::clean(&item.ports, 512),
             cpu_percent: None,
             memory_used_bytes: None,
             memory_limit_bytes: None,
@@ -165,6 +168,7 @@ pub struct Collector {
     pub costs: Vec<CollectorCost>,
     system: System,
     cpu_probe: CgroupCpuProbe,
+    guest_cpu: Option<bool>,
     networks: Networks,
     disks: DiskProbe,
     disk_inventory: Vec<Disk>,
@@ -206,9 +210,9 @@ fn root_disk_from_mounts(mounts: &str, total_bytes: u64, available_bytes: u64) -
             .then(|| (decode_mount_field(name), filesystem.to_string()))
     })?;
     (total_bytes > 0).then_some(Disk {
-        name,
+        name: extras::clean(&name, 255),
         mount: "/".into(),
-        filesystem,
+        filesystem: extras::clean(&filesystem, 128),
         total_bytes: total_bytes as f64,
         available_bytes: available_bytes.min(total_bytes) as f64,
     })
@@ -219,6 +223,9 @@ fn include_root_disk(disks: &mut Vec<Disk>, root: Option<Disk>) {
     if !disks.iter().any(|disk| disk.mount == "/")
         && let Some(root) = root
     {
+        if disks.len() >= 128 {
+            disks.pop();
+        }
         disks.push(root);
     }
 }
@@ -246,229 +253,22 @@ fn root_disk() -> Option<Disk> {
     )
 }
 
-#[derive(Clone, Copy)]
-struct CgroupCpuSample {
-    usage_usec: u64,
-    cores: f64,
-}
-
-#[derive(Default)]
-struct CgroupCpuProbe {
-    previous: Option<CgroupCpuSample>,
-}
-
-impl CgroupCpuProbe {
-    fn sample(&mut self, elapsed_seconds: f64, fallback_cores: usize) -> Option<f64> {
-        let Some(current) = read_cgroup_cpu_sample(fallback_cores) else {
-            self.previous = None;
-            return None;
-        };
-        let previous = self.previous.replace(current)?;
-        cpu_percent_from_samples(previous, current, elapsed_seconds)
+async fn is_container() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
     }
-}
-
-#[cfg(target_os = "linux")]
-fn read_cgroup_cpu_sample(fallback_cores: usize) -> Option<CgroupCpuSample> {
-    let membership = std::fs::read_to_string("/proc/self/cgroup").ok()?;
-    for line in membership.lines() {
-        let mut fields = line.splitn(3, ':');
-        let _hierarchy = fields.next()?;
-        let controllers = fields.next()?;
-        let group = fields.next()?;
-        if controllers.is_empty() {
-            if let Some(sample) = read_v2_cpu_sample(group, fallback_cores) {
-                return Some(sample);
-            }
-        } else if controllers.split(',').any(|name| name == "cpuacct")
-            && let Some(sample) = read_v1_cpu_sample(group, fallback_cores)
-        {
-            return Some(sample);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_cgroup_cpu_sample(_fallback_cores: usize) -> Option<CgroupCpuSample> {
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn safe_cgroup_path(root: &Path, group: &str) -> Option<PathBuf> {
-    let relative = Path::new(group).strip_prefix("/").ok()?;
-    if relative
-        .components()
-        .any(|part| !matches!(part, Component::Normal(_)))
+    if tokio::fs::try_exists("/run/systemd/container")
+        .await
+        .unwrap_or(false)
+        || tokio::fs::try_exists("/.dockerenv").await.unwrap_or(false)
     {
-        return None;
+        return true;
     }
-    Some(root.join(relative))
+    command("systemd-detect-virt", &["--container"], 2)
+        .await
+        .is_some()
 }
 
-#[cfg(target_os = "linux")]
-fn cgroup_ancestors(path: &Path) -> Vec<&Path> {
-    let mut paths = Vec::new();
-    let mut current = Some(path);
-    while let Some(directory) = current {
-        paths.push(directory);
-        current = directory.parent();
-    }
-    paths
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn parse_cpu_list(value: &str) -> Option<usize> {
-    let mut count = 0usize;
-    for item in value.trim().split(',').filter(|item| !item.is_empty()) {
-        let (first, last) = item
-            .split_once('-')
-            .map_or((item, item), |(first, last)| (first, last));
-        let first = first.parse::<usize>().ok()?;
-        let last = last.parse::<usize>().ok()?;
-        if last < first {
-            return None;
-        }
-        count = count.checked_add(last - first + 1)?;
-    }
-    (count > 0).then_some(count)
-}
-
-#[cfg(target_os = "linux")]
-fn v2_cpu_capacity(path: &Path, fallback_cores: usize) -> Option<f64> {
-    let mut capacity: Option<f64> = None;
-    for directory in cgroup_ancestors(path) {
-        if let Ok(value) = std::fs::read_to_string(directory.join("cpu.max"))
-            && let Some((quota, period)) = value.split_once(' ')
-            && quota != "max"
-        {
-            let quota = quota.parse::<f64>().ok()?;
-            let period = period.trim().parse::<f64>().ok()?;
-            if quota > 0.0 && period > 0.0 {
-                let cores = quota / period;
-                capacity = Some(capacity.map_or(cores, |current| current.min(cores)));
-            }
-        }
-    }
-    let cpus = std::fs::read_to_string(path.join("cpuset.cpus.effective"))
-        .ok()
-        .and_then(|value| parse_cpu_list(&value))
-        .or((fallback_cores > 0).then_some(fallback_cores));
-    match (capacity, cpus) {
-        (Some(quota), Some(cpus)) => Some(quota.min(cpus as f64)),
-        (Some(quota), None) => Some(quota),
-        (None, Some(cpus)) => Some(cpus as f64),
-        (None, None) => None,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn read_v2_cpu_sample(group: &str, fallback_cores: usize) -> Option<CgroupCpuSample> {
-    let root = Path::new("/sys/fs/cgroup");
-    let path = safe_cgroup_path(root, group)?;
-    let usage_path = path.join("cpu.stat");
-    if !usage_path.exists() && path != root {
-        return None;
-    }
-    let usage_path = if usage_path.exists() {
-        usage_path
-    } else {
-        root.join("cpu.stat")
-    };
-    let stats = std::fs::read_to_string(usage_path).ok()?;
-    let usage_usec = stats.lines().find_map(|line| {
-        let (key, value) = line.split_once(' ')?;
-        (key == "usage_usec")
-            .then(|| value.trim().parse().ok())
-            .flatten()
-    })?;
-    let cores = v2_cpu_capacity(&path, fallback_cores)?;
-    Some(CgroupCpuSample { usage_usec, cores })
-}
-
-#[cfg(target_os = "linux")]
-fn v1_cpu_capacity(path: &Path, cpuset: &Path, fallback_cores: usize) -> Option<f64> {
-    let mut capacity: Option<f64> = None;
-    for directory in cgroup_ancestors(path) {
-        if let (Ok(quota), Ok(period)) = (
-            std::fs::read_to_string(directory.join("cpu.cfs_quota_us")),
-            std::fs::read_to_string(directory.join("cpu.cfs_period_us")),
-        ) && let (Ok(quota), Ok(period)) =
-            (quota.trim().parse::<f64>(), period.trim().parse::<f64>())
-            && quota > 0.0
-            && period > 0.0
-        {
-            let cores = quota / period;
-            capacity = Some(capacity.map_or(cores, |current| current.min(cores)));
-        }
-    }
-    let cpus = cgroup_ancestors(cpuset)
-        .into_iter()
-        .find_map(|directory| {
-            std::fs::read_to_string(directory.join("cpuset.cpus"))
-                .ok()
-                .and_then(|value| parse_cpu_list(&value))
-        })
-        .or((fallback_cores > 0).then_some(fallback_cores));
-    match (capacity, cpus) {
-        (Some(quota), Some(cpus)) => Some(quota.min(cpus as f64)),
-        (Some(quota), None) => Some(quota),
-        (None, Some(cpus)) => Some(cpus as f64),
-        (None, None) => None,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn read_v1_cpu_sample(group: &str, fallback_cores: usize) -> Option<CgroupCpuSample> {
-    let cpu_paths = [
-        Path::new("/sys/fs/cgroup/cpu"),
-        Path::new("/sys/fs/cgroup/cpu,cpuacct"),
-    ];
-    let cpu_path = cpu_paths
-        .iter()
-        .filter_map(|root| safe_cgroup_path(root, group))
-        .find(|path| path.exists())?;
-    let cpuacct_path = safe_cgroup_path(Path::new("/sys/fs/cgroup/cpuacct"), group);
-    let usage_path = [
-        cpuacct_path.map(|path| path.join("cpuacct.usage")),
-        Some(cpu_path.join("cpuacct.usage")),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|candidate| candidate.exists())?;
-    let usage_usec = std::fs::read_to_string(usage_path)
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()?
-        / 1_000;
-    let cores = v1_cpu_capacity(
-        &cpu_path,
-        &Path::new("/sys/fs/cgroup/cpuset").join(group.trim_start_matches('/')),
-        fallback_cores,
-    )?;
-    Some(CgroupCpuSample { usage_usec, cores })
-}
-
-fn cpu_percent_from_samples(
-    previous: CgroupCpuSample,
-    current: CgroupCpuSample,
-    elapsed_seconds: f64,
-) -> Option<f64> {
-    if !elapsed_seconds.is_finite()
-        || elapsed_seconds <= 0.0
-        || current.usage_usec < previous.usage_usec
-        || current.cores <= 0.0
-    {
-        return None;
-    }
-    Some(
-        ((current.usage_usec - previous.usage_usec) as f64
-            / (elapsed_seconds * 1_000_000.0 * current.cores)
-            * 100.0)
-            .clamp(0.0, 100.0),
-    )
-}
 impl DiskProbe {
     fn new() -> Self {
         Self {
@@ -477,17 +277,25 @@ impl DiskProbe {
                 // A single detached worker may wait on a remote filesystem. It cannot
                 // accumulate further workers or prevent process shutdown.
                 let disks = Disks::new_with_refreshed_list();
-                disks
+                let collected = disks
                     .iter()
                     .take(128)
                     .map(|disk| Disk {
-                        name: disk.name().to_string_lossy().into(),
-                        mount: disk.mount_point().to_string_lossy().into(),
-                        filesystem: disk.file_system().to_string_lossy().into(),
+                        name: extras::clean(&disk.name().to_string_lossy(), 255),
+                        mount: extras::clean(&disk.mount_point().to_string_lossy(), 4096),
+                        filesystem: extras::clean(&disk.file_system().to_string_lossy(), 128),
                         total_bytes: disk.total_space() as f64,
                         available_bytes: disk.available_space() as f64,
                     })
-                    .collect()
+                    .collect::<Vec<_>>();
+                #[cfg(target_os = "linux")]
+                {
+                    let mut collected = collected;
+                    include_root_disk(&mut collected, root_disk());
+                    collected
+                }
+                #[cfg(not(target_os = "linux"))]
+                collected
             }),
         }
     }
@@ -538,6 +346,7 @@ impl Collector {
             costs: Vec::with_capacity(20),
             system,
             cpu_probe: CgroupCpuProbe::default(),
+            guest_cpu: None,
             networks: Networks::new_with_refreshed_list(),
             disks: DiskProbe::new(),
             disk_inventory: vec![],
@@ -559,12 +368,31 @@ impl Collector {
         let elapsed = self.last.elapsed().as_secs_f64();
         self.last = Instant::now();
         self.costs.clear();
+        let guest_cpu = match self.guest_cpu {
+            Some(guest) => guest,
+            None => {
+                let guest = is_container().await;
+                self.guest_cpu = Some(guest);
+                guest
+            }
+        };
         let started = Instant::now();
         self.system.refresh_cpu_usage();
-        let cpu_cores = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or_else(|_| self.system.cpus().len())
-            .max(1);
+        let cpu_cores = if guest_cpu {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or_else(|_| self.system.cpus().len())
+        } else {
+            self.system.cpus().len()
+        }
+        .max(1);
+        // Prime the chosen source on sample one, and never fall back to a different scope.
+        let cpu_percent = if guest_cpu {
+            self.cpu_probe.sample(cpu_cores)
+        } else {
+            (!self.first && !self.system.cpus().is_empty())
+                .then(|| self.system.global_cpu_usage() as f64)
+        };
         self.cost("cpu", started);
         let started = Instant::now();
         self.system.refresh_memory();
@@ -574,11 +402,6 @@ impl Collector {
         self.cost("network_refresh", started);
         let started = Instant::now();
         let disk_sample = self.disks.sample(Duration::from_millis(500)).await;
-        #[cfg(target_os = "linux")]
-        let disk_sample = disk_sample.map(|mut disks| {
-            include_root_disk(&mut disks, root_disk());
-            disks
-        });
         self.cost("filesystems", started);
         if let Some(disks) = &disk_sample {
             self.disk_inventory = disks.clone();
@@ -667,7 +490,7 @@ impl Collector {
         }
         let gpu_metrics_available = gpus.iter().any(|g| g.utilization_percent.is_some());
         let started = Instant::now();
-        let breakdown = extras::memory_breakdown().await;
+        let breakdown = extras::memory_breakdown(guest_cpu).await;
         let load_average = extras::load_average();
         self.cost("memory_breakdown", started);
         let started = Instant::now();
@@ -706,11 +529,17 @@ impl Collector {
         };
         self.cost("monitors", started);
         let mut collectors = vec![
-            status(
-                "cpu",
-                !self.first && !self.system.cpus().is_empty(),
-                Some("CPU utilization needs a previous sample"),
-            ),
+            CollectorStatus {
+                name: "cpu".into(),
+                available: cpu_percent.is_some(),
+                detail: Some(if cpu_percent.is_none() {
+                    "CPU utilization is warming up or the selected machine counters are unavailable"
+                } else if guest_cpu {
+                    "Container CPU usage at the init process's cgroup boundary"
+                } else {
+                    "Host CPU usage from system counters"
+                }.into()),
+            },
             status("memory", true, None),
             status("network", true, None),
             status(
@@ -782,7 +611,7 @@ impl Collector {
         }
         let started = Instant::now();
         let interfaces = interfaces(&self.networks, gateway);
-        let inventory = Inventory {
+        let mut inventory = Inventory {
             hostname: System::host_name().unwrap_or_else(|| "Unnamed host".into()),
             os: format!(
                 "{} {}",
@@ -803,12 +632,8 @@ impl Collector {
             gpus: gpus.clone(),
             collectors: collectors.clone(),
         };
-        let metrics = Metrics {
-            cpu_percent: (!self.first && !self.system.cpus().is_empty()).then(|| {
-                self.cpu_probe
-                    .sample(elapsed, cpu_cores)
-                    .unwrap_or_else(|| self.system.global_cpu_usage() as f64)
-            }),
+        let mut metrics = Metrics {
+            cpu_percent,
             memory_used_bytes: Some(self.system.used_memory() as f64),
             memory_total_bytes: Some(self.system.total_memory() as f64),
             memory_cached_bytes: breakdown.cached_bytes,
@@ -834,6 +659,8 @@ impl Collector {
         };
         self.cost("inventory", started);
         self.first = false;
+        crate::telemetry::isolate(&mut inventory, &mut metrics, &mut collectors);
+        inventory.collectors = collectors.clone();
         (inventory, metrics, collectors)
     }
 }
@@ -1132,21 +959,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lxc_cpu_usage_is_normalized_to_its_allowed_cpus() {
-        let previous = CgroupCpuSample {
-            usage_usec: 1_000_000,
-            cores: 3.0,
-        };
-        let current = CgroupCpuSample {
-            usage_usec: 1_141_600,
-            cores: 3.0,
-        };
-        assert_eq!(cpu_percent_from_samples(previous, current, 1.0), Some(4.72));
-        assert_eq!(parse_cpu_list("0-2"), Some(3));
-        assert_eq!(parse_cpu_list("0-1,4"), Some(3));
-    }
-
-    #[test]
     fn root_filesystem_can_be_recovered_from_a_complete_mount_list() {
         let mounts = "shared /mnt/shared nfs4 rw 0 0\n/dev/mapper/vg\\040root / ext4 rw 0 0\n";
         let root = root_disk_from_mounts(mounts, 30 * 1024_u64.pow(3), 13 * 1024_u64.pow(3))
@@ -1180,6 +992,21 @@ not json
         assert_eq!(containers[0].ports, "0.0.0.0:8080->80/tcp");
         assert_eq!(containers[1].state, "exited");
         assert_eq!(containers[0].cpu_percent, None);
+    }
+
+    #[test]
+    fn docker_metadata_fits_the_report_contract_and_stats_reject_bad_numbers() {
+        let row = serde_json::json!({
+            "ID":"id", "Names":"web", "Image":"nginx", "State":"running",
+            "Status":"Up\nhealthy", "Ports":"🔌".repeat(200),
+        });
+        let containers = parse_docker_output(&row.to_string());
+        assert_eq!(containers.len(), 1);
+        assert!(containers[0].ports.len() <= 512);
+        assert!(!containers[0].status.contains('\n'));
+        assert_eq!(docker_percent("NaN%"), None);
+        assert_eq!(docker_percent("-1%"), None);
+        assert_eq!(docker_bytes("999999999999999999TB"), None);
     }
 
     #[test]

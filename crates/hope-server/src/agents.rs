@@ -321,30 +321,37 @@ pub async fn report(
     };
     // Authenticate before queueing on the global write lock so unauthenticated callers cannot
     // hold up legitimate writers. The check is repeated under the lock to order against revocation.
-    let known: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM agents WHERE id=? AND credential_hash=? AND revoked=0",
-    )
-    .bind(&report.agent_id)
-    .bind(hash(credential))
-    .fetch_one(&state.0.db)
-    .await?;
-    if known != 1 {
+    let known: Option<(String, bool)> =
+        sqlx::query_as("SELECT credential_hash,revoked FROM agents WHERE id=?")
+            .bind(&report.agent_id)
+            .fetch_optional(&state.0.db)
+            .await?;
+    if known
+        .as_ref()
+        .is_none_or(|(expected, _)| expected != &hash(credential))
+    {
         state.0.report_denied.hit(&client.0, now());
         return Err(ApiError::unauthorized());
+    }
+    if known.is_some_and(|(_, revoked)| revoked) {
+        return Err(ApiError::agent_revoked());
     }
     // Keyed by the authenticated identity only: a valid credential never meets a shared ceiling.
     limited(state.0.report_limit.check(&report.agent_id, now()))?;
     state.0.report_limit.hit(&report.agent_id, now());
     let _guard = state.0.writes.lock().await;
-    let exists: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM agents WHERE id=? AND credential_hash=? AND revoked=0",
-    )
-    .bind(&report.agent_id)
-    .bind(hash(credential))
-    .fetch_one(&state.0.db)
-    .await?;
-    if exists != 1 {
-        return Err(ApiError::unauthorized());
+    let exists: Option<(String, bool)> =
+        sqlx::query_as("SELECT credential_hash,revoked FROM agents WHERE id=?")
+            .bind(&report.agent_id)
+            .fetch_optional(&state.0.db)
+            .await?;
+    match exists {
+        Some((expected, revoked)) if expected == hash(credential) => {
+            if revoked {
+                return Err(ApiError::agent_revoked());
+            }
+        }
+        _ => return Err(ApiError::unauthorized()),
     }
     if report.schema_version != SCHEMA_VERSION
         || Uuid::parse_str(&report.report_id).is_err()

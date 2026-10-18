@@ -1,0 +1,227 @@
+{
+  "date": "2026-10-18",
+  "commit": "21d1413",
+  "platform": "macOS (native)",
+  "production_sources_changed": true,
+  "tests": {
+    "agent": {
+      "passed": 39,
+      "failed": 0
+    },
+    "server_library": {
+      "passed": 57,
+      "failed": 0
+    },
+    "installer": {
+      "passed": 101,
+      "failed": 3,
+      "cause": "Native BSD sed does not match BRE alternation in updater outcome parser"
+    }
+  },
+  "reporting": {
+    "slow_collectors": {
+      "accepted_reports": 1,
+      "accepted_at_seconds": [
+        7.5
+      ],
+      "pending_samples": 3,
+      "agent_was_alive": true,
+      "stderr": "",
+      "exit_code": 0
+    },
+    "proxy_forbidden": {
+      "exit_code": 0,
+      "stderr": "Agent credential was revoked or rejected; request an identity-bound replacement from the administrator\n",
+      "request_count": 1
+    }
+  },
+  "server": {
+    "raw_docker_ports": {
+      "collected_ports_bytes": 698,
+      "status": 400,
+      "body": {
+        "code": "invalid_request",
+        "error": "Invalid containers"
+      }
+    },
+    "duplicate_monitor_settings": {
+      "targets": [
+        "tcp://127.0.0.1:1",
+        "tcp://127.0.0.1:2",
+        "tcp://127.0.0.1:1"
+      ],
+      "status": 400,
+      "body": {
+        "code": "invalid_request",
+        "error": "Invalid monitor results"
+      }
+    },
+    "clock_moves_back": {
+      "normal_report_accepted": true,
+      "live_cpu": 99.0,
+      "incoming_cpu": 10,
+      "live_collection_ahead_seconds": 240
+    }
+  },
+  "installer_harness": {
+    "hard_killed_installer": {
+      "returncode": 137,
+      "service_active": false,
+      "transaction_left": true,
+      "request_file_left": false,
+      "result": "status=failed\ncode=UNKNOWN\nat=1792324233\n"
+    },
+    "retry_with_orphaned_lock": {
+      "returncode": 0,
+      "request_deleted": true,
+      "service_active": false,
+      "lock_retained": true,
+      "stderr": "hope-agent-update: another update is already running\n"
+    }
+  },
+  "pure_server_observations": [
+    "disk_alerts_before=1 problems_after_storage_timeout=0",
+    "container_cpu_aggregate=80 expected_mean=50"
+  ],
+  "baseline_sources_changed": false,
+  "implementation_follow_up": {
+    "state": "local working tree; not deployed",
+    "reporting": {
+      "slow_collectors": {
+        "accepted_reports": 4,
+        "accepted_at_seconds": [
+          7.91,
+          19.71,
+          31.24,
+          43.15
+        ],
+        "pending_samples": 0,
+        "agent_was_alive": true,
+        "stderr": "",
+        "exit_code": 0
+      },
+      "proxy_forbidden": {
+        "agent_remained_alive": true,
+        "exit_code_after_shutdown": 0,
+        "stderr": "",
+        "request_count": 1
+      }
+    },
+    "server": {
+      "raw_docker_ports": {
+        "collected_ports_bytes": 698,
+        "status": 200,
+        "body": {
+          "accepted": true,
+          "duplicate": false,
+          "report_interval_seconds": 10,
+          "update_to": null
+        }
+      },
+      "duplicate_monitor_settings": {
+        "targets": [
+          "tcp://127.0.0.1:1",
+          "tcp://127.0.0.1:2"
+        ],
+        "status": 200,
+        "body": {
+          "accepted": true,
+          "duplicate": false,
+          "report_interval_seconds": 10,
+          "update_to": null
+        }
+      },
+      "clock_moves_back": {
+        "normal_report_accepted": true,
+        "live_cpu": 99.0,
+        "incoming_cpu": 10,
+        "live_collection_ahead_seconds": 240
+      }
+    },
+    "tests": {
+      "workspace_rust": {
+        "passed": 182,
+        "failed": 0,
+        "ignored": 1
+      },
+      "installer_full_suite": {
+        "passed": 106,
+        "failed": 0
+      },
+      "installer_additional_regressions": {
+        "passed": 2,
+        "failed": 0
+      },
+      "documentation": {
+        "passed": 8,
+        "failed": 0
+      },
+      "clippy_all_targets_all_features_deny_warnings": "passed",
+      "formatting": "passed",
+      "protocol_exports": "passed",
+      "shell_syntax": "passed",
+      "linux_cpu_module_metadata_check": "passed: x86_64-unknown-linux-musl",
+      "complete_linux_build": "not completed: no musl C toolchain",
+      "real_linux_service_manager_gate": "not run: local Docker executable unavailable",
+      "shellcheck": "not run: unavailable"
+    },
+    "remaining": [
+      "Server future-timestamp live-state ordering remains reproducible",
+      "Real Linux/systemd and LXC CPU load and updater recovery validation",
+      "Existing pinned updaters require administrative same-version upgrade repair",
+      "Monitoring coverage gaps and other inefficiencies remain documented",
+      "Crates researched but no new dependency adopted"
+    ]
+  },
+  "hosted_inspection": {
+    "date": "2026-10-18",
+    "mode": "read-only authenticated UI",
+    "displayed_time_approximate": "13:33-13:36",
+    "agent_count": 6,
+    "reporting_count": 6,
+    "agent_versions": [
+      "0.1.45"
+    ],
+    "report_interval_seconds": 10,
+    "cpu_transition": {
+      "host": "catacomb",
+      "before_local_time": "2026-10-18 00:50",
+      "before_percent_rounded": 58,
+      "after_local_time": "2026-10-18 01:12",
+      "after_percent_rounded": 0,
+      "historical_version_and_journal": "not available in inspected UI"
+    },
+    "additional_findings": [
+      {
+        "host": "dockge",
+        "kind": "memory_scope",
+        "summary_percent_approximate": 9,
+        "total_gib_approximate": 5.4,
+        "chart_used_excluding_arc_gib": 0.0,
+        "chart_arc_gib_observed_range": [
+          0.99,
+          1.46
+        ],
+        "local_fix": "omit global ZFS ARC in detected containers",
+        "guest_proc_virtualization": "inferred; host files not read"
+      },
+      {
+        "host": "dockge",
+        "kind": "guest_root_storage_exclusion",
+        "root_percent_rounded": 56,
+        "summary_percent_rounded": 4,
+        "local_fix": "root mount is never classified as an external guest volume, in Rust and TypeScript"
+      }
+    ],
+    "external_state_changed": false,
+    "local_fix_verification": {
+      "workspace_rust_passed": 182,
+      "workspace_rust_ignored": 1,
+      "clippy_warnings_denied": "passed",
+      "frontend_typecheck": "passed",
+      "fleet_tests_passed": 14,
+      "notification_regression": "guest-named ZFS root opens alert, unknown does not resolve, healthy resolves",
+      "linux_lxc_arc_runtime_check": "outstanding"
+    }
+  }
+}

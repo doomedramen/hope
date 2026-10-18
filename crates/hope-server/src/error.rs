@@ -14,6 +14,9 @@ impl ApiError {
     pub fn unauthorized() -> Self {
         Self(StatusCode::UNAUTHORIZED, "Authentication required".into())
     }
+    pub fn agent_revoked() -> Self {
+        Self(StatusCode::UNAUTHORIZED, "Agent credential revoked".into())
+    }
     pub fn not_found() -> Self {
         Self(StatusCode::NOT_FOUND, "Not found".into())
     }
@@ -22,6 +25,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let code = match self.0 {
             StatusCode::BAD_REQUEST => "invalid_request",
+            StatusCode::UNAUTHORIZED if self.1 == "Agent credential revoked" => "agent_revoked",
             StatusCode::UNAUTHORIZED => "authentication_required",
             StatusCode::FORBIDDEN => "forbidden",
             StatusCode::NOT_FOUND => "not_found",

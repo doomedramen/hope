@@ -1,5 +1,5 @@
 use anyhow::Result;
-use hope_protocol::{AgentReport, ReportResponse};
+use hope_protocol::{AgentReport, ErrorResponse, ReportResponse};
 use reqwest::{Client, StatusCode};
 use std::{
     collections::VecDeque,
@@ -127,7 +127,13 @@ pub async fn send(
             if response.status() == StatusCode::UNAUTHORIZED
                 || response.status() == StatusCode::FORBIDDEN =>
         {
-            Outcome::Revoked
+            // A proxy's denial (or an older server's generic authentication error)
+            // must not permanently stop the service. Only an explicit server
+            // revocation response is terminal.
+            match bounded_json::<ErrorResponse>(response).await {
+                Ok(error) if error.code == "agent_revoked" => Outcome::Revoked,
+                _ => Outcome::Retry(None),
+            }
         }
         Ok(response)
             if response.status() == StatusCode::TOO_MANY_REQUESTS
