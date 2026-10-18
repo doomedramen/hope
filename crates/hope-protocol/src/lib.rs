@@ -462,8 +462,28 @@ pub struct Container {
     pub pids: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UptimeScope {
+    System,
+    /// Kernel counters visible inside a container; these may describe its host.
+    ContainerKernel,
+}
+
+/// Latest observed boot metadata, never an average across different boots.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SystemUptime {
+    pub seconds: f64,
+    pub boot_time: Option<f64>,
+    /// Linux boot UUID, when readable. A container may share its host's UUID.
+    pub boot_id: Option<String>,
+    pub scope: UptimeScope,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, Default)]
 pub struct Metrics {
+    #[serde(default)]
+    pub system_uptime: Option<SystemUptime>,
     pub cpu_percent: Option<f64>,
     pub memory_used_bytes: Option<f64>,
     pub memory_total_bytes: Option<f64>,
@@ -893,6 +913,8 @@ pub fn typescript() -> String {
         ServiceSummary::decl(),
         MonitorResult::decl(),
         Container::decl(),
+        UptimeScope::decl(),
+        SystemUptime::decl(),
         Metrics::decl(),
         AgentReport::decl(),
         EnrollmentRequest::decl(),
@@ -928,6 +950,34 @@ pub fn typescript() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn uptime_is_optional_for_old_agents_and_rejects_invalid_boot_observations() {
+        let old: Metrics = serde_json::from_str(
+            r#"{"cpu_percent":null,"memory_used_bytes":null,"memory_total_bytes":null,"network_rx_bytes_per_second":null,"network_tx_bytes_per_second":null,"disk_read_bytes_per_second":null,"disk_write_bytes_per_second":null,"disks":[],"gpus":[]}"#,
+        ).expect("old agent metrics");
+        assert!(old.system_uptime.is_none());
+        assert!(validation::metrics(&old).is_ok());
+        let mut metrics = Metrics {
+            system_uptime: Some(SystemUptime {
+                seconds: 100.0,
+                boot_time: None,
+                boot_id: Some("28046bda-bbbf-4101-9455-8a7818f0969b".into()),
+                scope: UptimeScope::System,
+            }),
+            ..Default::default()
+        };
+        assert!(validation::metrics(&metrics).is_ok());
+        for invalid in [f64::NAN, f64::INFINITY, -1.0, 1e13] {
+            metrics.system_uptime.as_mut().unwrap().seconds = invalid;
+            assert!(validation::metrics(&metrics).is_err());
+        }
+        metrics.system_uptime.as_mut().unwrap().seconds = 1.0;
+        metrics.system_uptime.as_mut().unwrap().boot_id = Some("invalid".into());
+        assert!(validation::metrics(&metrics).is_err());
+        metrics.system_uptime.as_mut().unwrap().boot_id = None;
+        metrics.system_uptime.as_mut().unwrap().boot_time = Some(-1.0);
+        assert!(validation::metrics(&metrics).is_err());
+    }
     #[test]
     fn ssh_request_debug_redacts_credentials() {
         let request = SshInstallRequest {

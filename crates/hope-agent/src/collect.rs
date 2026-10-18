@@ -528,7 +528,11 @@ impl Collector {
             vec![]
         };
         self.cost("monitors", started);
+        let started = Instant::now();
+        let system_uptime = crate::uptime::sample(guest_cpu).await;
+        self.cost("uptime", started);
         let mut collectors = vec![
+            status("uptime", system_uptime.is_some(), Some("System uptime is unavailable")),
             CollectorStatus {
                 name: "cpu".into(),
                 available: cpu_percent.is_some(),
@@ -633,6 +637,7 @@ impl Collector {
             collectors: collectors.clone(),
         };
         let mut metrics = Metrics {
+            system_uptime,
             cpu_percent,
             memory_used_bytes: Some(self.system.used_memory() as f64),
             memory_total_bytes: Some(self.system.total_memory() as f64),

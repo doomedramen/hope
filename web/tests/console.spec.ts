@@ -42,6 +42,12 @@ async function expectMapFits(page: import("@playwright/test").Page) {
 
 function extended(sample: number) {
   return {
+    system_uptime: {
+      seconds: 172800 + sample * 60,
+      boot_time: 1700000000,
+      boot_id: "28046bda-bbbf-4101-9455-8a7818f0969b",
+      scope: "system",
+    },
     memory_cached_bytes: 6e9,
     memory_zfs_arc_bytes: 4e9,
     swap_used_bytes: 1e8,
@@ -312,6 +318,18 @@ test.describe.serial("H.O.P.E console", () => {
     const hostDetails = page.getByRole("complementary", {
       name: "Host details",
     });
+    await expect(hostDetails).toContainText("System uptime");
+    await expect(hostDetails).toContainText("2d 0h · at last sample");
+    await expect(hostDetails).toContainText(
+      "28046bda-bbbf-4101-9455-8a7818f0969b",
+    );
+    await expect(
+      hostDetails.locator('time[datetime="2023-11-14T22:13:20.000Z"]'),
+    ).toBeVisible();
+    await hostDetails
+      .getByRole("heading", { name: "Hardware", exact: true })
+      .locator("..")
+      .screenshot({ path: "test-results/host-uptime.png" });
     await hostDetails.getByRole("tab", { name: "Containers" }).click();
     await expect(
       page.getByRole("heading", { name: "Docker containers" }),
@@ -481,13 +499,19 @@ test.describe.serial("H.O.P.E console", () => {
       }
       return route.continue();
     });
+    // Hover waits for the measured/fitted node to be stable and receive events.
+    // Raw mouse coordinates captured during first layout can hit another node.
+    await node.hover();
     const bounds = await node.boundingBox();
     expect(bounds).not.toBeNull();
-    await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + 20);
     await page.mouse.down();
-    await page.mouse.move(bounds!.x + bounds!.width / 2 + 40, bounds!.y + 50, {
-      steps: 5,
-    });
+    await page.mouse.move(
+      bounds!.x + bounds!.width / 2 + 40,
+      bounds!.y + bounds!.height / 2 + 30,
+      {
+        steps: 5,
+      },
+    );
     await page.mouse.up();
     await expect(
       page.getByRole("button", { name: "Retry 1 unsaved map change" }),
@@ -581,6 +605,69 @@ test.describe.serial("H.O.P.E console", () => {
     });
     await page.getByRole("button", { name: "7d", exact: true }).click();
     await expect(page.getByTestId("chart-Container CPU")).toBeVisible();
+  });
+
+  test("boot information retains observed uptime during outages and labels container scope", async ({
+    page,
+    request,
+  }) => {
+    const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+    const host = bootstrap.hosts.find(
+      (item: { name: string }) => item.name === "atlas-nas",
+    );
+    let legacy = false;
+    await page.route("**/api/v1/bootstrap", (route) => {
+      const metrics = { ...host.metrics };
+      if (legacy) delete metrics.system_uptime;
+      else
+        metrics.system_uptime = {
+          ...metrics.system_uptime,
+          seconds: 86460,
+          scope: "container_kernel",
+        };
+      return route.fulfill({
+        json: {
+          ...bootstrap,
+          hosts: bootstrap.hosts.map((item: { id: string }) =>
+            item.id === host.id
+              ? { ...host, metrics, last_report: Date.now() / 1000 - 3600 }
+              : item,
+          ),
+        },
+      });
+    });
+    await page.clock.install();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`/?view=host&host=${host.id}`);
+    const details = page.getByRole("complementary", { name: "Host details" });
+    await expect(details).toContainText("Kernel uptime");
+    await expect(details).toContainText("1d 0h · at last sample");
+    await expect(details).toContainText(
+      "Kernel visible to this container; may describe the host.",
+    );
+    await page.clock.runFor(120000);
+    await expect(details).toContainText("1d 0h · at last sample");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => document.documentElement.scrollWidth <= window.innerWidth,
+        ),
+      )
+      .toBe(true);
+    await details
+      .getByRole("heading", { name: "Hardware", exact: true })
+      .locator("..")
+      .screenshot({ path: "test-results/host-uptime-mobile.png" });
+    legacy = true;
+    await page.reload();
+    await expect(details).toContainText("System uptime");
+    await expect(
+      details
+        .locator("dt")
+        .filter({ hasText: /^System uptime$/ })
+        .locator("+ dd"),
+    ).toHaveText("Unavailable");
+    await expect(details.getByText("Boot ID", { exact: true })).toHaveCount(0);
   });
 
   test("history advances during a reporting outage and unavailable GPUs remain selectable", async ({

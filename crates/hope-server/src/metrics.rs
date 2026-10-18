@@ -469,6 +469,29 @@ async fn retain_at(state: &State, reference: f64) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn uptime_preserves_the_latest_boot_instead_of_averaging_across_a_reboot() {
+        let sample = |seconds, id: &str| Metrics {
+            system_uptime: Some(hope_protocol::SystemUptime {
+                seconds,
+                boot_time: None,
+                boot_id: Some(id.into()),
+                scope: hope_protocol::UptimeScope::System,
+            }),
+            ..Default::default()
+        };
+        let before = sample(100_000.0, "old boot");
+        let after = sample(10.0, "new boot");
+        let aggregated = aggregate(&[before, after]);
+        let uptime = aggregated.system_uptime.as_ref().expect("latest boot");
+        assert_eq!(uptime.seconds, 10.0);
+        assert_eq!(uptime.boot_id.as_deref(), Some("new boot"));
+        assert!(
+            aggregate(&[aggregated, Metrics::default()])
+                .system_uptime
+                .is_none()
+        );
+    }
+    #[test]
     fn container_gauges_average_by_id_with_missing_samples_and_counter_totals_preserved() {
         let container = |id: &str, cpu, received| {
             serde_json::from_value(serde_json::json!({

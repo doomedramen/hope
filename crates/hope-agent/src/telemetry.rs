@@ -86,6 +86,7 @@ pub fn isolate(
     group!(pools, "storage_pools");
     group!(temperatures, "temperatures");
     group!(network_interfaces, "network");
+    group!(system_uptime, "uptime");
 
     let mut services = Metrics {
         services: std::mem::take(&mut metrics.services),
@@ -192,6 +193,12 @@ mod tests {
         };
         let mut metrics = Metrics {
             cpu_percent: Some(42.0),
+            system_uptime: Some(hope_protocol::SystemUptime {
+                seconds: -1.0,
+                boot_time: None,
+                boot_id: None,
+                scope: hope_protocol::UptimeScope::System,
+            }),
             memory_total_bytes: Some(100.0),
             memory_used_bytes: Some(50.0),
             disks: vec![Disk {
@@ -216,6 +223,7 @@ mod tests {
         isolate(&mut inventory, &mut metrics, &mut collectors);
         assert!(validation::metrics(&metrics).is_ok());
         assert_eq!(metrics.cpu_percent, Some(42.0));
+        assert!(metrics.system_uptime.is_none());
         assert_eq!(metrics.memory_used_bytes, Some(50.0));
         assert_eq!(metrics.disks.len(), 1);
         assert!(metrics.gpus.is_empty());
@@ -223,6 +231,11 @@ mod tests {
             collectors
                 .iter()
                 .any(|status| status.name == "gpu_metrics" && !status.available)
+        );
+        assert!(
+            collectors
+                .iter()
+                .any(|status| status.name == "uptime" && !status.available)
         );
     }
 }

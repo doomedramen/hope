@@ -6,6 +6,7 @@ import {
 } from "../lib/history";
 import type { Metrics, MetricPoint } from "../lib/protocol";
 const metrics: Metrics = {
+  system_uptime: null,
   cpu_percent: 20,
   memory_used_bytes: null,
   memory_total_bytes: 100,

@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 ts-rs = { version = "11", features = ["serde-compat"] }

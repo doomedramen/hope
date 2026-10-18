@@ -127,8 +127,9 @@
     {
       "path": "crates/hope-agent/src/config.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Full source read, including private durable writes, exclusive lock, TLS/origin validation and credential-preserving rollback. Existing agent unit/integration tests and workspace Clippy passed. Durable-write frequency remains queued."
     },
     {
       "path": "crates/hope-agent/src/cpu.rs",
@@ -152,8 +153,9 @@
     {
       "path": "crates/hope-agent/src/main.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Full CLI/enrollment/run entrypoint read; identity/credential/CA/rollback and bounded restore traced. Agent integration tests and workspace checks passed. Collection construction before enrollment/locking remains a cost follow-up; full Linux service gate unavailable."
     },
     {
       "path": "crates/hope-agent/src/reporting.rs",
@@ -165,8 +167,9 @@
     {
       "path": "crates/hope-agent/src/status.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Full status CLI and acceptance verification read. Identity, activation, current process and finite timestamps checked by existing regressions; workspace tests/Clippy passed."
     },
     {
       "path": "crates/hope-agent/src/telemetry.rs",
@@ -797,8 +800,9 @@
     {
       "path": "tests/installer/test_server_installer.py",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in_progress",
+      "pass_2": "pending",
+      "evidence": "Linux platform/userland prerequisite checked after native failures. Eleven Linux-only cases now skip explicitly off Linux; independent wrapper contract still passes. Full fixture/release signing review and actual Linux run pending."
     },
     {
       "path": "tests/release/test_assemble.py",
@@ -1272,6 +1276,13 @@
       "kind": "source/config/docs",
       "pass_1": "pending",
       "pass_2": "pending"
+    },
+    {
+      "path": "crates/hope-agent/src/uptime.rs",
+      "kind": "source/config/docs",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Existing sysinfo API/source checked, Linux boot UUID read bounded and validated; zero/unavailable and container kernel scope covered. Native inspect, workspace tests/Clippy and 47 browser tests passed. Linux execution not validated locally."
     }
   ],
   "milestones": [
@@ -1291,7 +1302,28 @@
     },
     {
       "subject": "Frontend denied-storage theme, native header normalization, proxy errors and isolated chart samples",
-      "verification": "46 browser/pure tests, frontend build/typecheck/lint/format; sample-marker screenshot inspected."
+      "verification": "46 browser/pure tests and frontend build/typecheck/format passed; final lint callback-name failure corrected in 034be2d, then lint/typecheck/format rerun successfully.",
+      "commit": "7bb83b8",
+      "follow_up_commit": "034be2d"
+    },
+    {
+      "commit": "f30060c",
+      "subject": "Cache offline spool byte lengths, preserve legacy arrays and bound eviction cost",
+      "verification": "48 agent tests and workspace Clippy passed; local debug delivery group 6.69 seconds before, 0.38 seconds after with an added regression. Not a production benchmark."
+    },
+    {
+      "commit": "d1b7a3b",
+      "subject": "Durable cooldown precedes exclusive updater request creation",
+      "verification": "49 agent tests and workspace Clippy passed. Actual systemd interruption unverified."
+    },
+    {
+      "commit": "7dcf10b",
+      "subject": "Linux userland prerequisite for server installer fixtures",
+      "verification": "Original native suite: 125 passed, 11 Linux-specific failures. Server subset after guard: independent wrapper test passed, 11 explicitly skipped."
+    },
+    {
+      "subject": "Observed OS uptime, boot time and Linux boot UUID with container scope and latest-boot history semantics",
+      "verification": "191 Rust tests passed, one retention test ignored; Clippy, protocol generation, frontend build/types/lint/format, 8 docs tests and 47 browser/pure tests passed. Native collector inspection and desktop/mobile rendering checked; actual Linux execution unverified."
     }
   ]
 }

@@ -7,6 +7,7 @@ mod reporting;
 mod status;
 mod telemetry;
 mod updates;
+mod uptime;
 
 /// The agent's version: the build version CI compiles in (`HOPE_BUILD_VERSION`, for example
 /// 0.1.57), or the crate version for local builds. `--version` prints it, the installer compares it

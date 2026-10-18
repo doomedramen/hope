@@ -23,7 +23,7 @@ The following fixes are implemented locally. The numbered findings later in this
 | Blocking filesystem fallback | Root `statvfs` now runs in the existing bounded disk worker. Other synchronous refreshes and per-collector timing issues remain. |
 | Update retry-state race | The agent durably saves the cooldown before creating the updater wakeup file. A failed cooldown write leaves no request; request creation is exclusive to avoid following/replacing a late file. A regression covers failed persistence followed by repair, and existing rollback/retry tests pass. This closes an additional restart race found during the repository review; it does not verify a real systemd interruption. |
 
-No dependencies or wire schema fields were added. The coverage gaps, remaining inefficiencies and richer update-attempt telemetry described below are still open. Container-history aggregation and charts were subsequently implemented during the [two-pass repository review](repository-review-2026-10-18.md); the baseline finding below is retained for context. The [crate evaluation](agent-crates-2026-10-18.md) remains a research shortlist; no shortlisted crate has been introduced by these fixes.
+The initial reliability fixes added no dependencies or wire schema fields. Subsequent repository-review work adds optional boot metadata using existing sysinfo/UUID crates. Remaining coverage gaps, inefficiencies and richer update-attempt telemetry are tracked below and in the review ledger. Container-history aggregation and charts were subsequently implemented during the [two-pass repository review](repository-review-2026-10-18.md); the baseline finding below is retained for context. The [crate evaluation](agent-crates-2026-10-18.md) remains a research shortlist; no shortlisted crate has been introduced by these fixes.
 
 Follow-up verification:
 
@@ -204,7 +204,7 @@ The current protocol already covers aggregate CPU, load, RAM/swap/cache/ARC, fil
 
 | Priority | Missing or incomplete reporting | Operational consequence |
 | --- | --- | --- |
-| First | Boot ID, host uptime, boot time, reboot reason/event | Cannot distinguish reboot from network outage or a restarted agent. The existing “uptime monitoring” feature checks availability, not OS uptime. |
+| First | Reboot reason/event; boot ID, uptime and boot time were subsequently added during the repository review | Boot metadata is now visible, with container kernel scope and unavailable values for old agents. Automatic reboot events/reasons and agent process uptime remain open. The separate “uptime monitoring” feature checks availability. |
 | First | Agent self-health: queue age/depth/drops, last attempt/error/status, report sequence, collector duration/freshness, collection overrun | Cannot remotely distinguish collection starvation, transport failure, validation rejection and data loss. `costs` are only emitted by benchmark mode. |
 | First | CPU user/system/iowait/steal, per-core usage, throttling and effective allocation, metric scope/source | Cannot explain a saturated guest, blocked I/O, throttling or a single hot core; aggregate CPU currently mixes scopes. |
 | First | Filesystem inode usage, read-only state; SMART/NVMe health; RAID and detailed ZFS errors/scrub/resilver state | A machine can run out of inodes or lose a drive while byte-capacity charts look normal. Pool health alone does not explain the fault. |

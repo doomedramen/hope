@@ -18,6 +18,7 @@ import type { Host, Metrics } from "../lib/protocol";
 
 const now = 1_700_000_000;
 const metrics: Metrics = {
+  system_uptime: null,
   cpu_percent: 20,
   memory_used_bytes: 4e9,
   memory_total_bytes: 8e9,

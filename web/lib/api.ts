@@ -63,6 +63,21 @@ export function age(
           ? `${Math.floor(seconds / 3600)}h ago`
           : `${Math.floor(seconds / 86400)}d ago`;
 }
+/** Observed uptime, without advancing stale reports using the browser clock. */
+export function uptimeDuration(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value < 0)
+    return "Unavailable";
+  const seconds = Math.floor(value);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  return hours >= 24
+    ? `${Math.floor(hours / 24)}d ${hours % 24}h`
+    : hours > 0
+      ? `${hours}h ${minutes % 60}m`
+      : minutes > 0
+        ? `${minutes}m`
+        : `${seconds}s`;
+}
 export function percentage(value: number | null | undefined) {
   return value == null || !Number.isFinite(value)
     ? "—"

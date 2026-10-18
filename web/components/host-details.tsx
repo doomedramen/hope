@@ -61,7 +61,15 @@ import {
   useHistory,
   type HistoryWindow,
 } from "@/components/metric-history";
-import { bytes, percent0, percentage, post, put, rate } from "@/lib/api";
+import {
+  bytes,
+  percent0,
+  percentage,
+  post,
+  put,
+  rate,
+  uptimeDuration,
+} from "@/lib/api";
 import {
   DEVICE_KINDS,
   confidenceLabel,
@@ -363,6 +371,53 @@ export function HostDetails({
                   </dd>
                   <dt>Memory</dt>
                   <dd>{bytes(inventory.memory_total_bytes)}</dd>
+                  <dt>
+                    {host.metrics?.system_uptime?.scope === "container_kernel"
+                      ? "Kernel uptime"
+                      : "System uptime"}
+                  </dt>
+                  <dd>
+                    {uptimeDuration(host.metrics?.system_uptime?.seconds)}
+                    {host.metrics?.system_uptime && (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · at last sample
+                      </span>
+                    )}
+                  </dd>
+                  {host.metrics?.system_uptime?.boot_time != null && (
+                    <>
+                      <dt>Booted</dt>
+                      <dd>
+                        <time
+                          dateTime={new Date(
+                            host.metrics.system_uptime.boot_time * 1000,
+                          ).toISOString()}
+                        >
+                          {new Date(
+                            host.metrics.system_uptime.boot_time * 1000,
+                          ).toLocaleString()}
+                        </time>
+                      </dd>
+                    </>
+                  )}
+                  {host.metrics?.system_uptime?.boot_id && (
+                    <>
+                      <dt>Boot ID</dt>
+                      <dd className="mono break-all">
+                        {host.metrics.system_uptime.boot_id}
+                      </dd>
+                    </>
+                  )}
+                  {host.metrics?.system_uptime?.scope ===
+                    "container_kernel" && (
+                    <>
+                      <dt>Uptime scope</dt>
+                      <dd>
+                        Kernel visible to this container; may describe the host.
+                      </dd>
+                    </>
+                  )}
                 </dl>
               ) : (
                 <dl className="detail-list">

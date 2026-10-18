@@ -203,6 +203,16 @@ fn extended(value: &Metrics) -> Result<(), &'static str> {
     Ok(())
 }
 pub fn metrics(value: &Metrics) -> Result<(), &'static str> {
+    if let Some(uptime) = &value.system_uptime
+        && (!number(uptime.seconds, 1e12)
+            || !optional(uptime.boot_time, 1e12)
+            || uptime
+                .boot_id
+                .as_ref()
+                .is_some_and(|id| id.len() != 36 || uuid::Uuid::parse_str(id).is_err()))
+    {
+        return Err("Invalid system uptime");
+    }
     extended(value)?;
     if value.network_interfaces.len() > 128
         || value.network_interfaces.iter().any(|i| {
