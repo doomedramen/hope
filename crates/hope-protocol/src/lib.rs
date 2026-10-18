@@ -472,6 +472,8 @@ pub struct Container {
     #[serde(default)]
     pub cpu_percent: Option<f64>,
     #[serde(default)]
+    pub cpu_capacity_cores: Option<f64>,
+    #[serde(default)]
     pub memory_used_bytes: Option<f64>,
     #[serde(default)]
     pub memory_limit_bytes: Option<f64>,
@@ -500,6 +502,8 @@ pub struct ContainerNetwork {
     pub ipv6: Option<String>,
     #[serde(default)]
     pub mac: Option<String>,
+    #[serde(default)]
+    pub gateway: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -585,6 +589,12 @@ pub struct ChildDeviceReport {
     pub name: String,
     pub lifecycle: DeviceLifecycle,
     #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub health: Option<String>,
+    #[serde(default)]
+    pub restart_count: Option<u32>,
+    #[serde(default)]
     pub parent_key: Option<String>,
     #[serde(default)]
     pub node: Option<String>,
@@ -602,6 +612,8 @@ pub struct ChildDeviceReport {
     pub compose_project: Option<String>,
     #[serde(default)]
     pub compose_service: Option<String>,
+    #[serde(default)]
+    pub published_ports: Vec<ContainerPort>,
     #[serde(default)]
     pub metrics: ChildMetrics,
 }

@@ -33,6 +33,7 @@ mod tests {
                 published_ports: vec![],
                 restart_count: None,
                 cpu_percent: Some(1.5),
+                cpu_capacity_cores: None,
                 memory_used_bytes: Some(10.0),
                 memory_limit_bytes: Some(100.0),
                 memory_percent: Some(10.0),

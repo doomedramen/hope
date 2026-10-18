@@ -163,6 +163,9 @@ fn child_device() -> ChildDeviceReport {
         },
         name: "web".into(),
         lifecycle: DeviceLifecycle::Running,
+        status: Some("Up".into()),
+        health: Some("healthy".into()),
+        restart_count: Some(0),
         parent_key: None,
         node: None,
         tags: vec![],
@@ -177,6 +180,7 @@ fn child_device() -> ChildDeviceReport {
         image: Some("nginx:latest".into()),
         compose_project: Some("stack".into()),
         compose_service: Some("web".into()),
+        published_ports: vec![],
         metrics: ChildMetrics {
             cpu_percent: Some(15.0),
             cpu_capacity_cores: Some(2.0),

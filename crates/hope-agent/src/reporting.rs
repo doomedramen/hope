@@ -1,11 +1,15 @@
 use crate::{
+    child_delivery::{self, Outcome as ChildOutcome},
     collect,
     config::{self, Config},
     delivery::{self, Outcome, Spool},
     now,
 };
 use anyhow::{Context, Result};
-use hope_protocol::{AgentReport, CollectorStatus, Inventory, Metrics, SCHEMA_VERSION};
+use hope_protocol::{
+    AgentReport, ChildReportBatch, ChildSourceKind, CollectorStatus, Inventory, Metrics,
+    SCHEMA_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use std::{future::Future, path::Path, pin::Pin, time::Duration};
 use tokio::{
@@ -18,10 +22,16 @@ pub type Sample = (Inventory, Metrics, Vec<CollectorStatus>);
 pub type Sampling<'a> = Pin<Box<dyn Future<Output = Sample> + 'a>>;
 pub trait Sampler {
     fn sample(&mut self) -> Sampling<'_>;
+    fn child_snapshot(&self) -> Option<collect::ChildSnapshot> {
+        None
+    }
 }
 impl Sampler for collect::Collector {
     fn sample(&mut self) -> Sampling<'_> {
         Box::pin(self.sample())
+    }
+    fn child_snapshot(&self) -> Option<collect::ChildSnapshot> {
+        collect::Collector::child_snapshot(self)
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -58,7 +68,109 @@ impl InventoryDelivery {
         Ok(())
     }
 }
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ChildCounters {
+    sequence: u64,
+    generation: u64,
+    #[serde(default)]
+    last_inventory_at: f64,
+    #[serde(default)]
+    last_report_at: f64,
+}
+impl Default for ChildCounters {
+    fn default() -> Self {
+        Self {
+            sequence: 0,
+            generation: 0,
+            last_inventory_at: 0.0,
+            last_report_at: 0.0,
+        }
+    }
+}
+struct ChildSchedule {
+    counters: ChildCounters,
+    disabled: bool,
+}
+impl ChildSchedule {
+    async fn load(dir: &Path) -> Self {
+        let path = dir.join("child-sequence.json");
+        match tokio::fs::try_exists(&path).await {
+            Ok(false) => Self {
+                counters: ChildCounters::default(),
+                disabled: false,
+            },
+            Ok(true) => match config::read_bounded(&path, 4096).await.and_then(|bytes| {
+                serde_json::from_slice::<ChildCounters>(&bytes).map_err(Into::into)
+            }) {
+                Ok(counters)
+                    if counters.last_inventory_at.is_finite()
+                        && counters.sequence <= i64::MAX as u64
+                        && counters.generation <= i64::MAX as u64 =>
+                {
+                    Self {
+                        counters,
+                        disabled: false,
+                    }
+                }
+                _ => {
+                    eprintln!(
+                        "Child reporting disabled: its sequence state is unreadable; core reporting continues"
+                    );
+                    Self {
+                        counters: ChildCounters::default(),
+                        disabled: true,
+                    }
+                }
+            },
+            Err(error) => {
+                eprintln!("Child reporting disabled: cannot inspect its sequence state: {error}");
+                Self {
+                    counters: ChildCounters::default(),
+                    disabled: true,
+                }
+            }
+        }
+    }
+    fn batch(
+        &mut self,
+        snapshot: collect::ChildSnapshot,
+        agent_id: &str,
+        at: f64,
+    ) -> Option<ChildReportBatch> {
+        if self.disabled {
+            return None;
+        }
+        let mut next = self.counters.clone();
+        if next.last_report_at > 0.0 && at - next.last_report_at < 30.0 {
+            return None;
+        }
+        next.sequence = next.sequence.checked_add(1)?;
+        let inventory_due = next.last_inventory_at == 0.0 || at - next.last_inventory_at >= 60.0;
+        if inventory_due {
+            next.generation = next.generation.checked_add(1)?;
+            next.last_inventory_at = at;
+        }
+        let complete = inventory_due && snapshot.inventory_complete;
+        next.last_report_at = at;
+        let batch = ChildReportBatch {
+            schema_version: SCHEMA_VERSION,
+            batch_id: Uuid::new_v4().to_string(),
+            agent_id: agent_id.into(),
+            source: ChildSourceKind::Docker,
+            source_scope: snapshot.source_scope,
+            sequence: next.sequence,
+            inventory_generation: next.generation,
+            complete,
+            observed_at: at,
+            devices: snapshot.devices,
+        };
+        self.counters = next;
+        Some(batch)
+    }
+}
 type Request = Pin<Box<dyn Future<Output = (AgentReport, Outcome)> + Send>>;
+type ChildRequest = Pin<Box<dyn Future<Output = (ChildReportBatch, ChildOutcome)> + Send>>;
 /// Collection is polled independently of delivery. A bounded channel allows only
 /// one completed sample to wait, and this actor remains the sole spool writer.
 const MIN_INTERVAL_SECONDS: u32 = 5;
@@ -76,7 +188,7 @@ fn jittered(period: Duration) -> Duration {
 
 async fn sample_loop<C: Sampler>(
     collector: &mut C,
-    sender: mpsc::Sender<(Sample, f64)>,
+    sender: mpsc::Sender<(Sample, f64, Option<collect::ChildSnapshot>)>,
     mut period: watch::Receiver<Duration>,
 ) {
     let mut next_sample = Instant::now();
@@ -92,7 +204,12 @@ async fn sample_loop<C: Sampler>(
         let tick = Instant::now();
         let sample = collector.sample().await;
         let collected_at = now();
-        if sender.send((sample, collected_at)).await.is_err() {
+        let child_snapshot = collector.child_snapshot();
+        if sender
+            .send((sample, collected_at, child_snapshot))
+            .await
+            .is_err()
+        {
             return;
         }
         let interval = jittered(*period.borrow_and_update());
@@ -121,6 +238,14 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
         .credential
         .clone()
         .context("Missing agent credential")?;
+    let child_queue_path = dir.join("child-spool.json");
+    let child_state_path = dir.join("child-sequence.json");
+    let child_bytes = config::read_bounded(&child_queue_path, child_delivery::MAX_BYTES)
+        .await
+        .unwrap_or_default();
+    let mut child_spool =
+        child_delivery::Spool::decode(&child_bytes, &configuration.agent_id, now());
+    let mut child_schedule = ChildSchedule::load(dir).await;
     let run_id = Uuid::new_v4().to_string();
     let activation_id = std::env::var("HOPE_ACTIVATION_ID").ok();
     if let Some(id) = &activation_id {
@@ -133,6 +258,9 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
     let mut current_reports = std::collections::HashSet::new();
     let mut retry_at = Instant::now();
     let mut inflight: Option<Request> = None;
+    let mut child_inflight: Option<ChildRequest> = None;
+    let mut child_retry_at = Instant::now();
+    let mut child_failures = 0u32;
     let mut inventory_delivery = InventoryDelivery::default();
     let mut first_report: Option<String> = None;
     let mut failures = 0u32;
@@ -141,13 +269,44 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
     loop {
         tokio::select! {
             biased;
-            _=&mut shutdown => { config::write_private(&dir.join("spool.json"),&spool.encode()?).await?; return Ok(()); }
+            _=&mut shutdown => {
+                config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
+                if let Ok(bytes) = child_spool.encode()
+                    && let Err(error) = config::write_private(&child_queue_path, &bytes).await
+                {
+                    eprintln!("Could not persist child reports during shutdown: {error}");
+                }
+                return Ok(());
+            }
             _=&mut sampling => { anyhow::bail!("Collector stopped unexpectedly"); }
-            Some(((inventory,metrics,mut collectors),collected_at))=samples.recv() => {
+            Some(((inventory,metrics,mut collectors),collected_at,child_snapshot))=samples.recv() => {
                 collectors.push(crate::updates::status(dir));
                 let changed=inventory_delivery.changed(&inventory,collected_at)?;
                 let mut report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),collected_at,inventory:changed.then_some(inventory),metrics,collectors };
                 crate::telemetry::bound_report(&mut report)?;
+                if let Some(snapshot) = child_snapshot
+                    && let Some(batch) = child_schedule.batch(snapshot, &configuration.agent_id, collected_at)
+                {
+                    if hope_protocol::validation::child_batch(&batch).is_ok() {
+                        match config::write_private(&child_state_path, &serde_json::to_vec(&child_schedule.counters)?).await {
+                            Ok(()) => {
+                                if let Err(error) = child_spool.push(batch, now()) {
+                                    eprintln!("Could not queue child report: {error:#}");
+                                } else if let Ok(bytes) = child_spool.encode()
+                                    && let Err(error) = config::write_private(&child_queue_path, &bytes).await
+                                {
+                                    eprintln!("Could not persist child reports: {error}");
+                                }
+                            }
+                            Err(error) => {
+                                child_schedule.disabled = true;
+                                eprintln!("Child reporting disabled: could not persist its sequence: {error}");
+                            }
+                        }
+                    } else {
+                        eprintln!("Dropped invalid local child inventory batch; core reporting continues");
+                    }
+                }
                 if first_report.is_none() { first_report=Some(report.report_id.clone()); }
                 current_reports.insert(report.report_id.clone());
                 spool.push(report,now())?;
@@ -178,6 +337,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                         config::save(dir, &disabled).await?;
                         // Queued telemetry is no longer deliverable. Do not retain it on disable.
                         config::write_private(&dir.join("spool.json"), b"[]").await?;
+                        let _ = config::write_private(&child_queue_path, b"[]").await;
                         return Err(delivery::Revoked.into());
                     }
                     Outcome::Invalid(status) => {
@@ -193,6 +353,46 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                     }
                 }
             }
+            result=async { child_inflight.as_mut().expect("guarded child request").await }, if child_inflight.is_some() => {
+                child_inflight = None;
+                let (batch, outcome) = result;
+                match outcome {
+                    ChildOutcome::Accepted => {
+                        child_spool.pop(&batch.batch_id);
+                        child_failures = 0;
+                        child_retry_at = Instant::now();
+                    }
+                    ChildOutcome::Revoked => {
+                        let mut disabled = configuration.clone();
+                        disabled.disabled = true;
+                        config::save(dir, &disabled).await?;
+                        config::write_private(&dir.join("spool.json"), b"[]").await?;
+                        let _ = config::write_private(&child_queue_path, b"[]").await;
+                        return Err(delivery::Revoked.into());
+                    }
+                    ChildOutcome::Invalid(status) => {
+                        child_spool.pop(&batch.batch_id);
+                        child_failures = 0;
+                        child_retry_at = Instant::now();
+                        eprintln!("Child report rejected ({status}); dropping invalid inventory batch");
+                    }
+                    ChildOutcome::Retry(after) => {
+                        child_failures = child_failures.saturating_add(1);
+                        child_retry_at = Instant::now() + after.unwrap_or_else(|| child_delivery::backoff(child_failures, rand::random()));
+                    }
+                }
+                if let Ok(bytes) = child_spool.encode()
+                    && let Err(error) = config::write_private(&child_queue_path, &bytes).await
+                {
+                    eprintln!("Could not persist child reports: {error}");
+                }
+            }
+            _=sleep_until(child_retry_at), if child_inflight.is_none() && !child_spool.is_empty() => {
+                child_spool.trim(now());
+                if let Some(batch) = child_spool.front().cloned() {
+                    child_inflight = Some(Box::pin(child_delivery::send(client.clone(), configuration.server.clone(), credential.clone(), batch)));
+                }
+            }
             _=sleep_until(retry_at), if inflight.is_none() && !spool.is_empty() => {
                 spool.trim(now());
                 if let Some(report)=spool.latest().cloned() {
@@ -206,6 +406,66 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn child_batches_keep_monotonic_sequences_and_separate_inventory_generations() {
+        let mut schedule = ChildSchedule {
+            counters: ChildCounters::default(),
+            disabled: false,
+        };
+        let snapshot = || collect::ChildSnapshot {
+            source_scope: "engine-id".into(),
+            devices: vec![],
+            inventory_complete: true,
+        };
+        let agent_id = Uuid::new_v4().to_string();
+        let first = schedule.batch(snapshot(), &agent_id, 100.0).unwrap();
+        assert!(schedule.batch(snapshot(), &agent_id, 115.0).is_none());
+        let second = schedule.batch(snapshot(), &agent_id, 130.0).unwrap();
+        let third = schedule.batch(snapshot(), &agent_id, 160.0).unwrap();
+        assert_eq!(
+            (first.sequence, first.inventory_generation, first.complete),
+            (1, 1, true)
+        );
+        assert_eq!(
+            (
+                second.sequence,
+                second.inventory_generation,
+                second.complete
+            ),
+            (2, 1, false)
+        );
+        assert_eq!(
+            (third.sequence, third.inventory_generation, third.complete),
+            (3, 2, true)
+        );
+        for batch in [first, second, third] {
+            hope_protocol::validation::child_batch(&batch).expect("valid batch");
+        }
+    }
+    #[test]
+    fn incomplete_collections_never_claim_authoritative_absence() {
+        let mut schedule = ChildSchedule {
+            counters: ChildCounters::default(),
+            disabled: false,
+        };
+        let snapshot = |inventory_complete| collect::ChildSnapshot {
+            source_scope: "engine-id".into(),
+            devices: vec![],
+            inventory_complete,
+        };
+        let first = schedule.batch(snapshot(false), "agent", 100.0).unwrap();
+        let next = schedule.batch(snapshot(false), "agent", 160.0).unwrap();
+        let complete = schedule.batch(snapshot(true), "agent", 220.0).unwrap();
+        assert!(!first.complete && !next.complete && complete.complete);
+        assert_eq!(
+            (
+                first.inventory_generation,
+                next.inventory_generation,
+                complete.inventory_generation
+            ),
+            (1, 2, 3)
+        );
+    }
     #[test]
     fn jitter_stays_within_a_fifteenth_of_the_interval() {
         for _ in 0..200 {
@@ -249,6 +509,45 @@ mod tests {
                     Metrics::default(),
                     vec![],
                 )
+            })
+        }
+    }
+    struct ChildFakeSampler {
+        count: usize,
+        stop_after_samples: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+    impl Sampler for ChildFakeSampler {
+        fn sample(&mut self) -> Sampling<'_> {
+            self.count += 1;
+            if self.count >= 6
+                && let Some(sender) = self.stop_after_samples.take()
+            {
+                let _ = sender.send(());
+            }
+            Box::pin(async {
+                (
+                    Inventory {
+                        hostname: "fixture".into(),
+                        os: "test".into(),
+                        architecture: "test".into(),
+                        cpu_model: "test".into(),
+                        cpu_cores: 1,
+                        memory_total_bytes: 1.0,
+                        interfaces: vec![],
+                        disks: vec![],
+                        gpus: vec![],
+                        collectors: vec![],
+                    },
+                    Metrics::default(),
+                    vec![],
+                )
+            })
+        }
+        fn child_snapshot(&self) -> Option<collect::ChildSnapshot> {
+            Some(collect::ChildSnapshot {
+                source_scope: "docker-engine".into(),
+                devices: vec![],
+                inventory_complete: true,
             })
         }
     }
@@ -313,6 +612,83 @@ mod tests {
             }
         });
         (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn stalled_child_uploads_do_not_delay_parent_heartbeat_acceptance() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let core_requests = Arc::new(AtomicUsize::new(0));
+        let child_requests = Arc::new(AtomicUsize::new(0));
+        let core_count = core_requests.clone();
+        let child_count = child_requests.clone();
+        let server_task = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let core_count = core_count.clone();
+                let child_count = child_count.clone();
+                tokio::spawn(async move {
+                    let mut request = [0; 8192];
+                    let size = socket.read(&mut request).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&request[..size]);
+                    if request.starts_with("POST /api/v1/agent/children ") {
+                        child_count.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        return;
+                    }
+                    if request.starts_with("POST /api/v1/agent/report ") {
+                        core_count.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"accepted":true,"duplicate":false,"report_interval_seconds":null,"update_to":null}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let directory = tempfile::tempdir().expect("directory");
+        let config = configuration(format!("http://{address}"));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let mut sampler = ChildFakeSampler {
+            count: 0,
+            stop_after_samples: Some(stop),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run(
+                &mut sampler,
+                &config,
+                Spool::default(),
+                "run",
+                directory.path(),
+                Duration::from_millis(80),
+                async {
+                    let _ = stopped.await;
+                },
+            ),
+        )
+        .await
+        .expect("sampling and parent reports continue while child upload is stalled")
+        .expect("agent run");
+        assert!(child_requests.load(Ordering::SeqCst) >= 1);
+        assert!(core_requests.load(Ordering::SeqCst) >= 1);
+        assert!(directory.path().join("last-report").exists());
+        let queued = config::read_bounded(
+            &directory.path().join("child-spool.json"),
+            child_delivery::MAX_BYTES,
+        )
+        .await
+        .expect("child queue persisted");
+        assert!(!child_delivery::Spool::decode(&queued, &config.agent_id, now()).is_empty());
+        server_task.abort();
     }
     fn configuration(server: String) -> Config {
         Config {

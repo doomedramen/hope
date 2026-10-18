@@ -5,8 +5,9 @@ use bollard::{
 };
 use futures_util::{StreamExt, stream};
 use hope_protocol::{
-    CollectorStatus, Container, ContainerNetwork, ContainerPort, Disk, Gpu, Inventory, Metrics,
-    NetworkCounter,
+    ChildDeviceKind, ChildDeviceReport, ChildMetrics, CollectorStatus, Container, ContainerNetwork,
+    ContainerPort, CpuMeasurement, DeviceLifecycle, Disk, Gpu, Interface, Inventory,
+    MemoryMeasurement, Metrics, NetworkCounter, SourceIdentity,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -48,6 +49,7 @@ fn docker_summary(item: bollard::models::ContainerSummary) -> Option<Container> 
                     ipv4: clean_option(endpoint.ip_address.as_deref(), 64),
                     ipv6: clean_option(endpoint.global_ipv6_address.as_deref(), 128),
                     mac: clean_option(endpoint.mac_address.as_deref(), 32),
+                    gateway: clean_option(endpoint.gateway.as_deref(), 64),
                 })
                 .collect::<Vec<_>>()
         })
@@ -132,6 +134,7 @@ fn docker_summary(item: bollard::models::ContainerSummary) -> Option<Container> 
         published_ports,
         restart_count: None,
         cpu_percent: None,
+        cpu_capacity_cores: None,
         memory_used_bytes: None,
         memory_limit_bytes: None,
         memory_percent: None,
@@ -172,6 +175,11 @@ fn apply_docker_api_stats(
     stats: &bollard::models::ContainerStatsResponse,
 ) {
     container.cpu_percent = docker_cpu_percent(stats);
+    container.cpu_capacity_cores = stats
+        .cpu_stats
+        .as_ref()
+        .and_then(|cpu| cpu.online_cpus)
+        .map(f64::from);
     if let Some(memory) = stats.memory_stats.as_ref() {
         let inactive = memory
             .stats
@@ -252,11 +260,24 @@ async fn docker_stats(
     (id, result)
 }
 
-async fn docker_containers() -> Option<Vec<Container>> {
+async fn docker_containers() -> Option<(String, Vec<Container>, bool)> {
     let docker = Docker::connect_with_local_defaults()
         .ok()?
         .with_timeout(Duration::from_secs(3));
-    let options = ListContainersOptionsBuilder::default().all(true).build();
+    let scope = timeout(Duration::from_secs(3), docker.info())
+        .await
+        .ok()?
+        .ok()?
+        .id?;
+    let scope = extras::clean(&scope, 128);
+    if scope.is_empty() {
+        return None;
+    }
+    const MAX_DOCKER_CONTAINERS: usize = 128;
+    let options = ListContainersOptionsBuilder::default()
+        .all(true)
+        .limit(MAX_DOCKER_CONTAINERS as i32 + 1)
+        .build();
     let listed = timeout(
         Duration::from_secs(3),
         docker.list_containers(Some(options)),
@@ -264,11 +285,13 @@ async fn docker_containers() -> Option<Vec<Container>> {
     .await
     .ok()?
     .ok()?;
+    let source_count = listed.len();
     let mut containers = listed
         .into_iter()
-        .take(128)
+        .take(MAX_DOCKER_CONTAINERS)
         .filter_map(docker_summary)
         .collect::<Vec<_>>();
+    let complete = docker_inventory_complete(source_count, containers.len(), MAX_DOCKER_CONTAINERS);
     let running = containers
         .iter()
         .filter(|container| container.state == "running")
@@ -292,7 +315,77 @@ async fn docker_containers() -> Option<Vec<Container>> {
             apply_docker_api_stats(container, &stats);
         }
     }
-    Some(containers)
+    Some((scope, containers, complete))
+}
+
+fn docker_inventory_complete(source_count: usize, parsed_count: usize, limit: usize) -> bool {
+    source_count <= limit && parsed_count == source_count
+}
+
+fn docker_child(container: &Container, scope: &str) -> ChildDeviceReport {
+    let interfaces = container
+        .networks
+        .iter()
+        .map(|network| Interface {
+            name: network.name.clone(),
+            mac: network.mac.clone(),
+            addresses: network
+                .ipv4
+                .iter()
+                .chain(network.ipv6.iter())
+                .cloned()
+                .collect(),
+            gateway: network.gateway.clone(),
+        })
+        .collect();
+    ChildDeviceReport {
+        identity: SourceIdentity {
+            kind: ChildDeviceKind::DockerContainer,
+            scope: scope.into(),
+            key: container.id.clone(),
+            incarnation: container
+                .created_at
+                .map(|created| format!("{created:.0}"))
+                .unwrap_or_else(|| container.id.clone()),
+        },
+        name: container.name.clone(),
+        lifecycle: if container.state == "running" {
+            DeviceLifecycle::Running
+        } else {
+            DeviceLifecycle::Stopped
+        },
+        status: Some(container.status.clone()),
+        health: container.health.clone(),
+        restart_count: container.restart_count,
+        parent_key: None,
+        node: None,
+        tags: vec![],
+        interfaces,
+        cpu_cores: container.cpu_capacity_cores,
+        memory_bytes: container.memory_limit_bytes,
+        image: Some(container.image.clone()),
+        compose_project: container.compose_project.clone(),
+        compose_service: container.compose_service.clone(),
+        published_ports: container.published_ports.clone(),
+        metrics: ChildMetrics {
+            cpu_percent: container.cpu_percent,
+            cpu_capacity_cores: container.cpu_capacity_cores,
+            cpu_measurement: Some(CpuMeasurement::DockerEngine),
+            memory_used_bytes: container.memory_used_bytes,
+            memory_total_bytes: container.memory_limit_bytes,
+            memory_measurement: Some(MemoryMeasurement::DockerWorkingSet),
+            network_rx_bytes: container.network_rx_bytes,
+            network_tx_bytes: container.network_tx_bytes,
+            ..Default::default()
+        },
+    }
+}
+
+#[derive(Clone)]
+pub struct ChildSnapshot {
+    pub source_scope: String,
+    pub devices: Vec<ChildDeviceReport>,
+    pub inventory_complete: bool,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -320,6 +413,9 @@ pub struct Collector {
     monitors: extras::Monitors,
     previous_devices: HashMap<String, extras::DeviceCounters>,
     previous_pools: HashMap<String, (u64, u64)>,
+    docker_scope: Option<String>,
+    child_devices: Vec<ChildDeviceReport>,
+    child_inventory_complete: bool,
 }
 
 struct DiskProbe {
@@ -479,6 +575,9 @@ impl Collector {
             sensors: extras::Sensors::new(),
             previous_devices: HashMap::new(),
             previous_pools: HashMap::new(),
+            docker_scope: None,
+            child_devices: vec![],
+            child_inventory_complete: false,
             costs: Vec::with_capacity(20),
             system,
             memory_total_bytes: 0.0,
@@ -550,7 +649,19 @@ impl Collector {
             self.disk_inventory = disks.clone();
         }
         let started = Instant::now();
-        let containers = docker_containers().await;
+        let docker = docker_containers().await;
+        self.docker_scope = docker.as_ref().map(|(scope, _, _)| scope.clone());
+        self.child_devices = docker
+            .as_ref()
+            .map(|(scope, containers, _)| {
+                containers
+                    .iter()
+                    .map(|container| docker_child(container, scope))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.child_inventory_complete = docker.as_ref().is_some_and(|(_, _, complete)| *complete);
+        let containers = docker.map(|(_, containers, _)| containers);
         self.cost("docker_containers", started);
         let started = Instant::now();
         let gateway = default_gateway().await;
@@ -738,11 +849,17 @@ impl Collector {
                 services.is_some(),
                 Some("Service units need systemd (systemctl list-units)"),
             ),
-            status(
-                "docker_containers",
-                containers.is_some(),
-                Some("Docker CLI is unavailable or the daemon cannot be reached"),
-            ),
+            CollectorStatus {
+                name: "docker_containers".into(),
+                available: containers.is_some() && self.child_inventory_complete,
+                detail: if containers.is_none() {
+                    Some("Docker Engine is unavailable or cannot be reached".into())
+                } else if !self.child_inventory_complete {
+                    Some("Docker inventory exceeded the per-report limit or contained invalid entries; absence is not authoritative".into())
+                } else {
+                    None
+                },
+            },
         ];
         if self.monitors.configured() > 0 {
             collectors.push(status(
@@ -810,6 +927,13 @@ impl Collector {
         crate::telemetry::isolate(&mut inventory, &mut metrics, &mut collectors);
         inventory.collectors = collectors.clone();
         (inventory, metrics, collectors)
+    }
+    pub fn child_snapshot(&self) -> Option<ChildSnapshot> {
+        Some(ChildSnapshot {
+            source_scope: self.docker_scope.clone()?,
+            devices: self.child_devices.clone(),
+            inventory_complete: self.child_inventory_complete,
+        })
     }
 }
 fn status(name: &str, available: bool, detail: Option<&str>) -> CollectorStatus {
@@ -1126,6 +1250,9 @@ mod tests {
                 .unwrap()
                 .contains("do-not-copy")
         );
+        assert!(docker_inventory_complete(1, 1, 128));
+        assert!(!docker_inventory_complete(129, 128, 128));
+        assert!(!docker_inventory_complete(2, 1, 128));
     }
 
     #[test]

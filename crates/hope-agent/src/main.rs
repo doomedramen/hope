@@ -1,3 +1,4 @@
+mod child_delivery;
 mod collect;
 mod config;
 mod cpu;

@@ -195,6 +195,7 @@ mod tests {
             published_ports: vec![],
             restart_count: None,
             cpu_percent: None,
+            cpu_capacity_cores: None,
             memory_used_bytes: None,
             memory_limit_bytes: None,
             memory_percent: None,

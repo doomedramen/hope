@@ -189,7 +189,7 @@ kind: string, up: boolean, latency_ms: number | null, status_code: number | null
  * Short failure reason; never remote response bodies.
  */
 detail: string | null, };
-export type ContainerNetwork = { name: string, network_id: string | null, ipv4: string | null, ipv6: string | null, mac: string | null, };
+export type ContainerNetwork = { name: string, network_id: string | null, ipv4: string | null, ipv6: string | null, mac: string | null, gateway: string | null, };
 export type ContainerPort = { host_ip: string | null, container_port: number, host_port: number | null, protocol: string, };
 export type ChildSourceKind = "docker" | "proxmox";
 export type ChildDeviceKind = "docker_container" | "proxmox_vm" | "proxmox_lxc";
@@ -202,7 +202,7 @@ export type ChildMetrics = { cpu_percent: number | null, cpu_capacity_cores: num
  * Raw counters allow rate baselines to recover after a parent-agent restart.
  */
 network_rx_bytes: number | null, network_tx_bytes: number | null, };
-export type ChildDeviceReport = { identity: SourceIdentity, name: string, lifecycle: DeviceLifecycle, parent_key: string | null, node: string | null, tags: Array<string>, interfaces: Array<Interface>, cpu_cores: number | null, memory_bytes: number | null, image: string | null, compose_project: string | null, compose_service: string | null, metrics: ChildMetrics, };
+export type ChildDeviceReport = { identity: SourceIdentity, name: string, lifecycle: DeviceLifecycle, status: string | null, health: string | null, restart_count: number | null, parent_key: string | null, node: string | null, tags: Array<string>, interfaces: Array<Interface>, cpu_cores: number | null, memory_bytes: number | null, image: string | null, compose_project: string | null, compose_service: string | null, published_ports: Array<ContainerPort>, metrics: ChildMetrics, };
 export type ChildReportBatch = { schema_version: number, batch_id: string, agent_id: string, source: ChildSourceKind, source_scope: string, sequence: number, inventory_generation: number, complete: boolean, observed_at: number, devices: Array<ChildDeviceReport>, };
 export type ChildReportResponse = { accepted: boolean, duplicate: boolean, };
 export type RelationshipKind = "runs_on" | "connected_to" | "exposes_service";
@@ -235,7 +235,7 @@ published_ports: Array<ContainerPort>,
 /**
  * Docker restart count. Unavailable when the daemon summary omits it.
  */
-restart_count: number | null, cpu_percent: number | null, memory_used_bytes: number | null, memory_limit_bytes: number | null, memory_percent: number | null, network_rx_bytes: number | null, network_tx_bytes: number | null, block_read_bytes: number | null, block_write_bytes: number | null, pids: number | null, };
+restart_count: number | null, cpu_percent: number | null, cpu_capacity_cores: number | null, memory_used_bytes: number | null, memory_limit_bytes: number | null, memory_percent: number | null, network_rx_bytes: number | null, network_tx_bytes: number | null, block_read_bytes: number | null, block_write_bytes: number | null, pids: number | null, };
 export type UptimeScope = "system" | "container_kernel";
 export type SystemUptime = { seconds: number, boot_time: number | null,
 /**

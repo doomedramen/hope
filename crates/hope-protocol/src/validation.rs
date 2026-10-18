@@ -136,6 +136,14 @@ pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
                 DeviceLifecycle::Running | DeviceLifecycle::Stopped
             )
             || device
+                .status
+                .as_ref()
+                .is_some_and(|value| !text(value, 256))
+            || device.health.as_ref().is_some_and(|value| !text(value, 32))
+            || device
+                .restart_count
+                .is_some_and(|value| value > 1_000_000_000)
+            || device
                 .parent_key
                 .as_ref()
                 .is_some_and(|text_value| text_value.is_empty() || !text(text_value, 256))
@@ -180,6 +188,14 @@ pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
                 .compose_service
                 .as_ref()
                 .is_some_and(|text_value| !text(text_value, 128))
+            || device.published_ports.len() > 128
+            || device.published_ports.iter().any(|port| {
+                !matches!(port.protocol.as_str(), "tcp" | "udp" | "sctp")
+                    || port
+                        .host_ip
+                        .as_ref()
+                        .is_some_and(|address| address.parse::<std::net::IpAddr>().is_err())
+            })
             || !optional(device.metrics.cpu_percent, 100_000.0)
             || !optional(device.metrics.cpu_capacity_cores, 65_536.0)
             || !optional(device.metrics.memory_used_bytes, 1e18)
@@ -313,6 +329,10 @@ fn extended(value: &Metrics) -> Result<(), &'static str> {
                         || network.ipv4.as_ref().is_some_and(|value| !text(value, 64))
                         || network.ipv6.as_ref().is_some_and(|value| !text(value, 128))
                         || network.mac.as_ref().is_some_and(|value| !text(value, 32))
+                        || network
+                            .gateway
+                            .as_ref()
+                            .is_some_and(|value| value.parse::<std::net::IpAddr>().is_err())
                 })
                 || container.published_ports.len() > 64
                 || container.published_ports.iter().any(|port| {
@@ -324,6 +344,7 @@ fn extended(value: &Metrics) -> Result<(), &'static str> {
                     .restart_count
                     .is_some_and(|value| value > 1_000_000_000)
                 || !optional(container.cpu_percent, 1e6)
+                || !optional(container.cpu_capacity_cores, 65_536.0)
                 || !optional(container.memory_used_bytes, 1e18)
                 || !optional(container.memory_limit_bytes, 1e18)
                 || !optional(container.memory_percent, 1e6)
