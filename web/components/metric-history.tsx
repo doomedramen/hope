@@ -486,10 +486,10 @@ function ChartBlock({
         isolated.add(index);
     });
     if (!isolated.size) return false;
-    return ({ cx, cy, index }: DotItemDotProps) =>
-      isolated.has(index) &&
-      typeof cx === "number" &&
-      typeof cy === "number" ? (
+    return function IsolatedSample({ cx, cy, index }: DotItemDotProps) {
+      return isolated.has(index) &&
+        typeof cx === "number" &&
+        typeof cy === "number" ? (
         <circle
           className="history-sample"
           data-series={key}
@@ -499,6 +499,7 @@ function ChartBlock({
           fill={color}
         />
       ) : null;
+    };
   };
   return (
     <div className="chart-block" data-testid={`chart-${title}`}>
