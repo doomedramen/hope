@@ -80,7 +80,8 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/auth/setup", post(auth::setup))
         .route("/auth/login", post(auth::login))
         .route("/agent/enroll", post(agents::enroll))
-        .route("/agent/report", post(agents::report));
+        .route("/agent/report", post(agents::report))
+        .route("/agent/children", post(agents::child_report));
     Router::new()
         .nest("/api/v1", private.merge(public))
         .route(

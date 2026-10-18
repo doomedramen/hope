@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 6;
+const LATEST: i64 = 7;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin().await?;
@@ -40,6 +40,14 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
         sqlx::query("PRAGMA user_version = 6")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 7 {
+        sqlx::raw_sql(include_str!("migrations/0007_child_sources.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 7")
             .execute(&mut *tx)
             .await?;
     }
@@ -156,6 +164,29 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(count, 1);
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&db)
+            .await
+            .expect("database version");
+        assert_eq!(version, 7);
+        for table in [
+            "child_batch_heads",
+            "child_batches",
+            "source_devices",
+            "source_observations",
+            "source_metrics",
+            "device_associations",
+            "device_relationships",
+        ] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+            )
+            .bind(table)
+            .fetch_one(&db)
+            .await
+            .expect("source table");
+            assert_eq!(exists, 1, "missing source table {table}");
+        }
         let credential: String = sqlx::query_scalar("SELECT credential_hash FROM agents")
             .fetch_one(&db)
             .await

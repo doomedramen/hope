@@ -191,6 +191,22 @@ kind: string, up: boolean, latency_ms: number | null, status_code: number | null
 detail: string | null, };
 export type ContainerNetwork = { name: string, network_id: string | null, ipv4: string | null, ipv6: string | null, mac: string | null, };
 export type ContainerPort = { host_ip: string | null, container_port: number, host_port: number | null, protocol: string, };
+export type ChildSourceKind = "docker" | "proxmox";
+export type ChildDeviceKind = "docker_container" | "proxmox_vm" | "proxmox_lxc";
+export type DeviceLifecycle = "running" | "stopped" | "stale" | "archived";
+export type MemoryMeasurement = "docker_working_set" | "hypervisor_guest" | "guest_operating_system";
+export type CpuMeasurement = "docker_engine" | "hypervisor_guest" | "guest_operating_system";
+export type SourceIdentity = { kind: ChildDeviceKind, scope: string, key: string, incarnation: string, };
+export type ChildMetrics = { cpu_percent: number | null, cpu_capacity_cores: number | null, cpu_measurement: CpuMeasurement | null, memory_used_bytes: number | null, memory_total_bytes: number | null, memory_measurement: MemoryMeasurement | null, disk_used_bytes: number | null, disk_total_bytes: number | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null,
+/**
+ * Raw counters allow rate baselines to recover after a parent-agent restart.
+ */
+network_rx_bytes: number | null, network_tx_bytes: number | null, };
+export type ChildDeviceReport = { identity: SourceIdentity, name: string, lifecycle: DeviceLifecycle, parent_key: string | null, node: string | null, tags: Array<string>, interfaces: Array<Interface>, cpu_cores: number | null, memory_bytes: number | null, image: string | null, compose_project: string | null, compose_service: string | null, metrics: ChildMetrics, };
+export type ChildReportBatch = { schema_version: number, batch_id: string, agent_id: string, source: ChildSourceKind, source_scope: string, sequence: number, inventory_generation: number, complete: boolean, observed_at: number, devices: Array<ChildDeviceReport>, };
+export type ChildReportResponse = { accepted: boolean, duplicate: boolean, };
+export type RelationshipKind = "runs_on" | "connected_to" | "exposes_service";
+export type DeviceRelationship = { from_device_id: string, to_device_id: string, kind: RelationshipKind, detail: string | null, };
 export type Container = { id: string, name: string, image: string,
 /**
  * Docker state such as running, exited, or created.
@@ -274,7 +290,11 @@ update_requested_at: number | null,
 /**
  * The release version the pending request is for.
  */
-update_target: string | null, };
+update_target: string | null,
+/**
+ * Hypervisor or container-runtime identity when this device has source inventory.
+ */
+source: SourceIdentity | null, lifecycle: DeviceLifecycle | null, source_observed_at: number | null, relationships: Array<DeviceRelationship>, };
 export type MetricPoint = { collected_at: number, resolution_seconds: number, metrics: Metrics, };
 export type Position = { id: string, x: number, y: number, };
 export type MapLink = { id: string, source: string, target: string, label: string, };

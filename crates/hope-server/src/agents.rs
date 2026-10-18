@@ -10,13 +10,15 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use hope_protocol::{
-    AgentReport, EnrollmentRequest, EnrollmentResponse, Host, Inventory, SCHEMA_VERSION,
+    AgentReport, ChildReportBatch, ChildReportResponse, ChildSourceKind, EnrollmentRequest,
+    EnrollmentResponse, Host, Inventory, SCHEMA_VERSION,
 };
 use hope_protocol::{
     EnrollmentTokenRequest, EnrollmentTokenResponse, HISTORY_SAMPLE_SECONDS, OkResponse,
     ReportResponse, UPDATE_REQUEST_SECONDS, UpdateRequested, version_newer,
 };
 use sqlx::Row;
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub fn shell_quote(value: &str) -> String {
@@ -473,6 +475,214 @@ pub async fn report(
     tx.commit().await?;
     state.host_changed(&host);
     Ok(Json(response))
+}
+
+/// Stores a bounded, sequenced child inventory independently of the parent heartbeat. Only a
+/// complete authoritative generation advances absence tracking; partial inventories cannot age
+/// children toward archival.
+pub async fn child_report(
+    Extract(state): Extract<State>,
+    Extension(client): Extension<ClientKey>,
+    headers: HeaderMap,
+    Json(batch): Json<ChildReportBatch>,
+) -> ApiResult<Json<ChildReportResponse>> {
+    limited(state.0.report_denied.check(&client.0, now()))?;
+    let Some(credential) = headers
+        .get("authorization")
+        .and_then(|header| header.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        state.0.report_denied.hit(&client.0, now());
+        return Err(ApiError::unauthorized());
+    };
+    let known: Option<(String, bool)> =
+        sqlx::query_as("SELECT credential_hash,revoked FROM agents WHERE id=?")
+            .bind(&batch.agent_id)
+            .fetch_optional(&state.0.db)
+            .await?;
+    if known
+        .as_ref()
+        .is_none_or(|(expected, _)| expected != &hash(credential))
+    {
+        state.0.report_denied.hit(&client.0, now());
+        return Err(ApiError::unauthorized());
+    }
+    if known.is_some_and(|(_, revoked)| revoked) {
+        return Err(ApiError::agent_revoked());
+    }
+    limited(state.0.report_limit.check(&batch.agent_id, now()))?;
+    state.0.report_limit.hit(&batch.agent_id, now());
+    hope_protocol::validation::child_batch(&batch).map_err(ApiError::bad)?;
+    if batch.observed_at > now() + 300.0 || batch.observed_at < now() - 86400.0 {
+        return Err(ApiError::bad("Invalid child inventory timestamp"));
+    }
+
+    // Authenticate again under the shared write lock so revocation and credential replacement
+    // are ordered against source writes exactly like core reports.
+    let _guard = state.0.writes.lock().await;
+    let current: Option<(String, bool)> =
+        sqlx::query_as("SELECT credential_hash,revoked FROM agents WHERE id=?")
+            .bind(&batch.agent_id)
+            .fetch_optional(&state.0.db)
+            .await?;
+    match current {
+        Some((expected, false)) if expected == hash(credential) => {}
+        Some((expected, true)) if expected == hash(credential) => {
+            return Err(ApiError::agent_revoked());
+        }
+        _ => return Err(ApiError::unauthorized()),
+    }
+
+    let source = match batch.source {
+        ChildSourceKind::Docker => "docker",
+        ChildSourceKind::Proxmox => "proxmox",
+    };
+    let mut tx = state.0.db.begin().await?;
+    let replay: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT parent_agent_id,source_scope,sequence FROM child_batches WHERE batch_id=?",
+    )
+    .bind(&batch.batch_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((parent, scope, sequence)) = replay {
+        if parent == batch.agent_id
+            && scope == batch.source_scope
+            && sequence == batch.sequence as i64
+        {
+            tx.rollback().await?;
+            return Ok(Json(ChildReportResponse {
+                accepted: true,
+                duplicate: true,
+            }));
+        }
+        return Err(ApiError::bad("Child inventory batch identity was reused"));
+    }
+    let head: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT sequence,inventory_generation FROM child_batch_heads WHERE parent_agent_id=? AND source=? AND source_scope=?",
+    )
+    .bind(&batch.agent_id)
+    .bind(source)
+    .bind(&batch.source_scope)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if head.is_some_and(|(sequence, generation)| {
+        batch.sequence <= sequence as u64 || batch.inventory_generation < generation as u64
+    }) {
+        return Err(ApiError::bad(
+            "Child inventory sequence or generation is out of order",
+        ));
+    }
+    let parent_host: String = sqlx::query_scalar("SELECT id FROM hosts WHERE agent_id=?")
+        .bind(&batch.agent_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    sqlx::query("INSERT INTO child_batches(batch_id,parent_agent_id,source,source_scope,sequence,inventory_generation,observed_at,complete,received_at) VALUES(?,?,?,?,?,?,?,?,?)")
+        .bind(&batch.batch_id).bind(&batch.agent_id).bind(source).bind(&batch.source_scope)
+        .bind(batch.sequence as i64).bind(batch.inventory_generation as i64)
+        .bind(batch.observed_at).bind(batch.complete).bind(now()).execute(&mut *tx).await?;
+
+    let seen: HashSet<(String, String)> = batch
+        .devices
+        .iter()
+        .map(|device| {
+            (
+                device.identity.key.clone(),
+                device.identity.incarnation.clone(),
+            )
+        })
+        .collect();
+    let mut source_ids = std::collections::HashMap::new();
+    for device in &batch.devices {
+        let identity = &device.identity;
+        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM source_devices WHERE parent_agent_id=? AND source=? AND source_scope=? AND source_key=? AND incarnation=?")
+            .bind(&batch.agent_id).bind(source).bind(&batch.source_scope).bind(&identity.key).bind(&identity.incarnation)
+            .fetch_optional(&mut *tx).await?;
+        let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let body = serde_json::to_string(device)?;
+        let kind = match identity.kind {
+            hope_protocol::ChildDeviceKind::DockerContainer => "docker_container",
+            hope_protocol::ChildDeviceKind::ProxmoxVm => "proxmox_vm",
+            hope_protocol::ChildDeviceKind::ProxmoxLxc => "proxmox_lxc",
+        };
+        if sqlx::query("UPDATE source_devices SET kind=?,lifecycle=?,name=?,observed_at=?,inventory_generation=?,missing_complete_count=0,missing_since=NULL,missing_inventory_generation=0,body=? WHERE id=?")
+            .bind(kind)
+            .bind(format!("{:?}", device.lifecycle).to_ascii_lowercase())
+            .bind(&device.name).bind(batch.observed_at).bind(batch.inventory_generation as i64)
+            .bind(&body).bind(&id).execute(&mut *tx).await?.rows_affected() == 0
+        {
+            sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,body) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+                .bind(&id).bind(&batch.agent_id).bind(source).bind(&batch.source_scope)
+                .bind(&identity.key).bind(&identity.incarnation)
+                .bind(kind)
+                .bind(format!("{:?}", device.lifecycle).to_ascii_lowercase())
+                .bind(&device.name).bind(batch.observed_at).bind(batch.inventory_generation as i64)
+                .bind(&body).execute(&mut *tx).await?;
+        }
+        sqlx::query("INSERT OR IGNORE INTO source_observations(source_device_id,batch_id,observed_at,inventory_generation,body) VALUES(?,?,?,?,?)")
+            .bind(&id).bind(&batch.batch_id).bind(batch.observed_at).bind(batch.inventory_generation as i64)
+            .bind(&body).execute(&mut *tx).await?;
+        sqlx::query("INSERT OR IGNORE INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES(?,?,?,30,?)")
+            .bind(&id).bind(&batch.batch_id).bind(batch.observed_at)
+            .bind(serde_json::to_string(&device.metrics)?).execute(&mut *tx).await?;
+        source_ids.insert(identity.key.as_str(), id);
+    }
+
+    for device in &batch.devices {
+        let id = &source_ids[device.identity.key.as_str()];
+        let parent = device
+            .parent_key
+            .as_deref()
+            .and_then(|key| source_ids.get(key))
+            .map(String::as_str)
+            .unwrap_or(&parent_host);
+        sqlx::query("DELETE FROM device_relationships WHERE source_device_id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT OR REPLACE INTO device_relationships(from_device_id,to_device_id,kind,detail,source_device_id,observed_at) VALUES(?,?,'runs_on',NULL,?,?)")
+            .bind(id).bind(parent).bind(id).bind(batch.observed_at).execute(&mut *tx).await?;
+    }
+
+    if batch.complete {
+        let rows = sqlx::query("SELECT id,source_key,incarnation,missing_complete_count,missing_since,missing_inventory_generation FROM source_devices WHERE parent_agent_id=? AND source=? AND source_scope=? AND lifecycle!='archived'")
+            .bind(&batch.agent_id).bind(source).bind(&batch.source_scope).fetch_all(&mut *tx).await?;
+        for row in rows {
+            let key: String = sqlx::Row::get(&row, "source_key");
+            let incarnation: String = sqlx::Row::get(&row, "incarnation");
+            if seen.contains(&(key, incarnation)) {
+                continue;
+            }
+            let id: String = sqlx::Row::get(&row, "id");
+            let previous: i64 = sqlx::Row::get(&row, "missing_complete_count");
+            let since: Option<f64> = sqlx::Row::get(&row, "missing_since");
+            let last_generation: i64 = sqlx::Row::get(&row, "missing_inventory_generation");
+            if batch.inventory_generation <= last_generation as u64 {
+                continue;
+            }
+            let missing_since = since.unwrap_or(batch.observed_at);
+            let count = previous.saturating_add(1);
+            let lifecycle = if count >= 3 && batch.observed_at - missing_since >= 300.0 {
+                "archived"
+            } else {
+                "stale"
+            };
+            sqlx::query("UPDATE source_devices SET lifecycle=?,missing_complete_count=?,missing_since=?,missing_inventory_generation=? WHERE id=?")
+                .bind(lifecycle).bind(count).bind(missing_since).bind(batch.inventory_generation as i64).bind(id).execute(&mut *tx).await?;
+        }
+    }
+    sqlx::query("INSERT INTO child_batch_heads(parent_agent_id,source,source_scope,sequence,inventory_generation,observed_at,complete_generation,complete_observed_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(parent_agent_id,source,source_scope) DO UPDATE SET sequence=excluded.sequence,inventory_generation=MAX(child_batch_heads.inventory_generation,excluded.inventory_generation),observed_at=excluded.observed_at,complete_generation=CASE WHEN excluded.complete_generation>0 THEN excluded.complete_generation ELSE child_batch_heads.complete_generation END,complete_observed_at=CASE WHEN excluded.complete_generation>0 THEN excluded.complete_observed_at ELSE child_batch_heads.complete_observed_at END")
+        .bind(&batch.agent_id).bind(source).bind(&batch.source_scope).bind(batch.sequence as i64)
+        .bind(batch.inventory_generation as i64).bind(batch.observed_at)
+        .bind(if batch.complete { batch.inventory_generation as i64 } else { 0 })
+        .bind(if batch.complete { Some(batch.observed_at) } else { None })
+        .execute(&mut *tx).await?;
+    tx.commit().await?;
+    state.changed();
+    Ok(Json(ChildReportResponse {
+        accepted: true,
+        duplicate: false,
+    }))
 }
 
 /// The release an agent should be updating to, while an administrator's request is still fresh.

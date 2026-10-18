@@ -1,5 +1,8 @@
 //! Shared validation for agent telemetry and server ingestion.
-use crate::{CollectorStatus, Disk, Gpu, Inventory, Metrics};
+use crate::{
+    ChildDeviceKind, ChildReportBatch, ChildSourceKind, CollectorStatus, DeviceLifecycle, Disk,
+    Gpu, Inventory, Metrics,
+};
 
 fn text(value: &str, maximum: usize) -> bool {
     value.len() <= maximum && !value.chars().any(char::is_control)
@@ -84,6 +87,114 @@ pub fn inventory(value: &Inventory) -> Result<(), &'static str> {
         return Err("Inventory exceeds supported limits or contains invalid values");
     }
     collectors(&value.collectors)
+}
+
+pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
+    if value.schema_version != crate::SCHEMA_VERSION
+        || uuid::Uuid::parse_str(&value.agent_id).is_err()
+        || uuid::Uuid::parse_str(&value.batch_id).is_err()
+        || value.source_scope.is_empty()
+        || !text(&value.source_scope, 128)
+        || value.sequence == 0
+        || value.sequence > i64::MAX as u64
+        || value.inventory_generation == 0
+        || value.inventory_generation > i64::MAX as u64
+        || !number(value.observed_at, 4_102_444_800.0)
+        || value.devices.len() > 512
+    {
+        return Err("Invalid child inventory batch");
+    }
+    let mut identities = std::collections::HashSet::new();
+    let mut source_keys = std::collections::HashSet::new();
+    for device in &value.devices {
+        let identity = &device.identity;
+        let kind_matches_source = matches!(
+            (value.source, identity.kind),
+            (ChildSourceKind::Docker, ChildDeviceKind::DockerContainer)
+                | (ChildSourceKind::Proxmox, ChildDeviceKind::ProxmoxVm)
+                | (ChildSourceKind::Proxmox, ChildDeviceKind::ProxmoxLxc)
+                | (ChildSourceKind::Proxmox, ChildDeviceKind::DockerContainer)
+        );
+        let key = (
+            &identity.kind,
+            &identity.scope,
+            &identity.key,
+            &identity.incarnation,
+        );
+        if !kind_matches_source
+            || identity.scope != value.source_scope
+            || identity.key.is_empty()
+            || !text(&identity.key, 256)
+            || identity.incarnation.is_empty()
+            || !text(&identity.incarnation, 128)
+            || !identities.insert(key)
+            || !source_keys.insert((identity.kind, identity.key.as_str()))
+            || device.name.is_empty()
+            || !text(&device.name, 256)
+            || !matches!(
+                device.lifecycle,
+                DeviceLifecycle::Running | DeviceLifecycle::Stopped
+            )
+            || device
+                .parent_key
+                .as_ref()
+                .is_some_and(|text_value| text_value.is_empty() || !text(text_value, 256))
+            || device
+                .node
+                .as_ref()
+                .is_some_and(|text_value| !text(text_value, 128))
+            || device.tags.len() > 64
+            || device.tags.iter().any(|tag| !text(tag, 128))
+            || device.interfaces.len() > 32
+            || device.interfaces.iter().any(|interface| {
+                !text(&interface.name, 128)
+                    || interface.addresses.len() > 32
+                    || interface
+                        .addresses
+                        .iter()
+                        .any(|address| address.parse::<std::net::IpAddr>().is_err())
+                    || interface
+                        .gateway
+                        .as_ref()
+                        .is_some_and(|address| address.parse::<std::net::IpAddr>().is_err())
+                    || interface.mac.as_ref().is_some_and(|mac| {
+                        mac.len() != 17
+                            || mac.split(':').count() != 6
+                            || mac.split(':').any(|part| {
+                                part.len() != 2
+                                    || !part.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                    })
+            })
+            || !optional(device.cpu_cores, 65_536.0)
+            || !optional(device.memory_bytes, 1e18)
+            || device
+                .image
+                .as_ref()
+                .is_some_and(|text_value| !text(text_value, 512))
+            || device
+                .compose_project
+                .as_ref()
+                .is_some_and(|text_value| !text(text_value, 128))
+            || device
+                .compose_service
+                .as_ref()
+                .is_some_and(|text_value| !text(text_value, 128))
+            || !optional(device.metrics.cpu_percent, 100_000.0)
+            || !optional(device.metrics.cpu_capacity_cores, 65_536.0)
+            || !optional(device.metrics.memory_used_bytes, 1e18)
+            || !optional(device.metrics.memory_total_bytes, 1e18)
+            || !optional(device.metrics.disk_used_bytes, 1e18)
+            || !optional(device.metrics.disk_total_bytes, 1e18)
+            || !optional(device.metrics.network_rx_bytes_per_second, 1e15)
+            || !optional(device.metrics.network_tx_bytes_per_second, 1e15)
+            || !optional(device.metrics.network_rx_bytes, 1e20)
+            || !optional(device.metrics.network_tx_bytes, 1e20)
+        {
+            return Err("Invalid child device inventory");
+        }
+    }
+    Ok(())
 }
 fn unique<'a>(names: impl Iterator<Item = &'a str>) -> bool {
     let mut seen = std::collections::HashSet::new();

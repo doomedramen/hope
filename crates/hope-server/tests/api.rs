@@ -130,6 +130,64 @@ async fn enrolled(state: &State, app: &Router) -> (String, String, String) {
         token,
     )
 }
+
+fn child_batch(
+    agent_id: &str,
+    sequence: u64,
+    generation: u64,
+    complete: bool,
+    observed_at: f64,
+    devices: Vec<ChildDeviceReport>,
+) -> ChildReportBatch {
+    ChildReportBatch {
+        schema_version: SCHEMA_VERSION,
+        batch_id: Uuid::new_v4().to_string(),
+        agent_id: agent_id.into(),
+        source: ChildSourceKind::Docker,
+        source_scope: "docker-engine-test".into(),
+        sequence,
+        inventory_generation: generation,
+        complete,
+        observed_at,
+        devices,
+    }
+}
+
+fn child_device() -> ChildDeviceReport {
+    ChildDeviceReport {
+        identity: SourceIdentity {
+            kind: ChildDeviceKind::DockerContainer,
+            scope: "docker-engine-test".into(),
+            key: "container-full-id".into(),
+            incarnation: "created-at-100".into(),
+        },
+        name: "web".into(),
+        lifecycle: DeviceLifecycle::Running,
+        parent_key: None,
+        node: None,
+        tags: vec![],
+        interfaces: vec![Interface {
+            name: "eth0".into(),
+            mac: Some("02:00:00:00:00:02".into()),
+            addresses: vec!["192.168.1.20".into()],
+            gateway: None,
+        }],
+        cpu_cores: None,
+        memory_bytes: None,
+        image: Some("nginx:latest".into()),
+        compose_project: Some("stack".into()),
+        compose_service: Some("web".into()),
+        metrics: ChildMetrics {
+            cpu_percent: Some(15.0),
+            cpu_capacity_cores: Some(2.0),
+            cpu_measurement: Some(CpuMeasurement::DockerEngine),
+            memory_used_bytes: Some(1024.0),
+            memory_total_bytes: Some(4096.0),
+            memory_measurement: Some(MemoryMeasurement::DockerWorkingSet),
+            ..Default::default()
+        },
+    }
+}
 #[tokio::test]
 async fn uninstall_instructions_require_admin_and_work_without_published_releases() {
     for ca in [None, Some("/etc/hope/owner's CA.pem".to_string())] {
@@ -519,6 +577,115 @@ async fn reporting_deduplicates_and_keeps_identity_after_dhcp_and_rejects_revoca
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(error["code"], "agent_revoked");
+}
+
+#[tokio::test]
+async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_absence() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let t0 = now() - 240.0;
+    let initial = child_batch(&agent, 1, 1, true, t0, vec![child_device()]);
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(initial),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["duplicate"], false);
+    let duplicate = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(initial),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(duplicate.0, StatusCode::OK);
+    assert_eq!(duplicate.1["duplicate"], true);
+
+    let partial = child_batch(&agent, 2, 2, false, t0 + 60.0, vec![]);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(partial),
+            Some(("authorization", &bearer)),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(lifecycle, "running", "partial data cannot age a child");
+
+    for (sequence, generation, elapsed) in [(3, 3, 61.0), (4, 4, 240.0), (5, 5, 361.0)] {
+        let batch = child_batch(&agent, sequence, generation, true, t0 + elapsed, vec![]);
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(batch),
+            Some(("authorization", &bearer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(lifecycle, "archived");
+    let observations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_observations")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    let metrics: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_metrics")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(observations, 1);
+    assert_eq!(metrics, 1);
+    let batches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM child_batches")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(batches, 5, "the replay does not create a second batch row");
+
+    let old = child_batch(&agent, 4, 5, true, now(), vec![]);
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(old),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    sqlx::query("UPDATE agents SET revoked=1 WHERE id=?")
+        .bind(&agent)
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    let revoked = child_batch(&agent, 6, 6, false, now(), vec![]);
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(revoked),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "agent_revoked");
 }
 #[tokio::test]
 async fn retention_averages_old_samples_and_deletes_expired_history() {

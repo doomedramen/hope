@@ -265,7 +265,7 @@ pub struct FingerprintResponse {
     pub instruction: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct Interface {
     pub name: String,
     pub mac: Option<String>,
@@ -510,6 +510,140 @@ pub struct ContainerPort {
     #[serde(default)]
     pub host_port: Option<u16>,
     pub protocol: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildSourceKind {
+    Docker,
+    Proxmox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildDeviceKind {
+    DockerContainer,
+    ProxmoxVm,
+    ProxmoxLxc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceLifecycle {
+    Running,
+    Stopped,
+    Stale,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMeasurement {
+    DockerWorkingSet,
+    HypervisorGuest,
+    GuestOperatingSystem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuMeasurement {
+    DockerEngine,
+    HypervisorGuest,
+    GuestOperatingSystem,
+}
+
+/// Stable source identity. `scope` is the Docker Engine or Proxmox cluster UUID;
+/// `key` is a full runtime ID or guest VMID; incarnation changes on recreation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SourceIdentity {
+    pub kind: ChildDeviceKind,
+    pub scope: String,
+    pub key: String,
+    pub incarnation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
+pub struct ChildMetrics {
+    pub cpu_percent: Option<f64>,
+    pub cpu_capacity_cores: Option<f64>,
+    pub cpu_measurement: Option<CpuMeasurement>,
+    pub memory_used_bytes: Option<f64>,
+    pub memory_total_bytes: Option<f64>,
+    pub memory_measurement: Option<MemoryMeasurement>,
+    pub disk_used_bytes: Option<f64>,
+    pub disk_total_bytes: Option<f64>,
+    pub network_rx_bytes_per_second: Option<f64>,
+    pub network_tx_bytes_per_second: Option<f64>,
+    /// Raw counters allow rate baselines to recover after a parent-agent restart.
+    pub network_rx_bytes: Option<f64>,
+    pub network_tx_bytes: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ChildDeviceReport {
+    pub identity: SourceIdentity,
+    pub name: String,
+    pub lifecycle: DeviceLifecycle,
+    #[serde(default)]
+    pub parent_key: Option<String>,
+    #[serde(default)]
+    pub node: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub interfaces: Vec<Interface>,
+    #[serde(default)]
+    pub cpu_cores: Option<f64>,
+    #[serde(default)]
+    pub memory_bytes: Option<f64>,
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub compose_project: Option<String>,
+    #[serde(default)]
+    pub compose_service: Option<String>,
+    #[serde(default)]
+    pub metrics: ChildMetrics,
+}
+
+/// One atomic source inventory. Incomplete batches update seen children but never imply deletion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ChildReportBatch {
+    pub schema_version: u32,
+    pub batch_id: String,
+    pub agent_id: String,
+    pub source: ChildSourceKind,
+    pub source_scope: String,
+    #[ts(type = "number")]
+    pub sequence: u64,
+    #[ts(type = "number")]
+    pub inventory_generation: u64,
+    pub complete: bool,
+    pub observed_at: f64,
+    pub devices: Vec<ChildDeviceReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ChildReportResponse {
+    pub accepted: bool,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipKind {
+    RunsOn,
+    ConnectedTo,
+    ExposesService,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DeviceRelationship {
+    pub from_device_id: String,
+    pub to_device_id: String,
+    pub kind: RelationshipKind,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -778,6 +912,15 @@ pub struct Host {
     /// The release version the pending request is for.
     #[serde(default)]
     pub update_target: Option<String>,
+    /// Hypervisor or container-runtime identity when this device has source inventory.
+    #[serde(default)]
+    pub source: Option<SourceIdentity>,
+    #[serde(default)]
+    pub lifecycle: Option<DeviceLifecycle>,
+    #[serde(default)]
+    pub source_observed_at: Option<f64>,
+    #[serde(default)]
+    pub relationships: Vec<DeviceRelationship>,
 }
 
 impl Host {
@@ -812,6 +955,10 @@ impl Host {
             agent_version: None,
             update_requested_at: None,
             update_target: None,
+            source: None,
+            lifecycle: None,
+            source_observed_at: None,
+            relationships: vec![],
         }
     }
 }
@@ -965,6 +1112,18 @@ pub fn typescript() -> String {
         MonitorResult::decl(),
         ContainerNetwork::decl(),
         ContainerPort::decl(),
+        ChildSourceKind::decl(),
+        ChildDeviceKind::decl(),
+        DeviceLifecycle::decl(),
+        MemoryMeasurement::decl(),
+        CpuMeasurement::decl(),
+        SourceIdentity::decl(),
+        ChildMetrics::decl(),
+        ChildDeviceReport::decl(),
+        ChildReportBatch::decl(),
+        ChildReportResponse::decl(),
+        RelationshipKind::decl(),
+        DeviceRelationship::decl(),
         Container::decl(),
         UptimeScope::decl(),
         SystemUptime::decl(),
