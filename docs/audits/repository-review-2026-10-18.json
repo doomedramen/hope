@@ -1133,9 +1133,9 @@
     {
       "path": "web/lib/api.ts",
       "kind": "source/config/docs",
-      "pass_1": "in progress",
+      "pass_1": "reviewed",
       "pass_2": "pending",
-      "evidence": "Whole source inspected; confirmed findings in ledger; history UI corrections tested; remaining issues pending."
+      "evidence": "Whole source inspected; denied-storage theme, header representations, malformed proxy bodies and normal persisted-theme browser regressions pass."
     },
     {
       "path": "web/lib/clock.ts",
@@ -1178,9 +1178,9 @@
     {
       "path": "web/lib/theme.ts",
       "kind": "source/config/docs",
-      "pass_1": "in progress",
+      "pass_1": "reviewed",
       "pass_2": "pending",
-      "evidence": "Whole source inspected; confirmed findings in ledger; history UI corrections tested; remaining issues pending."
+      "evidence": "Whole source inspected; denied-storage theme, header representations, malformed proxy bodies and normal persisted-theme browser regressions pass."
     },
     {
       "path": "web/lib/utils.ts",
@@ -1224,6 +1224,13 @@
       "kind": "source/config/docs",
       "pass_1": "pending",
       "pass_2": "pending"
+    },
+    {
+      "path": "web/tests/api.spec.ts",
+      "kind": "source/config/docs",
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Actual helper tested with native Headers, tuple and object inputs and malformed/non-object HTTP error responses."
     },
     {
       "path": "web/tests/console.spec.ts",
@@ -1276,7 +1283,12 @@
     },
     {
       "subject": "Bound live history memory, advance outage windows, scope request errors, keep unavailable GPU selectable",
-      "verification": "43 browser/pure tests passed; frontend build, typecheck and lint passed."
+      "verification": "43 browser/pure tests passed; frontend build, typecheck and lint passed.",
+      "commit": "1e276ed"
+    },
+    {
+      "subject": "Frontend denied-storage theme, native header normalization, proxy errors and isolated chart samples",
+      "verification": "46 browser/pure tests, frontend build/typecheck/lint/format; sample-marker screenshot inspected."
     }
   ]
 }

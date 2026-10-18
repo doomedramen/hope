@@ -4,8 +4,10 @@ import { useCallback, useEffect, useSyncExternalStore } from "react";
 export type Theme = "light" | "dark" | "system";
 const KEY = "hope-theme";
 const listeners = new Set<() => void>();
+let pagePreference: Theme | null = null;
 
 function stored(): Theme {
+  if (pagePreference !== null) return pagePreference;
   try {
     const value = localStorage.getItem(KEY);
     return value === "light" || value === "dark" ? value : "system";
@@ -20,11 +22,16 @@ function subscribe(callback: () => void) {
   listeners.add(callback);
   const media = window.matchMedia("(prefers-color-scheme: dark)");
   media.addEventListener("change", callback);
-  window.addEventListener("storage", callback);
+  const storageChanged = (event: StorageEvent) => {
+    if (event.key !== KEY && event.key !== null) return;
+    pagePreference = null;
+    callback();
+  };
+  window.addEventListener("storage", storageChanged);
   return () => {
     listeners.delete(callback);
     media.removeEventListener("change", callback);
-    window.removeEventListener("storage", callback);
+    window.removeEventListener("storage", storageChanged);
   };
 }
 const themeSnapshot = (): Theme => stored();
@@ -45,6 +52,7 @@ export function useTheme() {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
   const setTheme = useCallback((next: Theme) => {
+    pagePreference = next;
     try {
       if (next === "system") localStorage.removeItem(KEY);
       else localStorage.setItem(KEY, next);

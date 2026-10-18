@@ -4,22 +4,28 @@ export async function api<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
+  const headers = new Headers(options.headers);
+  if (!headers.has("Content-Type"))
+    headers.set("Content-Type", "application/json");
   const response = await fetch(`/api/v1${path}`, {
     ...options,
     credentials: "same-origin",
     cache: "no-store",
-    headers: { "Content-Type": "application/json", ...options.headers },
+    headers,
   });
   if (!response.ok) {
     if (response.status === 401 && !path.startsWith("/auth/"))
       window.dispatchEvent(new Event("hope:session-expired"));
-    const body = await response
-      .json()
-      .catch(() => ({ error: `Request failed (${response.status})` }));
-    throw Object.assign(
-      new Error(body.error || `Request failed (${response.status})`),
-      { status: response.status },
-    );
+    const body: unknown = await response.json().catch(() => null);
+    const message =
+      body !== null &&
+      typeof body === "object" &&
+      "error" in body &&
+      typeof body.error === "string" &&
+      body.error.trim()
+        ? body.error
+        : `Request failed (${response.status})`;
+    throw Object.assign(new Error(message), { status: response.status });
   }
   return response.json();
 }

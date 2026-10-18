@@ -7,6 +7,7 @@ import {
   Line,
   XAxis,
   YAxis,
+  type DotItemDotProps,
 } from "recharts";
 import {
   ChartContainer,
@@ -472,6 +473,33 @@ function ChartBlock({
     }
     return null;
   };
+  // A line cannot show an isolated observation. Draw just those samples,
+  // preserving the null gaps instead of inventing a connected interval.
+  const sampleDot = (key: string, color: string) => {
+    const isolated = new Set<number>();
+    data.forEach((row, index) => {
+      if (
+        row[key] != null &&
+        data[index - 1]?.[key] == null &&
+        data[index + 1]?.[key] == null
+      )
+        isolated.add(index);
+    });
+    if (!isolated.size) return false;
+    return ({ cx, cy, index }: DotItemDotProps) =>
+      isolated.has(index) &&
+      typeof cx === "number" &&
+      typeof cy === "number" ? (
+        <circle
+          className="history-sample"
+          data-series={key}
+          cx={cx}
+          cy={cy}
+          r={3}
+          fill={color}
+        />
+      ) : null;
+  };
   return (
     <div className="chart-block" data-testid={`chart-${title}`}>
       <div className="chart-title">
@@ -557,7 +585,7 @@ function ChartBlock({
                 strokeWidth={2}
                 connectNulls={false}
                 isAnimationActive={false}
-                dot={false}
+                dot={sampleDot(s.key, `var(--color-${s.key})`)}
                 activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--card)" }}
               />
             ) : (
@@ -572,7 +600,7 @@ function ChartBlock({
                 fillOpacity={kind === "stacked" ? 0.35 : 0.1}
                 connectNulls={false}
                 isAnimationActive={false}
-                dot={false}
+                dot={sampleDot(s.key, `var(--color-${s.key})`)}
                 activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--card)" }}
               />
             ),
@@ -585,7 +613,7 @@ function ChartBlock({
               strokeWidth={1.5}
               connectNulls={false}
               isAnimationActive={false}
-              dot={false}
+              dot={sampleDot(total.key, "var(--muted-foreground)")}
               activeDot={false}
             />
           )}

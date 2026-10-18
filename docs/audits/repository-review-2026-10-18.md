@@ -25,6 +25,7 @@ Pass one traces implementation and error cases, reproduces findings and implemen
 - `7f6b16c`: container history. CPU/RAM gauges now use per-ID sums/counts, preserve unknown readings and retain observed containers within a bounded bucket. Both retention and display aggregation preserve each container's latest metadata across late arrivals. Migration 6 adds a host metadata timestamp. Legacy container rollups without gauge statistics expose unknowns. The details page has four history windows and retains charts when the latest report omits the container. Native Rust 186 passing (plus one separately passing updated validation regression), Clippy, frontend types/lint/format/export, protocol generation, docs 8 and browser suite 41 passing. Desktop and mobile screenshots reviewed.
 - The [release-mode 250-host retention fixture](../benchmarks/retention-macos-arm64-2026-10-18.json) passed with 1,154,500 seeded samples, 0.614-second cleanup, 2.424-ms median and 8.920-ms maximum concurrent report latency. Database size was 894,586,880 bytes. This CPU-only native fixture does not establish populated-collection costs or Linux performance.
 - History UI: live report caching is bounded to the 10–15-minute reload interval and 256 points; a day of five-second reports retains 181 points for the longest reload interval. Windows advance on a shared 30-second clock during outages. Errors belong to their host/window, and an unavailable GPU keeps its selector. Frontend build/types/lint passed; the expanded 43-test suite covers cache bounds, advancing windows and switching GPU adapters.
+- Frontend resilience: theme choices have an in-memory fallback when local storage is denied; storage events still synchronize normal cross-tab changes. The API helper normalizes native/tuple/object headers and handles non-object proxy errors. Isolated chart observations render sample dots, including separate observations divided by outages. Frontend build, type checking, lint and 46 browser/pure tests passed; the sample-marker rendering was inspected.
 
 ## Work queue from evidence
 
@@ -34,9 +35,6 @@ Pass one traces implementation and error cases, reproduces findings and implemen
 - Agent state writes and spool serialization costs, duplicated/expensive collection, release cross-request consistency and updater-attempt visibility.
 - Review raw-point resolution/freshness semantics and remaining keyed-series lifecycle behavior beyond the fixed live cache and container paths.
 - History/retention SQL loads full metric JSON; the existing 250-host fixture uses minimal CPU-only reports. Measure populated collections and storage growth before treating its results as representative of a full monitoring installation.
-- Theme changes are ignored when local storage is unavailable despite the fallback comment promising they still apply. Retain an in-memory preference and test the denied-storage path.
-- `api()` spreads `RequestInit.headers` as an object; a native `Headers` instance or header tuple array is not handled correctly. Normalize through the standard `Headers` API and verify preserved custom headers.
-- A single-sample history window renders an empty-looking plot because line/area dots are disabled. The GPU-selector screenshot confirms this; show a sample marker without inventing an interval of data.
 - Operator notes in `.agent-notes/inbox.md`: host cleanup, multi-address identity, deleted-network history and raw-ARP recovery. Verify current behavior before choosing a correction.
 
 ## Environment limits

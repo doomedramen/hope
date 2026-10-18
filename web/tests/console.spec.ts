@@ -611,6 +611,15 @@ test.describe.serial("H.O.P.E console", () => {
       async (route) => {
         await route.fulfill({
           json: [
+            ...(new URL(route.request().url()).searchParams.get("hours") === "6"
+              ? [
+                  {
+                    collected_at: collected_at - 600,
+                    resolution_seconds: 30,
+                    metrics: host.metrics,
+                  },
+                ]
+              : []),
             {
               collected_at,
               resolution_seconds: 30,
@@ -630,6 +639,9 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("tab", { name: "Metrics", exact: true }).click();
     const selector = page.getByRole("combobox", { name: "GPU history device" });
     await expect(selector).toBeVisible();
+    await expect(
+      page.getByTestId("chart-CPU").locator("circle.history-sample"),
+    ).toHaveCount(1);
     await page.screenshot({
       path: "test-results/history-gpu-unavailable.png",
       fullPage: true,
@@ -639,6 +651,19 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByTestId("chart-GPU utilization and memory"),
     ).toBeVisible();
+    await expect(
+      page
+        .getByTestId("chart-GPU utilization and memory")
+        .locator('circle.history-sample[data-series="utilization"]'),
+    ).toHaveCount(1);
+    await page.screenshot({
+      path: "test-results/history-isolated-sample.png",
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "6h", exact: true }).click();
+    await expect(
+      page.getByTestId("chart-CPU").locator("circle.history-sample"),
+    ).toHaveCount(2);
     await page.clock.runFor(180000);
     const through = await page.evaluate(() =>
       new Date(Date.now()).toLocaleString([], {
@@ -957,6 +982,42 @@ test.describe.serial("H.O.P.E console", () => {
     await page.keyboard.press("Enter");
     await expect(page.locator("html")).not.toHaveClass(/dark/);
   });
+  test("theme choices still apply when browser storage is denied", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      const get = Storage.prototype.getItem,
+        set = Storage.prototype.setItem,
+        remove = Storage.prototype.removeItem;
+      const deny = (key: string) => {
+        if (key === "hope-theme")
+          throw new DOMException("Storage denied", "SecurityError");
+      };
+      Storage.prototype.getItem = function (key) {
+        deny(key);
+        return get.call(this, key);
+      };
+      Storage.prototype.setItem = function (key, value) {
+        deny(key);
+        set.call(this, key, value);
+      };
+      Storage.prototype.removeItem = function (key) {
+        deny(key);
+        remove.call(this, key);
+      };
+    });
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto("/");
+    const theme = page.getByRole("group", { name: "Theme" });
+    await theme.getByRole("button", { name: "Dark", exact: true }).click();
+    await expect(page.locator("html")).toHaveClass(/dark/);
+    await theme.getByRole("button", { name: "Light", exact: true }).click();
+    await expect(page.locator("html")).not.toHaveClass(/dark/);
+    await theme.getByRole("button", { name: "Auto", exact: true }).click();
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect(page.locator("html")).toHaveClass(/dark/);
+  });
+
   test("a range can be removed from settings without losing its hosts", async ({
     page,
     request,
