@@ -139,8 +139,9 @@
     {
       "path": "crates/hope-agent/src/delivery.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Full source and HTTP outcome policy inspected; cached byte budget preserves legacy arrays. Agent unit/integration tests and workspace Clippy passed. Per-report cached lengths checked across byte eviction, escaped text, duplicate removal, expiry and reload."
     },
     {
       "path": "crates/hope-agent/src/extras.rs",
@@ -157,8 +158,9 @@
     {
       "path": "crates/hope-agent/src/reporting.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in_progress",
+      "pass_2": "pending",
+      "evidence": "Sampling/delivery regression coverage and spool accessors checked. Inventory delivery clock ordering, persistence cost and runtime diagnostics remain under review."
     },
     {
       "path": "crates/hope-agent/src/status.rs",

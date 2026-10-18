@@ -148,7 +148,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                 if first_report.is_none() { first_report=Some(report.report_id.clone()); }
                 current_reports.insert(report.report_id.clone());
                 spool.push(report,now())?;
-                current_reports.retain(|id| spool.reports.iter().any(|report| &report.report_id == id));
+                current_reports.retain(|id| spool.iter().any(|report| &report.report_id == id));
                 config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
             }
             result=async { inflight.as_mut().expect("guarded request").await }, if inflight.is_some() => {
@@ -183,9 +183,9 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                     }
                 }
             }
-            _=sleep_until(retry_at), if inflight.is_none() && !spool.reports.is_empty() => {
-                spool.trim(now())?;
-                if let Some(report)=spool.reports.back().cloned() {
+            _=sleep_until(retry_at), if inflight.is_none() && !spool.is_empty() => {
+                spool.trim(now());
+                if let Some(report)=spool.latest().cloned() {
                     inflight=Some(Box::pin(delivery::send(client.clone(),configuration.server.clone(),credential.clone(),report)));
                 }
             }

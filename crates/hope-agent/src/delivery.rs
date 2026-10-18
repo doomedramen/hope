@@ -49,9 +49,29 @@ impl<'de> serde::Deserialize<'de> for BoundedReports {
         deserializer.deserialize_seq(Visitor)
     }
 }
+// Keep the on-disk array of reports unchanged. Only the serialized length is
+// cached: byte-budget eviction must not serialize the entire backlog for each
+// removed sample, or keep a second encoded copy of every report in memory.
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+struct QueuedReport {
+    report: AgentReport,
+    #[serde(skip)]
+    serialized_bytes: usize,
+}
+impl QueuedReport {
+    fn new(report: AgentReport) -> Result<Self> {
+        let serialized_bytes = serde_json::to_vec(&report)?.len();
+        Ok(Self {
+            report,
+            serialized_bytes,
+        })
+    }
+}
 #[derive(Default)]
 pub struct Spool {
-    pub reports: VecDeque<AgentReport>,
+    reports: VecDeque<QueuedReport>,
+    content_bytes: usize,
 }
 impl Spool {
     pub fn decode(bytes: &[u8], identity: &str, now: f64) -> Self {
@@ -62,31 +82,69 @@ impl Spool {
         } else {
             VecDeque::new()
         };
-        let mut spool = Self { reports };
-        spool.reports.retain(|r| r.agent_id == identity);
-        let _ = spool.trim(now);
+        let mut spool = Self::default();
+        for report in reports {
+            if report.agent_id == identity
+                && let Ok(queued) = QueuedReport::new(report)
+            {
+                spool.content_bytes += queued.serialized_bytes;
+                spool.reports.push_back(queued);
+            }
+        }
+        spool.trim(now);
         spool
     }
     pub fn push(&mut self, report: AgentReport, now: f64) -> Result<()> {
-        self.reports.push_back(report);
-        self.trim(now)
+        let queued = QueuedReport::new(report)?;
+        self.content_bytes += queued.serialized_bytes;
+        self.reports.push_back(queued);
+        self.trim(now);
+        Ok(())
     }
-    pub fn trim(&mut self, now: f64) -> Result<()> {
-        self.reports.retain(|r| {
+    pub fn trim(&mut self, now: f64) {
+        self.retain(|r| {
             r.collected_at.is_finite()
                 && r.collected_at > now - MAX_AGE_SECONDS
                 && r.collected_at <= now + 300.0
         });
-        while self.reports.len() > MAX_REPORTS || self.encode()?.len() > MAX_BYTES {
-            self.reports.pop_front();
+        while self.len() > MAX_REPORTS || self.encoded_len() > MAX_BYTES {
+            if let Some(queued) = self.reports.pop_front() {
+                self.content_bytes -= queued.serialized_bytes;
+            }
         }
-        Ok(())
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         Ok(serde_json::to_vec(&self.reports)?)
     }
     pub fn remove(&mut self, id: &str) {
-        self.reports.retain(|r| r.report_id != id);
+        self.retain(|r| r.report_id != id);
+    }
+    fn retain(&mut self, mut keep: impl FnMut(&AgentReport) -> bool) {
+        let content_bytes = &mut self.content_bytes;
+        self.reports.retain(|queued| {
+            if keep(&queued.report) {
+                true
+            } else {
+                *content_bytes -= queued.serialized_bytes;
+                false
+            }
+        });
+    }
+    fn encoded_len(&self) -> usize {
+        // Two brackets and one comma between each pair of reports.
+        2 + self.content_bytes + self.len().saturating_sub(1)
+    }
+    pub fn len(&self) -> usize {
+        self.reports.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.reports.is_empty()
+    }
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &AgentReport> + ExactSizeIterator {
+        self.reports.iter().map(|queued| &queued.report)
+    }
+    pub fn latest(&self) -> Option<&AgentReport> {
+        self.iter().next_back()
     }
 }
 #[derive(Debug)]
@@ -194,28 +252,19 @@ mod tests {
         for time in 0..MAX_REPORTS + 80 {
             spool.push(report(time as f64), 1000.0).expect("push");
         }
-        assert_eq!(spool.reports.len(), MAX_REPORTS);
-        spool.trim(5000.0).expect("trim");
-        assert!(spool.reports.is_empty());
-        assert!(
-            Spool::decode(b"invalid", "identity", 200.0)
-                .reports
-                .is_empty()
-        );
+        assert_eq!(spool.len(), MAX_REPORTS);
+        spool.trim(5000.0);
+        assert!(spool.is_empty());
+        assert!(Spool::decode(b"invalid", "identity", 200.0).is_empty());
         assert!(
             Spool::decode(
                 &serde_json::to_vec(&VecDeque::from([report(100.0)])).expect("json"),
                 "other",
                 200.0
             )
-            .reports
             .is_empty()
         );
-        assert!(
-            Spool::decode(&vec![0; MAX_BYTES + 1], "identity", 200.0)
-                .reports
-                .is_empty()
-        );
+        assert!(Spool::decode(&vec![0; MAX_BYTES + 1], "identity", 200.0).is_empty());
     }
     #[test]
     fn runtime_byte_budget_and_clock_skew_evict_oldest_samples() {
@@ -230,18 +279,11 @@ mod tests {
             spool.push(sample, 100.0).expect("push");
         }
         assert!(spool.encode().expect("encode").len() <= MAX_BYTES);
-        assert!(spool.reports.len() < 30);
-        assert_eq!(
-            spool.reports.back().expect("latest").collectors[0].name,
-            "29"
-        );
+        assert_eq!(spool.encoded_len(), spool.encode().expect("encode").len());
+        assert!(spool.len() < 30);
+        assert_eq!(spool.latest().expect("latest").collectors[0].name, "29");
         spool.push(report(1000.0), 100.0).expect("future");
-        assert!(
-            spool
-                .reports
-                .iter()
-                .all(|sample| sample.collected_at <= 400.0)
-        );
+        assert!(spool.iter().all(|sample| sample.collected_at <= 400.0));
         let oversized_count = vec![report(100.0); MAX_REPORTS + 1];
         assert!(
             Spool::decode(
@@ -249,9 +291,59 @@ mod tests {
                 "identity",
                 100.0
             )
-            .reports
             .is_empty()
         );
+    }
+    #[test]
+    fn cached_size_tracks_escaped_reports_removal_expiry_and_legacy_round_trip() {
+        fn assert_wire_format(spool: &Spool) {
+            let bytes = spool.encode().expect("encode");
+            assert_eq!(spool.encoded_len(), bytes.len());
+            assert_eq!(
+                bytes,
+                serde_json::to_vec(&spool.iter().collect::<Vec<_>>()).expect("legacy array")
+            );
+        }
+        let mut first = report(100.0);
+        first.report_id = "duplicate".into();
+        first.collectors.push(hope_protocol::CollectorStatus {
+            name: "quotes\" and \\ slashes".into(),
+            available: false,
+            detail: Some("control\0\n\t and Unicode 🦀".into()),
+        });
+        let mut wrong_identity = report(100.0);
+        wrong_identity.agent_id = "other".into();
+        // Decoding must continue to read arrays written by earlier agents,
+        // remove another identity and expire old entries before returning.
+        let legacy = vec![
+            first.clone(),
+            wrong_identity,
+            report(-4000.0),
+            first,
+            report(200.0),
+        ];
+        let mut spool = Spool::decode(
+            &serde_json::to_vec(&legacy).expect("legacy queue"),
+            "identity",
+            200.0,
+        );
+        assert_eq!(spool.len(), 3);
+        assert_wire_format(&spool);
+        spool.remove("duplicate");
+        assert_eq!(spool.len(), 1);
+        assert_wire_format(&spool);
+        spool.remove("absent");
+        spool.push(report(250.0), 250.0).expect("push");
+        assert_wire_format(&spool);
+        let mut restored = Spool::decode(&spool.encode().expect("encode"), "identity", 250.0);
+        assert_eq!(restored.len(), 2);
+        assert_wire_format(&restored);
+        restored.trim(3800.0);
+        assert_eq!(restored.len(), 1);
+        assert_wire_format(&restored);
+        restored.trim(3850.0);
+        assert!(restored.is_empty());
+        assert_wire_format(&restored);
     }
     #[test]
     fn retry_delays_are_bounded_and_understand_http_dates() {
