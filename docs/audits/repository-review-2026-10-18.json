@@ -534,6 +534,12 @@
       "pass_2": "pending"
     },
     {
+      "path": "docs/benchmarks/retention-macos-arm64-2026-10-18.json",
+      "kind": "source/config/docs",
+      "pass_1": "pending",
+      "pass_2": "pending"
+    },
+    {
       "path": "docs/benchmarks/retention-macos-arm64.json",
       "kind": "source/config/docs",
       "pass_1": "pending",
@@ -912,7 +918,7 @@
       "kind": "source/config/docs",
       "pass_1": "in progress",
       "pass_2": "pending",
-      "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
+      "evidence": "Whole source inspected; confirmed findings in ledger; history UI corrections tested; remaining issues pending."
     },
     {
       "path": "web/components/network-dialog.tsx",
@@ -1127,14 +1133,16 @@
     {
       "path": "web/lib/api.ts",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in progress",
+      "pass_2": "pending",
+      "evidence": "Whole source inspected; confirmed findings in ledger; history UI corrections tested; remaining issues pending."
     },
     {
       "path": "web/lib/clock.ts",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Whole source inspected; cache bounded over 24 hours of five-second reports; browser virtual-clock regression and history gaps pass."
     },
     {
       "path": "web/lib/devices.ts",
@@ -1151,8 +1159,9 @@
     {
       "path": "web/lib/history.ts",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Whole source inspected; cache bounded over 24 hours of five-second reports; browser virtual-clock regression and history gaps pass."
     },
     {
       "path": "web/lib/icon-matching.ts",
@@ -1169,14 +1178,16 @@
     {
       "path": "web/lib/theme.ts",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in progress",
+      "pass_2": "pending",
+      "evidence": "Whole source inspected; confirmed findings in ledger; history UI corrections tested; remaining issues pending."
     },
     {
       "path": "web/lib/utils.ts",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Single re-export of installed cn utility; frontend lint/types/build passed."
     },
     {
       "path": "web/next-env.d.ts",
@@ -1230,8 +1241,9 @@
     {
       "path": "web/tests/history.spec.ts",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "reviewed",
+      "pass_2": "pending",
+      "evidence": "Whole source inspected; cache bounded over 24 hours of five-second reports; browser virtual-clock regression and history gaps pass."
     },
     {
       "path": "web/tests/security.spec.ts",
@@ -1259,7 +1271,12 @@
     },
     {
       "subject": "Container history, weighted gauges, late metadata ordering and legacy compatibility",
-      "verification": "186 native Rust tests, Clippy, 41 browser tests, frontend build/types/lint/format, docs and protocol checks; 250-host load check in progress"
+      "verification": "186 Rust tests, targeted validation regression, Clippy, 41 browser tests, frontend build/types/lint/format, docs and generated protocol; release-mode 250-host CPU-only retention fixture passed (0.614 s cleanup, 8.920 ms maximum concurrent report latency).",
+      "commit": "7f6b16c"
+    },
+    {
+      "subject": "Bound live history memory, advance outage windows, scope request errors, keep unavailable GPU selectable",
+      "verification": "43 browser/pure tests passed; frontend build, typecheck and lint passed."
     }
   ]
 }

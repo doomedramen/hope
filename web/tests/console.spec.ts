@@ -583,6 +583,74 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(page.getByTestId("chart-Container CPU")).toBeVisible();
   });
 
+  test("history advances during a reporting outage and unavailable GPUs remain selectable", async ({
+    page,
+    request,
+  }) => {
+    const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+    const host = bootstrap.hosts.find(
+      (item: { name: string }) => item.name === "atlas-nas",
+    );
+    const gpu = (
+      id: string,
+      name: string,
+      utilization_percent: number | null,
+    ) => ({
+      id,
+      name,
+      vendor: "fixture",
+      utilization_percent,
+      memory_used_bytes: null,
+      memory_total_bytes: null,
+      temperature_celsius: null,
+    });
+    await page.clock.install();
+    const collected_at = await page.evaluate(() => Date.now() / 1000);
+    await page.route(
+      `**/api/v1/hosts/${host.id}/metrics?hours=*`,
+      async (route) => {
+        await route.fulfill({
+          json: [
+            {
+              collected_at,
+              resolution_seconds: 30,
+              metrics: {
+                ...host.metrics,
+                gpus: [
+                  gpu("first", "Unavailable GPU", null),
+                  gpu("second", "Working GPU", 40),
+                ],
+              },
+            },
+          ],
+        });
+      },
+    );
+    await page.goto(`/?view=host&host=${host.id}`);
+    await page.getByRole("tab", { name: "Metrics", exact: true }).click();
+    const selector = page.getByRole("combobox", { name: "GPU history device" });
+    await expect(selector).toBeVisible();
+    await page.screenshot({
+      path: "test-results/history-gpu-unavailable.png",
+      fullPage: true,
+    });
+    await selector.click();
+    await page.getByRole("option", { name: /Working GPU/ }).click();
+    await expect(
+      page.getByTestId("chart-GPU utilization and memory"),
+    ).toBeVisible();
+    await page.clock.runFor(180000);
+    const through = await page.evaluate(() =>
+      new Date(Date.now()).toLocaleString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    );
+    await expect(
+      page.getByTestId("chart-CPU").getByText(through, { exact: true }),
+    ).toBeVisible();
+  });
+
   test("expired session returns to login and mobile logout is reachable", async ({
     page,
   }) => {

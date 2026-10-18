@@ -1,0 +1,19 @@
+{
+  "aggregate_days": 6,
+  "architecture": "aarch64",
+  "concurrent_discovery_writes": 30,
+  "concurrent_reports": 29,
+  "database_bytes": 894586880,
+  "hosts": 250,
+  "platform": "macos",
+  "profile": "release",
+  "raw_hours": 24,
+  "report_latency_max_ms": 8.919542000000002,
+  "report_latency_median_ms": 2.424417,
+  "retention_calls": 2,
+  "retention_seconds": 0.61446025,
+  "seeded_samples": 1154500,
+  "date": "2026-10-18",
+  "change": "container-history milestone 7f6b16c",
+  "fixture_scope": "CPU-only metrics; does not measure populated container/device collections or Linux service behavior"
+}

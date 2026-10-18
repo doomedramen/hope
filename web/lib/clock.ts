@@ -23,11 +23,11 @@ function subscribe(listener: () => void) {
   };
 }
 
-/** Seconds since the epoch, re-rendering the caller once a second. */
-export function useNow(): number {
+/** Shared wall clock; a larger resolution limits expensive callers' re-renders. */
+export function useNow(resolutionSeconds = 1): number {
   return useSyncExternalStore(
     subscribe,
-    () => current,
-    () => current,
+    () => Math.floor(current / resolutionSeconds) * resolutionSeconds,
+    () => Math.floor(current / resolutionSeconds) * resolutionSeconds,
   );
 }

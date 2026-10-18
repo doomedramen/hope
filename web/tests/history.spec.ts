@@ -1,5 +1,9 @@
 import { test, expect } from "@playwright/test";
-import { historySeries, memoryPercent } from "../lib/history";
+import {
+  appendLiveHistory,
+  historySeries,
+  memoryPercent,
+} from "../lib/history";
 import type { Metrics, MetricPoint } from "../lib/protocol";
 const metrics: Metrics = {
   cpu_percent: 20,
@@ -25,6 +29,30 @@ const metrics: Metrics = {
   disks: [],
   gpus: [],
 };
+test("live history stays bounded across a day of five-second reports", () => {
+  let points: MetricPoint[] = [];
+  for (let collected_at = 0; collected_at < 86400; collected_at += 5)
+    points = appendLiveHistory(
+      points,
+      { collected_at, resolution_seconds: 30, metrics },
+      900,
+    );
+  expect(points).toHaveLength(181);
+  expect(points.at(-1)?.collected_at).toBe(86395);
+  expect(points[0].collected_at).toBe(85495);
+  const crowded = Array.from({ length: 1000 }, (_, collected_at) => ({
+    collected_at,
+    resolution_seconds: 30,
+    metrics,
+  }));
+  expect(
+    appendLiveHistory(
+      crowded,
+      { collected_at: 1000, resolution_seconds: 30, metrics },
+      900,
+    ),
+  ).toHaveLength(256);
+});
 test("missing memory stays unavailable and history has leading, internal and trailing gaps", () => {
   expect(memoryPercent(metrics)).toBeNull();
   expect(memoryPercent({ ...metrics, memory_used_bytes: 0 })).toBe(0);

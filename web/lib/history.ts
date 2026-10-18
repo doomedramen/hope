@@ -1,5 +1,21 @@
 import type { MetricPoint, Metrics } from "@/lib/protocol";
 
+/** Stored history is reloaded every 10–15 minutes; only bridge that interval. */
+export function appendLiveHistory(
+  points: MetricPoint[],
+  next: MetricPoint,
+  keepSeconds: number,
+): MetricPoint[] {
+  return [
+    ...points.filter(
+      (point) =>
+        point.collected_at >= next.collected_at - keepSeconds &&
+        point.collected_at < next.collected_at,
+    ),
+    next,
+  ].slice(-256);
+}
+
 export function memoryPercent(metrics: Metrics): number | null {
   return metrics.memory_used_bytes != null &&
     metrics.memory_total_bytes != null &&

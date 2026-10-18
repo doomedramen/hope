@@ -25,7 +25,8 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, bytes } from "@/lib/api";
-import { historySeries, memoryPercent } from "@/lib/history";
+import { appendLiveHistory, historySeries, memoryPercent } from "@/lib/history";
+import { useNow } from "@/lib/clock";
 import type { MetricPoint, Metrics } from "@/lib/protocol";
 
 export type HistoryWindow = "1" | "6" | "24" | "168";
@@ -52,12 +53,17 @@ export function useHistory(
   collectedAt: number | null,
   latest: Metrics | null,
 ) {
+  const now = useNow(30);
   const [result, setResult] = useState<{
     hostId: string;
     hours: string;
     points: MetricPoint[];
   } | null>(null);
-  const [error, setError] = useState("");
+  const [failure, setFailure] = useState<{
+    hostId: string;
+    hours: HistoryWindow;
+    message: string;
+  } | null>(null);
   const [fetchedAt, setFetchedAt] = useState(() => Date.now() / 1000);
   const [live, setLive] = useState<{
     hostId: string;
@@ -70,12 +76,11 @@ export function useHistory(
   else if (collectedAt && latest && collectedAt > newest)
     setLive({
       hostId,
-      points: [
-        ...live.points.filter(
-          (point) => point.collected_at > collectedAt - 7 * 86400,
-        ),
+      points: appendLiveHistory(
+        live.points,
         { collected_at: collectedAt, resolution_seconds: 30, metrics: latest },
-      ],
+        Math.max(BUCKET_SECONDS[hours], RAW_RELOAD_SECONDS),
+      ),
     });
   const bucket = BUCKET_SECONDS[hours] || RAW_RELOAD_SECONDS;
   const reload = collectedAt ? Math.floor(collectedAt / bucket) : 0;
@@ -86,11 +91,11 @@ export function useHistory(
         if (alive) {
           setResult({ hostId, hours, points: p });
           setFetchedAt(Date.now() / 1000);
-          setError("");
+          setFailure(null);
         }
       })
       .catch((e) => {
-        if (alive) setError(e.message);
+        if (alive) setFailure({ hostId, hours, message: e.message });
       });
     return () => {
       alive = false;
@@ -107,10 +112,13 @@ export function useHistory(
         : [];
     return fresh.length ? [...stored, ...fresh] : stored;
   }, [stored, live, hostId]);
-  const windowEnd = Math.max(fetchedAt, collectedAt ?? 0);
+  const windowEnd = Math.max(now, fetchedAt, collectedAt ?? 0);
   return {
     points,
-    error,
+    error:
+      failure?.hostId === hostId && failure.hours === hours
+        ? failure.message
+        : "",
     windowStart: windowEnd - Number(hours) * 3600,
     windowEnd,
   };
@@ -978,9 +986,20 @@ function ResourceHistory({
             {...frame}
           />
         ) : (
-          <p className="text-xs text-muted-foreground">
-            GPU metrics are unavailable for this device in this window.
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              GPU metrics are unavailable for this device in this window.
+            </p>
+            <Picker
+              value={gpuId}
+              options={[...gpuOptions].map(([id, name]) => [
+                id,
+                `${name} · ${id.slice(-8)}`,
+              ])}
+              onChange={setGpuChoice}
+              label="GPU history device"
+            />
+          </div>
         ))}
     </>
   );
