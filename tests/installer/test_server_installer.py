@@ -5,7 +5,8 @@ the release archive comes from a local directory through the HOPE_INSTALL_RELEAS
 the download, checksum verification and extraction paths are the real ones. The release also carries
 hope-agents.tar.gz (fake agent binaries with the right headers) and the package carries the real
 scripts/assemble-release.sh behind a wrapper that logs its call, so agent signing is the real one too.
-Run: python3 -I -m unittest discover -s tests/installer -v
+Requires Linux userland (including GNU sed); run the suite in Linux:
+python3 -I -m unittest discover -s tests/installer -v
 """
 import hashlib
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -90,6 +92,7 @@ sys.exit(1)
 '''
 
 
+@unittest.skipUnless(sys.platform.startswith('linux'), 'Server installer fixtures require Linux userland')
 class ServerInstaller(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix='hope-server-install-'))
