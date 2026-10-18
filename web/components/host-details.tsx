@@ -628,9 +628,22 @@ export function HostDetails({
                     >
                       {metrics.service_summary.failed} failed
                     </span>{" "}
-                    of {metrics.service_summary.total}
+                    of {metrics.service_summary.total} loaded
                   </span>
                 </h3>
+                {metrics.service_summary.failed >
+                  metrics.services.filter((unit) => unit.state === "failed")
+                    .length && (
+                  <p className="mb-2 text-xs text-muted-foreground">
+                    Showing{" "}
+                    {
+                      metrics.services.filter((unit) => unit.state === "failed")
+                        .length
+                    }{" "}
+                    of {metrics.service_summary.failed} failed units. Watched
+                    services are shown first.
+                  </p>
+                )}
                 {metrics.services.length ? (
                   <div className="flex flex-col">
                     {metrics.services.map((unit) => (
@@ -662,8 +675,9 @@ export function HostDetails({
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground">
-                    No failed units. Add names to HOPE_WATCH_SERVICES on the
-                    agent to always show them here.
+                    {metrics.service_summary.failed > 0
+                      ? "Failed unit details were not included in this report. Inspect the host for the full list."
+                      : "No failed units. Add names to HOPE_WATCH_SERVICES on the agent to show their loaded state here."}
                   </p>
                 )}
               </section>

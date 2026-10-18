@@ -97,6 +97,37 @@ function host(overrides: Partial<Host>): Host {
   };
 }
 
+test("bounded service details keep the overall failed-unit count", () => {
+  const fixture = host({
+    agent_id: "a",
+    last_report: now,
+    metrics: {
+      ...metrics,
+      service_summary: { active: 1, failed: 200, total: 201 },
+      services: [
+        {
+          name: "one.service",
+          state: "failed",
+          sub_state: "failed",
+          description: "fixture",
+          watched: true,
+        },
+      ],
+    },
+  });
+  expect(
+    hostIssues(fixture, now)
+      .filter((issue) => issue.kind === "service")
+      .map((issue) => issue.message),
+  ).toEqual(["200 service units failed"]);
+  fixture.metrics!.service_summary = null;
+  expect(
+    hostIssues(fixture, now)
+      .filter((issue) => issue.kind === "service")
+      .map((issue) => issue.message),
+  ).toEqual(["one.service failed"]);
+});
+
 test("host state distinguishes reporting, stale, revoked, observed and unobserved", () => {
   expect(hostState(host({}), now).key).toBe("observed");
   expect(hostState(host({ last_seen: now - 601 }), now).key).toBe("unobserved");

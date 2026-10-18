@@ -103,6 +103,13 @@ function extended(sample: number) {
         description: "A high performance web server",
         watched: false,
       },
+      {
+        name: "ghost.service",
+        state: "not-found",
+        sub_state: "dead",
+        description: "Missing watched unit",
+        watched: true,
+      },
     ],
     service_summary: { active: 40, failed: 1, total: 42 },
     containers: [
@@ -999,6 +1006,12 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(details.getByTestId("service-units")).toContainText(
       "nginx.service",
     );
+    await expect(details.getByTestId("service-units")).toContainText(
+      "ghost.service",
+    );
+    await expect(details.getByTestId("service-units")).toContainText(
+      "not-found",
+    );
     await expect(details.getByTestId("monitors")).toContainText("timed out");
     await expect(details).not.toContainText("Live usage");
     await details.getByRole("tab", { name: "Metrics", exact: true }).click();
@@ -1029,6 +1042,45 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(page).toHaveURL(/view=hosts/);
     await expect(page.getByRole("table")).toBeVisible();
   });
+  test("service failures remain visible when bounded reports omit unit details", async ({
+    page,
+    request,
+  }) => {
+    const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+    const host = bootstrap.hosts.find(
+      (item: { name: string }) => item.name === "atlas-nas",
+    );
+    await page.route("**/api/v1/bootstrap", (route) =>
+      route.fulfill({
+        json: {
+          ...bootstrap,
+          hosts: bootstrap.hosts.map((item: { id: string }) =>
+            item.id === host.id
+              ? {
+                  ...host,
+                  metrics: {
+                    ...host.metrics,
+                    services: [],
+                    service_summary: { active: 1, failed: 200, total: 201 },
+                  },
+                }
+              : item,
+          ),
+        },
+      }),
+    );
+    await page.goto(`/?view=host&host=${host.id}`);
+    const details = page.getByRole("complementary", { name: "Host details" });
+    await expect(details).toContainText("200 service units failed");
+    await details.getByRole("tab", { name: "Services", exact: true }).click();
+    const units = details.getByTestId("service-units");
+    await expect(units).toContainText("200 failed");
+    await expect(units).toContainText("Showing 0 of 200 failed units");
+    await expect(units).toContainText("Failed unit details were not included");
+    await expect(units).not.toContainText("No failed units");
+    await units.screenshot({ path: "test-results/services-omitted.png" });
+  });
+
   test("command palette jumps to a host and the theme persists", async ({
     page,
   }) => {

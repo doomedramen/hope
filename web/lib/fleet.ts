@@ -182,15 +182,19 @@ export function hostIssues(host: Host, now = Date.now() / 1000): Issue[] {
     const failed = (metrics?.services ?? []).filter(
       (unit) => unit.state === "failed",
     );
-    if (failed.length)
+    const failedCount = Math.max(
+      metrics?.service_summary?.failed ?? 0,
+      failed.length,
+    );
+    if (failedCount)
       issues.push({
         host,
         severity: "warning",
         kind: "service",
         message:
-          failed.length === 1
+          failedCount === 1 && failed.length === 1
             ? `${failed[0].name} failed`
-            : `${failed.length} service units failed`,
+            : `${failedCount} service ${failedCount === 1 ? "unit" : "units"} failed`,
       });
     const down = (metrics?.monitors ?? []).filter((monitor) => !monitor.up);
     if (down.length)

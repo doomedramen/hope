@@ -317,19 +317,30 @@ pub fn problems(host: &Host, now: f64, last_scan: &HashMap<String, (f64, u32)>) 
                 .iter()
                 .filter(|u| u.state == "failed")
                 .collect();
-            if let [unit] = failed.as_slice() {
+            let failed_count = metrics
+                .service_summary
+                .map_or(0, |summary| summary.failed as usize)
+                .max(failed.len());
+            if let [unit] = failed.as_slice()
+                && failed_count == 1
+            {
                 push(
                     "service",
                     false,
                     false,
                     format!("{} failed on {}", unit.name, host.name),
                 );
-            } else if !failed.is_empty() {
+            } else if failed_count > 0 {
                 push(
                     "service",
                     false,
                     false,
-                    format!("{} service units failed on {}", failed.len(), host.name),
+                    format!(
+                        "{} service {} failed on {}",
+                        failed_count,
+                        if failed_count == 1 { "unit" } else { "units" },
+                        host.name
+                    ),
                 );
             }
             for monitor in metrics.monitors.iter().filter(|m| !m.up) {
@@ -551,6 +562,47 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use hope_protocol::DeviceGuess;
+
+    #[test]
+    fn service_notifications_keep_the_full_failure_count_when_details_are_bounded() {
+        let mut host = Host::new("a".into(), "fixture".into(), "agent");
+        host.agent_id = Some("agent".into());
+        host.last_report = Some(10_000.0);
+        host.metrics = Some(hope_protocol::Metrics {
+            services: vec![hope_protocol::ServiceUnit {
+                name: "one.service".into(),
+                state: "failed".into(),
+                sub_state: "failed".into(),
+                description: "fixture".into(),
+                watched: true,
+            }],
+            service_summary: Some(hope_protocol::ServiceSummary {
+                active: 1,
+                failed: 200,
+                total: 201,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            problems(&host, 10_000.0, &HashMap::new())[0].message,
+            "200 service units failed on fixture"
+        );
+        host.metrics.as_mut().unwrap().service_summary = None;
+        assert_eq!(
+            problems(&host, 10_000.0, &HashMap::new())[0].message,
+            "one.service failed on fixture"
+        );
+        host.metrics.as_mut().unwrap().services.clear();
+        host.metrics.as_mut().unwrap().service_summary = Some(hope_protocol::ServiceSummary {
+            active: 1,
+            failed: 1,
+            total: 2,
+        });
+        assert_eq!(
+            problems(&host, 10_000.0, &HashMap::new())[0].message,
+            "1 service unit failed on fixture"
+        );
+    }
 
     #[test]
     fn agents_and_infrastructure_raise_offline_problems_only_when_looked_for() {

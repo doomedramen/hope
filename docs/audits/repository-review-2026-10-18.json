@@ -148,8 +148,9 @@
     {
       "path": "crates/hope-agent/src/extras.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in_progress",
+      "pass_2": "pending",
+      "evidence": "Settings, memory/load, pools, service and monitor paths inspected in targeted sections. Watched-unit cap regression reproduced/fixed; alias normalization, observed not-found rows and TCP port reservation verified. Full module review, explicit unloaded-unit queries and Linux runtime gate remain pending."
     },
     {
       "path": "crates/hope-agent/src/main.rs",
@@ -207,7 +208,7 @@
     {
       "path": "crates/hope-protocol/src/validation.rs",
       "kind": "source/config/docs",
-      "pass_1": "in progress",
+      "pass_1": "in_progress",
       "pass_2": "pending",
       "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
@@ -322,7 +323,7 @@
     {
       "path": "crates/hope-server/src/metrics.rs",
       "kind": "source/config/docs",
-      "pass_1": "in progress",
+      "pass_1": "in_progress",
       "pass_2": "pending",
       "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
@@ -362,8 +363,9 @@
     {
       "path": "crates/hope-server/src/notify.rs",
       "kind": "source/config/docs",
-      "pass_1": "pending",
-      "pass_2": "pending"
+      "pass_1": "in_progress",
+      "pass_2": "pending",
+      "evidence": "Resource unknown/recovery and bounded-service summary counts checked; focused notification regression and full 199-test Rust suite pass. Remaining full-file transport/settings/lifecycle review pending."
     },
     {
       "path": "crates/hope-server/src/releases.rs",
@@ -423,7 +425,7 @@
     {
       "path": "crates/hope-server/tests/api.rs",
       "kind": "source/config/docs",
-      "pass_1": "in progress",
+      "pass_1": "in_progress",
       "pass_2": "pending",
       "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
@@ -881,7 +883,7 @@
     {
       "path": "web/components/console.tsx",
       "kind": "source/config/docs",
-      "pass_1": "in progress",
+      "pass_1": "in_progress",
       "pass_2": "pending",
       "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
@@ -925,7 +927,7 @@
     {
       "path": "web/components/metric-history.tsx",
       "kind": "source/config/docs",
-      "pass_1": "in progress",
+      "pass_1": "in_progress",
       "pass_2": "pending",
       "evidence": "Whole source inspected; confirmed findings in ledger; history UI corrections tested; remaining issues pending."
     },
@@ -1244,7 +1246,7 @@
     {
       "path": "web/tests/console.spec.ts",
       "kind": "source/config/docs",
-      "pass_1": "in progress",
+      "pass_1": "in_progress",
       "pass_2": "pending",
       "evidence": "Container/history path reviewed and regressions added; remaining file-wide behaviors pending."
     },
@@ -1389,7 +1391,13 @@
     },
     {
       "subject": "Initialize monitor clients after enrollment CA updates and avoid unnecessary collector setup",
-      "verification": "CLI loopback HTTPS regression failed on baseline and passes for new enrollment and existing-agent CA update. Fifty-five agent tests and workspace Clippy pass; Axum/tokio-rustls are existing resolved test-only dependencies."
+      "verification": "CLI loopback HTTPS regression failed on baseline and passes for new enrollment and existing-agent CA update. Fifty-five agent tests and workspace Clippy pass; Axum/tokio-rustls are existing resolved test-only dependencies.",
+      "commit": "40603ac",
+      "fixture_follow_up_commit": "b74f365"
+    },
+    {
+      "subject": "Keep watched services and full failure totals visible through bounded reports",
+      "verification": "Watched-unit starvation regression reproduced before fix. Alias/cap/not-found, notification summary and omitted-detail UI regressions pass; Rust 199 tests (one retention ignored), browser 49, Clippy, generated types, frontend build/types/lint/format pass. Watched/TCP targets rechecked; full Linux/systemd execution pending."
     }
   ]
 }

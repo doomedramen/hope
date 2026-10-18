@@ -65,10 +65,7 @@ impl Settings {
             .monitors
             .retain(|target| seen.insert(target.clone()));
         settings.monitors.truncate(MAX_MONITORS);
-        settings.watch_services.retain(|unit| {
-            !unit.is_empty() && unit.len() <= 256 && !unit.chars().any(char::is_control)
-        });
-        settings.watch_services.truncate(MAX_WATCHED_SERVICES);
+        settings.watch_services = normalized_watched_units(&settings.watch_services);
         settings.ca_pem = crate::config::read(dir)
             .await
             .ok()
@@ -472,6 +469,30 @@ pub fn pools(
 
 // ---------- Service units ----------
 
+fn normalized_watched_units(units: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    units
+        .iter()
+        .filter_map(|unit| {
+            let unit = unit.trim();
+            if unit.is_empty()
+                || unit.len() > 256
+                || unit.chars().any(char::is_whitespace)
+                || unit.chars().any(char::is_control)
+            {
+                return None;
+            }
+            let unit = if unit.ends_with(".service") {
+                unit.to_string()
+            } else {
+                format!("{unit}.service")
+            };
+            (unit.len() <= 256 && seen.insert(unit.clone())).then_some(unit)
+        })
+        .take(MAX_WATCHED_SERVICES)
+        .collect()
+}
+
 pub struct ServiceReport {
     pub units: Vec<ServiceUnit>,
     pub summary: ServiceSummary,
@@ -498,17 +519,14 @@ pub async fn services(watched: &[String]) -> Option<ServiceReport> {
     Some(parse_units(&output, watched))
 }
 pub fn parse_units(output: &str, watched: &[String]) -> ServiceReport {
-    let is_watched = |name: &str| {
-        watched.iter().any(|w| {
-            w == name || w.trim_end_matches(".service") == name.trim_end_matches(".service")
-        })
-    };
+    let watched: HashSet<_> = normalized_watched_units(watched).into_iter().collect();
     let mut summary = ServiceSummary {
         active: 0,
         failed: 0,
         total: 0,
     };
-    let mut units = vec![];
+    let mut priority = vec![];
+    let mut failures = vec![];
     for line in output.lines() {
         let mut parts = line.split_whitespace();
         let (Some(name), Some(load), Some(active), Some(sub)) =
@@ -516,28 +534,47 @@ pub fn parse_units(output: &str, watched: &[String]) -> ServiceReport {
         else {
             continue;
         };
-        if load == "not-found" {
+        let is_watched = watched.contains(name);
+        if load == "not-found" && !is_watched {
             continue;
         }
-        summary.total = summary.total.saturating_add(1);
-        if active == "active" {
-            summary.active = summary.active.saturating_add(1);
+        if load != "not-found" {
+            summary.total = summary.total.saturating_add(1);
+            if active == "active" {
+                summary.active = summary.active.saturating_add(1);
+            }
+            if active == "failed" {
+                summary.failed = summary.failed.saturating_add(1);
+            }
         }
-        if active == "failed" {
-            summary.failed = summary.failed.saturating_add(1);
-        }
-        let watched = is_watched(name);
-        if (active == "failed" || watched) && units.len() < MAX_UNITS {
-            units.push(ServiceUnit {
-                name: clean(name, 256),
-                state: clean(active, 32),
-                sub_state: clean(sub, 32),
-                description: clean(&parts.collect::<Vec<_>>().join(" "), 256),
-                watched,
-            });
-        }
+        // Keep bounded pools separately: failed units must not fill the budget
+        // before later watched services have a chance to be observed.
+        let destination = if is_watched && priority.len() < MAX_WATCHED_SERVICES {
+            &mut priority
+        } else if !is_watched && active == "failed" && failures.len() < MAX_UNITS {
+            &mut failures
+        } else {
+            continue;
+        };
+        destination.push(ServiceUnit {
+            name: clean(name, 256),
+            state: clean(
+                if load == "not-found" {
+                    "not-found"
+                } else {
+                    active
+                },
+                32,
+            ),
+            sub_state: clean(sub, 32),
+            description: clean(&parts.collect::<Vec<_>>().join(" "), 256),
+            watched: is_watched,
+        });
     }
+    let mut units = priority;
+    units.extend(failures);
     units.sort_by(|a, b| (!a.watched, &a.name).cmp(&(!b.watched, &b.name)));
+    units.truncate(MAX_UNITS);
     ServiceReport { units, summary }
 }
 
@@ -831,6 +868,58 @@ ssh.service loaded active running OpenBSD Secure Shell server\n";
         assert_eq!(report.units[1].description, "A high performance web server");
     }
     #[test]
+    fn watched_units_survive_a_full_failed_unit_list_and_missing_units_stay_visible() {
+        let mut output = (0..200)
+            .map(|index| format!("failed-{index:03}.service loaded failed failed Fixture\n"))
+            .collect::<String>();
+        output.push_str("ssh.service loaded active running SSH\nghost.service not-found inactive dead ghost.service\n");
+        let report = parse_units(&output, &["ssh".into(), "ghost.service".into()]);
+        assert_eq!(report.units.len(), MAX_UNITS);
+        assert!(
+            report
+                .units
+                .iter()
+                .any(|unit| unit.name == "ssh.service" && unit.watched && unit.state == "active")
+        );
+        assert!(
+            report.units.iter().any(|unit| unit.name == "ghost.service"
+                && unit.watched
+                && unit.state == "not-found")
+        );
+        assert_eq!(report.summary.total, 201);
+        assert_eq!(report.summary.failed, 200);
+        assert!(
+            hope_protocol::validation::metrics(&hope_protocol::Metrics {
+                services: report.units,
+                service_summary: Some(report.summary),
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+    #[test]
+    fn watched_aliases_are_deduplicated_before_the_budget_and_suffixes_match_exactly() {
+        let mut watched = vec![" ssh ".into(); 100];
+        watched.extend([
+            "ssh.service".into(),
+            "important".into(),
+            "bad unit".into(),
+            "\n".into(),
+        ]);
+        assert_eq!(
+            normalized_watched_units(&watched),
+            ["ssh.service", "important.service"]
+        );
+        let report = parse_units(
+            "ssh.service loaded active running SSH\n",
+            &["ssh.service.service".into()],
+        );
+        assert!(
+            report.units.is_empty(),
+            "Repeated suffixes must not turn a different unit into a watched alias"
+        );
+    }
+    #[test]
     fn monitor_targets_are_validated() {
         assert_eq!(
             parse_monitor("tcp://10.0.0.1:22"),
@@ -861,10 +950,13 @@ ssh.service loaded active running OpenBSD Secure Shell server\n";
             .await
             .expect("listener");
         let port = listener.local_addr().expect("address").port();
-        let closed = {
-            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe");
-            probe.local_addr().expect("address").port()
-        };
+        // Reserve the TCP port without listening. Dropping an ephemeral
+        // listener lets another parallel test claim the supposedly closed port.
+        let closed_socket = tokio::net::TcpSocket::new_v4().expect("closed socket");
+        closed_socket
+            .bind("127.0.0.1:0".parse().unwrap())
+            .expect("reserve port");
+        let closed = closed_socket.local_addr().expect("address").port();
         let settings = Settings {
             monitors: vec![
                 format!("tcp://127.0.0.1:{port}"),
@@ -878,5 +970,6 @@ ssh.service loaded active running OpenBSD Secure Shell server\n";
         assert_eq!(results.len(), 2);
         assert!(results[0].up && results[0].latency_ms.is_some());
         assert!(!results[1].up && results[1].latency_ms.is_none() && results[1].detail.is_some());
+        drop(closed_socket);
     }
 }

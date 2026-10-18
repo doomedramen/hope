@@ -270,9 +270,11 @@ Two settings are read at agent start, from environment variables on the service 
 | Variable | Purpose |
 | --- | --- |
 | `HOPE_MONITORS` | Comma-separated reachability checks run every sample with a five-second deadline each: `tcp://host:port` (connect latency) and `http://` or `https://` URLs (GET, status below 400 counts as up; redirects are not followed; the agent's custom CA is trusted). At most 32 |
-| `HOPE_WATCH_SERVICES` | Comma-separated systemd unit names (with or without `.service`) always included in the report whatever their state. At most 64 |
+| `HOPE_WATCH_SERVICES` | Comma-separated systemd service names (with or without `.service`), trimmed and deduplicated before the 64-name limit. Observed watched entries take priority within the 128-unit detail limit, including `not-found` entries. Currently limited to the loaded-unit snapshot; see below |
 
 The console graphs memory as a stack (used excluding ARC, ARC, cache and buffers) under a total line, load averages, per-device and per-pool throughput, pool allocation, temperatures (the hottest eight sensors, filterable) and monitor latency, and raises attention items for degraded or nearly full pools, sensors at 85 °C and above, failed units and monitors that are down.
+
+Service summaries retain the full observed failed-unit count even when the detail list is bounded or omitted. The console explains missing detail instead of reporting no failures, and notifications use that summary count. An unloaded watched service is still a coverage gap: `list-units --all` is not an inventory of every installed definition. Explicit unit queries and expected-running policies remain planned; absence from the current snapshot must not be taken as proof that a service is missing or healthy. [systemctl documentation](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html).
 
 ## Agent upgrade, rollback and uninstall
 
