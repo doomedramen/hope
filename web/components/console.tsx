@@ -1239,7 +1239,8 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                       network !== "all" ||
                       sourceFilter !== "all" ||
                       parentFilter !== "all" ||
-                      statusFilter !== "all") && (
+                      statusFilter !== "all") &&
+                      visible.length > 0 && (
                         <Button
                           variant="ghost"
                           size="sm"
