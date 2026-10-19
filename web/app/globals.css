@@ -1549,6 +1549,8 @@ kbd.key {
   z-index: 2;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
   gap: 10px;
   padding: 18px 18px 14px;
   background: color-mix(in srgb, var(--card) 92%, transparent);

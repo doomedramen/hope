@@ -147,8 +147,10 @@ export function HostDetails({
   const displayName = hostDisplayName(host);
   const issues = hostIssues(host);
   const sourceParentId = host.source_device_id
-    ? host.relationships.find((relationship) =>
-        relationship.kind === "runs_on" && relationship.from_device_id === host.source_device_id,
+    ? host.relationships.find(
+        (relationship) =>
+          relationship.kind === "runs_on" &&
+          relationship.from_device_id === host.source_device_id,
       )?.to_device_id
     : null;
   const sourceParent = sourceParentId
@@ -214,13 +216,22 @@ export function HostDetails({
       setError((e as Error).message);
     }
   }
-  async function updateAssociation(action: "confirm" | "reject" | "unlink", hostId: string) {
+  async function updateAssociation(
+    action: "confirm" | "reject" | "unlink",
+    hostId: string,
+  ) {
     if (!host.source_device_id) return;
     try {
-      await post(`/hosts/${host.source_device_id}/association`, { action, host_id: hostId });
+      await post(`/hosts/${host.source_device_id}/association`, {
+        action,
+        host_id: hostId,
+      });
       notify(
-        action === "confirm" ? "Linked source inventory to the discovered device." :
-          action === "reject" ? "Dismissed this device match." : "Removed the device link.",
+        action === "confirm"
+          ? "Linked source inventory to the discovered device."
+          : action === "reject"
+            ? "Dismissed this device match."
+            : "Removed the device link.",
         "good",
       );
       refresh();
@@ -234,7 +245,7 @@ export function HostDetails({
       aria-label="Host details"
     >
       <header className="details-header">
-        <div className="flex items-start gap-3">
+        <div className="flex min-w-0 flex-wrap items-start gap-3">
           {wide && (
             <Button
               variant="outline"
@@ -286,7 +297,7 @@ export function HostDetails({
             </Button>
           )}
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <StatusPill host={host} />
           {agentInstalled && !host.agent_revoked && (
             <Badge variant="outline">
@@ -518,34 +529,60 @@ export function HostDetails({
                       <dt>Runs on</dt>
                       <dd>
                         {sourceParent ? (
-                          <button type="button" className="underline underline-offset-2" onClick={() => onOpenHost(sourceParent)}>
+                          <button
+                            type="button"
+                            className="underline underline-offset-2"
+                            onClick={() => onOpenHost(sourceParent)}
+                          >
                             {sourceParent.name}
                           </button>
-                        ) : sourceParentId}
+                        ) : (
+                          sourceParentId
+                        )}
                       </dd>
                     </>
                   ) : host.parent_id ? (
                     <>
                       <dt>Runs on</dt>
-                      <dd>{hosts.find((item) => item.id === host.parent_id)?.name ?? host.parent_id}</dd>
+                      <dd>
+                        {hosts.find((item) => item.id === host.parent_id)
+                          ?.name ?? host.parent_id}
+                      </dd>
                     </>
                   ) : null}
                 </dl>
               </section>
             )}
-            {host.relationships.some((relationship) => relationship.kind === "exposes_service") && (
+            {host.relationships.some(
+              (relationship) => relationship.kind === "exposes_service",
+            ) && (
               <section aria-label="Published services">
-                <h3 className="detail-heading"><Waypoints /> Published services</h3>
+                <h3 className="detail-heading">
+                  <Waypoints /> Published services
+                </h3>
                 <div className="flex flex-col gap-2">
                   {host.relationships
-                    .filter((relationship) => relationship.kind === "exposes_service")
+                    .filter(
+                      (relationship) => relationship.kind === "exposes_service",
+                    )
                     .map((relationship) => {
-                      const parent = hosts.find((item) => item.id === relationship.to_device_id);
+                      const parent = hosts.find(
+                        (item) => item.id === relationship.to_device_id,
+                      );
                       return (
-                        <div key={`${relationship.from_device_id}:${relationship.detail}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3">
-                          <span className="mono text-sm">{relationship.detail}</span>
+                        <div
+                          key={`${relationship.from_device_id}:${relationship.detail}`}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3"
+                        >
+                          <span className="mono text-sm">
+                            {relationship.detail}
+                          </span>
                           {parent && (
-                            <button type="button" className="underline underline-offset-2" onClick={() => onOpenHost(parent)}>
+                            <button
+                              type="button"
+                              className="underline underline-offset-2"
+                              onClick={() => onOpenHost(parent)}
+                            >
                               On {parent.name}
                             </button>
                           )}
@@ -557,28 +594,72 @@ export function HostDetails({
             )}
             {host.child && host.associations.length > 0 && (
               <section aria-label="Device matches">
-                <h3 className="detail-heading"><Waypoints /> Device matches</h3>
+                <h3 className="detail-heading">
+                  <Waypoints /> Device matches
+                </h3>
                 <div className="flex flex-col gap-2">
                   {host.associations.map((association) => (
-                    <div key={association.host_id} className="rounded-lg border p-3">
+                    <div
+                      key={association.host_id}
+                      className="rounded-lg border p-3"
+                    >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
-                          <p className="text-sm font-medium">{association.host_name}</p>
-                          <p className="text-xs text-muted-foreground">{association.status.replaceAll("_", " ")} · {association.reason}</p>
+                          <p className="text-sm font-medium">
+                            {association.host_name}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {association.status.replaceAll("_", " ")} ·{" "}
+                            {association.reason}
+                          </p>
                           {association.evidence.length > 0 && (
-                            <p className="mt-1 text-xs text-muted-foreground">{association.evidence.join(" · ")}</p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {association.evidence.join(" · ")}
+                            </p>
                           )}
                         </div>
                         <div className="flex gap-2">
                           {association.status === "suggested" && (
                             <>
-                              <Button size="sm" onClick={() => void updateAssociation("confirm", association.host_id)}>Confirm</Button>
-                              <Button size="sm" variant="outline" onClick={() => void updateAssociation("reject", association.host_id)}>Reject</Button>
+                              <Button
+                                size="sm"
+                                onClick={() =>
+                                  void updateAssociation(
+                                    "confirm",
+                                    association.host_id,
+                                  )
+                                }
+                              >
+                                Confirm
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                  void updateAssociation(
+                                    "reject",
+                                    association.host_id,
+                                  )
+                                }
+                              >
+                                Reject
+                              </Button>
                             </>
                           )}
                           {association.status !== "suggested" && (
-                            <Button size="sm" variant="outline" onClick={() => void updateAssociation("unlink", association.host_id)}>
-                              {association.status === "confirmed" ? "Unlink" : "Restore suggestion"}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() =>
+                                void updateAssociation(
+                                  "unlink",
+                                  association.host_id,
+                                )
+                              }
+                            >
+                              {association.status === "confirmed"
+                                ? "Unlink"
+                                : "Restore suggestion"}
                             </Button>
                           )}
                         </div>
@@ -588,7 +669,9 @@ export function HostDetails({
                 </div>
               </section>
             )}
-            {host.child && <SourceMetricHistory hostId={host.source_device_id ?? host.id} />}
+            {host.child && (
+              <SourceMetricHistory hostId={host.source_device_id ?? host.id} />
+            )}
             <DeviceSection
               host={host}
               hosts={hosts}

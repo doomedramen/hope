@@ -1023,6 +1023,21 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("heading", { name: "Host", exact: true }),
     ).toBeVisible();
+    await page.setViewportSize({ width: 320, height: 800 });
+    await expect
+      .poll(() =>
+        page.locator(".host-page .details-header").evaluate((header) => {
+          const parent = header.parentElement!;
+          const row = header.querySelector(".flex");
+          return (
+            header.scrollWidth <= header.clientWidth &&
+            header.getBoundingClientRect().right <=
+              parent.getBoundingClientRect().right + 1 &&
+            (!row || row.scrollWidth <= row.clientWidth)
+          );
+        }),
+      )
+      .toBeTruthy();
     await details.getByRole("tab", { name: "Metrics", exact: true }).click();
     await expect(page.locator(".host-page .charts")).toBeVisible();
     await expect(details.getByTestId("chart-Temperatures")).toBeVisible();
