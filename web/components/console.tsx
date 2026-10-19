@@ -469,16 +469,13 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     return hosts.filter((item) => ids.has(item.id));
   }, [hosts]);
   const matchesSource = (item: Host) => {
-    const source =
-      item.source?.kind ??
+    const source = item.source?.kind ??
       (item.agent_id && !item.agent_uninstalled ? "agent" : "discovered");
     return sourceFilter === "all" || source === sourceFilter;
   };
   const matchesParent = (item: Host) =>
     parentFilter === "all" ||
-    (parentFilter === "none"
-      ? !item.parent_id
-      : item.parent_id === parentFilter);
+    (parentFilter === "none" ? !item.parent_id : item.parent_id === parentFilter);
   const visible = hosts.filter(
     (h) =>
       (network === "all" || h.network_ids.includes(network ?? "")) &&
@@ -487,9 +484,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       matchesFilter(h, statusFilter) &&
       matchesSearch(h, filter),
   );
-  const host =
-    hosts.find((h) => h.id === selected || h.source_device_id === selected) ??
-    null;
+  const host = hosts.find((h) => h.id === selected || h.source_device_id === selected) ?? null;
   const scans =
     data?.scans.filter(
       (job, i, all) =>
@@ -1131,42 +1126,24 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     )}
                   </div>
                   <div className="inventory-filters flex flex-wrap items-center gap-2">
-                    <Select
-                      value={sourceFilter}
-                      onValueChange={(v) => v && setSourceFilter(v)}
-                    >
+                    <Select value={sourceFilter} onValueChange={(v) => v && setSourceFilter(v)}>
                       <SelectTrigger aria-label="Filter by source type">
                         <SelectValue>
-                          {
-                            SOURCE_FILTERS.find(
-                              ([value]) => value === sourceFilter,
-                            )?.[1]
-                          }
+                          {SOURCE_FILTERS.find(([value]) => value === sourceFilter)?.[1]}
                         </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
                         <SelectGroup>
                           {SOURCE_FILTERS.map(([value, label]) => (
-                            <SelectItem value={value} key={value}>
-                              {label}
-                            </SelectItem>
+                            <SelectItem value={value} key={value}>{label}</SelectItem>
                           ))}
                         </SelectGroup>
                       </SelectContent>
                     </Select>
-                    <Select
-                      value={parentFilter}
-                      onValueChange={(v) => v && setParentFilter(v)}
-                    >
+                    <Select value={parentFilter} onValueChange={(v) => v && setParentFilter(v)}>
                       <SelectTrigger aria-label="Filter by parent">
                         <SelectValue>
-                          {parentFilter === "all"
-                            ? "All parents"
-                            : parentFilter === "none"
-                              ? "No parent"
-                              : (parentChoices.find(
-                                  (item) => item.id === parentFilter,
-                                )?.name ?? "Parent")}
+                          {parentFilter === "all" ? "All parents" : parentFilter === "none" ? "No parent" : parentChoices.find((item) => item.id === parentFilter)?.name ?? "Parent"}
                         </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
@@ -1174,9 +1151,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                           <SelectItem value="all">All parents</SelectItem>
                           <SelectItem value="none">No parent</SelectItem>
                           {parentChoices.map((item) => (
-                            <SelectItem value={item.id} key={item.id}>
-                              {item.name}
-                            </SelectItem>
+                            <SelectItem value={item.id} key={item.id}>{item.name}</SelectItem>
                           ))}
                         </SelectGroup>
                       </SelectContent>
