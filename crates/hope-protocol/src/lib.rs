@@ -668,6 +668,31 @@ pub struct DeviceRelationship {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AssociationStatus {
+    Suggested,
+    Confirmed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct DeviceAssociation {
+    pub host_id: String,
+    pub host_name: String,
+    pub status: AssociationStatus,
+    pub reason: String,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum AssociationUpdate {
+    Confirm { host_id: String },
+    Reject { host_id: String },
+    Unlink { host_id: String },
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UptimeScope {
@@ -946,6 +971,10 @@ pub struct Host {
     pub source_observed_at: Option<f64>,
     #[serde(default)]
     pub relationships: Vec<DeviceRelationship>,
+    #[serde(default)]
+    pub source_device_id: Option<String>,
+    #[serde(default)]
+    pub associations: Vec<DeviceAssociation>,
     /// Latest source-provided guest/container inventory, kept separate from direct-agent data.
     #[serde(default)]
     pub child: Option<ChildDeviceReport>,
@@ -988,6 +1017,8 @@ impl Host {
             lifecycle: None,
             source_observed_at: None,
             relationships: vec![],
+            source_device_id: None,
+            associations: vec![],
             child: None,
         }
     }
@@ -1155,6 +1186,9 @@ pub fn typescript() -> String {
         SourceMetricPoint::decl(),
         RelationshipKind::decl(),
         DeviceRelationship::decl(),
+        AssociationStatus::decl(),
+        DeviceAssociation::decl(),
+        AssociationUpdate::decl(),
         Container::decl(),
         UptimeScope::decl(),
         SystemUptime::decl(),

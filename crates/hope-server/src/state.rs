@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use hope_protocol::{
-    Capabilities, ChildDeviceKind, ChildDeviceReport, DeviceLifecycle, DeviceRelationship, Host,
-    SourceIdentity,
+    AssociationStatus, Capabilities, ChildDeviceKind, ChildDeviceReport, DeviceAssociation,
+    DeviceLifecycle, DeviceRelationship, Host, Network, SourceIdentity,
 };
 use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
@@ -303,10 +303,35 @@ impl State {
             .into_iter()
             .map(|r| serde_json::from_str(r.get("body")).context("invalid stored host"))
             .collect::<Result<_>>()?;
-        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id")
+        let networks = crate::api::networks(self)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.1))?;
+        let association_rows = sqlx::query("SELECT a.source_device_id,a.host_id,h.name,a.status,a.reason,a.evidence FROM device_associations a JOIN hosts h ON h.id=a.host_id ORDER BY CASE a.status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,h.name COLLATE NOCASE")
+            .fetch_all(&self.0.db).await?;
+        let mut associations = HashMap::<String, Vec<DeviceAssociation>>::new();
+        for row in association_rows {
+            associations
+                .entry(row.get("source_device_id"))
+                .or_default()
+                .push(source_association(&row)?);
+        }
+        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id")
             .fetch_all(&self.0.db).await?;
         for row in children {
-            hosts.push(source_device_host(&row)?);
+            let mut source = source_device_host(&row)?;
+            source.network_ids = source_networks(&networks, &source.addresses);
+            source.associations = source
+                .source_device_id
+                .as_ref()
+                .and_then(|id| associations.remove(id))
+                .unwrap_or_default();
+            if let Some(target_id) = row.try_get::<Option<String>, _>("host_id").ok().flatten()
+                && let Some(target) = hosts.iter_mut().find(|host| host.id == target_id)
+            {
+                merge_source_host(target, source);
+            } else {
+                hosts.push(source);
+            }
         }
         hosts.sort_by_key(|host| host.name.to_lowercase());
         Ok(hosts)
@@ -321,9 +346,29 @@ impl State {
                 .context("invalid stored host")
                 .map(Some);
         }
-        let row = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id WHERE d.id=?")
+        let row = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id WHERE d.id=?")
             .bind(id).fetch_optional(&self.0.db).await?;
-        row.as_ref().map(source_device_host).transpose()
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut source = source_device_host(&row)?;
+        let networks = crate::api::networks(self)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.1))?;
+        source.network_ids = source_networks(&networks, &source.addresses);
+        source.associations = self.source_associations(&source.source_device_id).await?;
+        Ok(Some(source))
+    }
+    async fn source_associations(
+        &self,
+        source_device_id: &Option<String>,
+    ) -> Result<Vec<DeviceAssociation>> {
+        let Some(source_device_id) = source_device_id else {
+            return Ok(vec![]);
+        };
+        let rows = sqlx::query("SELECT a.host_id,h.name,a.status,a.reason,a.evidence FROM device_associations a JOIN hosts h ON h.id=a.host_id WHERE a.source_device_id=? ORDER BY CASE a.status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,h.name COLLATE NOCASE")
+            .bind(source_device_id).fetch_all(&self.0.db).await?;
+        rows.iter().map(source_association).collect()
     }
     /// Callers serialize host read-modify-write operations using `writes`.
     pub async fn save_host(&self, host: &Host) -> Result<()> {
@@ -361,6 +406,7 @@ fn source_device_host(row: &sqlx::sqlite::SqliteRow) -> Result<Host> {
         key,
         incarnation,
     });
+    host.source_device_id = Some(id.clone());
     host.lifecycle = Some(lifecycle);
     host.discovery_method = source;
     host.addresses = child
@@ -373,11 +419,7 @@ fn source_device_host(row: &sqlx::sqlite::SqliteRow) -> Result<Host> {
         .iter()
         .filter_map(|interface| interface.mac.clone())
         .collect();
-    host.network_ids = child
-        .interfaces
-        .iter()
-        .map(|interface| interface.name.clone())
-        .collect();
+    host.network_ids.clear();
     host.parent_id = row.try_get("to_device_id").ok().flatten();
     host.relationships = host
         .parent_id
@@ -391,4 +433,76 @@ fn source_device_host(row: &sqlx::sqlite::SqliteRow) -> Result<Host> {
         .collect();
     host.child = Some(child);
     Ok(host)
+}
+
+fn source_association(row: &sqlx::sqlite::SqliteRow) -> Result<DeviceAssociation> {
+    let evidence: Vec<String> = serde_json::from_str(row.get("evidence"))?;
+    Ok(DeviceAssociation {
+        host_id: row.get("host_id"),
+        host_name: row.get("name"),
+        status: match row.get::<String, _>("status").as_str() {
+            "confirmed" => AssociationStatus::Confirmed,
+            "rejected" => AssociationStatus::Rejected,
+            _ => AssociationStatus::Suggested,
+        },
+        reason: row.get("reason"),
+        evidence,
+    })
+}
+
+fn source_networks(networks: &[Network], addresses: &[String]) -> Vec<String> {
+    networks
+        .iter()
+        .filter(|network| {
+            network.cidr.parse::<ipnet::IpNet>().is_ok_and(|cidr| {
+                addresses.iter().any(|address| {
+                    address
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|address| cidr.contains(&address))
+                })
+            })
+        })
+        .map(|network| network.id.clone())
+        .collect()
+}
+
+fn merge_source_host(target: &mut Host, source: Host) {
+    for address in source.addresses {
+        if !target.addresses.contains(&address) {
+            target.addresses.push(address);
+        }
+    }
+    for mac in source.macs {
+        if !target
+            .macs
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&mac))
+        {
+            target.macs.push(mac);
+        }
+    }
+    for network in source.network_ids {
+        if !target.network_ids.contains(&network) {
+            target.network_ids.push(network);
+        }
+    }
+    target.source = source.source;
+    target.source_device_id = source.source_device_id;
+    target.source_observed_at = source.source_observed_at;
+    if target.last_collected_at.is_none() {
+        target.last_collected_at = source.last_collected_at;
+    }
+    target.last_seen = target.last_seen.max(source.last_seen);
+    target.lifecycle = source.lifecycle;
+    target.child = source.child;
+    target.associations = source.associations;
+    for relationship in source.relationships {
+        if !target.relationships.iter().any(|existing| {
+            existing.from_device_id == relationship.from_device_id
+                && existing.to_device_id == relationship.to_device_id
+                && existing.kind == relationship.kind
+        }) {
+            target.relationships.push(relationship);
+        }
+    }
 }

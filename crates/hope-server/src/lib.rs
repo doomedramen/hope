@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod api;
 pub mod arp;
+pub mod associations;
 pub mod auth;
 pub mod backup;
 pub mod classify;
@@ -57,6 +58,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/hosts/{id}/merge", post(api::merge))
         .route("/hosts/{id}/metrics", get(metrics::history))
         .route("/hosts/{id}/source-metrics", get(metrics::source_history))
+        .route("/hosts/{id}/association", post(agents::update_association))
         .route("/enrollment-tokens", post(agents::token))
         .route("/agents/{id}/revoke", post(agents::revoke))
         .route("/agents/{id}/uninstalled", post(agents::complete_uninstall))

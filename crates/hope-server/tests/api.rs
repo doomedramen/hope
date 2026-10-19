@@ -721,6 +721,248 @@ async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_ab
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["code"], "agent_revoked");
 }
+
+#[tokio::test]
+async fn source_matches_can_be_rejected_confirmed_and_unlinked_without_losing_source_data() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('lan','LAN','192.168.1.0/24',1,5)")
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    let mut scanned = Host::new("scanned-device".into(), "scanned device".into(), "tcp");
+    scanned.addresses = vec!["192.168.1.20".into()];
+    scanned.macs = vec!["02:00:00:00:00:99".into()];
+    scanned.network_ids = vec!["lan".into()];
+    state.save_host(&scanned).await.unwrap();
+
+    let first = child_batch(&agent, 1, 1, true, now(), vec![child_device()]);
+    let bearer = format!("Bearer {credential}");
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(first),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let source_id: String =
+        sqlx::query_scalar("SELECT id FROM source_devices WHERE source_key='container-full-id'")
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    let associations = state.host(&source_id).await.unwrap().unwrap().associations;
+    assert_eq!(associations.len(), 1);
+    assert_eq!(associations[0].status, AssociationStatus::Suggested);
+
+    let path = format!("/api/v1/hosts/{source_id}/association");
+    let (status, body) = request(
+        &app,
+        "POST",
+        &path,
+        json!({"action":"reject","host_id":"scanned-device"}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let next = child_batch(&agent, 2, 2, true, now(), vec![child_device()]);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(next),
+            Some(("authorization", &bearer)),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let associations = state.host(&source_id).await.unwrap().unwrap().associations;
+    assert_eq!(associations[0].status, AssociationStatus::Rejected);
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        &path,
+        json!({"action":"confirm","host_id":"scanned-device"}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let combined = state
+        .hosts()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|host| host.id == "scanned-device")
+        .unwrap();
+    assert_eq!(
+        combined.source_device_id.as_deref(),
+        Some(source_id.as_str())
+    );
+    assert!(combined.child.is_some());
+    assert_eq!(state.hosts().await.unwrap().len(), 2);
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        &path,
+        json!({"action":"unlink","host_id":"scanned-device"}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.hosts().await.unwrap().len(), 3);
+    assert!(
+        state
+            .host("scanned-device")
+            .await
+            .unwrap()
+            .unwrap()
+            .child
+            .is_none()
+    );
+    assert!(
+        state
+            .host(&source_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .child
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn unique_interface_matches_auto_link_without_changing_discovered_host_id() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('lan','LAN','192.168.1.0/24',1,5)")
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    let mut scanned = Host::new("scanned-device".into(), "scanned device".into(), "tcp");
+    scanned.addresses = vec!["192.168.1.20".into()];
+    scanned.macs = vec!["02:00:00:00:00:02".into()];
+    scanned.network_ids = vec!["lan".into()];
+    scanned.last_seen = now();
+    state.save_host(&scanned).await.unwrap();
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(child_batch(&agent, 1, 1, true, now(), vec![child_device()])),
+        Some(("authorization", &format!("Bearer {credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.hosts().await.unwrap().len(), 2);
+    let combined = state
+        .hosts()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|host| host.id == "scanned-device")
+        .unwrap();
+    assert_eq!(
+        combined.id, "scanned-device",
+        "the discovered URL remains stable"
+    );
+    assert!(combined.child.is_some());
+    assert_eq!(
+        combined.source_device_id,
+        sqlx::query_scalar::<_, String>("SELECT id FROM source_devices")
+            .fetch_one(&state.0.db)
+            .await
+            .ok()
+    );
+    assert_eq!(
+        combined.associations[0].status,
+        AssociationStatus::Confirmed
+    );
+}
+
+#[tokio::test]
+async fn linked_scan_presence_prevents_source_archival_until_the_scan_goes_stale() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('lan','LAN','192.168.1.0/24',1,5)")
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    let t0 = now() - 620.0;
+    let mut scanned = Host::new("scanned-device".into(), "web".into(), "tcp");
+    scanned.addresses = vec!["192.168.1.20".into()];
+    scanned.macs = vec!["02:00:00:00:00:02".into()];
+    scanned.last_seen = t0;
+    state.save_host(&scanned).await.unwrap();
+    let bearer = format!("Bearer {credential}");
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(child_batch(&agent, 1, 1, true, t0, vec![child_device()])),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let child_id: String = sqlx::query_scalar("SELECT id FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    let linked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM source_devices WHERE id=? AND host_id='scanned-device')",
+    )
+    .bind(&child_id)
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert!(linked);
+
+    for (sequence, elapsed) in [(2, 61.0), (3, 240.0), (4, 361.0)] {
+        let batch = child_batch(&agent, sequence, sequence, true, t0 + elapsed, vec![]);
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(batch),
+            Some(("authorization", &bearer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM source_devices WHERE id=?")
+        .bind(&child_id)
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(lifecycle, "stale", "fresh scan presence prevents archival");
+
+    for (sequence, elapsed) in [(5, 600.0), (6, 780.0), (7, 900.0)] {
+        let batch = child_batch(&agent, sequence, sequence, true, t0 + elapsed, vec![]);
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(batch),
+            Some(("authorization", &bearer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM source_devices WHERE id=?")
+        .bind(&child_id)
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        lifecycle, "archived",
+        "stale scan presence no longer blocks archival"
+    );
+}
+
 #[tokio::test]
 async fn retention_averages_old_samples_and_deletes_expired_history() {
     let (_dir, state, _app, _) = setup().await;

@@ -6,7 +6,9 @@ use axum::{
     Json,
     extract::{Path, Query, State as Extract},
 };
-use hope_protocol::{MetricPoint, Metrics, SourceMetricPoint};
+use hope_protocol::{
+    ChildMetrics, CpuMeasurement, MemoryMeasurement, MetricPoint, Metrics, SourceMetricPoint,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::BTreeMap;
@@ -232,6 +234,89 @@ impl Statistics {
             }
         }
         latest
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct SourceMetricStatistics {
+    values: BTreeMap<String, (f64, u64)>,
+    cpu_measurement: Option<CpuMeasurement>,
+    cpu_mixed: bool,
+    memory_measurement: Option<MemoryMeasurement>,
+    memory_mixed: bool,
+    latest_at: f64,
+    latest_rx_bytes: Option<f64>,
+    latest_tx_bytes: Option<f64>,
+}
+impl SourceMetricStatistics {
+    fn observe(&mut self, metrics: &ChildMetrics, at: f64) {
+        macro_rules! sample {
+            ($field:ident) => {
+                if let Some(value) = metrics.$field {
+                    let entry = self.values.entry(stringify!($field).into()).or_default();
+                    entry.0 += value;
+                    entry.1 += 1;
+                }
+            };
+        }
+        sample!(cpu_percent);
+        sample!(cpu_capacity_cores);
+        sample!(memory_used_bytes);
+        sample!(memory_total_bytes);
+        sample!(disk_used_bytes);
+        sample!(disk_total_bytes);
+        sample!(network_rx_bytes_per_second);
+        sample!(network_tx_bytes_per_second);
+        if let Some(measurement) = metrics.cpu_measurement {
+            if self
+                .cpu_measurement
+                .is_some_and(|previous| previous != measurement)
+            {
+                self.cpu_mixed = true;
+            } else {
+                self.cpu_measurement = Some(measurement);
+            }
+        }
+        if let Some(measurement) = metrics.memory_measurement {
+            if self
+                .memory_measurement
+                .is_some_and(|previous| previous != measurement)
+            {
+                self.memory_mixed = true;
+            } else {
+                self.memory_measurement = Some(measurement);
+            }
+        }
+        if at >= self.latest_at {
+            self.latest_at = at;
+            self.latest_rx_bytes = metrics.network_rx_bytes;
+            self.latest_tx_bytes = metrics.network_tx_bytes;
+        }
+    }
+
+    fn metrics(&self) -> ChildMetrics {
+        let average = |field: &str| {
+            self.values
+                .get(field)
+                .filter(|(_, count)| *count > 0)
+                .map(|(sum, count)| sum / *count as f64)
+        };
+        ChildMetrics {
+            cpu_percent: average("cpu_percent"),
+            cpu_capacity_cores: average("cpu_capacity_cores"),
+            cpu_measurement: (!self.cpu_mixed).then_some(self.cpu_measurement).flatten(),
+            memory_used_bytes: average("memory_used_bytes"),
+            memory_total_bytes: average("memory_total_bytes"),
+            memory_measurement: (!self.memory_mixed)
+                .then_some(self.memory_measurement)
+                .flatten(),
+            disk_used_bytes: average("disk_used_bytes"),
+            disk_total_bytes: average("disk_total_bytes"),
+            network_rx_bytes_per_second: average("network_rx_bytes_per_second"),
+            network_tx_bytes_per_second: average("network_tx_bytes_per_second"),
+            network_rx_bytes: self.latest_rx_bytes,
+            network_tx_bytes: self.latest_tx_bytes,
+        }
     }
 }
 fn gpu_key(id: Option<&str>, vendor: &str, name: &str) -> String {
@@ -476,11 +561,29 @@ async fn retain_at(state: &State, reference: f64) -> anyhow::Result<()> {
             .bind(&agent).bind(from).bind(from+300.0).execute(&mut *tx).await?;
         tx.commit().await?;
     }
+    retain_source_metrics(state, cutoff, start).await?;
     let _guard = state.0.writes.lock().await;
     let mut tx = state.0.db.begin().await?;
     sqlx::query("DELETE FROM metrics WHERE rowid IN (SELECT rowid FROM metrics WHERE collected_at<? AND (resolution=30 OR collected_at+resolution<=?) LIMIT 5000)")
         .bind(reference - 7.0 * 86400.0)
         .bind(reference - 7.0 * 86400.0)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM source_metrics WHERE rowid IN (SELECT rowid FROM source_metrics WHERE observed_at<? AND (resolution=30 OR observed_at+resolution<=?) LIMIT 5000)")
+        .bind(reference - 7.0 * 86400.0)
+        .bind(reference - 7.0 * 86400.0)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM source_observations WHERE rowid IN (SELECT rowid FROM source_observations WHERE observed_at<? LIMIT 5000)")
+        .bind(reference - 7.0 * 86400.0)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM child_batches WHERE rowid IN (SELECT rowid FROM child_batches WHERE observed_at<? LIMIT 5000)")
+        .bind(reference - 7.0 * 86400.0)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM source_metric_rollups WHERE rowid IN (SELECT rowid FROM source_metric_rollups WHERE bucket<? LIMIT 5000)")
+        .bind(((reference - 7.0 * 86400.0) / 300.0).floor() as i64)
         .execute(&mut *tx)
         .await?;
     sqlx::query(
@@ -490,6 +593,60 @@ async fn retain_at(state: &State, reference: f64) -> anyhow::Result<()> {
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+async fn retain_source_metrics(
+    state: &State,
+    cutoff: f64,
+    started: std::time::Instant,
+) -> anyhow::Result<()> {
+    let groups = sqlx::query("SELECT source_device_id,CAST(observed_at/300 AS INTEGER) AS bucket FROM source_metrics WHERE resolution=30 AND observed_at<? GROUP BY source_device_id,bucket LIMIT 128")
+        .bind(cutoff).fetch_all(&state.0.db).await?;
+    for group in groups {
+        if started.elapsed() > std::time::Duration::from_secs(2) {
+            break;
+        }
+        let _guard = state.0.writes.lock().await;
+        let source_id: String = group.get("source_device_id");
+        let bucket: i64 = group.get("bucket");
+        let from = bucket as f64 * 300.0;
+        let mut tx = state.0.db.begin().await?;
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT statistics FROM source_metric_rollups WHERE source_device_id=? AND bucket=?",
+        )
+        .bind(&source_id)
+        .bind(bucket)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let mut statistics = existing
+            .as_deref()
+            .map(serde_json::from_str::<SourceMetricStatistics>)
+            .transpose()?
+            .unwrap_or_default();
+        let rows = sqlx::query("SELECT body,observed_at FROM source_metrics WHERE source_device_id=? AND resolution=30 AND observed_at>=? AND observed_at<? ORDER BY observed_at")
+            .bind(&source_id).bind(from).bind(from + 300.0).fetch_all(&mut *tx).await?;
+        for row in rows {
+            let metrics: ChildMetrics = serde_json::from_str(row.get("body"))?;
+            statistics.observe(&metrics, row.get("observed_at"));
+        }
+        sqlx::query("INSERT OR REPLACE INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES(?,?,?,300,?)")
+            .bind(&source_id)
+            .bind(format!("source-rollup-{bucket}"))
+            .bind(from)
+            .bind(serde_json::to_string(&statistics.metrics())?)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT OR REPLACE INTO source_metric_rollups(source_device_id,bucket,statistics) VALUES(?,?,?)")
+            .bind(&source_id)
+            .bind(bucket)
+            .bind(serde_json::to_string(&statistics)?)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM source_metrics WHERE source_device_id=? AND resolution=30 AND observed_at>=? AND observed_at<?")
+            .bind(&source_id).bind(from).bind(from + 300.0).execute(&mut *tx).await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -729,6 +886,86 @@ mod tests {
             .unwrap();
         assert_eq!(container.network_rx_bytes, Some(700.0));
         assert_eq!(container.status, "newer for this container");
+    }
+
+    #[tokio::test]
+    async fn source_history_rolls_up_after_a_day_and_prunes_after_seven_days() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = State::open(
+            directory.path().join("source-history.db").to_str().unwrap(),
+            "http://localhost:8080".into(),
+            "releases".into(),
+            hope_protocol::Capabilities {
+                platform: "test".into(),
+                discovery_mode: "limited".into(),
+                arp: false,
+                icmp: false,
+                limitations: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let reference = now();
+        let cutoff = ((reference - 86400.0) / 300.0).floor() * 300.0;
+        let from = cutoff - 300.0;
+        macro_rules! insert_sample {
+            ($report:expr, $at:expr, $cpu:expr, $counter:expr) => {
+                sqlx::query("INSERT INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES('source','sample-' || ?,?,30,?)")
+                    .bind($report)
+                    .bind($at)
+                    .bind(serde_json::to_string(&ChildMetrics {
+                        cpu_percent: Some($cpu),
+                        cpu_measurement: Some(CpuMeasurement::DockerEngine),
+                        memory_used_bytes: Some($cpu * 10.0),
+                        memory_measurement: Some(MemoryMeasurement::DockerWorkingSet),
+                        network_rx_bytes: Some($counter),
+                        ..Default::default()
+                    }).unwrap())
+                    .execute(&state.0.db)
+                    .await
+                    .unwrap();
+            };
+        }
+        insert_sample!("a", from + 10.0, 10.0, 10.0);
+        insert_sample!("b", from + 40.0, 30.0, 30.0);
+        retain_at(&state, reference).await.unwrap();
+        let first: (i64, String) = sqlx::query_as("SELECT resolution,body FROM source_metrics WHERE source_device_id='source' AND report_id=?")
+            .bind(format!("source-rollup-{}", (from / 300.0) as i64))
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+        let first_metrics: ChildMetrics = serde_json::from_str(&first.1).unwrap();
+        assert_eq!(first.0, 300);
+        assert_eq!(first_metrics.cpu_percent, Some(20.0));
+        assert_eq!(first_metrics.network_rx_bytes, Some(30.0));
+
+        // A delayed report from the same old bucket is merged using the retained statistics.
+        insert_sample!("c", from + 70.0, 50.0, 50.0);
+        retain_at(&state, reference).await.unwrap();
+        let body: String = sqlx::query_scalar(
+            "SELECT body FROM source_metrics WHERE source_device_id='source' AND report_id=?",
+        )
+        .bind(format!("source-rollup-{}", (from / 300.0) as i64))
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+        let merged: ChildMetrics = serde_json::from_str(&body).unwrap();
+        assert_eq!(merged.cpu_percent, Some(30.0));
+        assert_eq!(merged.memory_used_bytes, Some(300.0));
+        assert_eq!(merged.network_rx_bytes, Some(50.0));
+
+        sqlx::query("INSERT INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES('source','expired',?,300,'{}')")
+            .bind(reference - 8.0 * 86400.0)
+            .execute(&state.0.db)
+            .await
+            .unwrap();
+        retain_at(&state, reference).await.unwrap();
+        let expired: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM source_metrics WHERE report_id='expired'")
+                .fetch_one(&state.0.db)
+                .await
+                .unwrap();
+        assert_eq!(expired, 0);
     }
 
     #[tokio::test]

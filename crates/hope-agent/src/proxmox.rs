@@ -9,7 +9,7 @@ use hope_protocol::{
 };
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::Path,
     time::{Duration, SystemTime},
 };
@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 const SNAPSHOT: &str = "/run/hope-agent/proxmox.json";
 const CLUSTER_ID: &str = "/etc/hope-agent/proxmox-cluster-id";
+const GUEST_IDENTITIES: &str = "/etc/hope-agent/proxmox-guest-identities.json";
 const MAX_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PVE_OUTPUT: usize = 8 * 1024 * 1024;
 const CONFIG_CACHE: &str = "/run/hope-agent/proxmox-config.json";
@@ -40,6 +41,21 @@ struct ConfigCache {
 struct CachedConfig {
     observed_at: u64,
     value: Value,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct GuestIdentityMap {
+    source_scope: String,
+    last_complete_at: f64,
+    entries: HashMap<String, GuestIdentity>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GuestIdentity {
+    incarnation: String,
+    missing_count: u32,
+    missing_since: Option<f64>,
 }
 
 /// Read a root-produced snapshot without following symlinks or accepting unbounded files.
@@ -184,11 +200,113 @@ pub async fn collect() -> Result<()> {
     drop(tasks);
     write_config_cache(&config_cache)?;
     devices.sort_by(|a, b| a.identity.key.cmp(&b.identity.key));
+    update_guest_identities(&mut devices, &cluster_id, complete, now as f64)?;
     write_snapshot(&SnapshotFile {
         source_scope: cluster_id,
         devices,
         inventory_complete: complete,
     })
+}
+
+fn update_guest_identities(
+    devices: &mut [ChildDeviceReport],
+    source_scope: &str,
+    complete: bool,
+    now: f64,
+) -> Result<()> {
+    let path = Path::new(GUEST_IDENTITIES);
+    let mut identities = std::fs::symlink_metadata(path)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file() && metadata.len() <= MAX_SNAPSHOT_BYTES)
+        .and_then(|_| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<GuestIdentityMap>(&bytes).ok())
+        .filter(|identities| identities.source_scope == source_scope)
+        .unwrap_or_else(|| GuestIdentityMap {
+            source_scope: source_scope.to_owned(),
+            ..GuestIdentityMap::default()
+        });
+    if assign_guest_identities(&mut identities, devices, source_scope, complete, now) {
+        write_guest_identities(&identities)?;
+    }
+    Ok(())
+}
+
+fn assign_guest_identities(
+    identities: &mut GuestIdentityMap,
+    devices: &mut [ChildDeviceReport],
+    source_scope: &str,
+    complete: bool,
+    now: f64,
+) -> bool {
+    let mut changed = false;
+    if identities.source_scope != source_scope {
+        *identities = GuestIdentityMap {
+            source_scope: source_scope.to_owned(),
+            ..GuestIdentityMap::default()
+        };
+        changed = true;
+    }
+    let mut present = HashSet::new();
+    for device in devices.iter_mut() {
+        let key = format!("{:?}:{}", device.identity.kind, device.identity.key);
+        present.insert(key.clone());
+        let entry = identities.entries.entry(key).or_insert_with(|| {
+            changed = true;
+            GuestIdentity {
+                incarnation: Uuid::new_v4().to_string(),
+                missing_count: 0,
+                missing_since: None,
+            }
+        });
+        if entry.missing_count >= 3
+            && entry
+                .missing_since
+                .is_some_and(|since| now - since >= 300.0)
+        {
+            entry.incarnation = Uuid::new_v4().to_string();
+            changed = true;
+        }
+        if entry.missing_count > 0 || entry.missing_since.is_some() {
+            entry.missing_count = 0;
+            entry.missing_since = None;
+            changed = true;
+        }
+        device.identity.incarnation = entry.incarnation.clone();
+    }
+    if complete && (identities.last_complete_at == 0.0 || now - identities.last_complete_at >= 60.0)
+    {
+        identities.last_complete_at = now;
+        for (key, entry) in &mut identities.entries {
+            if present.contains(key) {
+                continue;
+            }
+            entry.missing_count = entry.missing_count.saturating_add(1);
+            entry.missing_since.get_or_insert(now);
+        }
+        identities.entries.retain(|_, entry| {
+            entry
+                .missing_since
+                .is_none_or(|since| now - since < 30.0 * 86400.0)
+        });
+        changed = true;
+    }
+    changed
+}
+
+fn write_guest_identities(identities: &GuestIdentityMap) -> Result<()> {
+    let bytes = serde_json::to_vec(identities)?;
+    if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+        bail!("Proxmox guest identity map exceeded the size limit")
+    }
+    let temporary = format!("{GUEST_IDENTITIES}.tmp-{}", std::process::id());
+    std::fs::write(&temporary, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(temporary, GUEST_IDENTITIES)?;
+    Ok(())
 }
 
 fn resource_device(resource: &Value, cluster_id: &str) -> Option<ChildDeviceReport> {
@@ -261,8 +379,7 @@ fn resource_device(resource: &Value, cluster_id: &str) -> Option<ChildDeviceRepo
             kind,
             scope: cluster_id.to_owned(),
             key: key.clone(),
-            // PVE's VMID is stable through migrations. A guest-specific incarnation is supplied
-            // by `vmgenid` when available in configuration; VMID-only systems retain a safe ID.
+            // Replaced by the persistent VMID-incarnation map after the complete inventory read.
             incarnation: format!("vmid-{vmid}"),
         },
         name,
@@ -660,5 +777,56 @@ mod tests {
         assert!(resource_device(&unknown, &cluster).is_none());
         assert!(safe_node("../../etc").is_none());
         assert!(safe_node("pve-1.local").is_some());
+    }
+
+    #[test]
+    fn guest_incarnations_survive_migrations_and_change_after_confirmed_absence() {
+        let scope = Uuid::new_v4().to_string();
+        let mut map = GuestIdentityMap {
+            source_scope: scope.clone(),
+            ..Default::default()
+        };
+        let mut device = resource_device(
+            &serde_json::json!({"type":"qemu","vmid":100,"status":"running","node":"pve-a"}),
+            &scope,
+        )
+        .unwrap();
+        assign_guest_identities(
+            &mut map,
+            std::slice::from_mut(&mut device),
+            &scope,
+            true,
+            1000.0,
+        );
+        let original = device.identity.incarnation.clone();
+        device.node = Some("pve-b".into());
+        assign_guest_identities(
+            &mut map,
+            std::slice::from_mut(&mut device),
+            &scope,
+            false,
+            1030.0,
+        );
+        assert_eq!(device.identity.incarnation, original);
+
+        assign_guest_identities(&mut map, &mut [], &scope, false, 1050.0);
+        assert_eq!(map.entries.values().next().unwrap().missing_count, 0);
+        for at in [1060.0, 1120.0, 1180.0, 1240.0, 1300.0, 1360.0] {
+            assign_guest_identities(&mut map, &mut [], &scope, true, at);
+        }
+        assert!(map.entries.values().next().unwrap().missing_count >= 3);
+        let mut recreated = resource_device(
+            &serde_json::json!({"type":"qemu","vmid":100,"status":"running","node":"pve-b"}),
+            &scope,
+        )
+        .unwrap();
+        assign_guest_identities(
+            &mut map,
+            std::slice::from_mut(&mut recreated),
+            &scope,
+            false,
+            1361.0,
+        );
+        assert_ne!(recreated.identity.incarnation, original);
     }
 }

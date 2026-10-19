@@ -208,6 +208,9 @@ export type ChildReportResponse = { accepted: boolean, duplicate: boolean, };
 export type SourceMetricPoint = { collected_at: number, resolution_seconds: number, metrics: ChildMetrics, };
 export type RelationshipKind = "runs_on" | "connected_to" | "exposes_service";
 export type DeviceRelationship = { from_device_id: string, to_device_id: string, kind: RelationshipKind, detail: string | null, };
+export type AssociationStatus = "suggested" | "confirmed" | "rejected";
+export type DeviceAssociation = { host_id: string, host_name: string, status: AssociationStatus, reason: string, evidence: Array<string>, };
+export type AssociationUpdate = { "action": "confirm", host_id: string, } | { "action": "reject", host_id: string, } | { "action": "unlink", host_id: string, };
 export type Container = { id: string, name: string, image: string,
 /**
  * Docker state such as running, exited, or created.
@@ -299,7 +302,7 @@ update_target: string | null,
 /**
  * Hypervisor or container-runtime identity when this device has source inventory.
  */
-source: SourceIdentity | null, lifecycle: DeviceLifecycle | null, source_observed_at: number | null, relationships: Array<DeviceRelationship>,
+source: SourceIdentity | null, lifecycle: DeviceLifecycle | null, source_observed_at: number | null, relationships: Array<DeviceRelationship>, source_device_id: string | null, associations: Array<DeviceAssociation>,
 /**
  * Latest source-provided guest/container inventory, kept separate from direct-agent data.
  */

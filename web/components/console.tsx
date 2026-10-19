@@ -460,7 +460,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       matchesFilter(h, statusFilter) &&
       matchesSearch(h, filter),
   );
-  const host = hosts.find((h) => h.id === selected) ?? null;
+  const host = hosts.find((h) => h.id === selected || h.source_device_id === selected) ?? null;
   const scans =
     data?.scans.filter(
       (job, i, all) =>
@@ -980,6 +980,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                   void refresh();
                 }}
                 notify={toast}
+                onOpenHost={selectHost}
                 onOpenContainer={(containerId) =>
                   go({
                     view: "container",
@@ -1297,6 +1298,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     void refresh();
                   }}
                   notify={toast}
+                  onOpenHost={selectHost}
                   onOpenContainer={(containerId) =>
                     go({
                       view: "container",

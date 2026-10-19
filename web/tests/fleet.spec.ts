@@ -95,6 +95,8 @@ function host(overrides: Partial<Host>): Host {
     lifecycle: null,
     source_observed_at: null,
     relationships: [],
+    source_device_id: null,
+    associations: [],
     child: null,
     ...overrides,
     agent_uninstalled: overrides.agent_uninstalled ?? false,

@@ -62,6 +62,8 @@ class Linux(Base):
         self.assertIn('User=root', unit)
         self.assertIn('collect-proxmox', unit)
         self.assertIn('ReadWritePaths=/run/hope-agent /etc/hope-agent', unit)
+        self.assertIn('RuntimeDirectory=hope-agent', unit)
+        self.assertEqual((self.env.root / 'etc/hope-agent').stat().st_mode & 0o777, 0o750)
         self.assertIn('OnUnitActiveSec=30s', timer.read_text())
         self.assertIn('systemctl[system] enable --now hope-agent-proxmox-collect.timer', self.env.log())
 
