@@ -403,6 +403,20 @@ export function HostDetails({
                   }
                   value={memoryUsage(host)}
                 />
+                {host.source?.kind !== "docker_container" && (
+                  <ReadingMeter
+                    label="Allocated storage · source"
+                    value={
+                      host.child.metrics.disk_used_bytes != null &&
+                      host.child.metrics.disk_total_bytes != null &&
+                      host.child.metrics.disk_total_bytes > 0
+                        ? (host.child.metrics.disk_used_bytes /
+                            host.child.metrics.disk_total_bytes) *
+                          100
+                        : null
+                    }
+                  />
+                )}
                 <p className="text-xs text-muted-foreground">
                   Collected by{" "}
                   {host.source?.kind === "docker_container"
@@ -420,6 +434,24 @@ export function HostDetails({
                 <dl className="detail-list">
                   <dt>State</dt>
                   <dd>{host.child.status ?? host.child.lifecycle}</dd>
+                  {host.child.health && (
+                    <>
+                      <dt>Health</dt>
+                      <dd>{host.child.health}</dd>
+                    </>
+                  )}
+                  {host.child.restart_count != null && (
+                    <>
+                      <dt>Restarts</dt>
+                      <dd>{host.child.restart_count}</dd>
+                    </>
+                  )}
+                  {host.child.tags.length > 0 && (
+                    <>
+                      <dt>Tags</dt>
+                      <dd>{host.child.tags.join(", ")}</dd>
+                    </>
+                  )}
                   {host.child.node && (
                     <>
                       <dt>Node</dt>
