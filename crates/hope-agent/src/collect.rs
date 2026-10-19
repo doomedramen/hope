@@ -12,6 +12,7 @@ use hope_protocol::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 #[cfg(target_os = "linux")]
@@ -144,6 +145,32 @@ fn docker_summary(item: bollard::models::ContainerSummary) -> Option<Container> 
         block_write_bytes: None,
         pids: None,
     })
+}
+
+static DOCKER_INSPECT_CURSOR: AtomicUsize = AtomicUsize::new(0);
+const MAX_DOCKER_INSPECTS_PER_REPORT: usize = 32;
+
+fn docker_inspect_indices(container_count: usize, cursor: usize) -> Vec<usize> {
+    let count = container_count.min(MAX_DOCKER_INSPECTS_PER_REPORT);
+    if container_count == 0 {
+        return vec![];
+    }
+    (0..count)
+        .map(|offset| (cursor.wrapping_add(offset)) % container_count)
+        .collect()
+}
+
+async fn docker_restart_count(docker: &Docker, id: String) -> (String, Option<u32>) {
+    let result = timeout(Duration::from_secs(2), docker.inspect_container(&id, None))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|response| docker_restart_count_value(response.restart_count));
+    (id, result)
+}
+
+fn docker_restart_count_value(count: Option<i64>) -> Option<u32> {
+    count.and_then(|count| u32::try_from(count).ok())
 }
 
 fn docker_cpu_percent(stats: &bollard::models::ContainerStatsResponse) -> Option<f64> {
@@ -292,6 +319,20 @@ async fn docker_containers() -> Option<(String, Vec<Container>, bool)> {
         .filter_map(docker_summary)
         .collect::<Vec<_>>();
     let complete = docker_inventory_complete(source_count, containers.len(), MAX_DOCKER_CONTAINERS);
+    let inspect_cursor =
+        DOCKER_INSPECT_CURSOR.fetch_add(MAX_DOCKER_INSPECTS_PER_REPORT, Ordering::Relaxed);
+    let inspect_indices = docker_inspect_indices(containers.len(), inspect_cursor);
+    let inspect_ids = inspect_indices
+        .iter()
+        .map(|index| containers[*index].id.clone())
+        .collect::<Vec<_>>();
+    let inspected = timeout(
+        Duration::from_secs(5),
+        stream::iter(inspect_ids)
+            .map(|id| docker_restart_count(&docker, id))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>(),
+    );
     let running = containers
         .iter()
         .filter(|container| container.state == "running")
@@ -304,9 +345,14 @@ async fn docker_containers() -> Option<(String, Vec<Container>, bool)> {
             .map(|id| docker_stats(&docker, id))
             .buffer_unordered(8)
             .collect::<Vec<_>>(),
-    )
-    .await
-    .unwrap_or_default();
+    );
+    let (inspected, samples) = tokio::join!(inspected, samples);
+    for (id, restart_count) in inspected.unwrap_or_default() {
+        if let Some(container) = containers.iter_mut().find(|container| container.id == id) {
+            container.restart_count = restart_count;
+        }
+    }
+    let samples = samples.unwrap_or_default();
     for (id, stats) in samples {
         if let (Some(stats), Some(container)) = (
             stats,
@@ -1216,6 +1262,29 @@ async fn read_number(path: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_restart_inspection_rotates_through_inventory_with_a_bounded_batch() {
+        assert_eq!(docker_inspect_indices(0, 0), Vec::<usize>::new());
+        assert_eq!(docker_inspect_indices(4, 0), vec![0, 1, 2, 3]);
+        assert_eq!(
+            docker_inspect_indices(40, 32),
+            (32..40).chain(0..24).collect::<Vec<_>>()
+        );
+        assert_eq!(docker_inspect_indices(40, 40), (0..32).collect::<Vec<_>>());
+        assert_eq!(
+            docker_inspect_indices(128, 0).len(),
+            MAX_DOCKER_INSPECTS_PER_REPORT
+        );
+    }
+
+    #[test]
+    fn docker_restart_count_rejects_invalid_negative_or_overflow_values() {
+        assert_eq!(docker_restart_count_value(Some(12)), Some(12));
+        assert_eq!(docker_restart_count_value(Some(-1)), None);
+        assert_eq!(docker_restart_count_value(Some(i64::MAX)), None);
+        assert_eq!(docker_restart_count_value(None), None);
+    }
 
     #[test]
     fn root_filesystem_can_be_recovered_from_a_complete_mount_list() {
