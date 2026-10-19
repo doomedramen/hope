@@ -150,6 +150,23 @@ test("host state distinguishes reporting, stale, revoked, observed and unobserve
   ).toBe("neutral");
 });
 
+test("source-backed stopped and archived devices have distinct filters", () => {
+  const stopped = host({
+    source: {
+      kind: "proxmox_lxc",
+      scope: "cluster",
+      key: "101",
+      incarnation: "first",
+    },
+    lifecycle: "stopped",
+  });
+  const archived = host({ ...stopped, id: "archived", lifecycle: "archived" });
+  expect(hostState(stopped, now).key).toBe("stopped");
+  expect(hostState(archived, now).key).toBe("archived");
+  expect(matchesFilter(stopped, "stopped", now)).toBeTruthy();
+  expect(matchesFilter(archived, "archived", now)).toBeTruthy();
+});
+
 test("consumer device labels map to UniFi fingerprint icons", () => {
   expect(deviceFingerprintId(host({ name: "iPhone" }))).toBe("91");
   expect(deviceFingerprintId(host({ name: "Kindle Paperwhite" }))).toBe("41");

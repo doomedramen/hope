@@ -93,6 +93,14 @@ const NetworkMap = dynamic(
 type View =
   "overview" | "map" | "hosts" | "host" | "container" | "networks" | "agents";
 type Mode = "topology" | "subnets" | "health";
+const SOURCE_FILTERS = [
+  ["all", "All source types"],
+  ["docker_container", "Docker container"],
+  ["proxmox_lxc", "Proxmox LXC"],
+  ["proxmox_vm", "Proxmox VM"],
+  ["agent", "Agent"],
+  ["discovered", "Discovered device"],
+] as const;
 const VIEWS: View[] = [
   "overview",
   "map",
@@ -221,6 +229,8 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const [mode, setMode] = useState<Mode>("topology");
   const [filter, setFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<HostFilter>("all");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [parentFilter, setParentFilter] = useState("all");
   const [network, setNetwork] = useState<string | null>("all");
   const [networkOpen, setNetworkOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
@@ -454,9 +464,23 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   }
   const hosts = useMemo(() => data?.hosts ?? [], [data]);
   const networks = useMemo(() => data?.networks ?? [], [data]);
+  const parentChoices = useMemo(() => {
+    const ids = new Set(hosts.map((item) => item.parent_id).filter(Boolean));
+    return hosts.filter((item) => ids.has(item.id));
+  }, [hosts]);
+  const matchesSource = (item: Host) => {
+    const source = item.source?.kind ??
+      (item.agent_id && !item.agent_uninstalled ? "agent" : "discovered");
+    return sourceFilter === "all" || source === sourceFilter;
+  };
+  const matchesParent = (item: Host) =>
+    parentFilter === "all" ||
+    (parentFilter === "none" ? !item.parent_id : item.parent_id === parentFilter);
   const visible = hosts.filter(
     (h) =>
       (network === "all" || h.network_ids.includes(network ?? "")) &&
+      matchesSource(h) &&
+      matchesParent(h) &&
       matchesFilter(h, statusFilter) &&
       matchesSearch(h, filter),
   );
@@ -1100,6 +1124,36 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     )}
                   </div>
                   <div className="inventory-filters flex flex-wrap items-center gap-2">
+                    <Select value={sourceFilter} onValueChange={(v) => v && setSourceFilter(v)}>
+                      <SelectTrigger aria-label="Filter by source type">
+                        <SelectValue>
+                          {SOURCE_FILTERS.find(([value]) => value === sourceFilter)?.[1]}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          {SOURCE_FILTERS.map(([value, label]) => (
+                            <SelectItem value={value} key={value}>{label}</SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    <Select value={parentFilter} onValueChange={(v) => v && setParentFilter(v)}>
+                      <SelectTrigger aria-label="Filter by parent">
+                        <SelectValue>
+                          {parentFilter === "all" ? "All parents" : parentFilter === "none" ? "No parent" : parentChoices.find((item) => item.id === parentFilter)?.name ?? "Parent"}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value="all">All parents</SelectItem>
+                          <SelectItem value="none">No parent</SelectItem>
+                          {parentChoices.map((item) => (
+                            <SelectItem value={item.id} key={item.id}>{item.name}</SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
                     <Select value={network} onValueChange={setNetwork}>
                       <SelectTrigger aria-label="Filter by network">
                         <SelectValue>
@@ -1156,6 +1210,8 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                         (h) =>
                           (network === "all" ||
                             h.network_ids.includes(network ?? "")) &&
+                          matchesSource(h) &&
+                          matchesParent(h) &&
                           matchesSearch(h, filter) &&
                           matchesFilter(h, option.key),
                       ).length;
@@ -1179,16 +1235,19 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                         </button>
                       );
                     })}
-                    {visible.length > 0 &&
-                      (filter ||
-                        network !== "all" ||
-                        statusFilter !== "all") && (
+                    {(filter ||
+                      network !== "all" ||
+                      sourceFilter !== "all" ||
+                      parentFilter !== "all" ||
+                      statusFilter !== "all") && (
                         <Button
                           variant="ghost"
                           size="sm"
                           onClick={() => {
                             setFilter("");
                             setNetwork("all");
+                            setSourceFilter("all");
+                            setParentFilter("all");
                             setStatusFilter("all");
                           }}
                         >

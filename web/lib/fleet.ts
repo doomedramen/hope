@@ -349,6 +349,8 @@ export const HOST_FILTERS: { key: HostFilter; label: string }[] = [
   { key: "attention", label: "Needs attention" },
   { key: "reporting", label: "Reporting" },
   { key: "observed", label: "Observed" },
+  { key: "stopped", label: "Stopped" },
+  { key: "archived", label: "Archived" },
   { key: "stale", label: "Agent stale" },
   { key: "unobserved", label: "Not recently seen" },
   { key: "revoked", label: "Revoked" },
