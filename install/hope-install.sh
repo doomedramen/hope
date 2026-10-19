@@ -79,6 +79,7 @@ WorkingDirectory=/var/lib/hope
 ExecStart=/usr/local/bin/hope-server
 Restart=on-failure
 RestartSec=5
+AmbientCapabilities=CAP_NET_RAW
 ProtectSystem=strict
 ReadWritePaths=/var/lib/hope
 PrivateTmp=true

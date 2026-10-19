@@ -49,6 +49,12 @@ class CtScript(unittest.TestCase):
         body = CT[CT.index('function update_script'):]
         self.assertRegex(body, r'\n  exit\n\}')
 
+    def test_proxmox_container_service_gets_raw_socket_capability(self):
+        self.assertIn('AmbientCapabilities=CAP_NET_RAW', CT)
+        self.assertIn('AmbientCapabilities=CAP_NET_RAW', INSTALL)
+        self.assertIn('10-arp-capability.conf', CT)
+        self.assertIn('systemctl restart hope || true', CT)
+
     def test_update_removes_an_earlier_source_build_before_deploying(self):
         # Earlier pairs compiled in the container: /opt/hope was a git checkout (or held bin/), and
         # rustup and Node.js were installed with their records in /var/cache/app-versions, which the
@@ -78,7 +84,7 @@ class CtScript(unittest.TestCase):
         self.assertRegex(body, r'if CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents"')
         self.assertIn('&& $STD env HOPE_SIGNING_KEY=/etc/hope/release-signing.pem sh /opt/hope/tools/assemble-release.sh '
                       '--staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases; then', body)
-        self.assertEqual(body.count('msg_warn '), 2)
+        self.assertEqual(body.count('msg_warn '), 3)
 
     def test_the_container_is_small(self):
         resources = META['install_methods'][0]['resources']

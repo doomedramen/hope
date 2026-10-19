@@ -44,6 +44,25 @@ function update_script() {
     exit
   fi
 
+  # ARP discovery needs raw sockets. Keep this as a small drop-in so upgrades do not
+  # replace locally maintained service settings. If the container's capability set
+  # does not permit it, revert the drop-in and leave the existing service running.
+  local capability_dropin=/etc/systemd/system/hope.service.d/10-arp-capability.conf
+  if ! grep -Fxq 'AmbientCapabilities=CAP_NET_RAW' "$capability_dropin" 2>/dev/null; then
+    install -d -m 755 "${capability_dropin%/*}"
+    cat >"$capability_dropin" <<'EOF'
+[Service]
+AmbientCapabilities=CAP_NET_RAW
+EOF
+    systemctl daemon-reload
+    if systemctl is-active --quiet hope && ! systemctl restart hope; then
+      rm -f "$capability_dropin"
+      systemctl daemon-reload
+      systemctl restart hope || true
+      msg_warn "CAP_NET_RAW is unavailable in this Proxmox container; restored the previous service configuration"
+    fi
+  fi
+
   if check_for_gh_release "hope" "doomedramen/hope"; then
     msg_info "Stopping Service"
     systemctl stop hope
@@ -80,6 +99,7 @@ WorkingDirectory=/var/lib/hope
 ExecStart=/usr/local/bin/hope-server
 Restart=on-failure
 RestartSec=5
+AmbientCapabilities=CAP_NET_RAW
 ProtectSystem=strict
 ReadWritePaths=/var/lib/hope
 PrivateTmp=true

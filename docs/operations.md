@@ -162,7 +162,7 @@ Active ARP means the server sends its own ARP requests on the local network and 
 
 Fixes, by cause:
 
-- **Missing capability** (the log shows `Operation not permitted`). Give the process `CAP_NET_RAW`: the community-scripts container runs the service as root, which has it; the host installer's unit sets `AmbientCapabilities=CAP_NET_RAW`; with Docker add `cap_add: [NET_RAW]` (as `compose.yaml` does). Do not add `RestrictAddressFamilies` without `AF_PACKET` to the unit.
+- **Missing capability** (the log shows `Operation not permitted`). Give the process `CAP_NET_RAW`: the community-scripts container service and the host installer's unit set `AmbientCapabilities=CAP_NET_RAW`; with Docker add `cap_add: [NET_RAW]` (as `compose.yaml` does). On an existing community-scripts install, run its `update` command to install the capability drop-in and restart the service. If the drop-in is rejected, Proxmox is withholding the capability from the container; check the CT's capability policy rather than making it privileged or disabling its AppArmor profile. Do not add `RestrictAddressFamilies` without `AF_PACKET` to the unit.
 - **No interface on the scanned LAN.** ARP only works for ranges the server is directly attached to. A routed range (a VLAN reached through a router) never gets ARP; put the server, or a second network interface of its container, on that VLAN.
 - **Docker Desktop or `HOPE_DISCOVERY_MODE=limited`.** Containers there cannot see the LAN's layer 2 at all; run the Linux host-network deployment.
 
