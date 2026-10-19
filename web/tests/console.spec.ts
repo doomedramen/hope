@@ -1846,6 +1846,19 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("heading", { name: "Agents", exact: true }),
     ).toBeVisible();
+    const enrolledAgentCount =
+      data.hosts.filter(
+        (host: {
+          agent_id: string | null;
+          agent_revoked: boolean;
+          agent_uninstalled: boolean;
+        }) => host.agent_id && !host.agent_revoked && !host.agent_uninstalled,
+      ).length + 1;
+    await expect(
+      page
+        .getByRole("button", { name: "Agents", exact: true })
+        .locator(".count"),
+    ).toHaveText(String(enrolledAgentCount));
     await expect(
       page.getByRole("article", { name: "quiet-node" }),
     ).toContainText("Never reported");
