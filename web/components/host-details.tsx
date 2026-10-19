@@ -140,6 +140,19 @@ export function HostDetails({
   const agentInstalled = Boolean(host.agent_id && !host.agent_uninstalled);
   const containers = metrics?.containers ?? [];
   const hasContainers = containers.length > 0;
+  const proxmoxGuests = hosts
+    .filter(
+      (item) =>
+        item.parent_id === host.id &&
+        (item.source?.kind === "proxmox_vm" ||
+          item.source?.kind === "proxmox_lxc"),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const hasProxmoxGuests = proxmoxGuests.length > 0;
+  const isProxmoxHost =
+    host.device?.label.toLowerCase().includes("proxmox") === true ||
+    host.collectors.some((collector) => collector.name === "proxmox_children") ||
+    hasProxmoxGuests;
   const [activeTab, setActiveTab] = useState("summary");
   const update = updatePlan(host, agentRelease);
   const [copied, setCopied] = useState(false);
@@ -161,7 +174,10 @@ export function HostDetails({
     host.metrics,
   );
   const selectedTab =
-    !hasContainers && activeTab === "containers" ? "summary" : activeTab;
+    (!hasContainers && activeTab === "containers") ||
+    (!isProxmoxHost && activeTab === "guests")
+      ? "summary"
+      : activeTab;
   async function revoke() {
     try {
       await post(`/agents/${host.agent_id}/revoke`);
@@ -336,6 +352,7 @@ export function HostDetails({
             {agentInstalled && hasContainers && (
               <TabsTrigger value="containers">Containers</TabsTrigger>
             )}
+            {isProxmoxHost && <TabsTrigger value="guests">Guests</TabsTrigger>}
             <TabsTrigger value="services">Services</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
@@ -851,6 +868,84 @@ export function HostDetails({
                     ))}
                   </TableBody>
                 </Table>
+              </section>
+            </TabsContent>
+          )}
+          {isProxmoxHost && (
+            <TabsContent value="guests" className="host-tab-content">
+              <section aria-label="Proxmox guests">
+                <h3 className="detail-heading">
+                  <Boxes />
+                  Proxmox guests
+                  <span className="spacer" />
+                  <span className="text-xs font-normal text-muted-foreground">
+                    {proxmoxGuests.length}
+                  </span>
+                </h3>
+                {proxmoxGuests.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No VMs or LXCs are currently reported for this Proxmox
+                    node.
+                  </p>
+                ) : (
+                  <Table className="container-table">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Guest</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead>State</TableHead>
+                        <TableHead>CPU</TableHead>
+                        <TableHead>Memory</TableHead>
+                        <TableHead>VMID</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {proxmoxGuests.map((guest) => {
+                        const child = guest.child;
+                        const kind = guest.source?.kind;
+                        return (
+                          <TableRow key={guest.id}>
+                            <TableCell>
+                              <Button
+                                variant="link"
+                                className="container-name-link"
+                                onClick={() => onOpenHost(guest)}
+                              >
+                                {guest.name}
+                              </Button>
+                            </TableCell>
+                            <TableCell>
+                              {kind === "proxmox_lxc" ? "LXC" : "VM"}
+                            </TableCell>
+                            <TableCell>
+                              <span
+                                className="status-pill"
+                                data-tone={
+                                  child?.lifecycle === "running"
+                                    ? "good"
+                                    : "neutral"
+                                }
+                              >
+                                {child?.status ?? child?.lifecycle ?? "Unknown"}
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              {percentage(child?.metrics.cpu_percent ?? null)}
+                            </TableCell>
+                            <TableCell>
+                              {child?.metrics.memory_used_bytes == null
+                                ? "—"
+                                : `${bytes(child.metrics.memory_used_bytes)} / ${bytes(child.metrics.memory_total_bytes)}`}
+                            </TableCell>
+                            <TableCell className="mono">
+                              {child?.identity.key ?? "—"}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                )}
               </section>
             </TabsContent>
           )}

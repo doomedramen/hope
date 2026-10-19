@@ -23,6 +23,7 @@ const MAX_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PVE_OUTPUT: usize = 8 * 1024 * 1024;
 const CONFIG_CACHE: &str = "/run/hope-agent/proxmox-config.json";
 const CONFIG_REFRESH_SECONDS: u64 = 300;
+const MAX_GUEST_CONFIG_CONCURRENCY: usize = 2;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SnapshotFile {
@@ -137,11 +138,31 @@ pub async fn collect() -> Result<()> {
     if resources.len() > 500 {
         complete = false;
     }
-    let local_node = std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .and_then(|name| safe_node(name.trim()));
+    let local_node = local_node_name();
+    let Some(local_node) = local_node else {
+        write_snapshot(&SnapshotFile {
+            source_scope: cluster_id,
+            devices: vec![],
+            inventory_complete: false,
+        })?;
+        bail!("could not determine the local Proxmox node name");
+    };
     let mut parsed = Vec::with_capacity(resources.len().min(500));
     for resource in resources.iter().take(500) {
+        let Some(device) = resource_device(resource, &cluster_id) else {
+            complete = false;
+            continue;
+        };
+        // /cluster/resources is cluster-wide. Each installed system agent must report only
+        // guests owned by its local node, otherwise every node creates another copy of every
+        // VM/LXC and the server cannot attach the guest to the machine actually hosting it.
+        if device.node.is_none() {
+            complete = false;
+            continue;
+        }
+        if !is_local_guest(&device, &local_node) {
+            continue;
+        }
         if !resource
             .get("status")
             .and_then(Value::as_str)
@@ -151,10 +172,6 @@ pub async fn collect() -> Result<()> {
             // use their presence to age other devices as though this inventory were complete.
             complete = false;
         }
-        let Some(device) = resource_device(resource, &cluster_id) else {
-            complete = false;
-            continue;
-        };
         parsed.push(device);
     }
     let now = SystemTime::now()
@@ -171,34 +188,31 @@ pub async fn collect() -> Result<()> {
         .retain(|key, _| current_keys.contains(key));
     let cached_configs = config_cache.entries.clone();
     let mut tasks = stream::iter(parsed.into_iter().map(|mut device| {
-        let local_node = local_node.clone();
         let cached = config_key(&device).and_then(|key| cached_configs.get(&key).cloned());
         async move {
-            if local_node.as_deref() == device.node.as_deref() {
-                let key = config_key(&device);
-                let should_refresh = cached.as_ref().is_none_or(|entry| {
-                    now.saturating_sub(entry.observed_at) >= CONFIG_REFRESH_SECONDS
-                });
-                let config = if should_refresh {
-                    match guest_config(&device).await {
-                        Some(value) => Some(CachedConfig {
-                            observed_at: now,
-                            value,
-                        }),
-                        None => cached,
-                    }
-                } else {
-                    cached
-                };
-                if let Some(config) = config {
-                    enrich_from_config(&mut device, &config.value);
-                    return (device, key, Some(config));
+            let key = config_key(&device);
+            let should_refresh = cached.as_ref().is_none_or(|entry| {
+                now.saturating_sub(entry.observed_at) >= CONFIG_REFRESH_SECONDS
+            });
+            let config = if should_refresh {
+                match guest_config(&device).await {
+                    Some(value) => Some(CachedConfig {
+                        observed_at: now,
+                        value,
+                    }),
+                    None => cached,
                 }
+            } else {
+                cached
+            };
+            if let Some(config) = config {
+                enrich_from_config(&mut device, &config.value);
+                return (device, key, Some(config));
             }
             (device, None, None)
         }
     }))
-    .buffer_unordered(8);
+    .buffer_unordered(MAX_GUEST_CONFIG_CONCURRENCY);
     let mut devices = vec![];
     while let Some((device, key, config)) = tasks.next().await {
         if let (Some(key), Some(config)) = (key, config) {
@@ -215,6 +229,23 @@ pub async fn collect() -> Result<()> {
         devices,
         inventory_complete: complete,
     })
+}
+
+fn local_node_name() -> Option<String> {
+    // Proxmox's pmxcfs exposes the configured node name here. Fall back to the OS hostname for
+    // test fixtures and systems where the cluster filesystem has not mounted yet.
+    std::fs::read_link("/etc/pve/local")
+        .ok()
+        .and_then(|path| path.file_name()?.to_str().and_then(safe_node))
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .and_then(|name| safe_node(name.trim()))
+        })
+}
+
+fn is_local_guest(device: &ChildDeviceReport, local_node: &str) -> bool {
+    device.node.as_deref() == Some(local_node)
 }
 
 fn update_guest_identities(
@@ -796,6 +827,23 @@ mod tests {
         assert_eq!(device.status.as_deref(), Some("unknown"));
         assert!(safe_node("../../etc").is_none());
         assert!(safe_node("pve-1.local").is_some());
+    }
+
+    #[test]
+    fn cluster_inventory_is_scoped_to_the_local_node() {
+        let scope = Uuid::new_v4().to_string();
+        let local = resource_device(
+            &serde_json::json!({"type":"lxc","vmid":101,"node":"catacomb3","status":"running"}),
+            &scope,
+        )
+        .unwrap();
+        let remote = resource_device(
+            &serde_json::json!({"type":"lxc","vmid":102,"node":"catacomb","status":"running"}),
+            &scope,
+        )
+        .unwrap();
+        assert!(is_local_guest(&local, "catacomb3"));
+        assert!(!is_local_guest(&remote, "catacomb3"));
     }
 
     #[test]

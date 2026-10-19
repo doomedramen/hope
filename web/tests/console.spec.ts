@@ -160,6 +160,8 @@ async function seed(request: APIRequestContext) {
     data: { name: "Workshop", cidr: "192.168.30.0/24", enabled: false },
   });
   const names = ["atlas-nas", "studio-mac", "workshop-pi", "compute-node"];
+  let proxmoxAgent = "";
+  let proxmoxCredential = "";
   for (let i = 0; i < names.length; i++) {
     const enrollment = await (
       await request.post("/api/v1/enrollment-tokens", { data: {} })
@@ -203,6 +205,10 @@ async function seed(request: APIRequestContext) {
     });
     expect(enrolled.ok(), await enrolled.text()).toBeTruthy();
     const credential = (await enrolled.json()).credential;
+    if (i === 3) {
+      proxmoxAgent = agent;
+      proxmoxCredential = credential;
+    }
     for (let sample = 0; sample < 5; sample++) {
       const response = await request.post("/api/v1/agent/report", {
         headers: { Authorization: `Bearer ${credential}` },
@@ -231,12 +237,79 @@ async function seed(request: APIRequestContext) {
               available: false,
               detail: "No supported GPU driver",
             },
+            ...(i === 3
+              ? [
+                  {
+                    name: "proxmox_children",
+                    available: true,
+                    detail: null,
+                  },
+                ]
+              : []),
           ],
         },
       });
       expect(response.ok()).toBeTruthy();
     }
   }
+  const proxmoxScope = randomUUID();
+  const childBatch = await request.post("/api/v1/agent/children", {
+    headers: { Authorization: `Bearer ${proxmoxCredential}` },
+    data: {
+      schema_version: 1,
+      batch_id: randomUUID(),
+      agent_id: proxmoxAgent,
+      source: "proxmox",
+      source_scope: proxmoxScope,
+      sequence: 1,
+      inventory_generation: 1,
+      inventory_id: randomUUID(),
+      chunk_index: 0,
+      chunk_count: 1,
+      complete: true,
+      observed_at: Date.now() / 1000,
+      devices: [
+        {
+          identity: {
+            kind: "proxmox_lxc",
+            scope: proxmoxScope,
+            key: "202",
+            incarnation: "lxc-incarnation",
+          },
+          name: "dns-container",
+          lifecycle: "running",
+          status: "running",
+          health: null,
+          restart_count: null,
+          parent_key: null,
+          node: "compute-node",
+          tags: ["infra"],
+          interfaces: [],
+          cpu_cores: 2,
+          memory_bytes: 2 * 1024 * 1024 * 1024,
+          image: null,
+          compose_project: null,
+          compose_service: null,
+          published_ports: [],
+          metrics: {
+            cpu_percent: 15,
+            cpu_capacity_cores: 2,
+            cpu_measurement: "hypervisor_guest",
+            memory_used_bytes: 512 * 1024 * 1024,
+            memory_total_bytes: 2 * 1024 * 1024 * 1024,
+            memory_measurement: "hypervisor_guest",
+            disk_used_bytes: null,
+            disk_total_bytes: null,
+            network_rx_bytes_per_second: null,
+            network_tx_bytes_per_second: null,
+            network_rx_bytes: null,
+            network_tx_bytes: null,
+          },
+        },
+      ],
+    },
+  });
+  expect(childBatch.ok(), await childBatch.text()).toBeTruthy();
 }
 
 test.describe.serial("H.O.P.E console", () => {
@@ -377,6 +450,29 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(page.getByRole("table").getByRole("row")).toHaveCount(2);
     await page.getByLabel("Search hosts").fill("");
     await page.getByRole("button", { name: "Close host details" }).click();
+    await page.getByLabel("Search hosts").fill("compute-node");
+    await page.getByRole("row").filter({ hasText: "compute-node" }).click();
+    const proxmoxDetails = page.getByRole("complementary", {
+      name: "Host details",
+    });
+    await proxmoxDetails.getByRole("tab", { name: "Guests" }).click();
+    await expect(
+      proxmoxDetails.getByRole("heading", { name: "Proxmox guests" }),
+    ).toBeVisible();
+    await expect(proxmoxDetails.getByRole("table")).toContainText(
+      "dns-container",
+    );
+    await expect(proxmoxDetails.getByRole("table")).toContainText("LXC");
+    await proxmoxDetails.getByRole("button", { name: "dns-container" }).click();
+    await expect(page).toHaveURL(/host=/);
+    await expect(
+      page.getByRole("heading", { name: "dns-container" }),
+    ).toBeVisible();
+    await expect(proxmoxDetails).toContainText("Runs on");
+    await proxmoxDetails.getByRole("button", { name: "compute-node" }).click();
+    await expect(page.getByRole("heading", { name: "compute-node" })).toBeVisible();
+    await page.getByRole("button", { name: "Close host details" }).click();
+    await page.getByLabel("Search hosts").fill("");
     await page.getByRole("button", { name: "Map", exact: true }).click();
     await page.getByRole("button", { name: "Subnets", exact: true }).click();
     await expect(page.getByTestId("subnet-group").first()).toBeVisible();
