@@ -142,6 +142,15 @@ pub async fn collect() -> Result<()> {
         .and_then(|name| safe_node(name.trim()));
     let mut parsed = Vec::with_capacity(resources.len().min(500));
     for resource in resources.iter().take(500) {
+        if !resource
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "running" | "stopped" | "paused"))
+        {
+            // Keep guests with unfamiliar or temporarily unavailable states visible, but never
+            // use their presence to age other devices as though this inventory were complete.
+            complete = false;
+        }
         let Some(device) = resource_device(resource, &cluster_id) else {
             complete = false;
             continue;
@@ -317,11 +326,14 @@ fn resource_device(resource: &Value, cluster_id: &str) -> Option<ChildDeviceRepo
     };
     let vmid = resource.get("vmid")?.as_u64()?;
     let key = vmid.to_string();
-    let state = resource.get("status")?.as_str()?;
+    let state = resource
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     let lifecycle = match state {
         "running" => DeviceLifecycle::Running,
         "stopped" | "paused" => DeviceLifecycle::Stopped,
-        _ => return None,
+        _ => DeviceLifecycle::Stale,
     };
     let cpu_capacity = resource
         .get("maxcpu")
@@ -771,10 +783,17 @@ mod tests {
     }
 
     #[test]
-    fn unknown_guest_states_and_untrusted_node_names_are_not_guessed() {
+    fn guests_with_unknown_states_remain_visible_without_authoritative_collection() {
         let cluster = Uuid::new_v4().to_string();
         let unknown = serde_json::json!({"type":"lxc","vmid":10,"status":"migrating","node":"pve"});
-        assert!(resource_device(&unknown, &cluster).is_none());
+        let device = resource_device(&unknown, &cluster).unwrap();
+        assert_eq!(device.identity.kind, ChildDeviceKind::ProxmoxLxc);
+        assert_eq!(device.lifecycle, DeviceLifecycle::Stale);
+        assert_eq!(device.status.as_deref(), Some("migrating"));
+        let missing_status = serde_json::json!({"type":"lxc","vmid":11,"node":"pve"});
+        let device = resource_device(&missing_status, &cluster).unwrap();
+        assert_eq!(device.lifecycle, DeviceLifecycle::Stale);
+        assert_eq!(device.status.as_deref(), Some("unknown"));
         assert!(safe_node("../../etc").is_none());
         assert!(safe_node("pve-1.local").is_some());
     }

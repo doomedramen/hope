@@ -1799,7 +1799,7 @@ test.describe.serial("H.O.P.E console", () => {
       fullPage: true,
     });
   });
-  test("Agents includes never-reported, stale and revoked records and opens host details", async ({
+  test("Agents excludes revoked records, includes never-reported and stale agents, and opens host details", async ({
     page,
     request,
   }) => {
@@ -1836,7 +1836,7 @@ test.describe.serial("H.O.P.E console", () => {
     ).toContainText("Never reported");
     await expect(
       page.getByRole("article", { name: "revoked-agent" }),
-    ).toContainText("Revoked");
+    ).toHaveCount(0);
     await expect(
       page.getByRole("article", { name: "stale-agent" }),
     ).toContainText("Not reporting");
@@ -1848,8 +1848,9 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(page.getByRole("article", { name: "atlas-nas" })).toHaveCount(
       0,
     );
-    await filters.getByRole("button", { name: /^Revoked/ }).click();
-    await expect(page.getByRole("article")).toHaveCount(1);
+    await expect(filters.getByRole("button", { name: /Revoked/ })).toHaveCount(
+      0,
+    );
     await filters.getByRole("button", { name: /^All agents/ }).click();
     await page
       .getByRole("textbox", { name: "Search agents" })

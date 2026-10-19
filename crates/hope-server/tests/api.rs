@@ -726,6 +726,46 @@ async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_ab
 }
 
 #[tokio::test]
+async fn proxmox_lxc_child_batches_are_projected_as_hosts() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let scope = Uuid::new_v4().to_string();
+    let mut lxc = child_device();
+    lxc.identity.kind = hope_protocol::ChildDeviceKind::ProxmoxLxc;
+    lxc.identity.scope = scope.clone();
+    lxc.identity.key = "202".into();
+    lxc.identity.incarnation = "lxc-incarnation".into();
+    lxc.name = "dns-container".into();
+    lxc.status = Some("running".into());
+    lxc.health = None;
+    lxc.restart_count = None;
+    lxc.node = Some("pve-a".into());
+    let mut batch = child_batch(&agent, 1, 1, true, now(), vec![lxc]);
+    batch.source = ChildSourceKind::Proxmox;
+    batch.source_scope = scope;
+
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(batch),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hosts = state.hosts().await.unwrap();
+    let lxc_host = hosts
+        .iter()
+        .find(|host| host.name == "dns-container")
+        .expect("LXC inventory item should appear in Hosts");
+    assert_eq!(
+        lxc_host.source.as_ref().unwrap().kind,
+        hope_protocol::ChildDeviceKind::ProxmoxLxc
+    );
+}
+
+#[tokio::test]
 async fn multipart_inventory_is_authoritative_only_after_every_part_is_stored() {
     let (_dir, state, app, _) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;

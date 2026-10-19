@@ -21,11 +21,9 @@ const FILTERS = [
   ["reporting", "Reporting"],
   ["stale", "Not reporting"],
   ["never", "Never reported"],
-  ["revoked", "Revoked"],
 ] as const;
 type Filter = (typeof FILTERS)[number][0];
 function agentState(host: Host): Exclude<Filter, "all"> {
-  if (host.agent_revoked) return "revoked";
   if (!host.last_report) return "never";
   return hostState(host).key === "reporting" ? "reporting" : "stale";
 }
@@ -41,9 +39,10 @@ export function AgentsPage({
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
-  // Enrollment creates the host record before any report arrives. Keep revoked records too.
+  // Enrollment creates the host record before any report arrives. Keep those pending agents,
+  // but revoked credentials are no longer enrolled agents and belong only in Hosts.
   const agents = hosts.filter(
-    (host) => host.agent_id && !host.agent_uninstalled,
+    (host) => host.agent_id && !host.agent_revoked && !host.agent_uninstalled,
   );
   const matching = agents
     .filter((host) =>
@@ -66,7 +65,8 @@ export function AgentsPage({
       <div className="page-heading">
         <p>
           {agents.length} enrolled {agents.length === 1 ? "agent" : "agents"},
-          including agents that have stopped reporting or have been revoked.
+          including agents that have stopped reporting. Revoked agents remain in
+          Hosts.
         </p>
         <Button onClick={onInstall}>
           <Plus />
@@ -110,12 +110,7 @@ export function AgentsPage({
             const cpu = cpuPercent(host);
             const memory = memoryUsage(host);
             const storage = worstDisk(host);
-            const tone =
-              state === "reporting"
-                ? "good"
-                : state === "revoked"
-                  ? "neutral"
-                  : "warning";
+            const tone = state === "reporting" ? "good" : "warning";
             return (
               <article
                 key={host.id}
@@ -199,11 +194,6 @@ export function AgentsPage({
                 {state === "never" && (
                   <p className="mt-3 text-xs text-muted-foreground">
                     Enrolled, but no reports have been received.
-                  </p>
-                )}
-                {state === "revoked" && (
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    Access revoked. Open the host to re-enroll this agent.
                   </p>
                 )}
               </article>
