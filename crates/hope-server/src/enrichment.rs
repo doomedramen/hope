@@ -152,7 +152,7 @@ async fn enrich(work: Work) {
             host.evidence.dns_name = hostname.clone();
         }
         host.enrichment_status = EnrichmentStatus::Completed;
-        if host.agent_id.is_none()
+        if (host.agent_id.is_none() || host.agent_uninstalled)
             && let Some(name) = hostname
         {
             host.name = name;

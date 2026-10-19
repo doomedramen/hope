@@ -59,7 +59,7 @@ fn addresses(host: &Host) -> Vec<IpAddr> {
 
 /// Unknown discovery state is not evidence of downtime.
 fn device_down(host: &Host, now: f64, scans: &HashMap<String, (f64, u32)>) -> bool {
-    if host.agent_id.is_some() && !host.agent_revoked {
+    if host.agent_id.is_some() && !host.agent_revoked && !host.agent_uninstalled {
         return host
             .last_report
             .is_none_or(|at| now - at > AGENT_STALE_SECONDS);
@@ -112,7 +112,9 @@ pub async fn problems(
                 if host.uptime.device {
                     checks.push((
                         "device".to_string(),
-                        if (host.agent_id.is_some() && !host.agent_revoked)
+                        if (host.agent_id.is_some()
+                            && !host.agent_revoked
+                            && !host.agent_uninstalled)
                             || host.network_ids.iter().any(|id| scans.contains_key(id))
                             || now - host.last_seen <= AGENT_STALE_SECONDS
                         {

@@ -20,16 +20,19 @@ export function UninstallAgentDialog({
   host,
   onOpenChange,
   onDisabled,
+  onUninstalled,
 }: {
   host: Host;
   onOpenChange: (open: boolean) => void;
   onDisabled: () => void;
+  onUninstalled: () => void;
 }) {
   const [instructions, setInstructions] =
     useState<AgentUninstallInstructions | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [revoked, setRevoked] = useState(host.agent_revoked);
+  const [removed, setRemoved] = useState(false);
   const [copied, setCopied] = useState(false);
   const agentId = host.agent_id;
   useEffect(() => {
@@ -53,6 +56,20 @@ export function UninstallAgentDialog({
       await post(`/agents/${agentId}/revoke`);
       setRevoked(true);
       onDisabled();
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmUninstalled() {
+    setBusy(true);
+    setError("");
+    try {
+      await post(`/agents/${agentId}/uninstalled`);
+      setRemoved(true);
+      onUninstalled();
     } catch (failure) {
       setError((failure as Error).message);
     } finally {
@@ -149,6 +166,20 @@ export function UninstallAgentDialog({
                 the command. Check the command output on the device to confirm
                 removal; this dialog cannot confirm it remotely.
               </p>
+              {removed ? (
+                <p className="text-sm">
+                  The device is now listed as discovered, without an installed
+                  agent.
+                </p>
+              ) : (
+                <Button
+                  variant="destructive"
+                  disabled={busy || !instructions}
+                  onClick={confirmUninstalled}
+                >
+                  {busy ? "Updating device…" : "I removed the agent"}
+                </Button>
+              )}
             </section>
           </TabsContent>
         </Tabs>

@@ -54,7 +54,7 @@ export function Overview({
   const { hosts, networks, scans } = data;
   const summary = fleetSummary(hosts, scans);
   const updates = fleetUpdates(hosts, data.agent_release);
-  const agentsInstalled = hosts.some((h) => h.agent_id);
+  const agentsInstalled = hosts.some((h) => h.agent_id && !h.agent_uninstalled);
   const scanned = scans.length > 0 || hosts.length > 0;
   const onboarding = !networks.length || !scanned || !agentsInstalled;
   const affectedHosts = new Set(summary.issues.map((issue) => issue.host.id))

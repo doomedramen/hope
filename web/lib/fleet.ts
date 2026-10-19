@@ -3,7 +3,13 @@ import { memoryPercent } from "@/lib/history";
 
 export type Tone = "good" | "warning" | "critical" | "neutral";
 export type StateKey =
-  "reporting" | "stale" | "revoked" | "observed" | "unobserved";
+  | "reporting"
+  | "stale"
+  | "revoked"
+  | "observed"
+  | "unobserved"
+  | "stopped"
+  | "archived";
 export type HostState = { key: StateKey; label: string; tone: Tone };
 
 /** Agents report every 30 s; two missed reports mean the agent is stale. */
@@ -12,15 +18,33 @@ export const AGENT_STALE_SECONDS = 120;
 export const OBSERVED_SECONDS = 600;
 
 export function hostState(
-  host: Pick<Host, "agent_id" | "agent_revoked" | "last_report" | "last_seen">,
+  host: Pick<Host, "agent_id" | "agent_revoked" | "last_report" | "last_seen"> &
+    Partial<
+      Pick<
+        Host,
+        "agent_uninstalled" | "source" | "lifecycle" | "source_observed_at"
+      >
+    >,
   now = Date.now() / 1000,
 ): HostState {
-  if (host.agent_revoked)
+  if (host.agent_revoked && !host.agent_uninstalled)
     return { key: "revoked", label: "Agent revoked", tone: "neutral" };
-  if (host.agent_id)
+  if (host.agent_id && !host.agent_uninstalled)
     return host.last_report && now - host.last_report < AGENT_STALE_SECONDS
       ? { key: "reporting", label: "Reporting", tone: "good" }
       : { key: "stale", label: "Agent stale", tone: "critical" };
+  if (host.source) {
+    if (host.lifecycle === "archived")
+      return { key: "archived", label: "Archived", tone: "neutral" };
+    if (host.lifecycle === "stopped")
+      return { key: "stopped", label: "Stopped", tone: "neutral" };
+    if (
+      host.lifecycle === "stale" ||
+      now - (host.source_observed_at ?? 0) >= OBSERVED_SECONDS
+    )
+      return { key: "unobserved", label: "Source stale", tone: "warning" };
+    return { key: "observed", label: "Running", tone: "good" };
+  }
   return now - host.last_seen < OBSERVED_SECONDS
     ? { key: "observed", label: "Observed", tone: "good" }
     : { key: "unobserved", label: "Not recently seen", tone: "neutral" };
@@ -82,11 +106,17 @@ export function worstDisk(host: Host): { disk: Disk; percent: number } | null {
 }
 
 export function cpuPercent(host: Host): number | null {
-  const value = host.metrics?.cpu_percent;
+  const value = host.metrics?.cpu_percent ?? host.child?.metrics.cpu_percent;
   return value != null && Number.isFinite(value) ? value : null;
 }
 export function memoryUsage(host: Host): number | null {
-  return host.metrics ? memoryPercent(host.metrics) : null;
+  if (host.metrics) return memoryPercent(host.metrics);
+  const child = host.child?.metrics;
+  return child?.memory_used_bytes != null &&
+    child.memory_total_bytes != null &&
+    child.memory_total_bytes > 0
+    ? (child.memory_used_bytes / child.memory_total_bytes) * 100
+    : null;
 }
 
 export type Issue = {
@@ -261,7 +291,8 @@ export function fleetSummary(
   for (const host of hosts) {
     const state = hostState(host, now);
     if (state.tone === "good") online++;
-    if (host.agent_id && !host.agent_revoked) agents++;
+    if (host.agent_id && !host.agent_revoked && !host.agent_uninstalled)
+      agents++;
     if (state.key !== "reporting") continue;
     reporting++;
     const cpu = cpuPercent(host);
@@ -485,7 +516,13 @@ export function agentUpdate(
   host: Host,
   release: string | null | undefined,
 ): string | null {
-  if (!host.agent_id || host.agent_revoked || !host.agent_version || !release)
+  if (
+    !host.agent_id ||
+    host.agent_revoked ||
+    host.agent_uninstalled ||
+    !host.agent_version ||
+    !release
+  )
     return null;
   const have = versionParts(host.agent_version);
   const offer = versionParts(release);

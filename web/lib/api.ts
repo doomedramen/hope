@@ -92,8 +92,16 @@ export function percent0(value: number | null | undefined) {
 export function status(host: {
   agent_id: string | null;
   agent_revoked?: boolean;
+  agent_uninstalled?: boolean;
   last_report: number | null;
   last_seen: number;
 }) {
-  return hostState({ agent_revoked: false, ...host }).label;
+  return hostState({
+    agent_revoked: false,
+    agent_uninstalled: false,
+    source: null,
+    lifecycle: null,
+    source_observed_at: null,
+    ...host,
+  }).label;
 }

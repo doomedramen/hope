@@ -1197,13 +1197,16 @@ async fn provision(
         let Some(agent) = plan.bound_agent.as_deref() else {
             return Outcome::code("IDENTITY_MISMATCH");
         };
-        if agents::revoke_by_id(state, agent).await.is_err() {
+        if agents::complete_uninstall_by_id(state, agent)
+            .await
+            .is_err()
+        {
             return Outcome::code("UNINSTALL_REVOKE_FAILED");
         }
         return Outcome {
             status: InstallStatus::Completed,
             code: None,
-            message: "Agent service, updater and binary removed. Access revoked; identity and device history retained.".into(),
+            message: "Agent service, updater and binary removed. The host returned to discovered devices; historical agent metrics remain stored.".into(),
             agent_id: Some(agent.into()),
         };
     }

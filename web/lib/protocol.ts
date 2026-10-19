@@ -205,6 +205,7 @@ network_rx_bytes: number | null, network_tx_bytes: number | null, };
 export type ChildDeviceReport = { identity: SourceIdentity, name: string, lifecycle: DeviceLifecycle, status: string | null, health: string | null, restart_count: number | null, parent_key: string | null, node: string | null, tags: Array<string>, interfaces: Array<Interface>, cpu_cores: number | null, memory_bytes: number | null, image: string | null, compose_project: string | null, compose_service: string | null, published_ports: Array<ContainerPort>, metrics: ChildMetrics, };
 export type ChildReportBatch = { schema_version: number, batch_id: string, agent_id: string, source: ChildSourceKind, source_scope: string, sequence: number, inventory_generation: number, complete: boolean, observed_at: number, devices: Array<ChildDeviceReport>, };
 export type ChildReportResponse = { accepted: boolean, duplicate: boolean, };
+export type SourceMetricPoint = { collected_at: number, resolution_seconds: number, metrics: ChildMetrics, };
 export type RelationshipKind = "runs_on" | "connected_to" | "exposes_service";
 export type DeviceRelationship = { from_device_id: string, to_device_id: string, kind: RelationshipKind, detail: string | null, };
 export type Container = { id: string, name: string, image: string,
@@ -266,7 +267,11 @@ interval_minutes: number, };
 export type ScanJob = { id: string, network_id: string, cidr: string, status: ScanStatus, scanned: number, total: number, discovered: number, started_at: number, finished_at: number | null, error: string | null, };
 export type Service = { port: number, name: string, observed_at: number, };
 export type UptimeSettings = { enabled: boolean, device: boolean, ports: Array<number>, };
-export type Host = { uptime: UptimeSettings, id: string, agent_id: string | null, name: string, name_override: string | null, icon_override: string | null, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>,
+export type Host = { uptime: UptimeSettings, id: string, agent_id: string | null, name: string, name_override: string | null, icon_override: string | null, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean,
+/**
+ * The installation was removed remotely; the identity remains for history and re-enrollment.
+ */
+agent_uninstalled: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>,
 /**
  * Manufacturer registered for the MAC address prefix (IEEE OUI).
  */
@@ -294,7 +299,11 @@ update_target: string | null,
 /**
  * Hypervisor or container-runtime identity when this device has source inventory.
  */
-source: SourceIdentity | null, lifecycle: DeviceLifecycle | null, source_observed_at: number | null, relationships: Array<DeviceRelationship>, };
+source: SourceIdentity | null, lifecycle: DeviceLifecycle | null, source_observed_at: number | null, relationships: Array<DeviceRelationship>,
+/**
+ * Latest source-provided guest/container inventory, kept separate from direct-agent data.
+ */
+child: ChildDeviceReport | null, };
 export type MetricPoint = { collected_at: number, resolution_seconds: number, metrics: Metrics, };
 export type Position = { id: string, x: number, y: number, };
 export type MapLink = { id: string, source: string, target: string, label: string, };

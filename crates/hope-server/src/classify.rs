@@ -528,7 +528,9 @@ fn names(host: &Host) -> Vec<String> {
 
 /// A friendlier name for a host still named after its address.
 pub fn display_name(host: &Host) -> Option<String> {
-    if host.agent_id.is_some() || !(host.name.is_empty() || is_address(&host.name)) {
+    if (host.agent_id.is_some() && !host.agent_uninstalled)
+        || !(host.name.is_empty() || is_address(&host.name))
+    {
         return None;
     }
     let e = &host.evidence;

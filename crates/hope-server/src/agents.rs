@@ -260,6 +260,7 @@ async fn enroll_inner(
                 .await?;
             let mut host: Host = serde_json::from_str(&body)?;
             host.agent_revoked = false;
+            host.agent_uninstalled = false;
             sqlx::query("UPDATE hosts SET body=? WHERE agent_id=?")
                 .bind(serde_json::to_string(&host)?)
                 .bind(&request.agent_id)
@@ -706,7 +707,7 @@ fn settle_update_request(host: &mut Host, at: f64) {
 /// reports that it has an updater as a collector; one without (installed before updaters, or as a
 /// user service) has to be updated with the upgrade command on the host.
 fn update_blocker(host: &Host, release: &str) -> Option<&'static str> {
-    if host.agent_id.is_none() || host.agent_revoked {
+    if host.agent_id.is_none() || host.agent_revoked || host.agent_uninstalled {
         return Some("This host has no active agent to update");
     }
     if !host
@@ -783,6 +784,58 @@ pub async fn revoke(
 ) -> ApiResult<Json<OkResponse>> {
     revoke_by_id(&state, &id).await?;
     Ok(Json(OkResponse { ok: true }))
+}
+
+pub async fn complete_uninstall(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<OkResponse>> {
+    complete_uninstall_by_id(&state, &id).await?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
+/// Mark an agent installation as removed. Its identity stays attached for metric history and
+/// credential replacement, while the host returns to the discovered-device fleet.
+pub async fn complete_uninstall_by_id(state: &State, id: &str) -> ApiResult<()> {
+    let _guard = state.0.writes.lock().await;
+    let mut tx = state.0.db.begin().await?;
+    let updated = sqlx::query("UPDATE agents SET revoked=1 WHERE id=?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if updated == 0 {
+        return Err(ApiError::not_found());
+    }
+    let body: Option<String> = sqlx::query_scalar("SELECT body FROM hosts WHERE agent_id=?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(body) = body else {
+        return Err(ApiError::not_found());
+    };
+    let mut host: Host = serde_json::from_str(&body)?;
+    host.agent_revoked = true;
+    host.agent_uninstalled = true;
+    host.update_requested_at = None;
+    host.update_target = None;
+    host.last_seen = 0.0;
+    host.discovery_method = "tcp".into();
+    host.name = host
+        .addresses
+        .first()
+        .cloned()
+        .unwrap_or_else(|| host.id.clone());
+    crate::classify::refresh(&mut host, &state.gateway_set());
+    sqlx::query("UPDATE hosts SET name=?,body=? WHERE agent_id=?")
+        .bind(&host.name)
+        .bind(serde_json::to_string(&host)?)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    state.changed();
+    Ok(())
 }
 
 pub async fn revoke_by_id(state: &State, id: &str) -> ApiResult<()> {

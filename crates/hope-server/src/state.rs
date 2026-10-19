@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use hope_protocol::{Capabilities, Host};
+use hope_protocol::{
+    Capabilities, ChildDeviceKind, ChildDeviceReport, DeviceLifecycle, DeviceRelationship, Host,
+    SourceIdentity,
+};
 use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -242,7 +245,7 @@ impl State {
                 e.mdns_services = seen.mdns_services.iter().cloned().collect();
                 e.mdns_model = seen.mdns_model.clone();
                 let instances: Vec<String> = seen.mdns_instances.iter().cloned().collect();
-                if host.agent_id.is_none()
+                if (host.agent_id.is_none() || host.agent_uninstalled)
                     && e.mdns_instances.contains(&host.name)
                     && !instances.contains(&host.name)
                 {
@@ -296,18 +299,31 @@ impl State {
         let rows = sqlx::query("SELECT body FROM hosts ORDER BY name COLLATE NOCASE")
             .fetch_all(&self.0.db)
             .await?;
-        rows.into_iter()
+        let mut hosts: Vec<Host> = rows
+            .into_iter()
             .map(|r| serde_json::from_str(r.get("body")).context("invalid stored host"))
-            .collect()
+            .collect::<Result<_>>()?;
+        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id")
+            .fetch_all(&self.0.db).await?;
+        for row in children {
+            hosts.push(source_device_host(&row)?);
+        }
+        hosts.sort_by_key(|host| host.name.to_lowercase());
+        Ok(hosts)
     }
     pub async fn host(&self, id: &str) -> Result<Option<Host>> {
         let value: Option<String> = sqlx::query_scalar("SELECT body FROM hosts WHERE id=?")
             .bind(id)
             .fetch_optional(&self.0.db)
             .await?;
-        value
-            .map(|s| serde_json::from_str(&s).context("invalid stored host"))
-            .transpose()
+        if let Some(body) = value {
+            return serde_json::from_str(&body)
+                .context("invalid stored host")
+                .map(Some);
+        }
+        let row = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id WHERE d.id=?")
+            .bind(id).fetch_optional(&self.0.db).await?;
+        row.as_ref().map(source_device_host).transpose()
     }
     /// Callers serialize host read-modify-write operations using `writes`.
     pub async fn save_host(&self, host: &Host) -> Result<()> {
@@ -316,4 +332,63 @@ impl State {
             .execute(&self.0.db).await?;
         Ok(())
     }
+}
+
+fn source_device_host(row: &sqlx::sqlite::SqliteRow) -> Result<Host> {
+    let id: String = row.get("id");
+    let source: String = row.get("source");
+    let scope: String = row.get("source_scope");
+    let key: String = row.get("source_key");
+    let incarnation: String = row.get("incarnation");
+    let observed_at: f64 = row.get("observed_at");
+    let mut child: ChildDeviceReport =
+        serde_json::from_str(row.get("body")).context("invalid stored child device")?;
+    let kind: ChildDeviceKind = child.identity.kind;
+    let lifecycle = match row.get::<String, _>("lifecycle").as_str() {
+        "running" => DeviceLifecycle::Running,
+        "stopped" => DeviceLifecycle::Stopped,
+        "archived" => DeviceLifecycle::Archived,
+        _ => DeviceLifecycle::Stale,
+    };
+    child.lifecycle = lifecycle;
+    let mut host = Host::new(id.clone(), row.get("name"), &source);
+    host.last_seen = observed_at;
+    host.last_collected_at = Some(observed_at);
+    host.source_observed_at = Some(observed_at);
+    host.source = Some(SourceIdentity {
+        kind,
+        scope,
+        key,
+        incarnation,
+    });
+    host.lifecycle = Some(lifecycle);
+    host.discovery_method = source;
+    host.addresses = child
+        .interfaces
+        .iter()
+        .flat_map(|interface| interface.addresses.iter().cloned())
+        .collect();
+    host.macs = child
+        .interfaces
+        .iter()
+        .filter_map(|interface| interface.mac.clone())
+        .collect();
+    host.network_ids = child
+        .interfaces
+        .iter()
+        .map(|interface| interface.name.clone())
+        .collect();
+    host.parent_id = row.try_get("to_device_id").ok().flatten();
+    host.relationships = host
+        .parent_id
+        .iter()
+        .map(|parent| DeviceRelationship {
+            from_device_id: id.clone(),
+            to_device_id: parent.clone(),
+            kind: hope_protocol::RelationshipKind::RunsOn,
+            detail: None,
+        })
+        .collect();
+    host.child = Some(child);
+    Ok(host)
 }

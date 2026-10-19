@@ -2,7 +2,7 @@
 import { UptimeSettings } from "@/components/uptime-settings";
 import { UninstallAgentDialog } from "@/components/uninstall-agent-dialog";
 import { Age } from "@/components/age";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -60,6 +60,7 @@ import {
 import {
   HistoryRange,
   MetricHistory,
+  SourceMetricHistory,
   useHistory,
   type HistoryWindow,
 } from "@/components/metric-history";
@@ -134,6 +135,7 @@ export function HostDetails({
   const [hours, setHours] = useState<HistoryWindow>("1");
   const inventory = host.inventory;
   const metrics = host.metrics;
+  const agentInstalled = Boolean(host.agent_id && !host.agent_uninstalled);
   const containers = metrics?.containers ?? [];
   const hasContainers = containers.length > 0;
   const [activeTab, setActiveTab] = useState("summary");
@@ -262,14 +264,23 @@ export function HostDetails({
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <StatusPill host={host} />
-          {host.agent_id && !host.agent_revoked && (
+          {agentInstalled && !host.agent_revoked && (
             <Badge variant="outline">
               <Bot data-icon="inline-start" />
               {host.agent_version ? `Agent ${host.agent_version}` : "Agent"}
             </Badge>
           )}
+          {host.source && (
+            <Badge variant="outline">
+              {host.source.kind === "docker_container"
+                ? "Docker container"
+                : host.source.kind === "proxmox_lxc"
+                  ? "Proxmox LXC"
+                  : "Proxmox VM"}
+            </Badge>
+          )}
           <span>
-            {host.agent_id && host.last_report ? (
+            {agentInstalled && host.last_report ? (
               <>
                 Reported <Age value={host.last_report} lower /> · collected{" "}
                 <Age value={host.last_collected_at} lower />
@@ -298,7 +309,7 @@ export function HostDetails({
             {host.agent_id && (
               <TabsTrigger value="metrics">Metrics</TabsTrigger>
             )}
-            {host.agent_id && hasContainers && (
+            {agentInstalled && hasContainers && (
               <TabsTrigger value="containers">Containers</TabsTrigger>
             )}
             <TabsTrigger value="services">Services</TabsTrigger>
@@ -322,7 +333,7 @@ export function HostDetails({
                 ))}
               </div>
             )}
-            {!host.agent_id && (
+            {!agentInstalled && !host.child && (
               <div className="rounded-xl border border-dashed p-3.5">
                 <p className="mb-2.5 text-xs leading-relaxed text-muted-foreground">
                   Discovery can only see what answers on the network. Install
@@ -335,7 +346,7 @@ export function HostDetails({
                 </Button>
               </div>
             )}
-            {host.agent_id && (
+            {agentInstalled && (
               <section aria-label="Current readings" className="host-readings">
                 <ReadingMeter label="CPU" value={cpuPercent(host)} />
                 <ReadingMeter label="Memory" value={memoryUsage(host)} />
@@ -350,6 +361,115 @@ export function HostDetails({
                 </p>
               </section>
             )}
+            {host.child && (
+              <section
+                aria-label="Source-provided readings"
+                className="host-readings"
+              >
+                <ReadingMeter
+                  label="CPU · source"
+                  value={host.child.metrics.cpu_percent}
+                />
+                <ReadingMeter
+                  label={
+                    host.child.metrics.memory_measurement ===
+                    "docker_working_set"
+                      ? "Memory working set · source"
+                      : "Memory · source"
+                  }
+                  value={memoryUsage(host)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Collected by{" "}
+                  {host.source?.kind === "docker_container"
+                    ? "Docker Engine"
+                    : "Proxmox"}{" "}
+                  · observed <Age value={host.source_observed_at} lower />
+                </p>
+              </section>
+            )}
+            {host.child && (
+              <section aria-label="Source inventory">
+                <h3 className="detail-heading">
+                  <Boxes /> Source inventory
+                </h3>
+                <dl className="detail-list">
+                  <dt>State</dt>
+                  <dd>{host.child.status ?? host.child.lifecycle}</dd>
+                  {host.child.node && (
+                    <>
+                      <dt>Node</dt>
+                      <dd>{host.child.node}</dd>
+                    </>
+                  )}
+                  {host.child.image && (
+                    <>
+                      <dt>Image</dt>
+                      <dd className="mono break-all">{host.child.image}</dd>
+                    </>
+                  )}
+                  {host.child.compose_project && (
+                    <>
+                      <dt>Compose project</dt>
+                      <dd>{host.child.compose_project}</dd>
+                    </>
+                  )}
+                  {host.child.compose_service && (
+                    <>
+                      <dt>Compose service</dt>
+                      <dd>{host.child.compose_service}</dd>
+                    </>
+                  )}
+                  {host.child.cpu_cores != null && (
+                    <>
+                      <dt>Configured CPUs</dt>
+                      <dd>{host.child.cpu_cores}</dd>
+                    </>
+                  )}
+                  {host.child.memory_bytes != null && (
+                    <>
+                      <dt>Configured memory</dt>
+                      <dd>{bytes(host.child.memory_bytes)}</dd>
+                    </>
+                  )}
+                  <dt>Identity</dt>
+                  <dd className="mono break-all">{host.child.identity.key}</dd>
+                  {host.child.published_ports.length > 0 && (
+                    <>
+                      <dt>Published ports</dt>
+                      <dd>
+                        {host.child.published_ports
+                          .map(
+                            (port) =>
+                              `${port.host_ip ?? "*"}:${port.host_port ?? "—"} → ${port.container_port}/${port.protocol}`,
+                          )
+                          .join(", ")}
+                      </dd>
+                    </>
+                  )}
+                  {host.child.interfaces.map((iface) => (
+                    <Fragment key={iface.name}>
+                      <dt>{iface.name}</dt>
+                      <dd>
+                        {[iface.mac, ...iface.addresses]
+                          .filter(Boolean)
+                          .join(" · ") || "No address reported"}
+                      </dd>
+                    </Fragment>
+                  ))}
+                  {host.parent_id && (
+                    <>
+                      <dt>Runs on</dt>
+                      <dd>
+                        {hosts.find((item) => item.id === host.parent_id)
+                          ?.name ?? host.parent_id}
+                      </dd>
+                    </>
+                  )}
+                </dl>
+              </section>
+            )}
+            {host.child && <SourceMetricHistory hostId={host.id} />}
             <DeviceSection
               host={host}
               hosts={hosts}
@@ -726,7 +846,7 @@ export function HostDetails({
                       Common ports scanned{" "}
                       <Age value={host.ports_scanned_at} lower />
                     </>
-                  ) : host.agent_id ? (
+                  ) : agentInstalled ? (
                     ""
                   ) : (
                     "Port scan pending"
@@ -831,8 +951,10 @@ export function HostDetails({
             {host.agent_revoked && (
               <Alert>
                 <AlertDescription>
-                  This agent&rsquo;s credential was revoked. Generate a new
-                  installation command to enroll it again.
+                  {host.agent_uninstalled
+                    ? "The agent was removed. This device now appears as discovered without an active agent."
+                    : "This agent’s credential was revoked."}{" "}
+                  Generate a new installation command to enroll it again.
                   <div className="mt-2">
                     <Button size="sm" variant="outline" onClick={install}>
                       Re-enroll agent
@@ -841,7 +963,7 @@ export function HostDetails({
                 </AlertDescription>
               </Alert>
             )}
-            {host.agent_id && (
+            {agentInstalled && (
               <>
                 {uninstallOpen && (
                   <UninstallAgentDialog
@@ -853,6 +975,13 @@ export function HostDetails({
                       notify(
                         `Disabled agent access for ${displayName}.`,
                         "warning",
+                      );
+                    }}
+                    onUninstalled={() => {
+                      refresh();
+                      notify(
+                        `${displayName} is now a discovered device without an agent.`,
+                        "good",
                       );
                     }}
                   />
@@ -897,7 +1026,11 @@ export function HostDetails({
                       <SelectContent>
                         <SelectGroup>
                           {hosts
-                            .filter((h) => !h.agent_id && h.id !== host.id)
+                            .filter(
+                              (h) =>
+                                (!h.agent_id || h.agent_uninstalled) &&
+                                h.id !== host.id,
+                            )
                             .map((h) => (
                               <SelectItem key={h.id} value={h.id}>
                                 {hostDisplayName(h)} ({h.addresses[0]})
@@ -980,7 +1113,7 @@ export function HostDetails({
                 </section>
               </>
             )}
-            {!host.agent_id && (
+            {!agentInstalled && (
               <p className="text-sm text-muted-foreground">
                 Install a reporting agent to manage updates and access for this
                 host.
@@ -1291,12 +1424,14 @@ function DeviceSection({
           ))}
         </ul>
       )}
-      {device?.kind === "unknown" && !host.agent_id && (
-        <p className="text-xs text-muted-foreground">
-          Nothing identifies this device yet. Types come from its manufacturer,
-          open ports, web interface and what it announces on the network.
-        </p>
-      )}
+      {device?.kind === "unknown" &&
+        (!host.agent_id || host.agent_uninstalled) && (
+          <p className="text-xs text-muted-foreground">
+            Nothing identifies this device yet. Types come from its
+            manufacturer, open ports, web interface and what it announces on the
+            network.
+          </p>
+        )}
       <Select
         value={device?.manual ? device.kind : "auto"}
         onValueChange={(value) => value && onType(value)}

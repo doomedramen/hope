@@ -5,7 +5,14 @@ export function StatusPill({
   host,
   className,
 }: {
-  host: Pick<Host, "agent_id" | "agent_revoked" | "last_report" | "last_seen">;
+  host: Pick<
+    Host,
+    | "agent_id"
+    | "agent_revoked"
+    | "agent_uninstalled"
+    | "last_report"
+    | "last_seen"
+  >;
   className?: string;
 }) {
   const state = hostState(host);

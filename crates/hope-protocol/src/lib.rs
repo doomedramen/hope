@@ -641,6 +641,16 @@ pub struct ChildReportResponse {
     pub duplicate: bool,
 }
 
+/// A source-specific child sample. These values retain their collector semantics and must not be
+/// merged into direct guest-agent history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SourceMetricPoint {
+    #[ts(type = "number")]
+    pub collected_at: f64,
+    pub resolution_seconds: u32,
+    pub metrics: ChildMetrics,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationshipKind {
@@ -893,6 +903,9 @@ pub struct Host {
     pub last_collected_at: Option<f64>,
     #[serde(default)]
     pub agent_revoked: bool,
+    /// The installation was removed remotely; the identity remains for history and re-enrollment.
+    #[serde(default)]
+    pub agent_uninstalled: bool,
     #[serde(default)]
     pub enrichment_status: EnrichmentStatus,
     pub discovery_method: String,
@@ -933,6 +946,9 @@ pub struct Host {
     pub source_observed_at: Option<f64>,
     #[serde(default)]
     pub relationships: Vec<DeviceRelationship>,
+    /// Latest source-provided guest/container inventory, kept separate from direct-agent data.
+    #[serde(default)]
+    pub child: Option<ChildDeviceReport>,
 }
 
 impl Host {
@@ -952,6 +968,7 @@ impl Host {
             last_report: None,
             last_collected_at: None,
             agent_revoked: false,
+            agent_uninstalled: false,
             enrichment_status: EnrichmentStatus::Pending,
             discovery_method: discovery_method.into(),
             inventory: None,
@@ -971,6 +988,7 @@ impl Host {
             lifecycle: None,
             source_observed_at: None,
             relationships: vec![],
+            child: None,
         }
     }
 }
@@ -1134,6 +1152,7 @@ pub fn typescript() -> String {
         ChildDeviceReport::decl(),
         ChildReportBatch::decl(),
         ChildReportResponse::decl(),
+        SourceMetricPoint::decl(),
         RelationshipKind::decl(),
         DeviceRelationship::decl(),
         Container::decl(),

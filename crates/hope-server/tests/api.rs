@@ -585,7 +585,7 @@ async fn reporting_deduplicates_and_keeps_identity_after_dhcp_and_rejects_revoca
 
 #[tokio::test]
 async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_absence() {
-    let (_dir, state, app, _) = setup().await;
+    let (_dir, state, app, cookie) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;
     let bearer = format!("Bearer {credential}");
     let t0 = now() - 240.0;
@@ -600,6 +600,32 @@ async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_ab
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["duplicate"], false);
+    let child_id: String = sqlx::query_scalar("SELECT id FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    let projected = state.host(&child_id).await.unwrap().expect("child device");
+    assert_eq!(
+        projected.source.as_ref().unwrap().kind,
+        ChildDeviceKind::DockerContainer
+    );
+    assert_eq!(projected.child.as_ref().unwrap().name, "web");
+    assert_eq!(
+        projected.parent_id,
+        Some(state.hosts().await.unwrap()[0].id.clone())
+    );
+    assert_eq!(state.hosts().await.unwrap().len(), 2);
+    let (history_status, history) = request(
+        &app,
+        "GET",
+        &format!("/api/v1/hosts/{child_id}/source-metrics?hours=168"),
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(history_status, StatusCode::OK);
+    assert_eq!(history.as_array().unwrap().len(), 1);
+    assert_eq!(history[0]["metrics"]["cpu_percent"], 15.0);
     let duplicate = request(
         &app,
         "POST",
@@ -647,6 +673,10 @@ async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_ab
         .await
         .unwrap();
     assert_eq!(lifecycle, "archived");
+    assert_eq!(
+        state.host(&child_id).await.unwrap().unwrap().lifecycle,
+        Some(DeviceLifecycle::Archived)
+    );
     let observations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_observations")
         .fetch_one(&state.0.db)
         .await

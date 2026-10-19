@@ -42,7 +42,9 @@ export function AgentsPage({
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
   // Enrollment creates the host record before any report arrives. Keep revoked records too.
-  const agents = hosts.filter((host) => host.agent_id);
+  const agents = hosts.filter(
+    (host) => host.agent_id && !host.agent_uninstalled,
+  );
   const matching = agents
     .filter((host) =>
       [

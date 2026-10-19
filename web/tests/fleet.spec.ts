@@ -95,7 +95,9 @@ function host(overrides: Partial<Host>): Host {
     lifecycle: null,
     source_observed_at: null,
     relationships: [],
+    child: null,
     ...overrides,
+    agent_uninstalled: overrides.agent_uninstalled ?? false,
     name_override: overrides.name_override ?? null,
     icon_override: overrides.icon_override ?? null,
   };

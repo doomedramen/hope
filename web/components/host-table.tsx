@@ -231,11 +231,20 @@ export function HostTable({
                           aria-label="Uptime monitoring enabled"
                         />
                       )}
-                      {h.agent_id && (
+                      {h.agent_id && !h.agent_uninstalled && (
                         <Bot size={12} aria-label="Agent installed" />
                       )}
                       <span className="truncate">
-                        {[deviceLabel(h), h.inventory?.os ?? h.vendor ?? null]
+                        {[
+                          h.source?.kind === "docker_container"
+                            ? "Docker container"
+                            : h.source?.kind === "proxmox_lxc"
+                              ? "Proxmox LXC"
+                              : h.source?.kind === "proxmox_vm"
+                                ? "Proxmox VM"
+                                : deviceLabel(h),
+                          h.child?.image ?? h.inventory?.os ?? h.vendor ?? null,
+                        ]
                           .filter(Boolean)
                           .join(" · ") || `Discovered by ${h.discovery_method}`}
                       </span>

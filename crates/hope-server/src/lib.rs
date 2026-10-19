@@ -56,8 +56,10 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/map", put(api::map).patch(api::edit_map))
         .route("/hosts/{id}/merge", post(api::merge))
         .route("/hosts/{id}/metrics", get(metrics::history))
+        .route("/hosts/{id}/source-metrics", get(metrics::source_history))
         .route("/enrollment-tokens", post(agents::token))
         .route("/agents/{id}/revoke", post(agents::revoke))
+        .route("/agents/{id}/uninstalled", post(agents::complete_uninstall))
         .route(
             "/agents/{id}/uninstall-instructions",
             get(agents::uninstall_instructions),

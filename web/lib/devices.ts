@@ -57,7 +57,7 @@ export function deviceKind(host: Host): string {
   if (guessed && guessed !== "unknown") return guessed;
   const os = host.inventory?.os.toLowerCase() ?? "";
   if (os.includes("mac") || os.includes("windows")) return "computer";
-  if (host.agent_id) return "server";
+  if (host.agent_id && !host.agent_uninstalled) return "server";
   return "unknown";
 }
 

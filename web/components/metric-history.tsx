@@ -25,12 +25,63 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, bytes } from "@/lib/api";
+import { api, bytes, percentage } from "@/lib/api";
 import { appendLiveHistory, historySeries, memoryPercent } from "@/lib/history";
 import { useNow } from "@/lib/clock";
-import type { MetricPoint, Metrics } from "@/lib/protocol";
+import type { MetricPoint, Metrics, SourceMetricPoint } from "@/lib/protocol";
 
 export type HistoryWindow = "1" | "6" | "24" | "168";
+
+export function SourceMetricHistory({ hostId }: { hostId: string }) {
+  const [points, setPoints] = useState<SourceMetricPoint[] | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    api<SourceMetricPoint[]>(`/hosts/${hostId}/source-metrics?hours=24`)
+      .then((result) => {
+        if (alive) {
+          setPoints(result);
+          setError("");
+        }
+      })
+      .catch((cause: Error) => {
+        if (alive) setError(cause.message);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [hostId]);
+  const recent = points?.slice(-20).reverse() ?? [];
+  return (
+    <section className="container-info-section" aria-label="Source metrics history">
+      <h2>Source metrics history · last 24 hours</h2>
+      {error ? (
+        <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>
+      ) : points == null ? (
+        <Skeleton className="h-24 w-full" />
+      ) : recent.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No source samples in this window.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead><tr><th>Observed</th><th>CPU</th><th>Memory</th><th>Network RX</th><th>Network TX</th></tr></thead>
+            <tbody>{recent.map((point) => {
+              const metric = point.metrics;
+              const memoryLabel = metric.memory_measurement === "docker_working_set" ? "Working set" : metric.memory_measurement === "hypervisor_guest" ? "Hypervisor" : metric.memory_measurement === "guest_operating_system" ? "Guest OS" : "Source";
+              return <tr key={`${point.collected_at}:${point.resolution_seconds}`}>
+                <td><time dateTime={new Date(point.collected_at * 1000).toISOString()}>{new Date(point.collected_at * 1000).toLocaleString()}</time></td>
+                <td>{percentage(metric.cpu_percent)}</td>
+                <td>{metric.memory_used_bytes == null ? "—" : `${bytes(metric.memory_used_bytes)}${metric.memory_total_bytes == null ? "" : ` / ${bytes(metric.memory_total_bytes)}`} · ${memoryLabel}`}</td>
+                <td>{metric.network_rx_bytes_per_second == null ? "—" : `${bytes(metric.network_rx_bytes_per_second)}/s`}</td>
+                <td>{metric.network_tx_bytes_per_second == null ? "—" : `${bytes(metric.network_tx_bytes_per_second)}/s`}</td>
+              </tr>;
+            })}</tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
 
 /** Seconds per point the server averages each window into; 0 keeps raw samples. */
 const BUCKET_SECONDS: Record<HistoryWindow, number> = {

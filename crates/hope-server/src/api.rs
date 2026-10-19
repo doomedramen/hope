@@ -364,10 +364,12 @@ pub async fn merge(
         .host(&body.source_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    if target.agent_id.is_some() && source.agent_id.is_some() {
+    let target_has_agent = target.agent_id.is_some() && !target.agent_uninstalled;
+    let source_has_agent = source.agent_id.is_some() && !source.agent_uninstalled;
+    if target_has_agent && source_has_agent {
         return Err(ApiError::bad("Cannot merge two enrolled agents"));
     }
-    if target.agent_id.is_none() && source.agent_id.is_some() {
+    if !target_has_agent && source_has_agent {
         return Err(ApiError::bad(
             "Select the enrolled agent as the destination",
         ));

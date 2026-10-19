@@ -6,7 +6,7 @@ use axum::{
     Json,
     extract::{Path, Query, State as Extract},
 };
-use hope_protocol::{MetricPoint, Metrics};
+use hope_protocol::{MetricPoint, Metrics, SourceMetricPoint};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::BTreeMap;
@@ -338,6 +338,34 @@ pub async fn history(
         ));
     }
     Ok(Json(weighted_bucket(points, seconds)))
+}
+
+/// Return samples collected by the parent source, preserving its measurement semantics.
+pub async fn source_history(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+    Query(window): Query<Window>,
+) -> ApiResult<Json<Vec<SourceMetricPoint>>> {
+    let host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
+    if host.source.is_none() {
+        return Ok(Json(vec![]));
+    }
+    let hours = window.hours.unwrap_or(24).clamp(1, 168);
+    let since = now() - hours as f64 * 3600.0;
+    let rows = sqlx::query("SELECT observed_at,resolution,body FROM source_metrics WHERE source_device_id=? AND observed_at>=? ORDER BY observed_at DESC LIMIT 10000")
+        .bind(id).bind(since).fetch_all(&state.0.db).await?;
+    let mut points = rows
+        .into_iter()
+        .map(|row| {
+            Ok(SourceMetricPoint {
+                collected_at: row.get("observed_at"),
+                resolution_seconds: row.get::<i64, _>("resolution") as u32,
+                metrics: serde_json::from_str(row.get("body"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, serde_json::Error>>()?;
+    points.reverse();
+    Ok(Json(points))
 }
 fn weighted_bucket(
     points: Vec<(MetricPoint, Option<Statistics>, f64)>,

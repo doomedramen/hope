@@ -702,7 +702,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             "agents",
             Bot,
             "Agents",
-            hosts.filter((h) => h.agent_id).length,
+            hosts.filter((h) => h.agent_id && !h.agent_uninstalled).length,
           )}
         </nav>
         <div className="sidebar-bottom">

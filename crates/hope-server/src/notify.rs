@@ -352,7 +352,7 @@ pub fn problems(host: &Host, now: f64, last_scan: &HashMap<String, (f64, u32)>) 
                 );
             }
         }
-    } else if host.agent_id.is_none()
+    } else if (host.agent_id.is_none() || host.agent_uninstalled)
         && host
             .device
             .as_ref()
