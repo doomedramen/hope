@@ -630,9 +630,20 @@ pub struct ChildReportBatch {
     pub sequence: u64,
     #[ts(type = "number")]
     pub inventory_generation: u64,
+    /// Identifies all bounded batches that make up one inventory generation.
+    #[serde(default)]
+    pub inventory_id: Option<String>,
+    #[serde(default)]
+    pub chunk_index: u32,
+    #[serde(default = "one_chunk")]
+    pub chunk_count: u32,
     pub complete: bool,
     pub observed_at: f64,
     pub devices: Vec<ChildDeviceReport>,
+}
+
+fn one_chunk() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

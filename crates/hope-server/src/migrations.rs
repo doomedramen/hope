@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 8;
+const LATEST: i64 = 9;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin().await?;
@@ -56,6 +56,14 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
         sqlx::query("PRAGMA user_version = 8")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 9 {
+        sqlx::raw_sql(include_str!("migrations/0009_child_inventory_chunks.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 9")
             .execute(&mut *tx)
             .await?;
     }
@@ -176,7 +184,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         for table in [
             "child_batch_heads",
             "child_batches",

@@ -93,7 +93,6 @@ impl Default for ChildCounters {
 struct ChildSchedule {
     counters: std::collections::HashMap<String, ChildCounters>,
     disabled: bool,
-    device_rotation_cursor: usize,
 }
 impl ChildSchedule {
     async fn load(dir: &Path) -> Self {
@@ -118,7 +117,6 @@ impl ChildSchedule {
                         Self {
                             counters: [("*".into(), legacy)].into(),
                             disabled: false,
-                            device_rotation_cursor: 0,
                         }
                     } else {
                         eprintln!(
@@ -154,7 +152,7 @@ impl ChildSchedule {
         snapshot: collect::ChildSnapshot,
         agent_id: &str,
         at: f64,
-    ) -> Option<ChildReportBatch> {
+    ) -> Option<Vec<ChildReportBatch>> {
         if self.disabled {
             return None;
         }
@@ -168,7 +166,7 @@ impl ChildSchedule {
         if next.last_report_at > 0.0 && at - next.last_report_at < 30.0 {
             return None;
         }
-        next.sequence = next.sequence.checked_add(1)?;
+        let first_sequence = next.sequence.checked_add(1)?;
         let inventory_due = next.last_inventory_at == 0.0 || at - next.last_inventory_at >= 60.0;
         if inventory_due {
             next.generation = next.generation.checked_add(1)?;
@@ -176,58 +174,64 @@ impl ChildSchedule {
         }
         let complete = inventory_due && snapshot.inventory_complete;
         next.last_report_at = at;
-        let mut batch = ChildReportBatch {
+        let inventory_id = inventory_due.then(|| Uuid::new_v4().to_string());
+        let batch = ChildReportBatch {
             schema_version: SCHEMA_VERSION,
             batch_id: Uuid::new_v4().to_string(),
             agent_id: agent_id.into(),
             source: snapshot.source,
             source_scope: snapshot.source_scope,
-            sequence: next.sequence,
+            sequence: first_sequence,
             inventory_generation: next.generation,
+            inventory_id: inventory_id.clone(),
+            chunk_index: 0,
+            chunk_count: 512,
             complete,
             observed_at: at,
-            devices: snapshot.devices,
+            devices: Vec::new(),
         };
-        let inventory_size = batch.devices.len();
-        if inventory_size > 0 {
-            batch
-                .devices
-                .rotate_left(self.device_rotation_cursor % inventory_size);
-        }
-        // The child endpoint shares the bounded report body limit. A large inventory must never
-        // be retried forever as an oversized request or accidentally marked authoritative after
-        // dropping records. Keep a stable prefix and report it as partial until it fits whole.
-        let device_sizes = batch
-            .devices
-            .iter()
-            .map(|device| serde_json::to_vec(device).map(|body| body.len()))
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?;
-        let devices = std::mem::take(&mut batch.devices);
-        let mut encoded_size = serde_json::to_vec(&batch).ok()?.len()
-            + device_sizes.iter().sum::<usize>()
-            + device_sizes.len().saturating_sub(1);
-        batch.devices = devices;
-        while encoded_size > MAX_AGENT_REPORT_BYTES && !batch.devices.is_empty() {
-            let old_len = batch.devices.len();
-            encoded_size -= device_sizes[old_len - 1];
-            if old_len > 1 {
-                encoded_size -= 1;
+        // Use the protocol's strict body limit when splitting. Reserving the maximum chunk-count
+        // width keeps the sizing valid after the actual count and index are known.
+        let mut sizing = batch.clone();
+        sizing.sequence = i64::MAX as u64;
+        sizing.inventory_generation = i64::MAX as u64;
+        sizing.chunk_index = 511;
+        sizing.chunk_count = 512;
+        let base_size = serde_json::to_vec(&sizing).ok()?.len();
+        let mut chunks = vec![batch.clone()];
+        let mut current_size = base_size;
+        for device in snapshot.devices {
+            let device_size = serde_json::to_vec(&device).ok()?.len();
+            let current = chunks.last_mut()?;
+            let added_size = device_size + usize::from(!current.devices.is_empty());
+            if current_size + added_size > MAX_AGENT_REPORT_BYTES {
+                if current.devices.is_empty() || base_size + device_size > MAX_AGENT_REPORT_BYTES {
+                    return None;
+                }
+                chunks.push(batch.clone());
+                chunks.last_mut()?.batch_id = Uuid::new_v4().to_string();
+                current_size = base_size;
             }
-            batch.devices.pop();
-            batch.complete = false;
+            chunks.last_mut()?.devices.push(device);
+            current_size += device_size + usize::from(chunks.last()?.devices.len() > 1);
         }
-        if inventory_size > 0 {
-            self.device_rotation_cursor = (self.device_rotation_cursor % inventory_size
-                + batch.devices.len())
-                % inventory_size;
+        let group_id =
+            inventory_id.or_else(|| (chunks.len() > 1).then(|| Uuid::new_v4().to_string()));
+        let chunk_count = chunks.len() as u32;
+        for (index, part) in chunks.iter_mut().enumerate() {
+            part.sequence = first_sequence.checked_add(index as u64)?;
+            part.chunk_index = index as u32;
+            part.chunk_count = chunk_count;
+            part.inventory_id = group_id.clone();
+            part.complete = complete && index + 1 == chunk_count as usize;
+            if serde_json::to_vec(part).ok()?.len() > MAX_AGENT_REPORT_BYTES {
+                return None;
+            }
         }
-        if encoded_size > MAX_AGENT_REPORT_BYTES {
-            return None;
-        }
+        next.sequence = first_sequence.checked_add(chunks.len() as u64 - 1)?;
         self.counters.remove("*");
         self.counters.insert(key, next);
-        Some(batch)
+        Some(chunks)
     }
 }
 type Request = Pin<Box<dyn Future<Output = (AgentReport, Outcome)> + Send>>;
@@ -346,15 +350,20 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                 let mut report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),collected_at,inventory:changed.then_some(inventory),metrics,collectors };
                 crate::telemetry::bound_report(&mut report)?;
                 for snapshot in child_snapshots {
-                    let Some(batch) = child_schedule.batch(snapshot, &configuration.agent_id, collected_at) else { continue; };
-                    if hope_protocol::validation::child_batch(&batch).is_ok() {
+                    let Some(batches) = child_schedule.batch(snapshot, &configuration.agent_id, collected_at) else { continue; };
+                    if batches.iter().all(|batch| hope_protocol::validation::child_batch(batch).is_ok()) {
                         match config::write_private(&child_state_path, &serde_json::to_vec(&child_schedule)?).await {
                             Ok(()) => {
-                                if let Err(error) = child_spool.push(batch, now()) {
-                                    eprintln!("Could not queue child report: {error:#}");
-                                } else if let Ok(bytes) = child_spool.encode()
-                                    && let Err(error) = config::write_private(&child_queue_path, &bytes).await
-                                {
+                                let mut queued = true;
+                                for batch in batches {
+                                    if let Err(error) = child_spool.push(batch, now()) {
+                                        eprintln!("Could not queue child report: {error:#}");
+                                        queued = false;
+                                        break;
+                                    }
+                                }
+                                if queued && let Ok(bytes) = child_spool.encode()
+                                    && let Err(error) = config::write_private(&child_queue_path, &bytes).await {
                                     eprintln!("Could not persist child reports: {error}");
                                 }
                             }
@@ -475,7 +484,6 @@ mod tests {
         let mut schedule = ChildSchedule {
             counters: Default::default(),
             disabled: false,
-            device_rotation_cursor: 0,
         };
         let snapshot = || collect::ChildSnapshot {
             source: ChildSourceKind::Docker,
@@ -484,10 +492,19 @@ mod tests {
             inventory_complete: true,
         };
         let agent_id = Uuid::new_v4().to_string();
-        let first = schedule.batch(snapshot(), &agent_id, 100.0).unwrap();
+        let first = schedule
+            .batch(snapshot(), &agent_id, 100.0)
+            .unwrap()
+            .remove(0);
         assert!(schedule.batch(snapshot(), &agent_id, 115.0).is_none());
-        let second = schedule.batch(snapshot(), &agent_id, 130.0).unwrap();
-        let third = schedule.batch(snapshot(), &agent_id, 160.0).unwrap();
+        let second = schedule
+            .batch(snapshot(), &agent_id, 130.0)
+            .unwrap()
+            .remove(0);
+        let third = schedule
+            .batch(snapshot(), &agent_id, 160.0)
+            .unwrap()
+            .remove(0);
         assert_eq!(
             (first.sequence, first.inventory_generation, first.complete),
             (1, 1, true)
@@ -513,7 +530,6 @@ mod tests {
         let mut schedule = ChildSchedule {
             counters: Default::default(),
             disabled: false,
-            device_rotation_cursor: 0,
         };
         let snapshot = |inventory_complete| collect::ChildSnapshot {
             source: ChildSourceKind::Docker,
@@ -521,9 +537,18 @@ mod tests {
             devices: vec![],
             inventory_complete,
         };
-        let first = schedule.batch(snapshot(false), "agent", 100.0).unwrap();
-        let next = schedule.batch(snapshot(false), "agent", 160.0).unwrap();
-        let complete = schedule.batch(snapshot(true), "agent", 220.0).unwrap();
+        let first = schedule
+            .batch(snapshot(false), "agent", 100.0)
+            .unwrap()
+            .remove(0);
+        let next = schedule
+            .batch(snapshot(false), "agent", 160.0)
+            .unwrap()
+            .remove(0);
+        let complete = schedule
+            .batch(snapshot(true), "agent", 220.0)
+            .unwrap()
+            .remove(0);
         assert!(!first.complete && !next.complete && complete.complete);
         assert_eq!(
             (
@@ -550,10 +575,16 @@ mod tests {
             devices: vec![],
             inventory_complete: true,
         };
-        let docker_first = schedule.batch(docker.clone(), "agent", 100.0).unwrap();
-        let pve_first = schedule.batch(proxmox.clone(), "agent", 100.0).unwrap();
-        let docker_second = schedule.batch(docker, "agent", 160.0).unwrap();
-        let pve_second = schedule.batch(proxmox, "agent", 160.0).unwrap();
+        let docker_first = schedule
+            .batch(docker.clone(), "agent", 100.0)
+            .unwrap()
+            .remove(0);
+        let pve_first = schedule
+            .batch(proxmox.clone(), "agent", 100.0)
+            .unwrap()
+            .remove(0);
+        let docker_second = schedule.batch(docker, "agent", 160.0).unwrap().remove(0);
+        let pve_second = schedule.batch(proxmox, "agent", 160.0).unwrap().remove(0);
         assert_eq!(
             (
                 docker_first.sequence,
@@ -612,8 +643,9 @@ mod tests {
         let mut schedule = ChildSchedule::default();
         let agent_id = Uuid::new_v4().to_string();
         let mut observed = std::collections::HashSet::new();
+        let mut final_chunks = 0;
         for report in 0..32 {
-            let batch = schedule
+            let batches = schedule
                 .batch(
                     collect::ChildSnapshot {
                         source: ChildSourceKind::Docker,
@@ -625,16 +657,21 @@ mod tests {
                     100.0 + f64::from(report) * 30.0,
                 )
                 .unwrap();
-            assert!(!batch.complete);
-            assert!(batch.devices.len() < 512);
-            assert!(serde_json::to_vec(&batch).unwrap().len() <= MAX_AGENT_REPORT_BYTES);
-            hope_protocol::validation::child_batch(&batch).expect("bounded partial batch is valid");
-            observed.extend(batch.devices.into_iter().map(|device| device.identity.key));
+            for batch in batches {
+                assert!(serde_json::to_vec(&batch).unwrap().len() <= MAX_AGENT_REPORT_BYTES);
+                hope_protocol::validation::child_batch(&batch).expect("bounded batch is valid");
+                final_chunks += usize::from(batch.complete);
+                observed.extend(batch.devices.into_iter().map(|device| device.identity.key));
+            }
         }
         assert_eq!(
             observed.len(),
             512,
-            "rotation eventually reports every device"
+            "multipart inventories report every device in each generation"
+        );
+        assert!(
+            final_chunks >= 16,
+            "each full snapshot ends with an authoritative chunk"
         );
     }
     #[test]

@@ -147,6 +147,9 @@ fn child_batch(
         source_scope: "docker-engine-test".into(),
         sequence,
         inventory_generation: generation,
+        inventory_id: complete.then(|| Uuid::new_v4().to_string()),
+        chunk_index: 0,
+        chunk_count: 1,
         complete,
         observed_at,
         devices,
@@ -720,6 +723,90 @@ async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_ab
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["code"], "agent_revoked");
+}
+
+#[tokio::test]
+async fn multipart_inventory_is_authoritative_only_after_every_part_is_stored() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let first = child_batch(&agent, 1, 1, true, now() - 30.0, vec![child_device()]);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(first),
+            Some(("authorization", &bearer)),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let group = Uuid::new_v4().to_string();
+    let mut part_0 = child_batch(&agent, 2, 2, false, now(), vec![child_device()]);
+    part_0.inventory_id = Some(group.clone());
+    part_0.chunk_index = 0;
+    part_0.chunk_count = 2;
+    let mut part_1 = child_batch(&agent, 3, 2, true, now(), vec![]);
+    part_1.inventory_id = Some(group);
+    part_1.chunk_index = 1;
+    part_1.chunk_count = 2;
+    for batch in [part_0, part_1] {
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(batch),
+            Some(("authorization", &bearer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let complete_generation: i64 = sqlx::query_scalar(
+        "SELECT complete_generation FROM child_batch_heads WHERE parent_agent_id=? AND source='docker' AND source_scope='docker-engine-test'",
+    )
+    .bind(&agent)
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(complete_generation, 2);
+    let (lifecycle, missing_count): (String, i64) = sqlx::query_as(
+        "SELECT lifecycle,missing_complete_count FROM source_devices WHERE source_key='container-full-id'",
+    )
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        lifecycle, "running",
+        "all chunk observations form the full presence set"
+    );
+    assert_eq!(missing_count, 0);
+
+    // A final marker cannot make a generation complete if an earlier part was dropped.
+    let missing = Uuid::new_v4().to_string();
+    let mut orphan_final = child_batch(&agent, 5, 3, true, now(), vec![]);
+    orphan_final.inventory_id = Some(missing);
+    orphan_final.chunk_index = 1;
+    orphan_final.chunk_count = 2;
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(orphan_final),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let complete_generation: i64 = sqlx::query_scalar(
+        "SELECT complete_generation FROM child_batch_heads WHERE parent_agent_id=? AND source='docker' AND source_scope='docker-engine-test'",
+    )
+    .bind(&agent)
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(complete_generation, 2);
 }
 
 #[tokio::test]

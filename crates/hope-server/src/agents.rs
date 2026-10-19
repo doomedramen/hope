@@ -578,12 +578,32 @@ pub async fn child_report(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    sqlx::query("INSERT INTO child_batches(batch_id,parent_agent_id,source,source_scope,sequence,inventory_generation,observed_at,complete,received_at) VALUES(?,?,?,?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO child_batches(batch_id,parent_agent_id,source,source_scope,sequence,inventory_generation,inventory_id,chunk_index,chunk_count,observed_at,complete,received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&batch.batch_id).bind(&batch.agent_id).bind(source).bind(&batch.source_scope)
         .bind(batch.sequence as i64).bind(batch.inventory_generation as i64)
+        .bind(&batch.inventory_id).bind(batch.chunk_index as i64).bind(batch.chunk_count as i64)
         .bind(batch.observed_at).bind(batch.complete).bind(now()).execute(&mut *tx).await?;
 
-    let seen: HashSet<(String, String)> = batch
+    let authoritative_complete = if batch.complete {
+        if let Some(inventory_id) = &batch.inventory_id {
+            let (count, min_index, max_index, min_count, max_count): (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+                "SELECT COUNT(*),MIN(chunk_index),MAX(chunk_index),MIN(chunk_count),MAX(chunk_count) FROM child_batches WHERE parent_agent_id=? AND source=? AND source_scope=? AND inventory_id=? AND inventory_generation=?",
+            ).bind(&batch.agent_id).bind(source).bind(&batch.source_scope)
+                .bind(inventory_id).bind(batch.inventory_generation as i64)
+                .fetch_one(&mut *tx).await?;
+            count == batch.chunk_count as i64
+                && min_index == Some(0)
+                && max_index == Some(batch.chunk_count as i64 - 1)
+                && min_count == Some(batch.chunk_count as i64)
+                && max_count == Some(batch.chunk_count as i64)
+        } else {
+            batch.chunk_count == 1 && batch.chunk_index == 0
+        }
+    } else {
+        false
+    };
+
+    let mut seen: HashSet<(String, String)> = batch
         .devices
         .iter()
         .map(|device| {
@@ -745,7 +765,28 @@ pub async fn child_report(
             .await?;
     }
 
-    if batch.complete {
+    if authoritative_complete {
+        if let Some(inventory_id) = &batch.inventory_id {
+            let rows = sqlx::query(
+                "SELECT DISTINCT d.source_key,d.incarnation FROM source_observations o JOIN child_batches b ON b.batch_id=o.batch_id JOIN source_devices d ON d.id=o.source_device_id WHERE b.parent_agent_id=? AND b.source=? AND b.source_scope=? AND b.inventory_id=? AND b.inventory_generation=?",
+            )
+            .bind(&batch.agent_id)
+            .bind(source)
+            .bind(&batch.source_scope)
+            .bind(inventory_id)
+            .bind(batch.inventory_generation as i64)
+            .fetch_all(&mut *tx)
+            .await?;
+            seen = rows
+                .into_iter()
+                .map(|row| {
+                    (
+                        sqlx::Row::get(&row, "source_key"),
+                        sqlx::Row::get(&row, "incarnation"),
+                    )
+                })
+                .collect();
+        }
         let scan_presence = sqlx::query("SELECT id,body FROM hosts")
             .fetch_all(&mut *tx)
             .await?
@@ -793,8 +834,8 @@ pub async fn child_report(
     sqlx::query("INSERT INTO child_batch_heads(parent_agent_id,source,source_scope,sequence,inventory_generation,observed_at,complete_generation,complete_observed_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(parent_agent_id,source,source_scope) DO UPDATE SET sequence=excluded.sequence,inventory_generation=MAX(child_batch_heads.inventory_generation,excluded.inventory_generation),observed_at=excluded.observed_at,complete_generation=CASE WHEN excluded.complete_generation>0 THEN excluded.complete_generation ELSE child_batch_heads.complete_generation END,complete_observed_at=CASE WHEN excluded.complete_generation>0 THEN excluded.complete_observed_at ELSE child_batch_heads.complete_observed_at END")
         .bind(&batch.agent_id).bind(source).bind(&batch.source_scope).bind(batch.sequence as i64)
         .bind(batch.inventory_generation as i64).bind(batch.observed_at)
-        .bind(if batch.complete { batch.inventory_generation as i64 } else { 0 })
-        .bind(if batch.complete { Some(batch.observed_at) } else { None })
+        .bind(if authoritative_complete { batch.inventory_generation as i64 } else { 0 })
+        .bind(if authoritative_complete { Some(batch.observed_at) } else { None })
         .execute(&mut *tx).await?;
     tx.commit().await?;
     state.changed();

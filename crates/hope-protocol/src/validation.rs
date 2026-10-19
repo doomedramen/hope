@@ -99,6 +99,14 @@ pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
         || value.sequence > i64::MAX as u64
         || value.inventory_generation == 0
         || value.inventory_generation > i64::MAX as u64
+        || value.chunk_count == 0
+        || value.chunk_count > 512
+        || value.chunk_index >= value.chunk_count
+        || value
+            .inventory_id
+            .as_ref()
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+        || (value.inventory_id.is_none() && (value.chunk_index != 0 || value.chunk_count != 1))
         || !number(value.observed_at, 4_102_444_800.0)
         || value.devices.len() > 512
     {
