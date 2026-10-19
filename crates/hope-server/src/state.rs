@@ -315,10 +315,16 @@ impl State {
                 .or_default()
                 .push(source_association(&row)?);
         }
-        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id")
+        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id AND r.kind='runs_on'")
             .fetch_all(&self.0.db).await?;
+        let mut service_relationships = source_service_relationships(&self.0.db, None).await?;
         for row in children {
             let mut source = source_device_host(&row)?;
+            if let Some(id) = &source.source_device_id {
+                source
+                    .relationships
+                    .extend(service_relationships.remove(id).unwrap_or_default());
+            }
             source.network_ids = source_networks(&networks, &source.addresses);
             source.associations = source
                 .source_device_id
@@ -346,12 +352,18 @@ impl State {
                 .context("invalid stored host")
                 .map(Some);
         }
-        let row = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id WHERE d.id=?")
+        let row = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id AND r.kind='runs_on' WHERE d.id=?")
             .bind(id).fetch_optional(&self.0.db).await?;
         let Some(row) = row else {
             return Ok(None);
         };
         let mut source = source_device_host(&row)?;
+        source.relationships.extend(
+            source_service_relationships(&self.0.db, Some(id))
+                .await?
+                .remove(id)
+                .unwrap_or_default(),
+        );
         let networks = crate::api::networks(self)
             .await
             .map_err(|error| anyhow::anyhow!(error.1))?;
@@ -377,6 +389,33 @@ impl State {
             .execute(&self.0.db).await?;
         Ok(())
     }
+}
+
+async fn source_service_relationships(
+    db: &SqlitePool,
+    source_device_id: Option<&str>,
+) -> Result<HashMap<String, Vec<DeviceRelationship>>> {
+    let rows = if let Some(id) = source_device_id {
+        sqlx::query("SELECT from_device_id,to_device_id,detail FROM device_relationships WHERE kind='exposes_service' AND source_device_id=?")
+            .bind(id).fetch_all(db).await?
+    } else {
+        sqlx::query("SELECT from_device_id,to_device_id,detail FROM device_relationships WHERE kind='exposes_service'")
+            .fetch_all(db).await?
+    };
+    let mut relationships = HashMap::<String, Vec<DeviceRelationship>>::new();
+    for row in rows {
+        let from_device_id: String = row.get("from_device_id");
+        relationships
+            .entry(from_device_id.clone())
+            .or_default()
+            .push(DeviceRelationship {
+                from_device_id,
+                to_device_id: row.get("to_device_id"),
+                kind: hope_protocol::RelationshipKind::ExposesService,
+                detail: row.get("detail"),
+            });
+    }
+    Ok(relationships)
 }
 
 fn source_device_host(row: &sqlx::sqlite::SqliteRow) -> Result<Host> {

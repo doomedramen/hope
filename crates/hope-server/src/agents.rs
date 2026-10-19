@@ -663,6 +663,23 @@ pub async fn child_report(
             .await?;
         sqlx::query("INSERT OR REPLACE INTO device_relationships(from_device_id,to_device_id,kind,detail,source_device_id,observed_at) VALUES(?,?,'runs_on',NULL,?,?)")
             .bind(id).bind(parent).bind(id).bind(batch.observed_at).execute(&mut *tx).await?;
+        for port in &device.published_ports {
+            let Some(host_port) = port.host_port else {
+                continue;
+            };
+            let address = port
+                .host_ip
+                .as_deref()
+                .filter(|ip| !ip.is_empty())
+                .unwrap_or("*");
+            let detail = format!(
+                "{}://{}:{} → container:{}",
+                port.protocol, address, host_port, port.container_port
+            );
+            sqlx::query("INSERT OR REPLACE INTO device_relationships(from_device_id,to_device_id,kind,detail,source_device_id,observed_at) VALUES(?,?,'exposes_service',?,?,?)")
+                .bind(id).bind(parent).bind(detail).bind(id).bind(batch.observed_at)
+                .execute(&mut *tx).await?;
+        }
     }
 
     let scan_hosts = sqlx::query("SELECT body FROM hosts")

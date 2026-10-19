@@ -533,6 +533,28 @@ export function HostDetails({
                 </dl>
               </section>
             )}
+            {host.relationships.some((relationship) => relationship.kind === "exposes_service") && (
+              <section aria-label="Published services">
+                <h3 className="detail-heading"><Waypoints /> Published services</h3>
+                <div className="flex flex-col gap-2">
+                  {host.relationships
+                    .filter((relationship) => relationship.kind === "exposes_service")
+                    .map((relationship) => {
+                      const parent = hosts.find((item) => item.id === relationship.to_device_id);
+                      return (
+                        <div key={`${relationship.from_device_id}:${relationship.detail}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3">
+                          <span className="mono text-sm">{relationship.detail}</span>
+                          {parent && (
+                            <button type="button" className="underline underline-offset-2" onClick={() => onOpenHost(parent)}>
+                              On {parent.name}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              </section>
+            )}
             {host.child && host.associations.length > 0 && (
               <section aria-label="Device matches">
                 <h3 className="detail-heading"><Waypoints /> Device matches</h3>

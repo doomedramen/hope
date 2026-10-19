@@ -810,6 +810,52 @@ async fn multipart_inventory_is_authoritative_only_after_every_part_is_stored() 
 }
 
 #[tokio::test]
+async fn published_ports_create_distinct_service_relationships_per_container() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let mut first = child_device();
+    first.published_ports = vec![ContainerPort {
+        host_ip: Some("0.0.0.0".into()),
+        container_port: 80,
+        host_port: Some(8080),
+        protocol: "tcp".into(),
+    }];
+    let mut second = first.clone();
+    second.identity.key = "other-container-id".into();
+    second.identity.incarnation = "created-at-200".into();
+    second.name = "other-web".into();
+    let batch = child_batch(&agent, 1, 1, true, now(), vec![first, second]);
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(batch),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let edges: Vec<(String, String)> = sqlx::query_as(
+        "SELECT from_device_id,detail FROM device_relationships WHERE kind='exposes_service' ORDER BY from_device_id",
+    )
+    .fetch_all(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(edges.len(), 2);
+    assert_ne!(
+        edges[0].0, edges[1].0,
+        "shared host ports stay container-scoped"
+    );
+    assert_eq!(edges[0].1, "tcp://0.0.0.0:8080 → container:80");
+    let projected = state.host(&edges[0].0).await.unwrap().unwrap();
+    assert!(projected.relationships.iter().any(|relationship| {
+        relationship.kind == RelationshipKind::ExposesService
+            && relationship.detail.as_deref() == Some("tcp://0.0.0.0:8080 → container:80")
+    }));
+}
+
+#[tokio::test]
 async fn source_matches_can_be_rejected_confirmed_and_unlinked_without_losing_source_data() {
     let (_dir, state, app, cookie) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;
