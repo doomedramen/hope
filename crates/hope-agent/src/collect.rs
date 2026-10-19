@@ -149,6 +149,7 @@ fn docker_summary(item: bollard::models::ContainerSummary) -> Option<Container> 
 
 static DOCKER_INSPECT_CURSOR: AtomicUsize = AtomicUsize::new(0);
 const MAX_DOCKER_INSPECTS_PER_REPORT: usize = 32;
+const DOCKER_INSPECT_ROTATION_STEP: usize = 8;
 
 fn docker_inspect_indices(container_count: usize, cursor: usize) -> Vec<usize> {
     let count = container_count.min(MAX_DOCKER_INSPECTS_PER_REPORT);
@@ -320,7 +321,7 @@ async fn docker_containers() -> Option<(String, Vec<Container>, bool)> {
         .collect::<Vec<_>>();
     let complete = docker_inventory_complete(source_count, containers.len(), MAX_DOCKER_CONTAINERS);
     let inspect_cursor =
-        DOCKER_INSPECT_CURSOR.fetch_add(MAX_DOCKER_INSPECTS_PER_REPORT, Ordering::Relaxed);
+        DOCKER_INSPECT_CURSOR.fetch_add(DOCKER_INSPECT_ROTATION_STEP, Ordering::Relaxed);
     let inspect_indices = docker_inspect_indices(containers.len(), inspect_cursor);
     let inspect_ids = inspect_indices
         .iter()
@@ -1275,6 +1276,14 @@ mod tests {
         assert_eq!(
             docker_inspect_indices(128, 0).len(),
             MAX_DOCKER_INSPECTS_PER_REPORT
+        );
+        let visited: std::collections::HashSet<_> = (0..16)
+            .flat_map(|report| docker_inspect_indices(128, report * DOCKER_INSPECT_ROTATION_STEP))
+            .collect();
+        assert_eq!(
+            visited.len(),
+            128,
+            "rotation covers slow inspection batches"
         );
     }
 
