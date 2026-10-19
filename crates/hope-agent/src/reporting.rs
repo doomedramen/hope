@@ -864,13 +864,13 @@ mod tests {
         });
 
         let directory = tempfile::tempdir().expect("directory");
+        let last_report = directory.path().join("last-report");
         let config = configuration(format!("http://{address}"));
         let mut sampler = ChildFakeSampler {
             count: 0,
             stop_after_samples: None,
         };
         let child_count = child_requests.clone();
-        let core_count = core_requests.clone();
         tokio::time::timeout(
             Duration::from_secs(3),
             run(
@@ -882,8 +882,7 @@ mod tests {
                 Duration::from_millis(80),
                 async move {
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-                    while (child_count.load(Ordering::SeqCst) == 0
-                        || core_count.load(Ordering::SeqCst) == 0)
+                    while (child_count.load(Ordering::SeqCst) == 0 || !last_report.exists())
                         && tokio::time::Instant::now() < deadline
                     {
                         tokio::time::sleep(Duration::from_millis(10)).await;

@@ -159,7 +159,9 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
   await request.post("/api/v1/networks", {
     data: { name: "Workshop", cidr: "192.168.30.0/24", enabled: false },
   });
-  const names = ["atlas-nas", "studio-mac", "workshop-pi", "compute-node"];
+  const names = includeProxmox
+    ? ["proxmox-fixture-node"]
+    : ["atlas-nas", "studio-mac", "workshop-pi", "compute-node"];
   let proxmoxAgent = "";
   let proxmoxCredential = "";
   for (let i = 0; i < names.length; i++) {
@@ -205,7 +207,7 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
     });
     expect(enrolled.ok(), await enrolled.text()).toBeTruthy();
     const credential = (await enrolled.json()).credential;
-    if (i === 3) {
+    if (includeProxmox) {
       proxmoxAgent = agent;
       proxmoxCredential = credential;
     }
@@ -237,7 +239,7 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
               available: false,
               detail: "No supported GPU driver",
             },
-            ...(includeProxmox && i === 3
+            ...(includeProxmox
               ? [
                   {
                     name: "proxmox_children",
@@ -283,7 +285,7 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
             health: null,
             restart_count: null,
             parent_key: null,
-            node: "compute-node",
+            node: "proxmox-fixture-node",
             tags: ["infra"],
             interfaces: [],
             cpu_cores: 2,
@@ -347,7 +349,7 @@ test.describe.serial("H.O.P.E console", () => {
     page,
     request,
   }) => {
-    await seed(request, true);
+    await seed(request);
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
     await page.goto("/?view=map");
@@ -452,29 +454,6 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(page.getByRole("table").getByRole("row")).toHaveCount(2);
     await page.getByLabel("Search hosts").fill("");
     await page.getByRole("button", { name: "Close host details" }).click();
-    await page.getByLabel("Search hosts").fill("compute-node");
-    await page.getByRole("row").filter({ hasText: "compute-node" }).click();
-    const proxmoxDetails = page.getByRole("complementary", {
-      name: "Host details",
-    });
-    await proxmoxDetails.getByRole("tab", { name: "Guests" }).click();
-    await expect(
-      proxmoxDetails.getByRole("heading", { name: "Proxmox guests" }),
-    ).toBeVisible();
-    await expect(proxmoxDetails.getByRole("table")).toContainText(
-      "dns-container",
-    );
-    await expect(proxmoxDetails.getByRole("table")).toContainText("LXC");
-    await proxmoxDetails.getByRole("button", { name: "dns-container" }).click();
-    await expect(page).toHaveURL(/host=/);
-    await expect(
-      page.getByRole("heading", { name: "dns-container" }),
-    ).toBeVisible();
-    await expect(proxmoxDetails).toContainText("Runs on");
-    await proxmoxDetails.getByRole("button", { name: "compute-node" }).click();
-    await expect(page.getByRole("heading", { name: "compute-node" })).toBeVisible();
-    await page.getByRole("button", { name: "Close host details" }).click();
-    await page.getByLabel("Search hosts").fill("");
     await page.getByRole("button", { name: "Map", exact: true }).click();
     await page.getByRole("button", { name: "Subnets", exact: true }).click();
     await expect(page.getByTestId("subnet-group").first()).toBeVisible();
@@ -2239,5 +2218,40 @@ test.describe.serial("H.O.P.E console", () => {
         ).status(),
       ).toBe(status);
     await other.dispose();
+  });
+  test("Proxmox host details list guests and link to guest pages", async ({
+    page,
+    request,
+  }) => {
+    await seed(request, true);
+    await page.goto("/?view=hosts");
+    await page.getByLabel("Search hosts").fill("proxmox-fixture-node");
+    await page
+      .getByRole("row")
+      .filter({ hasText: "proxmox-fixture-node" })
+      .click();
+    const proxmoxDetails = page.getByRole("complementary", {
+      name: "Host details",
+    });
+    await proxmoxDetails.getByRole("tab", { name: "Guests" }).click();
+    await expect(
+      proxmoxDetails.getByRole("heading", { name: "Proxmox guests" }),
+    ).toBeVisible();
+    await expect(proxmoxDetails.getByRole("table")).toContainText(
+      "dns-container",
+    );
+    await expect(proxmoxDetails.getByRole("table")).toContainText("LXC");
+    await proxmoxDetails.getByRole("button", { name: "dns-container" }).click();
+    await expect(page).toHaveURL(/host=/);
+    await expect(
+      page.getByRole("heading", { name: "dns-container" }),
+    ).toBeVisible();
+    await expect(proxmoxDetails).toContainText("Runs on");
+    await proxmoxDetails
+      .getByRole("button", { name: "proxmox-fixture-node" })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "proxmox-fixture-node" }),
+    ).toBeVisible();
   });
 });
