@@ -930,7 +930,9 @@ pve_was_active=0
 if is_system && is_linux; then
     proxmox_paths
     if [ -f "$proxmox_timer" ]; then
-        systemctl is-active --quiet hope-agent-proxmox-collect.timer && pve_was_active=1 || true
+        if systemctl is-active --quiet hope-agent-proxmox-collect.timer; then
+            pve_was_active=1
+        fi
     fi
 fi
 {
