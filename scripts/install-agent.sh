@@ -48,6 +48,7 @@ set -eu
 umask 077
 
 operation=${1:-install}
+proxmox_enabled=0
 temporary=
 txn=
 txn_active=0
@@ -111,6 +112,36 @@ updater_paths() {
         updater_plist=$root/Library/LaunchDaemons/io.hope.agent.update.plist
     fi
 }
+proxmox_paths() {
+    proxmox_service=$root/etc/systemd/system/hope-agent-proxmox-collect.service
+    proxmox_timer=$root/etc/systemd/system/hope-agent-proxmox-collect.timer
+}
+stop_proxmox_collector() {
+    if is_system && is_linux; then
+        systemctl stop hope-agent-proxmox-collect.timer hope-agent-proxmox-collect.service >/dev/null 2>&1 || true
+    fi
+}
+remove_proxmox_collector() {
+    if is_system && is_linux; then
+        systemctl disable --now hope-agent-proxmox-collect.timer >/dev/null 2>&1 || true
+        systemctl stop hope-agent-proxmox-collect.service >/dev/null 2>&1 || true
+        proxmox_paths
+        rm -f "$proxmox_service" "$proxmox_timer"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+}
+install_proxmox_collector() {
+    [ "$proxmox_enabled" = 1 ] || { remove_proxmox_collector; return 0; }
+    proxmox_paths
+    mkdir_public "$(dirname "$proxmox_service")" || return 1
+    mkdir_public "$root/etc/hope-agent" || return 1
+    chmod 750 "$root/etc/hope-agent" || return 1
+    cp "$temporary/proxmox.service.new" "$proxmox_service.new" && chmod 644 "$proxmox_service.new" \
+        && mv -f "$proxmox_service.new" "$proxmox_service" || return 1
+    cp "$temporary/proxmox.timer.new" "$proxmox_timer.new" && chmod 644 "$proxmox_timer.new" \
+        && mv -f "$proxmox_timer.new" "$proxmox_timer" || return 1
+    systemctl daemon-reload && systemctl enable --now hope-agent-proxmox-collect.timer
+}
 mkdir_public() { ( umask 022; mkdir -p "$1" ); }
 state_safe() { [ ! -L "$state" ] && [ ! -L "$state/config.json" ]; }
 install_lock_held=0
@@ -166,6 +197,7 @@ rollback() {
     rb_ok=1
     if [ ! -d "$txn" ]; then rm -rf "$txn.tmp"; return 0; fi
     phase rollback
+    stop_proxmox_collector
     svc_stop
     if [ "$(jget had_binary)" = 1 ]; then
         if [ -f "$txn/binary.prev" ] && cp "$txn/binary.prev" "$binary.new" && chmod 755 "$binary.new" && mv -f "$binary.new" "$binary"; then :; else rb_ok=0; fi
@@ -173,6 +205,19 @@ rollback() {
     if [ "$(jget had_unit)" = 1 ]; then
         if [ -f "$txn/unit.prev" ] && cp "$txn/unit.prev" "$unit.new" && chmod 644 "$unit.new" && mv -f "$unit.new" "$unit"; then :; else rb_ok=0; fi
     else svc_disable; rm -f "$unit" "$unit.new"; fi
+    proxmox_paths
+    for component in service timer; do
+        if [ "$(jget had_proxmox_$component)" = 1 ]; then
+            previous="$txn/proxmox.$component.prev"
+            destination=$proxmox_service
+            [ "$component" = timer ] && destination=$proxmox_timer
+            if [ -f "$previous" ] && cp "$previous" "$destination.new" && chmod 644 "$destination.new" && mv -f "$destination.new" "$destination"; then :; else rb_ok=0; fi
+        else
+            destination=$proxmox_service
+            [ "$component" = timer ] && destination=$proxmox_timer
+            rm -f "$destination" "$destination.new"
+        fi
+    done
     # Settings: the previous binary restores them while keeping any credential already issued.
     # Without a previous installation the freshly enrolled identity is retained for the retry.
     if [ "$(jget configure)" = started ] && [ "$(jget had_config)" = 1 ] && [ "$(jget had_binary)" = 1 ]; then
@@ -184,6 +229,12 @@ rollback() {
     fi
     chown_state || rb_ok=0
     svc_reload || true
+    if is_system && is_linux; then
+        systemctl daemon-reload >/dev/null 2>&1 || rb_ok=0
+        if [ "$(jget proxmox_was_active)" = 1 ] && [ "$rb_ok" = 1 ]; then
+            systemctl enable --now hope-agent-proxmox-collect.timer >/dev/null 2>&1 || rb_ok=0
+        fi
+    fi
     if [ "$(jget was_active)" = 1 ] && [ "$rb_ok" = 1 ]; then
         svc_start || { note 'warning=the previous service could not be restarted'; rb_ok=0; }
     fi
@@ -524,12 +575,13 @@ if [ "$operation" = uninstall ]; then
         fail UNINSTALL_STOP_FAILED 'The service is still loaded or running. Installation files were kept; stop it before retrying.'
     fi
     svc_disable
+    remove_proxmox_collector
     rm -f "$unit" "$binary" "$binary.new"
     svc_reload || true
     if [ "${HOPE_PURGE_IDENTITY:-}" = 1 ]; then
         state_safe || fail PATH_UNWRITABLE 'Refusing to purge through a symbolic link.'
         # Remove only files the agent creates; never the whole (possibly shared) directory.
-        for name in config.json spool.json last-acceptance.json previous.json sample.json last-report agent.lock agent.log bootstrap-ca.pem update-queue update-result update-asked .install-transaction; do
+        for name in config.json spool.json child-spool.json child-sequence.json last-acceptance.json previous.json sample.json last-report agent.lock agent.log bootstrap-ca.pem update-queue update-result update-asked .install-transaction; do
             rm -rf "${state:?}/$name"
         done
         rm -f "$state"/.hope-*.tmp "$state"/.update-result.*
@@ -541,6 +593,10 @@ if [ "$operation" = uninstall ]; then
     # This removes the updater lock's directory too. Keep it until all agent-state changes
     # finish, so another installer cannot create a new lock inode during a purge.
     if is_system; then remove_updater; fi
+    if is_system && is_linux; then
+        rm -f "$root/run/hope-agent/proxmox.json" "$root"/run/hope-agent/proxmox.json.tmp-*
+        rmdir "$root/run/hope-agent" 2>/dev/null || true
+    fi
     phase complete
     exit 0
 fi
@@ -789,6 +845,42 @@ EOF
         fi
         printf '\n[Install]\nWantedBy=default.target\n'
     } > "$temporary/unit.new"
+    if is_system && command -v pvesh >/dev/null 2>&1; then
+        proxmox_enabled=1
+        cat > "$temporary/proxmox.service.new" <<EOF
+[Unit]
+Description=H.O.P.E read-only Proxmox inventory collector
+After=local-fs.target
+ConditionPathExists=$(command -v pvesh)
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart="$binary" collect-proxmox
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RuntimeDirectory=hope-agent
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=/run/hope-agent /etc/hope-agent
+EOF
+        cat > "$temporary/proxmox.timer.new" <<'EOF'
+[Unit]
+Description=Refresh H.O.P.E Proxmox inventory
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=2s
+Persistent=true
+Unit=hope-agent-proxmox-collect.service
+[Install]
+WantedBy=timers.target
+EOF
+    fi
 else
     xml_escape() { printf '%s' "$1" | sed 's/\&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
     {
@@ -834,10 +926,21 @@ rm -rf "$txn.tmp"
 mkdir "$txn.tmp"
 was_active=0
 svc_active && was_active=1
+pve_was_active=0
+if is_system && is_linux; then
+    proxmox_paths
+    if [ -f "$proxmox_timer" ]; then
+        systemctl is-active --quiet hope-agent-proxmox-collect.timer && pve_was_active=1 || true
+    fi
+fi
 {
-    printf 'mode=%s\nwas_active=%s\n' "$mode" "$was_active"
+    printf 'mode=%s\nwas_active=%s\nproxmox_was_active=%s\n' "$mode" "$was_active" "$pve_was_active"
     if [ -f "$binary" ]; then cp "$binary" "$txn.tmp/binary.prev"; echo had_binary=1; else echo had_binary=0; fi
     if [ -f "$unit" ]; then cp "$unit" "$txn.tmp/unit.prev"; echo had_unit=1; else echo had_unit=0; fi
+    if is_system && is_linux; then
+        if [ -f "$proxmox_service" ]; then cp "$proxmox_service" "$txn.tmp/proxmox.service.prev"; echo had_proxmox_service=1; else echo had_proxmox_service=0; fi
+        if [ -f "$proxmox_timer" ]; then cp "$proxmox_timer" "$txn.tmp/proxmox.timer.prev"; echo had_proxmox_timer=1; else echo had_proxmox_timer=0; fi
+    fi
     if [ -f "$state/config.json" ]; then cp "$state/config.json" "$txn.tmp/config.json.prev"; echo had_config=1; else echo had_config=0; fi
     echo step=begin
 } > "$txn.tmp/journal"
@@ -846,6 +949,7 @@ mv "$txn.tmp" "$txn"
 
 phase stop
 journal step=stop
+stop_proxmox_collector
 svc_stop
 
 phase place-binary
@@ -870,6 +974,7 @@ cp "$temporary/unit.new" "$unit.new"
 chmod 644 "$unit.new"
 mv -f "$unit.new" "$unit"
 svc_reload || fail SERVICE_START_FAILED 'The service manager rejected the new service definition.'
+install_proxmox_collector || fail SERVICE_START_FAILED 'The Proxmox collector service could not be installed safely.'
 
 phase activate
 journal step=activate

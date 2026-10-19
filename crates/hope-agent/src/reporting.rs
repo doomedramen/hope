@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use hope_protocol::{
-    AgentReport, ChildReportBatch, ChildSourceKind, CollectorStatus, Inventory, Metrics,
+    AgentReport, ChildReportBatch, CollectorStatus, Inventory, MAX_AGENT_REPORT_BYTES, Metrics,
     SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -22,16 +22,16 @@ pub type Sample = (Inventory, Metrics, Vec<CollectorStatus>);
 pub type Sampling<'a> = Pin<Box<dyn Future<Output = Sample> + 'a>>;
 pub trait Sampler {
     fn sample(&mut self) -> Sampling<'_>;
-    fn child_snapshot(&self) -> Option<collect::ChildSnapshot> {
-        None
+    fn child_snapshots(&self) -> Vec<collect::ChildSnapshot> {
+        vec![]
     }
 }
 impl Sampler for collect::Collector {
     fn sample(&mut self) -> Sampling<'_> {
         Box::pin(self.sample())
     }
-    fn child_snapshot(&self) -> Option<collect::ChildSnapshot> {
-        collect::Collector::child_snapshot(self)
+    fn child_snapshots(&self) -> Vec<collect::ChildSnapshot> {
+        collect::Collector::child_snapshots(self)
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -88,46 +88,61 @@ impl Default for ChildCounters {
         }
     }
 }
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
 struct ChildSchedule {
-    counters: ChildCounters,
+    counters: std::collections::HashMap<String, ChildCounters>,
     disabled: bool,
 }
 impl ChildSchedule {
     async fn load(dir: &Path) -> Self {
         let path = dir.join("child-sequence.json");
         match tokio::fs::try_exists(&path).await {
-            Ok(false) => Self {
-                counters: ChildCounters::default(),
-                disabled: false,
-            },
-            Ok(true) => match config::read_bounded(&path, 4096).await.and_then(|bytes| {
-                serde_json::from_slice::<ChildCounters>(&bytes).map_err(Into::into)
-            }) {
-                Ok(counters)
-                    if counters.last_inventory_at.is_finite()
-                        && counters.sequence <= i64::MAX as u64
-                        && counters.generation <= i64::MAX as u64 =>
-                {
-                    Self {
-                        counters,
-                        disabled: false,
+            Ok(false) => Self::default(),
+            Ok(true) => match config::read_bounded(&path, 4096).await {
+                Ok(bytes) => {
+                    let valid = |counters: &ChildCounters| {
+                        counters.last_inventory_at.is_finite()
+                            && counters.last_report_at.is_finite()
+                            && counters.sequence <= i64::MAX as u64
+                            && counters.generation <= i64::MAX as u64
+                    };
+                    if let Ok(schedule) = serde_json::from_slice::<Self>(&bytes)
+                        && schedule.counters.values().all(valid)
+                    {
+                        schedule
+                    } else if let Ok(legacy) = serde_json::from_slice::<ChildCounters>(&bytes)
+                        && valid(&legacy)
+                    {
+                        Self {
+                            counters: [("*".into(), legacy)].into(),
+                            disabled: false,
+                        }
+                    } else {
+                        eprintln!(
+                            "Child reporting disabled: its sequence state is unreadable; core reporting continues"
+                        );
+                        Self {
+                            disabled: true,
+                            ..Self::default()
+                        }
                     }
                 }
-                _ => {
+                Err(error) => {
                     eprintln!(
-                        "Child reporting disabled: its sequence state is unreadable; core reporting continues"
+                        "Child reporting disabled: cannot inspect its sequence state: {error}"
                     );
                     Self {
-                        counters: ChildCounters::default(),
                         disabled: true,
+                        ..Self::default()
                     }
                 }
             },
             Err(error) => {
                 eprintln!("Child reporting disabled: cannot inspect its sequence state: {error}");
                 Self {
-                    counters: ChildCounters::default(),
                     disabled: true,
+                    ..Self::default()
                 }
             }
         }
@@ -141,7 +156,13 @@ impl ChildSchedule {
         if self.disabled {
             return None;
         }
-        let mut next = self.counters.clone();
+        let key = format!("{:?}:{}", snapshot.source, snapshot.source_scope);
+        let mut next = self
+            .counters
+            .get(&key)
+            .or_else(|| self.counters.get("*"))
+            .cloned()
+            .unwrap_or_default();
         if next.last_report_at > 0.0 && at - next.last_report_at < 30.0 {
             return None;
         }
@@ -153,11 +174,11 @@ impl ChildSchedule {
         }
         let complete = inventory_due && snapshot.inventory_complete;
         next.last_report_at = at;
-        let batch = ChildReportBatch {
+        let mut batch = ChildReportBatch {
             schema_version: SCHEMA_VERSION,
             batch_id: Uuid::new_v4().to_string(),
             agent_id: agent_id.into(),
-            source: ChildSourceKind::Docker,
+            source: snapshot.source,
             source_scope: snapshot.source_scope,
             sequence: next.sequence,
             inventory_generation: next.generation,
@@ -165,7 +186,34 @@ impl ChildSchedule {
             observed_at: at,
             devices: snapshot.devices,
         };
-        self.counters = next;
+        // The child endpoint shares the bounded report body limit. A large inventory must never
+        // be retried forever as an oversized request or accidentally marked authoritative after
+        // dropping records. Keep a stable prefix and report it as partial until it fits whole.
+        let device_sizes = batch
+            .devices
+            .iter()
+            .map(|device| serde_json::to_vec(device).map(|body| body.len()))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let devices = std::mem::take(&mut batch.devices);
+        let mut encoded_size = serde_json::to_vec(&batch).ok()?.len()
+            + device_sizes.iter().sum::<usize>()
+            + device_sizes.len().saturating_sub(1);
+        batch.devices = devices;
+        while encoded_size > MAX_AGENT_REPORT_BYTES && !batch.devices.is_empty() {
+            let old_len = batch.devices.len();
+            encoded_size -= device_sizes[old_len - 1];
+            if old_len > 1 {
+                encoded_size -= 1;
+            }
+            batch.devices.pop();
+            batch.complete = false;
+        }
+        if encoded_size > MAX_AGENT_REPORT_BYTES {
+            return None;
+        }
+        self.counters.remove("*");
+        self.counters.insert(key, next);
         Some(batch)
     }
 }
@@ -188,7 +236,7 @@ fn jittered(period: Duration) -> Duration {
 
 async fn sample_loop<C: Sampler>(
     collector: &mut C,
-    sender: mpsc::Sender<(Sample, f64, Option<collect::ChildSnapshot>)>,
+    sender: mpsc::Sender<(Sample, f64, Vec<collect::ChildSnapshot>)>,
     mut period: watch::Receiver<Duration>,
 ) {
     let mut next_sample = Instant::now();
@@ -204,9 +252,9 @@ async fn sample_loop<C: Sampler>(
         let tick = Instant::now();
         let sample = collector.sample().await;
         let collected_at = now();
-        let child_snapshot = collector.child_snapshot();
+        let child_snapshots = collector.child_snapshots();
         if sender
-            .send((sample, collected_at, child_snapshot))
+            .send((sample, collected_at, child_snapshots))
             .await
             .is_err()
         {
@@ -279,16 +327,15 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                 return Ok(());
             }
             _=&mut sampling => { anyhow::bail!("Collector stopped unexpectedly"); }
-            Some(((inventory,metrics,mut collectors),collected_at,child_snapshot))=samples.recv() => {
+            Some(((inventory,metrics,mut collectors),collected_at,child_snapshots))=samples.recv() => {
                 collectors.push(crate::updates::status(dir));
                 let changed=inventory_delivery.changed(&inventory,collected_at)?;
                 let mut report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),collected_at,inventory:changed.then_some(inventory),metrics,collectors };
                 crate::telemetry::bound_report(&mut report)?;
-                if let Some(snapshot) = child_snapshot
-                    && let Some(batch) = child_schedule.batch(snapshot, &configuration.agent_id, collected_at)
-                {
+                for snapshot in child_snapshots {
+                    let Some(batch) = child_schedule.batch(snapshot, &configuration.agent_id, collected_at) else { continue; };
                     if hope_protocol::validation::child_batch(&batch).is_ok() {
-                        match config::write_private(&child_state_path, &serde_json::to_vec(&child_schedule.counters)?).await {
+                        match config::write_private(&child_state_path, &serde_json::to_vec(&child_schedule)?).await {
                             Ok(()) => {
                                 if let Err(error) = child_spool.push(batch, now()) {
                                     eprintln!("Could not queue child report: {error:#}");
@@ -406,13 +453,18 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hope_protocol::{
+        ChildDeviceKind, ChildDeviceReport, ChildMetrics, ChildSourceKind, DeviceLifecycle,
+        SourceIdentity,
+    };
     #[test]
     fn child_batches_keep_monotonic_sequences_and_separate_inventory_generations() {
         let mut schedule = ChildSchedule {
-            counters: ChildCounters::default(),
+            counters: Default::default(),
             disabled: false,
         };
         let snapshot = || collect::ChildSnapshot {
+            source: ChildSourceKind::Docker,
             source_scope: "engine-id".into(),
             devices: vec![],
             inventory_complete: true,
@@ -445,10 +497,11 @@ mod tests {
     #[test]
     fn incomplete_collections_never_claim_authoritative_absence() {
         let mut schedule = ChildSchedule {
-            counters: ChildCounters::default(),
+            counters: Default::default(),
             disabled: false,
         };
         let snapshot = |inventory_complete| collect::ChildSnapshot {
+            source: ChildSourceKind::Docker,
             source_scope: "engine-id".into(),
             devices: vec![],
             inventory_complete,
@@ -465,6 +518,99 @@ mod tests {
             ),
             (1, 2, 3)
         );
+    }
+
+    #[test]
+    fn each_child_source_has_independent_sequences_and_complete_inventory_clock() {
+        let mut schedule = ChildSchedule::default();
+        let docker = collect::ChildSnapshot {
+            source: ChildSourceKind::Docker,
+            source_scope: "engine".into(),
+            devices: vec![],
+            inventory_complete: true,
+        };
+        let proxmox = collect::ChildSnapshot {
+            source: ChildSourceKind::Proxmox,
+            source_scope: Uuid::new_v4().to_string(),
+            devices: vec![],
+            inventory_complete: true,
+        };
+        let docker_first = schedule.batch(docker.clone(), "agent", 100.0).unwrap();
+        let pve_first = schedule.batch(proxmox.clone(), "agent", 100.0).unwrap();
+        let docker_second = schedule.batch(docker, "agent", 160.0).unwrap();
+        let pve_second = schedule.batch(proxmox, "agent", 160.0).unwrap();
+        assert_eq!(
+            (
+                docker_first.sequence,
+                docker_first.inventory_generation,
+                docker_first.complete
+            ),
+            (1, 1, true)
+        );
+        assert_eq!(
+            (
+                pve_first.sequence,
+                pve_first.inventory_generation,
+                pve_first.complete
+            ),
+            (1, 1, true)
+        );
+        assert_eq!(
+            (docker_second.sequence, docker_second.inventory_generation),
+            (2, 2)
+        );
+        assert_eq!(
+            (pve_second.sequence, pve_second.inventory_generation),
+            (2, 2)
+        );
+    }
+
+    #[test]
+    fn oversized_child_inventory_is_partial_and_fits_the_server_body_limit() {
+        let source_scope = "engine-id".to_owned();
+        let devices = (0..512)
+            .map(|index| ChildDeviceReport {
+                identity: SourceIdentity {
+                    kind: ChildDeviceKind::DockerContainer,
+                    scope: source_scope.clone(),
+                    key: format!("container-{index}"),
+                    incarnation: "first".into(),
+                },
+                name: "n".repeat(256),
+                lifecycle: DeviceLifecycle::Running,
+                status: None,
+                health: None,
+                restart_count: None,
+                parent_key: None,
+                node: None,
+                tags: vec!["t".repeat(128); 64],
+                interfaces: vec![],
+                cpu_cores: None,
+                memory_bytes: None,
+                image: None,
+                compose_project: None,
+                compose_service: None,
+                published_ports: vec![],
+                metrics: ChildMetrics::default(),
+            })
+            .collect();
+        let mut schedule = ChildSchedule::default();
+        let batch = schedule
+            .batch(
+                collect::ChildSnapshot {
+                    source: ChildSourceKind::Docker,
+                    source_scope,
+                    devices,
+                    inventory_complete: true,
+                },
+                &Uuid::new_v4().to_string(),
+                100.0,
+            )
+            .unwrap();
+        assert!(!batch.complete);
+        assert!(batch.devices.len() < 512);
+        assert!(serde_json::to_vec(&batch).unwrap().len() <= MAX_AGENT_REPORT_BYTES);
+        hope_protocol::validation::child_batch(&batch).expect("bounded partial batch is valid");
     }
     #[test]
     fn jitter_stays_within_a_fifteenth_of_the_interval() {
@@ -543,12 +689,13 @@ mod tests {
                 )
             })
         }
-        fn child_snapshot(&self) -> Option<collect::ChildSnapshot> {
-            Some(collect::ChildSnapshot {
+        fn child_snapshots(&self) -> Vec<collect::ChildSnapshot> {
+            vec![collect::ChildSnapshot {
+                source: ChildSourceKind::Docker,
                 source_scope: "docker-engine".into(),
                 devices: vec![],
                 inventory_complete: true,
-            })
+            }]
         }
     }
     #[tokio::test]

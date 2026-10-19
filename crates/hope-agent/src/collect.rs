@@ -383,6 +383,7 @@ fn docker_child(container: &Container, scope: &str) -> ChildDeviceReport {
 
 #[derive(Clone)]
 pub struct ChildSnapshot {
+    pub source: hope_protocol::ChildSourceKind,
     pub source_scope: String,
     pub devices: Vec<ChildDeviceReport>,
     pub inventory_complete: bool,
@@ -861,6 +862,9 @@ impl Collector {
                 },
             },
         ];
+        if let Some(status) = crate::proxmox::collector_status() {
+            collectors.push(status);
+        }
         if self.monitors.configured() > 0 {
             collectors.push(status(
                 "monitors",
@@ -928,12 +932,18 @@ impl Collector {
         inventory.collectors = collectors.clone();
         (inventory, metrics, collectors)
     }
-    pub fn child_snapshot(&self) -> Option<ChildSnapshot> {
-        Some(ChildSnapshot {
-            source_scope: self.docker_scope.clone()?,
-            devices: self.child_devices.clone(),
-            inventory_complete: self.child_inventory_complete,
-        })
+    pub fn child_snapshots(&self) -> Vec<ChildSnapshot> {
+        let mut snapshots = vec![];
+        if let Some(source_scope) = self.docker_scope.clone() {
+            snapshots.push(ChildSnapshot {
+                source: hope_protocol::ChildSourceKind::Docker,
+                source_scope,
+                devices: self.child_devices.clone(),
+                inventory_complete: self.child_inventory_complete,
+            });
+        }
+        snapshots.extend(crate::proxmox::read_snapshot());
+        snapshots
     }
 }
 fn status(name: &str, available: bool, detail: Option<&str>) -> CollectorStatus {

@@ -6,6 +6,7 @@ mod delivery;
 mod extras;
 mod memory;
 mod network;
+mod proxmox;
 mod reporting;
 mod status;
 mod telemetry;
@@ -52,6 +53,9 @@ async fn execute() -> Result<()> {
     if operation == "--version" {
         println!("hope-agent {VERSION}");
         return Ok(());
+    }
+    if operation == "collect-proxmox" {
+        return proxmox::collect().await;
     }
     let dir = config::directory();
     if operation == "status" {
@@ -117,7 +121,7 @@ async fn execute() -> Result<()> {
     }
     anyhow::ensure!(
         matches!(operation.as_str(), "enroll" | "configure" | "run" | "once"),
-        "Use run, enroll, configure, once, inspect, status, benchmark, or --version"
+        "Use run, enroll, configure, once, inspect, status, benchmark, collect-proxmox, or --version"
     );
     let _state_lock = config::lock(&dir).await?;
     let mut configuration = if tokio::fs::try_exists(dir.join("config.json")).await? {

@@ -48,6 +48,23 @@ class Base(unittest.TestCase):
 
 
 class Linux(Base):
+    def test_proxmox_system_install_adds_a_root_owned_collector_timer(self):
+        pvesh = self.env.bin / 'pvesh'
+        pvesh.write_text('#!/bin/sh\nexit 0\n')
+        pvesh.chmod(0o755)
+        result = self.env.run()
+        self.ok(result)
+        service = self.env.root / 'etc/systemd/system/hope-agent-proxmox-collect.service'
+        timer = self.env.root / 'etc/systemd/system/hope-agent-proxmox-collect.timer'
+        self.assertTrue(service.exists())
+        self.assertTrue(timer.exists())
+        unit = service.read_text()
+        self.assertIn('User=root', unit)
+        self.assertIn('collect-proxmox', unit)
+        self.assertIn('ReadWritePaths=/run/hope-agent /etc/hope-agent', unit)
+        self.assertIn('OnUnitActiveSec=30s', timer.read_text())
+        self.assertIn('systemctl[system] enable --now hope-agent-proxmox-collect.timer', self.env.log())
+
     def test_root_install(self):
         result = self.env.run()
         self.ok(result)
