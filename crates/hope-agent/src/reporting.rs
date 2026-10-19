@@ -656,11 +656,12 @@ mod tests {
 
         let directory = tempfile::tempdir().expect("directory");
         let config = configuration(format!("http://{address}"));
-        let (stop, stopped) = tokio::sync::oneshot::channel();
         let mut sampler = ChildFakeSampler {
             count: 0,
-            stop_after_samples: Some(stop),
+            stop_after_samples: None,
         };
+        let child_count = child_requests.clone();
+        let core_count = core_requests.clone();
         tokio::time::timeout(
             Duration::from_secs(3),
             run(
@@ -670,8 +671,14 @@ mod tests {
                 "run",
                 directory.path(),
                 Duration::from_millis(80),
-                async {
-                    let _ = stopped.await;
+                async move {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                    while (child_count.load(Ordering::SeqCst) == 0
+                        || core_count.load(Ordering::SeqCst) == 0)
+                        && tokio::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
                 },
             ),
         )
