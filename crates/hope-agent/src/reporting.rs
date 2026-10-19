@@ -93,6 +93,7 @@ impl Default for ChildCounters {
 struct ChildSchedule {
     counters: std::collections::HashMap<String, ChildCounters>,
     disabled: bool,
+    device_rotation_cursor: usize,
 }
 impl ChildSchedule {
     async fn load(dir: &Path) -> Self {
@@ -117,6 +118,7 @@ impl ChildSchedule {
                         Self {
                             counters: [("*".into(), legacy)].into(),
                             disabled: false,
+                            device_rotation_cursor: 0,
                         }
                     } else {
                         eprintln!(
@@ -186,6 +188,12 @@ impl ChildSchedule {
             observed_at: at,
             devices: snapshot.devices,
         };
+        let inventory_size = batch.devices.len();
+        if inventory_size > 0 {
+            batch
+                .devices
+                .rotate_left(self.device_rotation_cursor % inventory_size);
+        }
         // The child endpoint shares the bounded report body limit. A large inventory must never
         // be retried forever as an oversized request or accidentally marked authoritative after
         // dropping records. Keep a stable prefix and report it as partial until it fits whole.
@@ -208,6 +216,11 @@ impl ChildSchedule {
             }
             batch.devices.pop();
             batch.complete = false;
+        }
+        if inventory_size > 0 {
+            self.device_rotation_cursor = (self.device_rotation_cursor % inventory_size
+                + batch.devices.len())
+                % inventory_size;
         }
         if encoded_size > MAX_AGENT_REPORT_BYTES {
             return None;
@@ -462,6 +475,7 @@ mod tests {
         let mut schedule = ChildSchedule {
             counters: Default::default(),
             disabled: false,
+            device_rotation_cursor: 0,
         };
         let snapshot = || collect::ChildSnapshot {
             source: ChildSourceKind::Docker,
@@ -499,6 +513,7 @@ mod tests {
         let mut schedule = ChildSchedule {
             counters: Default::default(),
             disabled: false,
+            device_rotation_cursor: 0,
         };
         let snapshot = |inventory_complete| collect::ChildSnapshot {
             source: ChildSourceKind::Docker,
@@ -568,7 +583,7 @@ mod tests {
     #[test]
     fn oversized_child_inventory_is_partial_and_fits_the_server_body_limit() {
         let source_scope = "engine-id".to_owned();
-        let devices = (0..512)
+        let devices: Vec<ChildDeviceReport> = (0..512)
             .map(|index| ChildDeviceReport {
                 identity: SourceIdentity {
                     kind: ChildDeviceKind::DockerContainer,
@@ -595,22 +610,32 @@ mod tests {
             })
             .collect();
         let mut schedule = ChildSchedule::default();
-        let batch = schedule
-            .batch(
-                collect::ChildSnapshot {
-                    source: ChildSourceKind::Docker,
-                    source_scope,
-                    devices,
-                    inventory_complete: true,
-                },
-                &Uuid::new_v4().to_string(),
-                100.0,
-            )
-            .unwrap();
-        assert!(!batch.complete);
-        assert!(batch.devices.len() < 512);
-        assert!(serde_json::to_vec(&batch).unwrap().len() <= MAX_AGENT_REPORT_BYTES);
-        hope_protocol::validation::child_batch(&batch).expect("bounded partial batch is valid");
+        let agent_id = Uuid::new_v4().to_string();
+        let mut observed = std::collections::HashSet::new();
+        for report in 0..32 {
+            let batch = schedule
+                .batch(
+                    collect::ChildSnapshot {
+                        source: ChildSourceKind::Docker,
+                        source_scope: source_scope.clone(),
+                        devices: devices.clone(),
+                        inventory_complete: true,
+                    },
+                    &agent_id,
+                    100.0 + f64::from(report) * 30.0,
+                )
+                .unwrap();
+            assert!(!batch.complete);
+            assert!(batch.devices.len() < 512);
+            assert!(serde_json::to_vec(&batch).unwrap().len() <= MAX_AGENT_REPORT_BYTES);
+            hope_protocol::validation::child_batch(&batch).expect("bounded partial batch is valid");
+            observed.extend(batch.devices.into_iter().map(|device| device.identity.key));
+        }
+        assert_eq!(
+            observed.len(),
+            512,
+            "rotation eventually reports every device"
+        );
     }
     #[test]
     fn jitter_stays_within_a_fifteenth_of_the_interval() {
