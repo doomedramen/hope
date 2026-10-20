@@ -116,12 +116,15 @@ def make_keys():
     if not (pki / "ca.pem").exists():
         run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(pki / "ca.key")])
         run(["openssl", "req", "-x509", "-new", "-key", str(pki / "ca.key"), "-sha256", "-days", "3",
-             "-subj", "/CN=hopegate throwaway CA", "-out", str(pki / "ca.pem")])
+             "-subj", "/CN=hopegate throwaway CA", "-addext", "basicConstraints=critical,CA:TRUE",
+             "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-addext", "subjectKeyIdentifier=hash",
+             "-addext", "authorityKeyIdentifier=keyid:always", "-out", str(pki / "ca.pem")])
         run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(pki / "server.key")])
         run(["openssl", "req", "-new", "-key", str(pki / "server.key"), "-subj", "/CN=" + HOST,
              "-out", str(pki / "server.csr")])
-        (pki / "ext.cnf").write_text("subjectAltName=DNS:%s,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n"
-                                     "extendedKeyUsage=serverAuth\n" % HOST)
+        (pki / "ext.cnf").write_text("subjectAltName=DNS:%s,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n"
+                                     "extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\n"
+                                     "authorityKeyIdentifier=keyid,issuer\n" % HOST)
         run(["openssl", "x509", "-req", "-in", str(pki / "server.csr"), "-CA", str(pki / "ca.pem"), "-CAkey",
              str(pki / "ca.key"), "-CAcreateserial", "-days", "2", "-sha256", "-extfile", str(pki / "ext.cnf"),
              "-out", str(pki / "server.pem")])
@@ -969,8 +972,8 @@ def main():
         results.clear()
         (WORK / "results.json").write_text("[]")
         build_all()
-        up()
         try:
+            up()
             proxy_checks()
             matrix()
             ssh_phase()
