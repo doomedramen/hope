@@ -14,7 +14,7 @@ network_check
 update_os
 
 msg_info "Installing Dependencies"
-$STD apt install -y caddy openssl
+$STD apt install -y caddy openssl python3
 msg_ok "Installed Dependencies"
 
 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-x86_64-linux.tar.gz"

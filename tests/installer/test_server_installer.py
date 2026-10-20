@@ -5,14 +5,16 @@ the release archive comes from a local directory through the HOPE_INSTALL_RELEAS
 the download, checksum verification and extraction paths are the real ones. The release also carries
 hope-agents.tar.gz (fake agent binaries with the right headers) and the package carries the real
 scripts/assemble-release.sh behind a wrapper that logs its call, so agent signing is the real one too.
-Requires Linux userland (including GNU sed); run the suite in Linux:
+The operating system and service manager are stubbed; the filesystem, activation helper and signing are real:
 python3 -I -m unittest discover -s tests/installer -v
 """
+from contextlib import closing
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -48,6 +50,8 @@ def log(line):
     with open(os.path.join(root, 'commands.log'), 'a') as handle:
         handle.write(line + '\n')
 log(name + ' ' + ' '.join(args))
+if name == 'uname':
+    print('Linux' if '-s' in args else 'x86_64'); sys.exit(0)
 if name == 'id':
     print('0'); sys.exit(0)
 if name in ('apt-get', 'dnf', 'pacman', 'setcap', 'useradd', 'chown'):
@@ -57,9 +61,24 @@ if name in ('apt-get', 'dnf', 'pacman', 'setcap', 'useradd', 'chown'):
 if name == 'getent':
     sys.exit(0 if os.path.exists(os.path.join(root, 'user-created')) else 2)
 if name == 'systemctl':
+    if args[0] == 'show':
+        running = os.path.exists(os.path.join(root, 'hope-running'))
+        print(('123' if running else '0') if '--property=MainPID' in args else ('active' if running else 'inactive'))
+        sys.exit(0)
+    if args[0] == 'stop':
+        try: os.unlink(os.path.join(root, 'hope-running'))
+        except FileNotFoundError: pass
+    if args[0] == 'is-enabled': sys.exit(0)
     if args[:2] == ['is-active', '--quiet']:
         sys.exit(0 if os.path.exists(os.path.join(root, 'hope-running')) else 3)
     if args and args[0] in ('start', 'restart') and 'hope' in args:
+        binary = os.path.join(root, 'opt/hope/bin/hope-server')
+        if os.environ.get('FAIL_ACTIVATION_START') and os.path.exists(binary) and 'fake hope-server' in open(binary).read():
+            import sqlite3
+            db = os.path.join(root, 'var/lib/hope/hope.db')
+            with sqlite3.connect(db) as connection:
+                connection.execute('PRAGMA user_version=99')
+            sys.exit(1)
         open(os.path.join(root, 'hope-running'), 'w').close()
     if args[:2] == ['enable', '--now'] and 'hope' in args:
         open(os.path.join(root, 'hope-running'), 'w').close()
@@ -86,13 +105,13 @@ if name == 'curl':
             sys.stdout.write(open(source).read())
         sys.exit(0)
     if url.endswith('/healthz'):
+        print('{"status":"ok","pid":123}')
         sys.exit(0 if os.path.exists(os.path.join(root, 'hope-running')) else 7)
     sys.exit(6)
 sys.exit(1)
 '''
 
 
-@unittest.skipUnless(sys.platform.startswith('linux'), 'Server installer fixtures require Linux userland')
 class ServerInstaller(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix='hope-server-install-'))
@@ -100,7 +119,7 @@ class ServerInstaller(unittest.TestCase):
         self.bin = self.root / 'stubs'
         self.bin.mkdir()
         stub = STUB.replace('@PYTHON@', os.path.realpath(__import__('sys').executable))
-        for name in ('id', 'apt-get', 'dnf', 'pacman', 'setcap', 'useradd', 'chown', 'getent', 'systemctl', 'journalctl', 'curl'):
+        for name in ('id', 'apt-get', 'dnf', 'pacman', 'setcap', 'useradd', 'chown', 'getent', 'systemctl', 'journalctl', 'curl', 'uname'):
             path = self.bin / name
             path.write_text(stub)
             path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -111,7 +130,7 @@ class ServerInstaller(unittest.TestCase):
         self.make_release()
 
     def make_release(self, corrupt=False, version='0.9.0', agents=True, agent_version=None, corrupt_agents=False, nested=False):
-        arch = {'x86_64': 'x86_64', 'amd64': 'x86_64'}[os.uname().machine]
+        arch = 'x86_64'
         tree = self.root / 'tree'
         shutil.rmtree(tree, ignore_errors=True)
         for path in self.release.iterdir():
@@ -124,6 +143,7 @@ class ServerInstaller(unittest.TestCase):
         (tree / 'VERSION').write_text(version + '\n')
         (tree / 'tools/assemble-release.sh').write_text(ASSEMBLE_WRAPPER)
         shutil.copyfile(ASSEMBLE, tree / 'tools/assemble-release-real.sh')
+        shutil.copyfile(REPO / 'scripts/activate-server.py', tree / 'tools/activate-server.py')
         name = f'hope-server-{arch}-linux.tar.gz'
         with tarfile.open(self.release / name, 'w:gz') as archive:
             for entry in ('hope-server', 'web', 'VERSION', 'tools'):
@@ -199,10 +219,10 @@ class ServerInstaller(unittest.TestCase):
         self.assertIn('FAKE', (self.root / 'etc/hope/ca.crt').read_text())
         commands = self.commands()
         self.assertTrue(any(c.startswith('useradd --system') and 'hope' in c for c in commands))
-        self.assertTrue(any(c.startswith('setcap cap_net_raw=ep') for c in commands))
+        self.assertTrue((self.root / 'etc/systemd/system/hope.service.d/20-hope-activation.conf').exists())
         self.assertIn('systemctl daemon-reload', commands)
-        self.assertTrue(any(c.startswith('systemctl enable --now hope') for c in commands))
-        self.assertIn('systemctl restart hope', commands, 'restarted after the CA path was set')
+        self.assertIn('systemctl enable hope', commands)
+        self.assertIn('systemctl start hope', commands, 'the CA path is staged before the initial start')
         self.assertTrue(any(c.startswith('apt-get install') and 'caddy' in c for c in commands))
         self.assertIn('Setup token:    tok3n-ABCdef_123456789012345678', done.stdout)
         self.assertIn('copy /etc/hope/ca.crt', done.stdout)
@@ -212,6 +232,8 @@ class ServerInstaller(unittest.TestCase):
         env_path = self.root / 'etc/hope/hope.env'
         env_path.write_text(env_path.read_text().replace('HOPE_TRUSTED_PROXIES=', 'HOPE_TRUSTED_PROXIES=10.0.0.5') + 'CUSTOM=1\n')
         (self.root / 'opt/hope/bin/hope-server').write_text('old')
+        unit_path = self.root / 'etc/systemd/system/hope.service'
+        unit_path.write_text(unit_path.read_text() + '# retained operator setting\n')
         (self.root / 'commands.log').unlink()
         done = self.run_installer(HOPE_INSTALL_URL='https://other.example')
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -220,10 +242,47 @@ class ServerInstaller(unittest.TestCase):
         self.assertIn('CUSTOM=1\n', env)
         self.assertIn('HOPE_SERVER_URL=https://192.168.1.50\n', env, 'an existing URL is never overwritten silently')
         self.assertIn('fake hope-server', (self.root / 'opt/hope/bin/hope-server').read_text())
+        self.assertIn('# retained operator setting', unit_path.read_text())
         commands = self.commands()
         self.assertFalse(any(c.startswith('useradd') for c in commands))
-        self.assertIn('systemctl restart hope', commands)
+        self.assertIn('systemctl stop hope', commands)
+        self.assertIn('systemctl start hope', commands)
         self.assertFalse(any(c.startswith('systemctl enable --now hope') for c in commands))
+
+    def test_failed_activation_restores_the_pre_upgrade_database_and_published_agents(self):
+        self.assertEqual(self.run_installer(HOPE_INSTALL_PROXY='none').returncode, 0)
+        binary = self.root / 'opt/hope/bin/hope-server'
+        binary.write_text('old server')
+        database = self.root / 'var/lib/hope/hope.db'
+        with closing(sqlite3.connect(database)) as connection:
+            connection.executescript('CREATE TABLE kept(value); INSERT INTO kept VALUES(7); PRAGMA user_version=14;')
+        env = (self.root / 'etc/hope/hope.env').read_bytes()
+        unit = (self.root / 'etc/systemd/system/hope.service').read_bytes()
+        release = os.readlink(self.releases / 'current')
+        (self.root / 'commands.log').unlink()
+        self.make_release(version='0.9.1')
+        done = self.run_installer(HOPE_INSTALL_PROXY='none', FAIL_ACTIVATION_START='1')
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('Previous installation restored', done.stderr)
+        self.assertEqual(binary.read_text(), 'old server')
+        self.assertEqual((self.root / 'etc/hope/hope.env').read_bytes(), env)
+        self.assertEqual((self.root / 'etc/systemd/system/hope.service').read_bytes(), unit)
+        with closing(sqlite3.connect(database)) as connection:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone(), (14,))
+            self.assertEqual(connection.execute('SELECT * FROM kept').fetchall(), [(7,)])
+        self.assertTrue((self.root / 'hope-running').exists())
+        self.assertEqual(os.readlink(self.releases / 'current'), release)
+        self.assertFalse(any(line.startswith('assemble-release ') for line in self.commands()))
+        self.assertNotIn('H.O.P.E is installed.', done.stdout)
+
+    def test_failed_first_activation_does_not_claim_success_or_publish_agents(self):
+        done = self.run_installer(HOPE_INSTALL_PROXY='none', FAIL_ACTIVATION_START='1')
+        self.assertNotEqual(done.returncode, 0)
+        self.assertFalse((self.root / 'opt/hope/bin/hope-server').exists())
+        self.assertFalse((self.root / 'var/lib/hope/hope.db').exists())
+        self.assertFalse((self.root / 'etc/hope/hope.env').exists())
+        self.assertFalse(self.key.exists())
+        self.assertNotIn('H.O.P.E is installed.', done.stdout)
 
     def test_public_domain_uses_a_public_certificate_and_no_proxy_is_respected(self):
         done = self.run_installer(HOPE_INSTALL_URL='https://hope.example.com')

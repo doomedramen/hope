@@ -43,48 +43,34 @@ function update_script() {
     exit
   fi
 
-  # ARP discovery needs raw sockets. Keep this as a small drop-in so upgrades do not
-  # replace locally maintained service settings. If the container's capability set
-  # does not permit it, revert the drop-in and leave the existing service running.
-  local capability_dropin=/etc/systemd/system/hope.service.d/10-arp-capability.conf
-  if ! grep -Fxq 'AmbientCapabilities=CAP_NET_RAW' "$capability_dropin" 2>/dev/null; then
-    install -d -m 755 "${capability_dropin%/*}"
-    cat >"$capability_dropin" <<'EOF'
-[Service]
-AmbientCapabilities=CAP_NET_RAW
-EOF
-    systemctl daemon-reload
-    if systemctl is-active --quiet hope && ! systemctl restart hope; then
-      rm -f "$capability_dropin"
-      systemctl daemon-reload
-      systemctl restart hope || true
-      msg_warn "CAP_NET_RAW is unavailable in this Proxmox container; restored the previous service configuration"
-    fi
+  # Recover an interrupted activation before asking the release engine about versions.
+  ensure_dependencies python3 openssl
+  if [[ -f /var/lib/hope-activation/recover.py ]]; then
+    python3 /var/lib/hope-activation/recover.py recover || return 1
   fi
-
   if check_for_gh_release "hope" "doomedramen/hope"; then
-    msg_info "Stopping Service"
-    systemctl stop hope
-    msg_ok "Stopped Service"
-
-    # Earlier installs compiled H.O.P.E in the container (a git checkout in /opt/hope, or binaries
-    # in /opt/hope/bin). Keep their agent releases, then drop the checkout and the toolchains; the
-    # toolchain records go too, or the engine would reinstall them before the next update.
-    if [[ -d /opt/hope/.git || -d /opt/hope/bin ]]; then
-      msg_info "Removing the H.O.P.E source build"
-      mkdir -p /var/lib/hope/releases
-      [[ -d /opt/hope/releases ]] && cp -a /opt/hope/releases/. /var/lib/hope/releases/
-      rm -rf /opt/hope "$HOME/.cargo" "$HOME/.rustup"
-      rm -f /var/cache/app-versions/rust_version.txt /var/cache/app-versions/nodejs_version.txt
-      $STD apt purge -y nodejs build-essential cmake pkg-config
-      $STD apt autoremove -y
-      msg_ok "Removed the H.O.P.E source build"
+    local staged release activation release_dir
+    staged=$(mktemp -d /var/tmp/hope-update.XXXXXX)
+    release=$CHECK_UPDATE_RELEASE
+    # Keep the engine's installed-version marker unchanged until activation is proven.
+    if ! FORCE_UPDATE=1 CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-staged" "doomedramen/hope" "prebuild" "$release" "$staged/server" "hope-server-x86_64-linux.tar.gz"; then
+      rm -rf "$staged"
+      return 1
     fi
-    sed -i -e 's|^HOPE_WEB_DIR=.*|HOPE_WEB_DIR=/opt/hope/web|' -e 's|^HOPE_RELEASE_DIR=.*|HOPE_RELEASE_DIR=/var/lib/hope/releases|' /etc/hope/hope.env
-    grep -q '^HOPE_SETUP_TOKEN=' /etc/hope/hope.env || echo "HOPE_SETUP_TOKEN=$(random_password 32)" >>/etc/hope/hope.env
-    chmod 600 /etc/hope/hope.env
-    if ! grep -q '^ExecStart=/usr/local/bin/hope-server$' /etc/systemd/system/hope.service; then
-      cat <<EOF >/etc/systemd/system/hope.service
+    activation=$staged/server/tools/activate-server.py
+    if [[ ! -f "$activation" ]]; then
+      msg_error "This release lacks recoverable server activation; existing installation kept"
+      rm -rf "$staged"
+      return 1
+    fi
+    cp -p /etc/hope/hope.env "$staged/hope.env"
+    release_dir=$(python3 "$activation" value --env "$staged/hope.env" --key HOPE_RELEASE_DIR)
+    release_dir=${release_dir:-/var/lib/hope/releases}
+    # The old checkout, toolchains, configuration and signed agents remain intact.
+    if [[ -f /etc/systemd/system/hope.service ]] && grep -Fxq 'ExecStart=/usr/local/bin/hope-server' /etc/systemd/system/hope.service; then
+      cp -p /etc/systemd/system/hope.service "$staged/hope.service"
+    else
+      cat >"$staged/hope.service" <<EOF
 [Unit]
 Description=H.O.P.E network observatory
 Documentation=https://github.com/doomedramen/hope
@@ -106,22 +92,24 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-      systemctl daemon-reload
     fi
+    msg_info "Activating Service"
+    if ! python3 "$activation" install --package "$staged/server" --binary /usr/local/bin/hope-server \
+        --candidate-env "$staged/hope.env" --candidate-unit "$staged/hope.service"; then
+      rm -rf "$staged"
+      msg_error "Activation failed; inspect the recovery result above"
+      return 1
+    fi
+    cp "$HOME/.hope-staged" "$HOME/.hope"
+    msg_ok "Activated Service"
 
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-x86_64-linux.tar.gz"
-    install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server
-
-    # Re-sign the release's agents with this server's key (created here for containers installed
-    # before agents were signed, unless a release signed elsewhere is already published). A failure
-    # keeps the previous agent release and never leaves the service stopped.
-    ensure_dependencies openssl
-    if CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" "/opt/hope-agents" "hope-agents.tar.gz"; then
+    # Use the selected release for agents too. Publication follows successful server activation.
+    if FORCE_UPDATE=1 CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "$release" "$staged/agents" "hope-agents.tar.gz"; then
       msg_info "Signing Agent Release"
-      if [[ ! -e /etc/hope/release-signing.pem && ! -e /var/lib/hope/releases/current ]]; then
+      if [[ ! -e /etc/hope/release-signing.pem && ! -e "$release_dir/current" ]]; then
         (umask 077 && openssl genrsa -out /etc/hope/release-signing.pem 3072 2>/dev/null) || true
       fi
-      if [[ -f /etc/hope/release-signing.pem ]] && $STD env HOPE_SIGNING_KEY=/etc/hope/release-signing.pem sh /opt/hope/tools/assemble-release.sh --staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases; then
+      if [[ -f /etc/hope/release-signing.pem ]] && $STD env HOPE_SIGNING_KEY=/etc/hope/release-signing.pem sh "$staged/server/tools/assemble-release.sh" --staging "$staged/agents" --version "$(cat "$staged/server/VERSION")" --out "$release_dir"; then
         msg_ok "Signed Agent Release"
       else
         msg_warn "Agent release not signed; the previous one stays published (docs/operations.md, Signed agent releases)"
@@ -129,10 +117,7 @@ EOF
     else
       msg_warn "No agent release downloaded; the previous one stays published"
     fi
-
-    msg_info "Starting Service"
-    systemctl start hope
-    msg_ok "Started Service"
+    rm -rf "$staged"
     msg_ok "Updated successfully!"
   fi
   exit

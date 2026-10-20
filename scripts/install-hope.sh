@@ -71,7 +71,10 @@ cleanup() {
     [ -n "$staging" ] && rm -rf "$staging"
     return 0
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---------- prompts ----------
 has_tty() { [ "$noninteractive" != 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; }
@@ -175,9 +178,9 @@ pkg_install() {
 }
 deps_for() {
     case "$(os_id)" in
-    debian) case "$1" in base) echo "curl ca-certificates tar xz-utils libcap2-bin openssl" ;; build) echo "git build-essential pkg-config cmake" ;; caddy) echo caddy ;; esac ;;
-    fedora) case "$1" in base) echo "curl ca-certificates tar xz libcap openssl" ;; build) echo "git gcc gcc-c++ make pkgconf-pkg-config cmake" ;; caddy) echo caddy ;; esac ;;
-    arch) case "$1" in base) echo "curl ca-certificates tar xz libcap openssl" ;; build) echo "git base-devel cmake" ;; caddy) echo caddy ;; esac ;;
+    debian) case "$1" in base) echo "curl ca-certificates tar xz-utils openssl python3" ;; build) echo "git build-essential pkg-config cmake" ;; caddy) echo caddy ;; esac ;;
+    fedora) case "$1" in base) echo "curl ca-certificates tar xz openssl python3" ;; build) echo "git gcc gcc-c++ make pkgconf-pkg-config cmake" ;; caddy) echo caddy ;; esac ;;
+    arch) case "$1" in base) echo "curl ca-certificates tar xz openssl python" ;; build) echo "git base-devel cmake" ;; caddy) echo caddy ;; esac ;;
     esac
 }
 
@@ -268,6 +271,9 @@ build_from_source() {
     mkdir -p "$staging/server"
     cp "$_build/src/target/release/hope-server" "$staging/server/hope-server"
     cp -R "$_build/src/web/out" "$staging/server/web"
+    mkdir -p "$staging/server/tools"
+    cp "$_build/src/scripts/activate-server.py" "$staging/server/tools/activate-server.py"
+    sed -n 's/^version = "\(.*\)"$/\1/p' "$_build/src/Cargo.toml" | head -n 1 > "$staging/server/VERSION"
     ok 'Built from source'
 }
 obtain_server() {
@@ -299,7 +305,8 @@ sign_agents() {
         return 0
     fi
     _key=$root/etc/hope/release-signing.pem
-    _releases=$root/opt/hope/releases
+    _release_path=$(python3 "$staging/server/tools/activate-server.py" value --env "$root/etc/hope/hope.env" --key HOPE_RELEASE_DIR)
+    _releases=$root${_release_path:-/opt/hope/releases}
     if [ ! -e "$_key" ] && [ ! -L "$_key" ]; then
         if [ -e "$_releases/current" ] || [ -L "$_releases/current" ]; then
             # Published by hand with a key kept elsewhere; a new key here would be refused anyway.
@@ -326,7 +333,11 @@ sign_agents() {
     fi
 }
 write_unit() {
-    cat > "$root/etc/systemd/system/hope.service" <<EOF
+    if [ -f "$root/etc/systemd/system/hope.service" ] && grep -Fxq 'ExecStart=/opt/hope/bin/hope-server' "$root/etc/systemd/system/hope.service"; then
+        cp -p "$root/etc/systemd/system/hope.service" "$staging/hope.service"
+        return
+    fi
+    cat > "$staging/hope.service" <<EOF
 [Unit]
 Description=H.O.P.E network observatory
 Documentation=https://github.com/$repo
@@ -362,8 +373,9 @@ EOF
 }
 write_env() {
     # Created once; re-runs keep the operator's values.
-    _env=$root/etc/hope/hope.env
-    if [ -f "$_env" ]; then
+    _env=$staging/hope.env
+    if [ -f "$root/etc/hope/hope.env" ]; then
+        cp -p "$root/etc/hope/hope.env" "$_env"
         grep -q '^HOPE_SERVER_URL=' "$_env" || printf 'HOPE_SERVER_URL=%s\n' "$url" >> "$_env"
         return
     fi
@@ -383,8 +395,8 @@ EOF
     chmod 640 "$_env"
 }
 set_env() {
-    _env=$root/etc/hope/hope.env
-    if grep -q "^$1=" "$_env"; then sed -i "s|^$1=.*|$1=$2|" "$_env"; else printf '%s=%s\n' "$1" "$2" >> "$_env"; fi
+    _env=$staging/hope.env
+    if grep -q "^$1=" "$_env"; then sed "s|^$1=.*|$1=$2|" "$_env" > "$_env.new"; chmod 640 "$_env.new"; mv "$_env.new" "$_env"; else printf '%s=%s\n' "$1" "$2" >> "$_env"; fi
 }
 install_caddy() {
     _host=${url#https://}; _host=${_host#http://}; _host=${_host%%/*}
@@ -448,33 +460,23 @@ host_install() {
     info 'Installing files'
     getent passwd hope >/dev/null 2>&1 || useradd --system --home-dir /var/lib/hope --shell /usr/sbin/nologin --user-group hope
     mkdir -p "$root/opt/hope/bin" "$root/opt/hope/releases" "$root/var/lib/hope" "$root/etc/hope" "$root/etc/systemd/system"
-    _running=0
-    systemctl is-active --quiet hope 2>/dev/null && _running=1
-    install -m 755 "$staging/server/hope-server" "$root/opt/hope/bin/hope-server.new"
-    mv -f "$root/opt/hope/bin/hope-server.new" "$root/opt/hope/bin/hope-server"
-    rm -rf "$root/opt/hope/web.new"
-    cp -R "$staging/server/web" "$root/opt/hope/web.new"
-    rm -rf "$root/opt/hope/web.old"
-    [ -d "$root/opt/hope/web" ] && mv "$root/opt/hope/web" "$root/opt/hope/web.old"
-    mv "$root/opt/hope/web.new" "$root/opt/hope/web"
-    rm -rf "$root/opt/hope/web.old"
-    chown -R hope:hope "$root/var/lib/hope"
-    chmod 700 "$root/var/lib/hope"
-    setcap cap_net_raw=ep "$root/opt/hope/bin/hope-server" || warn 'setcap failed: ICMP and ARP discovery will be unavailable (TCP probing continues).'
-    sign_agents
+    _activation=$staging/server/tools/activate-server.py
+    [ -f "$_activation" ] || die 'This package lacks tools/activate-server.py; use a current release for recoverable activation.'
+    python3 "$_activation" recover --root "$root" || die 'An earlier activation needs recovery before upgrading.'
     write_env
     write_unit
-    systemctl daemon-reload
-    if [ "$_running" = 1 ]; then systemctl restart hope; else systemctl enable --now hope >/dev/null 2>&1 || systemctl start hope; fi
+    _data_path=$(python3 "$_activation" value --env "$staging/hope.env" --key HOPE_DATA_DIR)
+    mkdir -p "$root${_data_path:-/var/lib/hope}"
+    chown -R hope:hope "$root${_data_path:-/var/lib/hope}"
+    chmod 700 "$root${_data_path:-/var/lib/hope}"
+    url=$(python3 "$_activation" value --env "$staging/hope.env" --key HOPE_SERVER_URL)
     [ "$HOPE_INSTALL_PROXY" = caddy ] && install_caddy
-    [ "$ca_exported" = 1 ] && systemctl restart hope
-    _n=0
-    while [ $_n -lt 30 ]; do
-        curl -fsS --max-time 2 http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break
-        sleep 1; _n=$((_n + 1))
-    done
-    if [ $_n -lt 30 ]; then ok 'hope-server is healthy'
-    else warn 'hope-server did not answer on 127.0.0.1:8080 yet; check: journalctl -u hope'; fi
+    info 'Activating server with database backup and rollback'
+    python3 "$_activation" install --root "$root" --package "$staging/server" \
+        --candidate-env "$staging/hope.env" --candidate-unit "$staging/hope.service" \
+        || die 'Server activation failed; inspect the recovery result above before retrying.'
+    ok 'hope-server activation verified'
+    sign_agents
     _token=$(journalctl -u hope -b --no-pager 2>/dev/null | sed -n 's/.*setup token: \([A-Za-z0-9_-]*\).*/\1/p' | tail -n 1)
     printf '\n%s%s%s\n' "$c_bold" 'H.O.P.E is installed.' "$c_off"
     printf '  Console:        %s\n' "$url"

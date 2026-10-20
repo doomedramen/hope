@@ -37,54 +37,42 @@ class CtScript(unittest.TestCase):
                        'header_info "$APP"\nvariables\ncolor\ncatch_errors', 'start\nbuild_container\ndescription'):
             self.assertIn(needle, CT)
 
-    def test_update_installs_the_latest_release_without_compiling(self):
+    def test_update_stages_a_pinned_release_and_commits_version_after_activation(self):
         self.assertIn('check_for_gh_release "hope" "doomedramen/hope"', CT)
-        self.assertIn('CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" '
-                      '"hope-server-x86_64-linux.tar.gz"', CT)
-        for command in ('systemctl stop hope', 'install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server',
-                        'systemctl start hope'):
-            self.assertIn(command, CT)
+        self.assertIn('release=$CHECK_UPDATE_RELEASE', CT)
+        self.assertIn('fetch_and_deploy_gh_release "hope-staged" "doomedramen/hope" "prebuild" "$release" "$staged/server"', CT)
+        activate = CT.index('python3 "$activation" install')
+        self.assertLess(CT.index('fetch_and_deploy_gh_release "hope-staged"'), activate)
+        self.assertGreater(CT.index('cp "$HOME/.hope-staged" "$HOME/.hope"'), activate)
+        self.assertIn('--binary /usr/local/bin/hope-server', CT)
+        self.assertIn('python3 /var/lib/hope-activation/recover.py recover', CT)
         for compiled in ('setup_rust', 'setup_nodejs', 'cargo build', 'npm ', 'check_for_gh_branch', 'fetch_and_deploy_gh_branch'):
             self.assertNotIn(compiled, CT, compiled)
-        body = CT[CT.index('function update_script'):]
-        self.assertRegex(body, r'\n  exit\n\}')
 
     def test_proxmox_container_service_gets_raw_socket_capability(self):
         self.assertIn('AmbientCapabilities=CAP_NET_RAW', CT)
         self.assertIn('AmbientCapabilities=CAP_NET_RAW', INSTALL)
-        self.assertIn('10-arp-capability.conf', CT)
-        self.assertIn('systemctl restart hope || true', CT)
+        # Startup failure, including capability refusal, is handled by the shared transaction.
+        self.assertIn('--candidate-unit "$staged/hope.service"', CT)
 
-    def test_update_removes_an_earlier_source_build_before_deploying(self):
-        # Earlier pairs compiled in the container: /opt/hope was a git checkout (or held bin/), and
-        # rustup and Node.js were installed with their records in /var/cache/app-versions, which the
-        # engine would use to reinstall them. All of that goes before the release is unpacked.
-        deploy = CT.index('fetch_and_deploy_gh_release')
-        for needle in ('/opt/hope/.git', 'rm -rf /opt/hope "$HOME/.cargo" "$HOME/.rustup"',
-                       '/var/cache/app-versions/rust_version.txt', '/var/cache/app-versions/nodejs_version.txt',
-                       'apt purge -y nodejs', 'cp -a /opt/hope/releases/. /var/lib/hope/releases/',
-                       'HOPE_WEB_DIR=/opt/hope/web|', 'HOPE_RELEASE_DIR=/var/lib/hope/releases|'):
-            self.assertIn(needle, CT)
-            self.assertLess(CT.index(needle), deploy, needle)
-        self.assertEqual(CT[CT.index('[Unit]'):CT.index('EOF\n      systemctl daemon-reload')],
+    def test_update_preserves_the_earlier_source_build_and_toolchains(self):
+        for destructive in ('rm -rf /opt/hope', '"$HOME/.cargo"', '"$HOME/.rustup"', 'apt purge', 'apt autoremove'):
+            self.assertNotIn(destructive, CT)
+        self.assertIn('cp -p /etc/hope/hope.env "$staged/hope.env"', CT)
+        begin = CT.index('[Unit]')
+        self.assertEqual(CT[begin:CT.index('EOF', begin)],
                          INSTALL[INSTALL.index('[Unit]'):INSTALL.index('EOF\nsystemctl enable -q --now hope')])
 
-    def test_update_resigns_agents_with_the_kept_key_and_never_aborts(self):
-        body = CT[CT.index('function update_script'):]
-        deploy = body.index('CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" '
-                            '"/opt/hope-agents" "hope-agents.tar.gz"')
-        self.assertLess(body.index('install -m 755 /opt/hope/hope-server'), deploy)
-        self.assertLess(deploy, body.index('systemctl start hope'))
-        self.assertIn('ensure_dependencies openssl', body)
-        # A key is created only when there is none and no release signed elsewhere is published.
-        self.assertIn('if [[ ! -e /etc/hope/release-signing.pem && ! -e /var/lib/hope/releases/current ]]; then\n'
-                      '        (umask 077 && openssl genrsa -out /etc/hope/release-signing.pem 3072 2>/dev/null)', body)
-        self.assertEqual(body.count('openssl genrsa'), 1)
-        # Fetch and signing run as if-conditions, so a failure warns and the service is still started.
-        self.assertRegex(body, r'if CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents"')
-        self.assertIn('&& $STD env HOPE_SIGNING_KEY=/etc/hope/release-signing.pem sh /opt/hope/tools/assemble-release.sh '
-                      '--staging /opt/hope-agents --version "$(cat /opt/hope/VERSION)" --out /var/lib/hope/releases; then', body)
-        self.assertEqual(body.count('msg_warn '), 3)
+    def test_update_signs_agents_only_after_server_activation(self):
+        activate = CT.index('python3 "$activation" install')
+        deploy = CT.index('fetch_and_deploy_gh_release "hope-agents"')
+        self.assertLess(activate, deploy)
+        self.assertIn('"prebuild" "$release" "$staged/agents" "hope-agents.tar.gz"', CT)
+        self.assertIn('ensure_dependencies python3 openssl', CT)
+        self.assertIn('! -e "$release_dir/current"', CT)
+        self.assertIn('--out "$release_dir"', CT)
+        self.assertEqual(CT.count('openssl genrsa'), 1)
+        self.assertIn('if FORCE_UPDATE=1 CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope-agents"', CT)
 
     def test_the_container_is_small(self):
         resources = META['install_methods'][0]['resources']
@@ -148,6 +136,7 @@ class InstallScript(unittest.TestCase):
         # The package carries what the pair runs.
         package = (ROOT / 'scripts' / 'package-server.sh').read_text()
         self.assertIn('scripts/assemble-release.sh "$staging/hope-server-$version/tools/assemble-release.sh"', package)
+        self.assertIn('scripts/activate-server.py "$staging/hope-server-$version/tools/activate-server.py"', package)
         self.assertIn('> "$staging/hope-server-$version/VERSION"', package)
 
     def test_releases_carry_the_unsigned_agents(self):

@@ -39,6 +39,7 @@ cp LICENSE "$staging/hope-server-$version/LICENSE"
 # install-hope.sh signs the release's hope-agents.tar.gz with this, using the server's own key.
 mkdir -p "$staging/hope-server-$version/tools"
 install -m 755 scripts/assemble-release.sh "$staging/hope-server-$version/tools/assemble-release.sh"
+install -m 755 scripts/activate-server.py "$staging/hope-server-$version/tools/activate-server.py"
 printf '%s\n' "$version" > "$staging/hope-server-$version/VERSION"
 name=hope-server-$architecture-linux.tar.gz
 # Reproducible ordering and ownership; the installer extracts into its own staging directory.
