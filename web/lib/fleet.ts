@@ -153,7 +153,31 @@ export function hostIssues(host: Host, now = Date.now() / 1000): Issue[] {
         ? `Agent silent for ${duration(now - host.last_report)}`
         : "Agent has never reported",
     });
-  if (state.key === "reporting") {
+  const staleMeasurements =
+    host.metrics_received_at != null &&
+    now - host.metrics_received_at >= AGENT_STALE_SECONDS;
+  if (state.key === "reporting" && staleMeasurements)
+    issues.push({
+      host,
+      severity: "warning",
+      kind: "agent",
+      message: `Measurements unchanged for ${duration(now - host.metrics_received_at!)}, despite arriving reports`,
+    });
+  if (
+    state.key === "reporting" &&
+    host.metrics_received_at != null &&
+    host.last_collected_at != null
+  ) {
+    const offset = host.last_collected_at - host.metrics_received_at;
+    if (Math.abs(offset) >= 60)
+      issues.push({
+        host,
+        severity: "warning",
+        kind: "agent",
+        message: `Sample timestamp is ${duration(Math.abs(offset))} ${offset > 0 ? "ahead of" : "behind"} server receipt; check clocks and queued data`,
+      });
+  }
+  if (state.key === "reporting" && !staleMeasurements) {
     const cpu = cpuPercent(host);
     if (cpu != null && cpu >= 90)
       issues.push({

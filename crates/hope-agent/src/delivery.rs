@@ -240,6 +240,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             report_id: uuid::Uuid::new_v4().to_string(),
             agent_id: "identity".into(),
+            sequence: None,
             collected_at: time,
             inventory: None,
             metrics: Metrics::default(),

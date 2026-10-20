@@ -66,6 +66,7 @@ function host(overrides: Partial<Host>): Host {
     last_seen: now,
     last_report: null,
     last_collected_at: null,
+    metrics_received_at: null,
     agent_revoked: false,
     enrichment_status: "completed",
     discovery_method: "icmp",
@@ -610,4 +611,34 @@ test("the fleet counts agents by what can be done about their update", () => {
     manual: 0,
     total: 0,
   });
+});
+
+test("fresh heartbeats expose stale measurements without raising stale resource alarms", () => {
+  const fixture = host({
+    agent_id: "agent",
+    last_report: now - 1,
+    metrics_received_at: now - 600,
+    last_collected_at: now - 600,
+    metrics: { ...metrics, cpu_percent: 99 },
+  });
+  expect(hostState(fixture, now).key).toBe("reporting");
+  expect(hostIssues(fixture, now).map((issue) => issue.message)).toEqual([
+    "Measurements unchanged for 10 min, despite arriving reports",
+  ]);
+  for (const offset of [-240, 240]) {
+    const messages = hostIssues(
+      host({
+        ...fixture,
+        metrics: null,
+        metrics_received_at: now,
+        last_collected_at: now + offset,
+      }),
+      now,
+    )
+      .filter((issue) => issue.kind === "agent")
+      .map((issue) => issue.message);
+    expect(messages).toEqual([
+      `Sample timestamp is 4 min ${offset > 0 ? "ahead of" : "behind"} server receipt; check clocks and queued data`,
+    ]);
+  }
 });

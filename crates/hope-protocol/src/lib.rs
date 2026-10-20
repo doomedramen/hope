@@ -149,6 +149,13 @@ pub struct AgentUninstallInstructions {
 pub struct ReportResponse {
     pub accepted: bool,
     pub duplicate: bool,
+    /// Whether this report supplies the current live sample, including a retried acknowledgment.
+    /// Absent on older servers.
+    #[serde(default)]
+    pub live_applied: Option<bool>,
+    /// Durable server watermark, allowing an agent restored from an old backup to recover.
+    #[serde(default)]
+    pub report_sequence: Option<u64>,
     /// Seconds the server asks the agent to wait between samples; older servers omit it.
     #[serde(default)]
     pub report_interval_seconds: Option<u32>,
@@ -889,11 +896,17 @@ pub struct AgentReport {
     pub schema_version: u32,
     pub report_id: String,
     pub agent_id: String,
+    /// Durable order within an agent identity; independent of its wall clock.
+    #[serde(default)]
+    pub sequence: Option<u64>,
     pub collected_at: f64,
     pub inventory: Option<Inventory>,
     pub metrics: Metrics,
     pub collectors: Vec<CollectorStatus>,
 }
+
+/// Largest exact JSON integer across Rust and browser clients.
+pub const MAX_REPORT_SEQUENCE: u64 = (1 << 53) - 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct EnrollmentRequest {
@@ -1059,6 +1072,9 @@ pub struct Host {
     pub last_report: Option<f64>,
     #[serde(default)]
     pub last_collected_at: Option<f64>,
+    /// Server receipt time of the sample currently displayed, rather than any queued heartbeat.
+    #[serde(default)]
+    pub metrics_received_at: Option<f64>,
     #[serde(default)]
     pub agent_revoked: bool,
     /// The installation was removed remotely; the identity remains for history and re-enrollment.
@@ -1130,6 +1146,7 @@ impl Host {
             last_seen: 0.0,
             last_report: None,
             last_collected_at: None,
+            metrics_received_at: None,
             agent_revoked: false,
             agent_uninstalled: false,
             enrichment_status: EnrichmentStatus::Pending,

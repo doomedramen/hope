@@ -334,16 +334,20 @@ class Linux(Base):
 
     def test_uninstall_keeps_identity(self):
         self.ok(self.env.run())
+        counter = self.env.paths('system')['state'] / 'report-sequence.json'
+        counter.write_text('{"agent_id":"agent-1","reserved":42}')
         result = self.env.run('uninstall', token=None, server=None)
         self.ok(result)
         paths = self.env.paths('system')
         self.assertFalse(paths['binary'].exists())
         self.assertFalse(paths['unit'].exists())
         self.assertTrue((paths['state'] / 'config.json').exists())
+        self.assertIn('42', counter.read_text())
         self.assertIn('Identity retained', result.out)
 
     def test_uninstall_purge_removes_identity(self):
         self.ok(self.env.run())
+        (self.env.paths('system')['state'] / 'report-sequence.json').write_text('{"reserved":42}')
         result = self.env.run('uninstall', token=None, server=None, HOPE_PURGE_IDENTITY=1)
         self.ok(result)
         self.assertFalse(self.env.paths('system')['state'].exists())

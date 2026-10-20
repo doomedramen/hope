@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 16;
+const LATEST: i64 = 17;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
@@ -139,6 +139,14 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
         sqlx::query("PRAGMA user_version = 16")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 17 {
+        sqlx::raw_sql(include_str!("migrations/0017_report_order.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 17")
             .execute(&mut *tx)
             .await?;
     }
@@ -300,7 +308,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         for table in [
             "child_batch_heads",
             "child_batches",
@@ -316,6 +324,7 @@ mod tests {
             "source_device_identities",
             "shared_source_members",
             "pending_legacy_identities",
+            "agent_report_heads",
         ] {
             let exists: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",

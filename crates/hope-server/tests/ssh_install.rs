@@ -440,6 +440,7 @@ async fn send_report(state: &State, agent: &str, credential: &str) {
         schema_version: SCHEMA_VERSION,
         report_id: Uuid::new_v4().to_string(),
         agent_id: agent.into(),
+        sequence: None,
         collected_at: now(),
         inventory: None,
         metrics: Metrics {

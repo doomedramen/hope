@@ -77,6 +77,8 @@ async fn first_reports_after_enrollment_or_ca_update_trust_the_new_monitor_ca() 
                 async move {
                     sender.send(report).await.unwrap();
                     Json(ReportResponse {
+                        live_applied: None,
+                        report_sequence: None,
                         accepted: true,
                         duplicate: false,
                         report_interval_seconds: Some(30),

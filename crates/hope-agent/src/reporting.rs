@@ -50,20 +50,32 @@ pub(crate) struct Acceptance {
 struct InventoryDelivery {
     fingerprint: String,
     accepted_at: f64,
+    accepted_sequence: Option<u64>,
+    refreshed_at: Option<Instant>,
 }
 impl InventoryDelivery {
-    fn changed(&self, inventory: &Inventory, collected_at: f64) -> Result<bool> {
+    fn changed(&self, inventory: &Inventory) -> Result<bool> {
         Ok(self.fingerprint
             != serde_json::to_string(&collect::stable_inventory(inventory.clone()))?
-            || collected_at - self.accepted_at >= 3600.0)
+            || self
+                .refreshed_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(3600)))
     }
     fn accept(&mut self, report: &AgentReport) -> Result<()> {
-        if report.collected_at >= self.accepted_at
-            && let Some(inventory) = &report.inventory
-        {
+        let newer = match (report.sequence, self.accepted_sequence) {
+            (Some(sequence), Some(previous)) => sequence >= previous,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => report.collected_at >= self.accepted_at,
+        };
+        if newer {
+            self.accepted_sequence = report.sequence;
+            self.accepted_at = report.collected_at;
+        }
+        if newer && let Some(inventory) = &report.inventory {
             self.fingerprint =
                 serde_json::to_string(&collect::stable_inventory(inventory.clone()))?;
-            self.accepted_at = report.collected_at;
+            self.refreshed_at = Some(Instant::now());
         }
         Ok(())
     }
@@ -331,7 +343,8 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
     let mut child_retry_at = Instant::now();
     let mut child_failures = 0u32;
     let mut inventory_delivery = InventoryDelivery::default();
-    let mut first_report: Option<String> = None;
+    let mut sequence =
+        crate::sequence::Sequence::load(dir, &configuration.agent_id, &spool).await?;
     let mut failures = 0u32;
     let mut update_requests = crate::updates::Requests;
     tokio::pin!(shutdown);
@@ -350,8 +363,8 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
             _=&mut sampling => { anyhow::bail!("Collector stopped unexpectedly"); }
             Some(((inventory,metrics,mut collectors),collected_at,child_snapshots))=samples.recv() => {
                 collectors.push(crate::updates::status(dir));
-                let changed=inventory_delivery.changed(&inventory,collected_at)?;
-                let mut report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),collected_at,inventory:changed.then_some(inventory),metrics,collectors };
+                let changed=inventory_delivery.changed(&inventory)?;
+                let mut report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),sequence:Some(sequence.next(dir).await?),collected_at,inventory:changed.then_some(inventory),metrics,collectors };
                 crate::telemetry::bound_report(&mut report)?;
                 for snapshot in child_snapshots {
                     let Some(batches) = child_schedule.batch(snapshot, &configuration.agent_id, collected_at) else { continue; };
@@ -380,7 +393,6 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                         eprintln!("Dropped invalid local child inventory batch; core reporting continues");
                     }
                 }
-                if first_report.is_none() { first_report=Some(report.report_id.clone()); }
                 current_reports.insert(report.report_id.clone());
                 spool.push(report,now())?;
                 current_reports.retain(|id| spool.iter().any(|report| &report.report_id == id));
@@ -392,17 +404,24 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                 match outcome {
                     Outcome::Accepted(response) => {
                         debug_assert!(response.accepted);
+                        if let Some(watermark) = response.report_sequence { sequence.advance(dir, watermark).await?; }
                         spool.remove(&report.report_id); failures=0; retry_at=Instant::now();
                         if let Some(version)=&response.update_to { update_requests.handle_now(dir,version).await; }
                         if let Some(seconds)=response.report_interval_seconds { period_tx.send_if_modified(|period| { let next=Duration::from_secs(seconds.clamp(MIN_INTERVAL_SECONDS,MAX_INTERVAL_SECONDS).into()); if *period==next { false } else { *period=next; true } }); }
-                        inventory_delivery.accept(&report)?;
-                        if current_reports.remove(&report.report_id) {
+                        let applied = response.live_applied != Some(false);
+                        if applied { inventory_delivery.accept(&report)?; }
+                        let current = current_reports.remove(&report.report_id);
+                        if current && applied {
                             let accepted=now();
                             config::write_private(&dir.join("last-report"),accepted.to_string().as_bytes()).await?;
                             config::write_private(&dir.join("last-acceptance.json"),&serde_json::to_vec(&Acceptance { agent_id:configuration.agent_id.clone(),report_id:report.report_id.clone(),run_id:run_id.clone(),process_id:std::process::id(),operation:operation.into(),activation_id:activation_id.clone(),collected_at:report.collected_at,accepted_at:accepted })?).await?;
                         }
                         config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
-                        if operation!="run" && first_report.as_ref()==Some(&report.report_id) { println!("Agent report accepted"); return Ok(()); }
+                        if !applied && current {
+                            // Refresh inventory with the next new sample after a restored counter.
+                            inventory_delivery = InventoryDelivery::default();
+                        }
+                        if operation!="run" && current && applied { println!("Agent report accepted"); return Ok(()); }
                     }
                     Outcome::Revoked => {
                         let mut disabled = configuration.clone();
@@ -803,31 +822,46 @@ mod tests {
         };
         let (inventory, metrics, collectors) = sampler.sample().await;
         let mut delivery = InventoryDelivery::default();
-        assert!(delivery.changed(&inventory, 100.0).expect("changed"));
-        assert!(
-            delivery
-                .changed(&inventory, 200.0)
-                .expect("still unaccepted")
-        );
+        assert!(delivery.changed(&inventory).expect("changed"));
+        assert!(delivery.changed(&inventory).expect("still unaccepted"));
         let mut report = AgentReport {
             schema_version: SCHEMA_VERSION,
             report_id: Uuid::new_v4().to_string(),
             agent_id: Uuid::new_v4().to_string(),
+            sequence: None,
             collected_at: 200.0,
             inventory: Some(inventory.clone()),
             metrics,
             collectors,
         };
         delivery.accept(&report).expect("accept");
-        assert!(!delivery.changed(&inventory, 201.0).expect("unchanged"));
-        assert!(delivery.changed(&inventory, 3800.0).expect("refresh"));
+        assert!(!delivery.changed(&inventory).expect("unchanged"));
+        delivery.refreshed_at = Some(Instant::now() - Duration::from_secs(3600));
+        assert!(delivery.changed(&inventory).expect("refresh"));
+        delivery.refreshed_at = Some(Instant::now());
         let mut changed = inventory.clone();
         changed.hostname = "changed".into();
-        assert!(delivery.changed(&changed, 201.0).expect("new inventory"));
+        assert!(delivery.changed(&changed).expect("new inventory"));
         report.collected_at = 100.0;
         report.inventory = Some(changed);
         delivery.accept(&report).expect("old accepted backlog");
-        assert!(!delivery.changed(&inventory, 201.0).expect("latest remains"));
+        assert!(!delivery.changed(&inventory).expect("latest remains"));
+        report.sequence = Some(1);
+        report.collected_at = 500.0;
+        report.inventory = Some(inventory.clone());
+        delivery.accept(&report).unwrap();
+        let mut corrected = inventory.clone();
+        corrected.hostname = "clock-corrected".into();
+        report.sequence = Some(2);
+        report.collected_at = 50.0;
+        report.inventory = Some(corrected.clone());
+        delivery.accept(&report).unwrap();
+        assert!(!delivery.changed(&corrected).unwrap());
+        report.sequence = Some(1);
+        report.collected_at = 500.0;
+        report.inventory = Some(inventory);
+        delivery.accept(&report).unwrap();
+        assert!(!delivery.changed(&corrected).unwrap());
     }
     async fn server(
         status: &str,
@@ -856,6 +890,74 @@ mod tests {
             }
         });
         (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn restored_counter_waits_for_a_new_live_sample_before_confirming_installation() {
+        use axum::{Json, Router, extract::State, routing::post};
+        use std::sync::{Arc, Mutex};
+        let reports = Arc::new(Mutex::new(Vec::<AgentReport>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/api/v1/agent/report",
+                post(
+                    |State(reports): State<Arc<Mutex<Vec<AgentReport>>>>,
+                     Json(report): Json<AgentReport>| async move {
+                        let applied = report.sequence.unwrap() > 100;
+                        let watermark = report.sequence.unwrap().max(100);
+                        reports.lock().unwrap().push(report);
+                        Json(hope_protocol::ReportResponse {
+                            accepted: true,
+                            duplicate: false,
+                            live_applied: Some(applied),
+                            report_sequence: Some(watermark),
+                            report_interval_seconds: None,
+                            update_to: None,
+                        })
+                    },
+                ),
+            )
+            .with_state(reports.clone());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let config = configuration(format!("http://{address}"));
+        let mut sampler = FakeSampler {
+            count: 0,
+            stop_after_samples: None,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run(
+                &mut sampler,
+                &config,
+                Spool::default(),
+                "once",
+                dir.path(),
+                Duration::from_millis(50),
+                std::future::pending(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let accepted = {
+            let attempts = reports.lock().unwrap();
+            assert!(attempts.len() >= 2);
+            assert!(attempts[0].sequence.unwrap() <= 100);
+            attempts.last().unwrap().clone()
+        };
+        assert!(accepted.sequence.unwrap() > 100);
+        assert!(accepted.inventory.is_some());
+        let marker: Acceptance = serde_json::from_slice(
+            &tokio::fs::read(dir.path().join("last-acceptance.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker.report_id, accepted.report_id);
+        task.abort();
     }
 
     #[tokio::test]
@@ -977,6 +1079,7 @@ mod tests {
                 schema_version: SCHEMA_VERSION,
                 report_id: Uuid::new_v4().to_string(),
                 agent_id: config.agent_id,
+                sequence: None,
                 collected_at: now(),
                 inventory: None,
                 metrics: Metrics::default(),
@@ -1050,6 +1153,39 @@ mod tests {
         .await
         .expect("shutdown must not wait for collection")
         .expect("shutdown");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_one_off_report_confirms_a_live_sample_even_when_sampling_overtakes_http() {
+        let (endpoint, task) = server(
+            "200 OK",
+            r#"{"accepted":true,"duplicate":false,"live_applied":true}"#,
+            Duration::from_millis(100),
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut sampler = FakeSampler {
+            count: 0,
+            stop_after_samples: None,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run(
+                &mut sampler,
+                &configuration(endpoint),
+                Spool::default(),
+                "once",
+                dir.path(),
+                Duration::from_millis(10),
+                std::future::pending(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(sampler.count > 1);
+        assert!(dir.path().join("last-acceptance.json").exists());
         task.abort();
     }
 

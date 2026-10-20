@@ -598,7 +598,7 @@ if [ "$operation" = uninstall ]; then
     if [ "${HOPE_PURGE_IDENTITY:-}" = 1 ]; then
         state_safe || fail PATH_UNWRITABLE 'Refusing to purge through a symbolic link.'
         # Remove only files the agent creates; never the whole (possibly shared) directory.
-        for name in config.json spool.json child-spool.json child-sequence.json last-acceptance.json previous.json sample.json last-report agent.lock agent.log bootstrap-ca.pem update-queue update-result update-asked .install-transaction; do
+        for name in config.json spool.json report-sequence.json child-spool.json child-sequence.json last-acceptance.json previous.json sample.json last-report agent.lock agent.log bootstrap-ca.pem update-queue update-result update-asked .install-transaction; do
             rm -rf "${state:?}/$name"
         done
         rm -f "$state"/.hope-*.tmp "$state"/.update-result.*

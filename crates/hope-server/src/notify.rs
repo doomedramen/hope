@@ -322,7 +322,14 @@ pub fn problems(host: &Host, now: f64, last_scan: &HashMap<String, (f64, u32)>) 
                 format!("The agent on {} stopped reporting", host.name),
             );
         }
-        if let Some(metrics) = host.metrics.as_ref().filter(|_| !silent) {
+        let measurements_stale = host
+            .metrics_received_at
+            .is_some_and(|at| now - at >= AGENT_STALE_SECONDS);
+        if let Some(metrics) = host
+            .metrics
+            .as_ref()
+            .filter(|_| !silent && !measurements_stale)
+        {
             for disk in &metrics.disks {
                 if disk.total_bytes > 0.0 && !disk.is_guest_storage() {
                     let used = 100.0 * (1.0 - disk.available_bytes / disk.total_bytes);
@@ -450,6 +457,9 @@ pub fn problems(host: &Host, now: f64, last_scan: &HashMap<String, (f64, u32)>) 
 /// Unknown telemetry is not evidence that an existing resource problem recovered.
 fn resource_observed(host: &Host, key: &str, at: f64) -> bool {
     if host.agent_revoked
+        || host
+            .metrics_received_at
+            .is_some_and(|received| at - received >= AGENT_STALE_SECONDS)
         || host
             .last_report
             .is_none_or(|last| at - last > AGENT_STALE_SECONDS)
@@ -678,6 +688,27 @@ pub fn spawn(state: State) {
 mod tests {
     use super::*;
     use hope_protocol::DeviceGuess;
+
+    #[test]
+    fn arriving_backlog_is_not_evidence_of_a_fresh_resource_failure_or_recovery() {
+        let mut host = Host::new("a".into(), "fixture".into(), "agent");
+        host.agent_id = Some("agent".into());
+        host.last_report = Some(10_000.0);
+        host.metrics_received_at = Some(9_000.0);
+        host.metrics = Some(hope_protocol::Metrics {
+            service_summary: Some(hope_protocol::ServiceSummary {
+                active: 0,
+                failed: 1,
+                total: 1,
+            }),
+            ..Default::default()
+        });
+        assert!(problems(&host, 10_000.0, &HashMap::new()).is_empty());
+        assert!(!resource_observed(&host, "a:service", 10_000.0));
+        host.metrics_received_at = Some(10_000.0);
+        assert_eq!(problems(&host, 10_000.0, &HashMap::new()).len(), 1);
+        assert!(resource_observed(&host, "a:service", 10_000.0));
+    }
 
     #[test]
     fn service_notifications_keep_the_full_failure_count_when_details_are_bounded() {

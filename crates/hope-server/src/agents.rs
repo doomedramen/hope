@@ -387,6 +387,9 @@ pub async fn report(
     }
     if report.schema_version != SCHEMA_VERSION
         || Uuid::parse_str(&report.report_id).is_err()
+        || report
+            .sequence
+            .is_some_and(|sequence| sequence == 0 || sequence > hope_protocol::MAX_REPORT_SEQUENCE)
         || !report.collected_at.is_finite()
         || report.collected_at > now() + 300.0
         || report.collected_at < now() - 86400.0
@@ -400,21 +403,45 @@ pub async fn report(
     if let Some(inv) = &report.inventory {
         validate_inventory(inv)?;
     }
+    let mut tx = state.write_transaction().await?;
     let row = sqlx::query("SELECT body FROM hosts WHERE agent_id=?")
         .bind(&report.agent_id)
-        .fetch_optional(&state.0.db)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let mut host = StoredHost::decode(row.get("body"))?;
-    let duplicate: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM metrics WHERE agent_id=? AND report_id=?)")
+    let head: Option<(i64, String)> =
+        sqlx::query_as("SELECT sequence,report_id FROM agent_report_heads WHERE agent_id=?")
             .bind(&report.agent_id)
-            .bind(&report.report_id)
-            .fetch_one(&state.0.db)
+            .fetch_optional(&mut *tx)
             .await?;
+    let live_applied = match (report.sequence, &head) {
+        (Some(sequence), Some((prior, _))) => sequence > *prior as u64,
+        (Some(_), None) => true,
+        // Once an identity supports ordering, old queued reports and older binaries cannot
+        // replace its live measurements. Their valid history remains ingestible.
+        (None, Some(_)) => false,
+        (None, None) => report.collected_at >= host.last_collected_at.unwrap_or(0.0),
+    };
+    let duplicate = head.as_ref().is_some_and(|(_, id)| id == &report.report_id)
+        || sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM metrics WHERE agent_id=? AND report_id=?)",
+        )
+        .bind(&report.agent_id)
+        .bind(&report.report_id)
+        .fetch_one(&mut *tx)
+        .await?;
     let mut response = ReportResponse {
         accepted: true,
         duplicate,
+        live_applied: Some(
+            (live_applied && (!duplicate || head.is_none()))
+                || head.as_ref().is_some_and(|(_, id)| id == &report.report_id),
+        ),
+        report_sequence: report
+            .sequence
+            .filter(|_| live_applied && !duplicate)
+            .or_else(|| head.as_ref().map(|(sequence, _)| *sequence as u64)),
         report_interval_seconds: Some(state.report_interval()),
         update_to: pending_update(&host, now()),
     };
@@ -431,9 +458,8 @@ pub async fn report(
     .bind(&report.agent_id)
     .bind(report.collected_at - spacing)
     .bind(report.collected_at + spacing)
-    .fetch_one(&state.0.db)
+    .fetch_one(&mut *tx)
     .await?;
-    let mut tx = state.write_transaction().await?;
     if !crowded {
         sqlx::query(
             "INSERT OR IGNORE INTO metrics(agent_id,report_id,collected_at,body) VALUES(?,?,?,?)",
@@ -445,7 +471,8 @@ pub async fn report(
         .execute(&mut *tx)
         .await?;
     }
-    let identity_changed = report.inventory.is_some() || host.last_seen < now() - 7.0 * 86400.0;
+    let identity_changed =
+        (live_applied && report.inventory.is_some()) || host.last_seen < now() - 7.0 * 86400.0;
     host.last_report = Some(now());
     host.last_seen = now();
     if let Some(version) = agent_version(&headers) {
@@ -454,8 +481,14 @@ pub async fn report(
     settle_update_request(&mut host, now());
     response.update_to = pending_update(&host, now());
     // A backlog delivered after an outage fills history but never replaces newer live state.
-    if report.collected_at >= host.last_collected_at.unwrap_or(0.0) {
+    if live_applied {
         host.last_collected_at = Some(report.collected_at);
+        host.metrics_received_at = Some(now());
+        if let Some(sequence) = report.sequence {
+            sqlx::query("INSERT INTO agent_report_heads(agent_id,sequence,report_id) VALUES(?,?,?) ON CONFLICT(agent_id) DO UPDATE SET sequence=excluded.sequence,report_id=excluded.report_id")
+                .bind(&report.agent_id).bind(sequence as i64).bind(&report.report_id)
+                .execute(&mut *tx).await?;
+        }
         if let Some(inv) = report.inventory {
             host.name = inv.hostname.clone();
             host.addresses = inventory_addresses(&inv);

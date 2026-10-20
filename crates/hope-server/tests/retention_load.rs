@@ -99,6 +99,7 @@ async fn seven_days_for_250_hosts_keep_reports_and_discovery_writes_responsive()
                     schema_version: SCHEMA_VERSION,
                     report_id: Uuid::new_v4().to_string(),
                     agent_id: agent.clone(),
+                    sequence: None,
                     collected_at: now(),
                     inventory: None,
                     metrics: Metrics::default(),

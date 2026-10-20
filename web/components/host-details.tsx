@@ -338,6 +338,13 @@ export function HostDetails({
               <>
                 Reported <Age value={host.last_report} lower /> · collected{" "}
                 <Age value={host.last_collected_at} lower />
+                {host.metrics_received_at != null && (
+                  <>
+                    {" "}
+                    · measurements received{" "}
+                    <Age value={host.metrics_received_at} lower />
+                  </>
+                )}
               </>
             ) : (
               <>

@@ -209,6 +209,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             report_id: uuid::Uuid::new_v4().to_string(),
             agent_id: uuid::Uuid::new_v4().to_string(),
+            sequence: None,
             collected_at: 1.0,
             inventory: None,
             collectors: vec![],

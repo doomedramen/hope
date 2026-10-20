@@ -2925,4 +2925,76 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByRole("heading", { name: "atlas-nas" }),
     ).toBeVisible();
   });
+  test("live readings recover after a clock correction and expose timestamp skew", async ({
+    page,
+    request,
+  }) => {
+    const token = await (
+      await request.post("/api/v1/enrollment-tokens", { data: {} })
+    ).json();
+    const agent = randomUUID();
+    const inventory = {
+      hostname: "clock-order-probe",
+      os: "Linux",
+      architecture: "x86_64",
+      cpu_model: "Test CPU",
+      cpu_cores: 2,
+      memory_total_bytes: 1000,
+      interfaces: [],
+      disks: [],
+      gpus: [],
+      collectors: [],
+    };
+    const enrolled = await request.post("/api/v1/agent/enroll", {
+      data: {
+        schema_version: 1,
+        token: token.token,
+        agent_id: agent,
+        credential: randomBytes(32).toString("hex"),
+        inventory,
+      },
+    });
+    expect(enrolled.ok(), await enrolled.text()).toBeTruthy();
+    const credential = (await enrolled.json()).credential;
+    const start = Date.now() / 1000;
+    const report = async (
+      sequence: number,
+      collected_at: number,
+      cpu_percent: number,
+    ) => {
+      const response = await request.post("/api/v1/agent/report", {
+        headers: { Authorization: `Bearer ${credential}` },
+        data: {
+          schema_version: 1,
+          report_id: randomUUID(),
+          agent_id: agent,
+          sequence,
+          collected_at,
+          inventory: null,
+          metrics: { cpu_percent, disks: [], gpus: [] },
+          collectors: [],
+        },
+      });
+      expect(response.ok(), await response.text()).toBeTruthy();
+      return response.json();
+    };
+    await report(1, start + 240, 10);
+    const bootstrap: Bootstrap = await (
+      await request.get("/api/v1/bootstrap")
+    ).json();
+    const host = bootstrap.hosts.find((host) => host.agent_id === agent)!;
+    await page.goto(`/?view=host&host=${host.id}`);
+    const details = page.getByRole("complementary", { name: "Host details" });
+    const readings = details.getByRole("region", { name: "Current readings" });
+    await expect(readings).toContainText("10%");
+    await expect(details).toContainText("ahead of server receipt");
+    expect((await report(2, start, 99)).live_applied).toBe(true);
+    await expect(readings).toContainText("99%");
+    await expect(details).not.toContainText("ahead of server receipt");
+    await expect(details).toContainText("measurements received");
+    expect((await report(1, start + 240, 10)).live_applied).toBe(false);
+    await expect(readings).toContainText("99%");
+    await page.reload();
+    await expect(readings).toContainText("99%");
+  });
 });

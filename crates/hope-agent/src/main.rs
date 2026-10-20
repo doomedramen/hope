@@ -8,6 +8,7 @@ mod memory;
 mod network;
 mod proxmox;
 mod reporting;
+mod sequence;
 mod status;
 mod telemetry;
 mod updates;

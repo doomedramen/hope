@@ -106,6 +106,15 @@ export type AgentUninstallInstructions = {
 command: string, custom_ca_required: boolean, };
 export type ReportResponse = { accepted: boolean, duplicate: boolean,
 /**
+ * Whether this report supplies the current live sample, including a retried acknowledgment.
+ * Absent on older servers.
+ */
+live_applied: boolean | null,
+/**
+ * Durable server watermark, allowing an agent restored from an old backup to recover.
+ */
+report_sequence: bigint | null,
+/**
  * Seconds the server asks the agent to wait between samples; older servers omit it.
  */
 report_interval_seconds: number | null,
@@ -313,7 +322,11 @@ memory_cached_bytes: number | null,
  * ZFS ARC size; counted as used by the kernel, released under pressure.
  */
 memory_zfs_arc_bytes: number | null, swap_used_bytes: number | null, swap_total_bytes: number | null, load_average: LoadAverage | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null, network_interfaces: Array<NetworkCounter>, disk_read_bytes_per_second: number | null, disk_write_bytes_per_second: number | null, disks: Array<Disk>, disk_io: Array<DiskIo>, pools: Array<StoragePool>, gpus: Array<Gpu>, temperatures: Array<Temperature>, services: Array<ServiceUnit>, service_summary: ServiceSummary | null, monitors: Array<MonitorResult>, containers: Array<Container>, };
-export type AgentReport = { schema_version: number, report_id: string, agent_id: string, collected_at: number, inventory: Inventory | null, metrics: Metrics, collectors: Array<CollectorStatus>, };
+export type AgentReport = { schema_version: number, report_id: string, agent_id: string,
+/**
+ * Durable order within an agent identity; independent of its wall clock.
+ */
+sequence: bigint | null, collected_at: number, inventory: Inventory | null, metrics: Metrics, collectors: Array<CollectorStatus>, };
 export type EnrollmentRequest = { schema_version: number, token: string, agent_id: string,
 /**
  * Client-generated secret persisted before enrollment, allowing safe retries after a lost response.
@@ -332,7 +345,11 @@ export type Host = { uptime: UptimeSettings, id: string, agent_id: string | null
 /**
  * First usable address inside a configured HOPE network, for safe connection defaults.
  */
-primary_ip: string | null, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean,
+primary_ip: string | null, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null,
+/**
+ * Server receipt time of the sample currently displayed, rather than any queued heartbeat.
+ */
+metrics_received_at: number | null, agent_revoked: boolean,
 /**
  * The installation was removed remotely; the identity remains for history and re-enrollment.
  */

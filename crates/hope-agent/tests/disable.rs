@@ -28,6 +28,8 @@ async fn revocation_survives_process_restarts_until_successful_credential_replac
                         (StatusCode::UNAUTHORIZED, Json(json!({"code":"agent_revoked", "error":"Agent credential revoked"})))
                     } else {
                         (StatusCode::OK, Json(serde_json::to_value(ReportResponse {
+                            live_applied: None,
+                            report_sequence: None,
                             accepted: true, duplicate: false, report_interval_seconds: None, update_to: None,
                         }).unwrap()))
                     }

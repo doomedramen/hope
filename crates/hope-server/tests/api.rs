@@ -557,6 +557,7 @@ async fn reporting_deduplicates_and_keeps_identity_after_dhcp_and_rejects_revoca
         schema_version: 1,
         report_id: Uuid::new_v4().to_string(),
         agent_id: agent.clone(),
+        sequence: None,
         collected_at: now(),
         inventory: Some(inv),
         metrics: Metrics {
@@ -2494,6 +2495,7 @@ async fn invalid_schema_and_metrics_are_rejected_without_storage() {
         schema_version: 999,
         report_id: Uuid::new_v4().to_string(),
         agent_id: agent,
+        sequence: None,
         collected_at: now(),
         inventory: None,
         metrics: Metrics::default(),
@@ -2614,6 +2616,7 @@ async fn queued_report_cannot_commit_after_revocation() {
                     schema_version: SCHEMA_VERSION,
                     report_id: Uuid::new_v4().to_string(),
                     agent_id: agent,
+                    sequence: None,
                     collected_at: now(),
                     inventory: None,
                     metrics: Metrics::default(),
@@ -2723,6 +2726,7 @@ async fn revoked_identity_requires_bound_token_and_new_secret_for_recovery() {
         schema_version: SCHEMA_VERSION,
         report_id: Uuid::new_v4().to_string(),
         agent_id: agent,
+        sequence: None,
         collected_at: now(),
         inventory: None,
         metrics: Metrics::default(),
@@ -2867,6 +2871,7 @@ async fn ambiguous_mac_requires_manual_merge_and_preserves_history_and_map() {
         schema_version: SCHEMA_VERSION,
         report_id: Uuid::new_v4().to_string(),
         agent_id: agent.clone(),
+        sequence: None,
         collected_at: now(),
         inventory: None,
         metrics: Metrics {
@@ -3453,6 +3458,7 @@ async fn reports_record_the_agent_version_and_bootstrap_names_the_release_on_off
         schema_version: 1,
         report_id: Uuid::new_v4().to_string(),
         agent_id: agent,
+        sequence: None,
         collected_at: now(),
         inventory: None,
         metrics: Metrics::default(),
@@ -3499,6 +3505,7 @@ async fn live_reports_update_the_host_and_stream_it_while_history_keeps_its_spac
             schema_version: 1,
             report_id: Uuid::new_v4().to_string(),
             agent_id: agent.clone(),
+            sequence: None,
             collected_at: start + 10.0 * step as f64,
             inventory: None,
             metrics: Metrics {
@@ -3624,6 +3631,7 @@ async fn report_with_updater(
         schema_version: 1,
         report_id: Uuid::new_v4().to_string(),
         agent_id: agent.into(),
+        sequence: None,
         collected_at: now(),
         inventory: None,
         metrics: Metrics::default(),
@@ -4147,6 +4155,7 @@ async fn identity_live_event_preserves_the_snapshot_source_view() {
             schema_version: SCHEMA_VERSION,
             report_id: Uuid::new_v4().to_string(),
             agent_id: agent.clone(),
+            sequence: None,
             collected_at: now(),
             inventory: None,
             metrics: Metrics::default(),
@@ -4299,7 +4308,7 @@ async fn identity_migration_repairs_saved_views_and_keeps_settings_and_old_links
     let projected = state.host("migration-scan").await.unwrap().unwrap();
     let source_id = projected.source_device_id.clone().unwrap();
     // Recreate the schema and persisted projection corruption produced by v14.
-    sqlx::raw_sql("DROP INDEX confirmed_source_device; DROP INDEX confirmed_scan_host; ALTER TABLE device_associations DROP COLUMN manual; DROP TABLE source_device_settings; PRAGMA user_version=14;").execute(&state.0.db).await.unwrap();
+    sqlx::raw_sql("DROP INDEX confirmed_source_device; DROP INDEX confirmed_scan_host; ALTER TABLE device_associations DROP COLUMN manual; DROP TABLE source_device_settings; DROP TABLE agent_report_heads; PRAGMA user_version=14;").execute(&state.0.db).await.unwrap();
     sqlx::query("UPDATE hosts SET body=? WHERE id='migration-scan'")
         .bind(serde_json::to_string(&projected).unwrap())
         .execute(&state.0.db)
@@ -4740,4 +4749,124 @@ async fn inventory_writes_wait_for_an_independent_sqlite_writer_before_reading()
         .expect("writer is released")
         .expect("save succeeds without a stale-snapshot upgrade");
     assert_eq!(state.host(&host.id).await.unwrap().unwrap().name, "after");
+}
+
+#[tokio::test]
+async fn report_order_survives_clock_corrections_replay_retention_and_restart() {
+    let (dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let host_id = state.hosts().await.unwrap()[0].id.clone();
+    let start = now();
+    let mut report = AgentReport {
+        schema_version: SCHEMA_VERSION,
+        report_id: Uuid::new_v4().to_string(),
+        agent_id: agent.clone(),
+        sequence: Some(1),
+        collected_at: start + 240.0,
+        inventory: Some(inventory()),
+        metrics: Metrics {
+            cpu_percent: Some(10.0),
+            ..Default::default()
+        },
+        collectors: vec![],
+    };
+    let send = |app: Router, report: AgentReport| {
+        let bearer = bearer.clone();
+        async move {
+            request(
+                &app,
+                "POST",
+                "/api/v1/agent/report",
+                json!(report),
+                Some(("authorization", &bearer)),
+            )
+            .await
+        }
+    };
+    assert_eq!(
+        send(app.clone(), report.clone()).await.1["live_applied"],
+        true
+    );
+    let fast = report.clone();
+    for (sequence, timestamp, cpu) in [
+        (2, start - 240.0, 99.0),
+        (3, start + 200.0, 25.0),
+        (4, start, 40.0),
+    ] {
+        report.sequence = Some(sequence);
+        report.report_id = Uuid::new_v4().to_string();
+        report.collected_at = timestamp;
+        report.metrics.cpu_percent = Some(cpu);
+        report.inventory.as_mut().unwrap().hostname = format!("sequence-{sequence}");
+        let (status, response) = send(app.clone(), report.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["live_applied"], true);
+        let host = state.host(&host_id).await.unwrap().unwrap();
+        assert_eq!(host.metrics.unwrap().cpu_percent, Some(cpu));
+        assert_eq!(host.last_collected_at, Some(timestamp));
+        assert!(host.metrics_received_at.unwrap() >= start);
+        assert_eq!(host.name, format!("sequence-{sequence}"));
+    }
+    let received = state
+        .host(&host_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .metrics_received_at;
+    // The watermark cannot depend on retained history, including samples omitted by downsampling.
+    sqlx::query("DELETE FROM metrics WHERE agent_id=?")
+        .bind(&agent)
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    let duplicate = send(app.clone(), report.clone()).await.1;
+    assert_eq!(duplicate["duplicate"], true);
+    assert_eq!(duplicate["live_applied"], true);
+    assert_eq!(
+        state
+            .host(&host_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .metrics_received_at,
+        received
+    );
+    let restarted = State::open(
+        dir.path().join("test.db").to_str().unwrap(),
+        state.0.server_url.clone(),
+        "releases".into(),
+        state.0.capabilities.clone(),
+    )
+    .await
+    .unwrap();
+    let app = router(restarted.clone(), "web/out");
+    for sequence in [Some(1), None] {
+        let mut old = fast.clone();
+        old.sequence = sequence;
+        old.report_id = Uuid::new_v4().to_string();
+        let response = send(app.clone(), old).await.1;
+        assert_eq!(response["accepted"], true);
+        assert_eq!(response["live_applied"], false);
+        assert_eq!(response["report_sequence"], 4);
+        let host = restarted.host(&host_id).await.unwrap().unwrap();
+        assert_eq!(host.metrics.unwrap().cpu_percent, Some(40.0));
+        assert_eq!(host.metrics_received_at, received);
+        assert_eq!(host.name, "sequence-4");
+    }
+    report.sequence = Some(5);
+    report.report_id = Uuid::new_v4().to_string();
+    report.metrics.cpu_percent = Some(75.0);
+    assert_eq!(
+        send(app.clone(), report.clone()).await.1["live_applied"],
+        true
+    );
+    for sequence in [0, MAX_REPORT_SEQUENCE + 1] {
+        report.sequence = Some(sequence);
+        report.report_id = Uuid::new_v4().to_string();
+        assert_eq!(
+            send(app.clone(), report.clone()).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
 }
