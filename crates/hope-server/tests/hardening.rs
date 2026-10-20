@@ -192,6 +192,48 @@ async fn security_headers_everywhere_and_no_store_on_api_responses() {
 }
 
 #[tokio::test]
+async fn readiness_checks_database_and_shutdown_while_liveness_stays_process_only() {
+    let env = env("http://localhost:8080").await;
+    let ready = send(
+        &env.app,
+        Request::get("/readyz").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(ready.status(), StatusCode::OK);
+    let ready: Value = serde_json::from_str(&body_text(ready).await).unwrap();
+    assert_eq!(ready["status"], "ready");
+    assert_eq!(ready["checks"]["database"], "ok");
+    assert_eq!(ready["checks"]["shutdown"], "running");
+
+    env.state.0.db.close().await;
+    let unavailable = send(
+        &env.app,
+        Request::get("/readyz").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let unavailable: Value = serde_json::from_str(&body_text(unavailable).await).unwrap();
+    assert_eq!(unavailable["checks"]["database"], "unavailable");
+
+    env.state.0.shutdown.cancel();
+    let stopping = send(
+        &env.app,
+        Request::get("/readyz").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(stopping.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let stopping: Value = serde_json::from_str(&body_text(stopping).await).unwrap();
+    assert_eq!(stopping["checks"]["shutdown"], "stopping");
+
+    let live = send(
+        &env.app,
+        Request::get("/healthz").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(live.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn session_cookie_flags_follow_the_canonical_origin() {
     let secure = env("https://hope.example").await;
     let (_, set_cookie) = setup_session(&secure).await;

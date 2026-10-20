@@ -11,6 +11,7 @@ pub mod enrichment;
 pub mod error;
 pub mod fingerprint;
 pub mod headers;
+pub mod health;
 pub mod identity;
 pub mod inventory;
 pub mod lifecycle;
@@ -104,6 +105,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
                 axum::Json(serde_json::json!({"status":"ok", "pid":std::process::id()}))
             }),
         )
+        .route("/readyz", get(health::readiness))
         .route("/agent/install", get(releases::installer))
         .route("/agent/uninstall", get(releases::uninstaller))
         .nest_service(

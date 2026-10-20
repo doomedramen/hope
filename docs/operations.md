@@ -106,6 +106,10 @@ Without Docker: `make build` (type generation, static web export, `cargo build -
 
 Capacity: up to 250 active agent identities and one administrator. Revoking or uninstalling an agent releases its slot; its identity and device history remain available, and an identity-bound reset can reactivate it when capacity is available.
 
+## Health checks
+
+`GET /healthz` is a process liveness check and stays successful while the HTTP process can answer. `GET /readyz` returns 200 only when the server is not shutting down and SQLite answers `SELECT 1` within one second; it returns 503 with the failed check otherwise. The Docker image uses `/healthz` so a database fault does not automatically restart the process. Use `/readyz` when a proxy or orchestrator should stop sending new work to a server that cannot reach its database. Neither endpoint confirms that discovery or notification delivery is progressing.
+
 ## Canonical URL and reverse proxy
 
 The server does not terminate TLS. Put it behind an existing HTTPS reverse proxy and set `HOPE_SERVER_URL` to the exact public origin users and agents will use, for example `https://hope.example.com`. This single value is used for:
