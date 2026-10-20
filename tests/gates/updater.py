@@ -132,15 +132,18 @@ class Gate:
         config.write_text('[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=hopegate updater CA\n[v3]\n' + extensions.read_text())
         return str(config)
 
-    def publish(self, version, key, root=None):
-        """Sign the agent built as `version` and publish it as the release `root` offers (a partial,
-        Linux-only release: this gate runs on one platform)."""
+    def publish(self, version, key, root=None, rotate=False):
+        """Sign a built agent and publish it under the root the server serves."""
         staging = self.work / 'staging' / f'{version}-{key}'
         shutil.rmtree(staging, ignore_errors=True)
         shutil.copytree(self.work / 'agents' / version, staging)
         env = dict(os.environ, HOPE_SIGNING_KEY=str(self.work / f'{key}.pem'))
-        run(['sh', 'scripts/assemble-release.sh', '--staging', str(staging), '--version', version, '--out', str(root or self.root),
-             '--allow-partial'], cwd=REPO, env=env)
+        command = ['sh', 'scripts/assemble-release.sh', '--staging', str(staging), '--version', version,
+                   '--out', str(root or self.root)]
+        # Key rotation requires a complete release. Linux x86_64 is the only supported target,
+        # so this gate's single staged artifact is complete when exercising key rotation.
+        command.append('--rotate-key' if rotate else '--allow-partial')
+        run(command, cwd=REPO, env=env)
         return (root or self.root) / 'current'
 
     def manifest_sha(self, version_hint=None):
@@ -356,18 +359,13 @@ class Gate:
 
         with self.cell('a server that switches signing keys cannot push an update') as go:
             if go:
-                other = self.work / 'releases-other'
-                other.mkdir(exist_ok=True)
-                foreign = self.publish(V3, 'other', other).resolve()
-                good = os.readlink(self.root / 'current')
+                # Publish the new key under this same release root. Repointing current outside
+                # HOPE_RELEASE_DIR no longer represents a valid published release.
+                self.publish(V3, 'other', rotate=True)
                 pid, sha = self.main_pid(), self.installed_sha()
                 previous = int(self.result_file().get('at', '0'))
-                self.repoint(str(foreign))
-                try:
-                    self.request_all()
-                    wait_for('the updater to refuse the release', lambda: int(self.result_file().get('at', '0')) > previous, 120)
-                finally:
-                    self.repoint(good)
+                self.request_all()
+                wait_for('the updater to refuse the release', lambda: int(self.result_file().get('at', '0')) > previous, 120)
                 result = self.result_file()
                 expect(result.get('status') == 'failed' and result.get('code') == 'MANIFEST_INVALID', f'update-result says {result}')
                 expect(self.installed_version() == V2 and self.installed_sha() == sha, 'the installed agent changed')
@@ -377,7 +375,7 @@ class Gate:
 
         with self.cell('a signed release whose agent cannot report is rolled back') as go:
             if go:
-                self.publish(V4, 'good')
+                self.publish(V4, 'good', rotate=True)
                 sha = self.installed_sha()
                 previous = int(self.result_file().get('at', '0'))
                 # The server answers 503 to reports from the new version only: the installed agent keeps
@@ -420,14 +418,6 @@ class Gate:
         if host and host.get('agent_version') == version and host.get('last_report') and time.time() - host['last_report'] < 30 and self.collector(host):
             return host
         return None
-
-    def repoint(self, target):
-        link = self.root / 'current'
-        temporary = self.root / '.current.tmp'
-        if temporary.is_symlink() or temporary.exists():
-            temporary.unlink()
-        temporary.symlink_to(target)
-        os.replace(temporary, link)
 
     # ------------------------------------------------------------------ teardown and report
     def down(self):
