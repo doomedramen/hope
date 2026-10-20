@@ -15,28 +15,6 @@ use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-fn same_interface_mac(
-    left: &hope_protocol::ChildDeviceReport,
-    right: &hope_protocol::ChildDeviceReport,
-) -> bool {
-    let macs = |report: &hope_protocol::ChildDeviceReport| {
-        report
-            .interfaces
-            .iter()
-            .filter_map(|interface| interface.mac.as_deref())
-            .chain(
-                report
-                    .network_configuration
-                    .iter()
-                    .filter_map(|network| network.mac.as_deref()),
-            )
-            .map(str::to_ascii_lowercase)
-            .collect::<HashSet<_>>()
-    };
-    let left = macs(left);
-    macs(right).iter().any(|mac| left.contains(mac))
-}
-
 /// Stores a bounded, sequenced child inventory independently of the parent heartbeat. Only a
 /// complete authoritative generation advances absence tracking; partial inventories cannot age
 /// children toward archival.
@@ -178,133 +156,8 @@ pub async fn child_report(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    if shared_scope && let Some(old_scope) = batch.legacy_source_scope.as_deref() {
-        for legacy in &batch.legacy_identities {
-            let kind = match legacy.kind {
-                hope_protocol::ChildDeviceKind::DockerContainer => "docker_container",
-                hope_protocol::ChildDeviceKind::ProxmoxVm => "proxmox_vm",
-                hope_protocol::ChildDeviceKind::ProxmoxLxc => "proxmox_lxc",
-            };
-            let old_row: Option<(String, String, f64, String)> = sqlx::query_as("SELECT id,body,observed_at,lifecycle FROM source_devices WHERE parent_agent_id=? AND source=? AND source_scope=? AND source_key=? AND incarnation=? AND kind=?")
-                    .bind(&batch.agent_id).bind(source).bind(old_scope).bind(&legacy.key).bind(&legacy.incarnation).bind(kind)
-                    .fetch_optional(&mut *tx).await?;
-            let Some((old_id, old_body, old_seen, old_lifecycle)) = old_row else {
-                continue;
-            };
-            // Keep metadata-only migration evidence pending until a current observation of
-            // the canonical identity proves that the interface still matches. Old local
-            // maps can survive VMID reuse, so a tuple alone must never move history.
-            sqlx::query("INSERT OR IGNORE INTO pending_legacy_identities(source,parent_agent_id,legacy_source_device_id,source_scope,source_key,canonical_incarnation) VALUES(?,?,?,?,?,?)")
-                    .bind(source).bind(&batch.agent_id).bind(&old_id).bind(&batch.source_scope).bind(&legacy.key).bind(&legacy.canonical_incarnation)
-                    .execute(&mut *tx).await?;
+    crate::identity::reconcile_legacy_source_maps(&mut tx, source, &batch, shared_scope).await?;
 
-            // The canonical owner may have reported before this remote reporter submitted its
-            // legacy map. In that ordering no later guest batch from this reporter may arrive
-            // (for example, its collector can be stopped), so reconcile against the already
-            // stored shared identity now. The token-bound scope/key/incarnation selects the
-            // canonical record; matching kind, fresh timestamps, and an interface MAC prove the
-            // legacy row is the same current guest rather than a reused VMID.
-            crate::identity::reconcile_shared_identity(
-                &mut tx,
-                source,
-                &batch.source_scope,
-                &legacy.key,
-                &legacy.canonical_incarnation,
-            )
-            .await?;
-            let canonical_id: Option<String> = sqlx::query_scalar("SELECT source_device_id FROM source_device_identities WHERE source=? AND identity_owner='@shared' AND source_scope=? AND source_key=? AND incarnation=?")
-                .bind(source).bind(&batch.source_scope).bind(&legacy.key).bind(&legacy.canonical_incarnation)
-                .fetch_optional(&mut *tx).await?;
-            if old_lifecycle != "archived"
-                && let Some(canonical_id) = canonical_id
-                && canonical_id != old_id
-            {
-                let canonical: Option<(String, String, f64, String)> = sqlx::query_as(
-                    "SELECT kind,body,observed_at,lifecycle FROM source_devices WHERE id=?",
-                )
-                .bind(&canonical_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-                if let Some((canonical_kind, canonical_body, canonical_seen, canonical_lifecycle)) =
-                    canonical
-                    && canonical_kind == kind
-                    && canonical_lifecycle != "archived"
-                    && batch.observed_at >= old_seen
-                    && batch.observed_at - old_seen <= 30.0 * 86400.0
-                    && batch.observed_at >= canonical_seen
-                    && batch.observed_at - canonical_seen <= 30.0 * 86400.0
-                    && (canonical_seen - old_seen).abs() <= 30.0 * 86400.0
-                {
-                    let old: hope_protocol::ChildDeviceReport = serde_json::from_str(&old_body)?;
-                    let canonical: hope_protocol::ChildDeviceReport =
-                        serde_json::from_str(&canonical_body)?;
-                    if same_interface_mac(&old, &canonical) {
-                        crate::identity::merge_legacy_source_identity(
-                            &mut tx,
-                            &canonical_id,
-                            &old_id,
-                            &batch.agent_id,
-                        )
-                        .await?;
-                        sqlx::query("DELETE FROM pending_legacy_identities WHERE source=? AND parent_agent_id=? AND legacy_source_device_id=? AND source_scope=? AND source_key=? AND canonical_incarnation=?")
-                            .bind(source).bind(&batch.agent_id).bind(&old_id).bind(&batch.source_scope).bind(&legacy.key).bind(&legacy.canonical_incarnation)
-                            .execute(&mut *tx).await?;
-                    }
-                }
-            } else if old_lifecycle != "archived"
-                && batch.observed_at >= old_seen
-                && batch.observed_at - old_seen <= 30.0 * 86400.0
-            {
-                // Before any current owner report exists, two authorized cluster members may
-                // submit maps for copies of the same old cluster-wide VM inventory. Join those
-                // copies only when both point to the exact same token-bound canonical identity,
-                // have current rows, and share an interface MAC. The pending-map membership is
-                // the cluster proof; VMID/name/IP coincidence alone never reaches this path.
-                let old_report: hope_protocol::ChildDeviceReport = serde_json::from_str(&old_body)?;
-                let siblings = sqlx::query("SELECT p.parent_agent_id,p.legacy_source_device_id,d.body,d.observed_at,d.lifecycle,d.kind FROM pending_legacy_identities p JOIN source_devices d ON d.id=p.legacy_source_device_id AND d.parent_agent_id=p.parent_agent_id AND d.source=p.source AND d.source_key=p.source_key JOIN shared_source_members m ON m.source=p.source AND m.source_scope=p.source_scope AND m.agent_id=p.parent_agent_id JOIN agents a ON a.id=p.parent_agent_id AND a.revoked=0 WHERE p.source=? AND p.source_scope=? AND p.source_key=? AND p.canonical_incarnation=? AND p.legacy_source_device_id!=? AND p.parent_agent_id!=? ORDER BY d.observed_at DESC,d.id")
-                    .bind(source).bind(&batch.source_scope).bind(&legacy.key).bind(&legacy.canonical_incarnation)
-                    .bind(&old_id).bind(&batch.agent_id).fetch_all(&mut *tx).await?;
-                for sibling in siblings {
-                    let sibling_parent: String = sibling.get("parent_agent_id");
-                    let sibling_id: String = sibling.get("legacy_source_device_id");
-                    let sibling_body: String = sibling.get("body");
-                    let sibling_seen: f64 = sibling.get("observed_at");
-                    let sibling_lifecycle: String = sibling.get("lifecycle");
-                    let sibling_kind: String = sibling.get("kind");
-                    if sibling_kind != kind
-                        || sibling_lifecycle == "archived"
-                        || batch.observed_at < sibling_seen
-                        || batch.observed_at - sibling_seen > 30.0 * 86400.0
-                        || (sibling_seen - old_seen).abs() > 30.0 * 86400.0
-                    {
-                        continue;
-                    }
-                    let sibling_report: hope_protocol::ChildDeviceReport =
-                        serde_json::from_str(&sibling_body)?;
-                    if !same_interface_mac(&old_report, &sibling_report) {
-                        continue;
-                    }
-                    // Pick a stable survivor independent of which agent's metadata arrives
-                    // first; old URLs for the duplicate remain resolvable through the alias.
-                    let (survivor, duplicate, duplicate_parent) = if old_id <= sibling_id {
-                        (&old_id, &sibling_id, &sibling_parent)
-                    } else {
-                        (&sibling_id, &old_id, &batch.agent_id)
-                    };
-                    crate::identity::merge_legacy_source_identity(
-                        &mut tx,
-                        survivor,
-                        duplicate,
-                        duplicate_parent,
-                    )
-                    .await?;
-                    sqlx::query("DELETE FROM pending_legacy_identities WHERE source=? AND parent_agent_id=? AND legacy_source_device_id=? AND source_scope=? AND source_key=? AND canonical_incarnation=?")
-                        .bind(source).bind(duplicate_parent).bind(duplicate).bind(&batch.source_scope).bind(&legacy.key).bind(&legacy.canonical_incarnation)
-                        .execute(&mut *tx).await?;
-                }
-            }
-        }
-    }
     sqlx::query("INSERT INTO child_batches(batch_id,parent_agent_id,source,source_scope,sequence,inventory_generation,inventory_id,chunk_index,chunk_count,observed_at,complete,received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&batch.batch_id).bind(&batch.agent_id).bind(source).bind(&batch.source_scope)
         .bind(batch.sequence as i64).bind(batch.inventory_generation as i64)
@@ -387,7 +240,7 @@ pub async fn child_report(
                 let old: hope_protocol::ChildDeviceReport = serde_json::from_str(&old_body)?;
                 if batch.observed_at < old_seen
                     || batch.observed_at - old_seen > 30.0 * 86400.0
-                    || !same_interface_mac(device, &old)
+                    || !crate::identity::same_interface_mac(device, &old)
                 {
                     continue;
                 }
@@ -432,7 +285,9 @@ pub async fn child_report(
             pending_legacy_id
         } else if let Some((old_id, old_body, old_seen)) = &legacy_row {
             let old: hope_protocol::ChildDeviceReport = serde_json::from_str(old_body)?;
-            if batch.observed_at - *old_seen <= 30.0 * 86400.0 && same_interface_mac(device, &old) {
+            if batch.observed_at - *old_seen <= 30.0 * 86400.0
+                && crate::identity::same_interface_mac(device, &old)
+            {
                 Some(old_id.clone())
             } else {
                 None
