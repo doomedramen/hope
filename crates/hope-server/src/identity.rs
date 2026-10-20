@@ -158,6 +158,148 @@ pub async fn change(state: &State, source_id: &str, update: AssociationUpdate) -
     state.host(&host_id).await?.ok_or_else(ApiError::not_found)
 }
 
+pub(crate) async fn merge_source_device(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    survivor: &str,
+    duplicate: &str,
+) -> ApiResult<()> {
+    merge_source_device_inner(tx, survivor, duplicate, None).await
+}
+
+pub(crate) async fn merge_legacy_source_identity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    survivor: &str,
+    duplicate: &str,
+    reporting_agent: &str,
+) -> ApiResult<()> {
+    merge_source_device_inner(tx, survivor, duplicate, Some(reporting_agent)).await
+}
+
+async fn merge_source_device_inner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    survivor: &str,
+    duplicate: &str,
+    legacy_reporter: Option<&str>,
+) -> ApiResult<()> {
+    let compatible: bool = if let Some(reporter) = legacy_reporter {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM source_devices a JOIN source_devices b ON a.id=? AND b.id=? WHERE a.source=b.source AND a.kind=b.kind AND a.source_key=b.source_key AND b.parent_agent_id=?)")
+            .bind(survivor).bind(duplicate).bind(reporter).fetch_one(&mut **tx).await?
+    } else {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM source_devices a JOIN source_devices b ON a.id=? AND b.id=? WHERE a.source=b.source AND a.kind=b.kind AND ((a.source_scope=b.source_scope AND a.source_key=b.source_key AND a.incarnation=b.incarnation AND (a.parent_agent_id=b.parent_agent_id OR (EXISTS(SELECT 1 FROM shared_source_members m WHERE m.source=a.source AND m.source_scope=a.source_scope AND m.agent_id=a.parent_agent_id) AND EXISTS(SELECT 1 FROM shared_source_members m WHERE m.source=b.source AND m.source_scope=b.source_scope AND m.agent_id=b.parent_agent_id)))) OR (a.source_scope!=b.source_scope AND a.source_key=b.source_key AND abs(a.observed_at-b.observed_at)<604800 AND NOT EXISTS(SELECT 1 FROM shared_source_scopes s WHERE s.source=a.source AND s.source_scope IN (a.source_scope,b.source_scope)))))")
+        .bind(survivor).bind(duplicate).fetch_one(&mut **tx).await?
+    };
+    if !compatible {
+        return Err(ApiError::bad(
+            "Devices do not share a proven source identity",
+        ));
+    }
+    let exact_identity: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM source_devices a JOIN source_devices b ON a.source=b.source AND a.source_scope=b.source_scope AND a.source_key=b.source_key AND a.incarnation=b.incarnation AND a.kind=b.kind WHERE a.id=? AND b.id=?)")
+        .bind(survivor).bind(duplicate).fetch_one(&mut **tx).await?;
+    if !exact_identity {
+        let bodies: Vec<String> =
+            sqlx::query_scalar("SELECT body FROM source_devices WHERE id IN (?,?)")
+                .bind(survivor)
+                .bind(duplicate)
+                .fetch_all(&mut **tx)
+                .await?;
+        let reports: Vec<hope_protocol::ChildDeviceReport> = bodies
+            .iter()
+            .map(|body| serde_json::from_str(body))
+            .collect::<Result<_, _>>()?;
+        let macs = |report: &hope_protocol::ChildDeviceReport| {
+            report
+                .interfaces
+                .iter()
+                .filter_map(|i| i.mac.as_deref())
+                .chain(
+                    report
+                        .network_configuration
+                        .iter()
+                        .filter_map(|network| network.mac.as_deref()),
+                )
+                .map(str::to_ascii_lowercase)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        if reports.len() != 2 || macs(&reports[0]).is_disjoint(&macs(&reports[1])) {
+            return Err(ApiError::bad(
+                "Legacy candidates need a shared interface MAC",
+            ));
+        }
+    }
+    sqlx::query("UPDATE source_device_identities SET source_device_id=? WHERE source_device_id=?")
+        .bind(survivor)
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    if exact_identity && legacy_reporter.is_none() {
+        crate::metrics::merge_source_history(tx, survivor, duplicate).await?;
+    }
+    merge_associations(tx, survivor, duplicate).await?;
+    sqlx::query("UPDATE source_devices SET host_id=COALESCE(host_id,(SELECT host_id FROM source_devices WHERE id=?)) WHERE id=?").bind(duplicate).bind(survivor).execute(&mut **tx).await?;
+    sqlx::query("INSERT OR IGNORE INTO device_relationships SELECT CASE WHEN from_device_id=? THEN ? ELSE from_device_id END,CASE WHEN to_device_id=? THEN ? ELSE to_device_id END,kind,detail,?,observed_at FROM device_relationships WHERE source_device_id=? AND kind!='runs_on'")
+        .bind(duplicate).bind(survivor).bind(duplicate).bind(survivor).bind(survivor).bind(duplicate).execute(&mut **tx).await?;
+    sqlx::query("INSERT OR IGNORE INTO device_relationships SELECT ?,to_device_id,'runs_on',detail,?,observed_at FROM device_relationships WHERE source_device_id=? AND kind='runs_on' AND NOT EXISTS(SELECT 1 FROM device_relationships WHERE source_device_id=? AND kind='runs_on')")
+        .bind(survivor).bind(survivor).bind(duplicate).bind(survivor).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM device_relationships WHERE source_device_id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM device_associations WHERE source_device_id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT OR IGNORE INTO retired_devices(device_id,retired_at) SELECT ?,retired_at FROM retired_devices WHERE device_id=?")
+        .bind(survivor)
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM retired_devices WHERE device_id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT INTO source_device_aliases(alias_id,survivor_id) VALUES(?,?) ON CONFLICT(alias_id) DO UPDATE SET survivor_id=excluded.survivor_id").bind(duplicate).bind(survivor).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO device_id_aliases(alias_id,survivor_id) VALUES(?,?) ON CONFLICT(alias_id) DO UPDATE SET survivor_id=excluded.survivor_id").bind(duplicate).bind(survivor).execute(&mut **tx).await?;
+    sqlx::query("UPDATE source_device_aliases SET survivor_id=? WHERE survivor_id=?")
+        .bind(survivor)
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE device_id_aliases SET survivor_id=? WHERE survivor_id=?")
+        .bind(survivor)
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM source_devices WHERE id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Consolidate old parent-scoped rows only after every contributing reporter has joined the
+/// token-bound scope. The exact incarnation must match, so a reused VMID remains separate.
+pub(crate) async fn reconcile_shared_identity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    source: &str,
+    scope: &str,
+    key: &str,
+    incarnation: &str,
+) -> ApiResult<()> {
+    let rows = sqlx::query("SELECT d.id FROM source_devices d JOIN shared_source_members m ON m.source=d.source AND m.source_scope=d.source_scope AND m.agent_id=d.parent_agent_id WHERE d.source=? AND d.source_scope=? AND d.source_key=? AND d.incarnation=? ORDER BY d.ownership_generation DESC,d.observed_at DESC,d.id")
+        .bind(source).bind(scope).bind(key).bind(incarnation).fetch_all(&mut **tx).await?;
+    let Some(first) = rows.first() else {
+        return Ok(());
+    };
+    let survivor: String = first.get("id");
+    for row in rows.iter().skip(1) {
+        let duplicate: String = row.get("id");
+        merge_source_device(tx, &survivor, &duplicate).await?;
+    }
+    sqlx::query("INSERT INTO source_device_identities(source,identity_owner,source_scope,source_key,incarnation,source_device_id) VALUES(?,'@shared',?,?,?,?) ON CONFLICT(source,identity_owner,source_scope,source_key,incarnation) DO UPDATE SET source_device_id=excluded.source_device_id")
+        .bind(source).bind(scope).bind(key).bind(incarnation).bind(&survivor).execute(&mut **tx).await?;
+    Ok(())
+}
+
 /// Transfer associations before installing the old source's URL alias. Delete first so the
 /// unique host index cannot discard the duplicate's confirmed association during the transfer.
 pub(crate) async fn merge_associations(
