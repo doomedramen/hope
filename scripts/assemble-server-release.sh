@@ -11,7 +11,10 @@ while [ "$#" -gt 0 ]; do
         *) echo "assemble-server-release: unknown argument $1" >&2; exit 1 ;;
     esac
 done
-[ -n "$staging" ] && [ -n "$out" ] || { echo 'Usage: assemble-server-release.sh --staging DIR --out DIR' >&2; exit 1; }
+if [ -z "$staging" ] || [ -z "$out" ]; then
+    echo 'Usage: assemble-server-release.sh --staging DIR --out DIR' >&2
+    exit 1
+fi
 architecture=x86_64
 for directory in "$staging"/server-*; do
     [ -e "$directory" ] || continue
@@ -22,7 +25,10 @@ for directory in "$staging"/server-*; do
 done
 directory=$staging/server-$architecture
 name=hope-server-$architecture-linux.tar.gz
-[ -s "$directory/$name" ] && [ -s "$directory/SHA256SUMS-server" ] || { echo "Missing server artifact for $architecture" >&2; exit 1; }
+if [ ! -s "$directory/$name" ] || [ ! -s "$directory/SHA256SUMS-server" ]; then
+    echo "Missing server artifact for $architecture" >&2
+    exit 1
+fi
 # Verify the architecture's own manifest before copying; never overlay the manifest.
 expected=$(awk -v name="$name" '$2 == name { print $1 }' "$directory/SHA256SUMS-server")
 actual=$(sha256sum "$directory/$name" | awk '{ print $1 }')
