@@ -1224,6 +1224,219 @@ async fn metadata_only_legacy_map_carries_old_remote_guest_to_current_owner() {
 }
 
 #[tokio::test]
+async fn late_legacy_map_reconciles_against_an_already_reported_canonical_guest() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (legacy_agent, legacy_credential, _) = enrolled(&state, &app).await;
+    let (owner_agent, owner_credential, _) = enrolled(&state, &app).await;
+    let token = "c".repeat(64);
+    let mut old = child_device();
+    old.identity.kind = ChildDeviceKind::ProxmoxVm;
+    old.identity.scope = "node-a-local".into();
+    old.identity.key = "99".into();
+    old.identity.incarnation = "old-remote-inc".into();
+    sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,body) VALUES('remote-old',?,'proxmox','node-a-local','99','old-remote-inc','proxmox_vm','running','remote guest',?,1,?)")
+        .bind(&legacy_agent).bind(now() - 1.0).bind(serde_json::to_string(&old).unwrap()).execute(&state.0.db).await.unwrap();
+    sqlx::query("INSERT INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES('remote-old','legacy-sample',?,30,'{}')")
+        .bind(now() - 1.0).execute(&state.0.db).await.unwrap();
+
+    // The current owner reports first. Its authenticated cluster identity is already stored,
+    // but the old remote copy is not yet linked because its reporter has not sent its map.
+    let mut current = child_device();
+    current.identity.kind = ChildDeviceKind::ProxmoxVm;
+    current.identity.scope = "joined-cluster".into();
+    current.identity.key = "99".into();
+    current.identity.incarnation = "shared-remote-inc".into();
+    current.ownership_generation = Some(2);
+    current.node = Some("node-b".into());
+    let mut report = child_batch(&owner_agent, 1, 1, true, now(), vec![current]);
+    report.source = ChildSourceKind::Proxmox;
+    report.source_scope = "joined-cluster".into();
+    report.source_token = Some(token.clone());
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(report),
+        Some(("authorization", &format!("Bearer {owner_credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let canonical: String = sqlx::query_scalar("SELECT source_device_id FROM source_device_identities WHERE identity_owner='@shared' AND source_key='99'")
+        .fetch_one(&state.0.db).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    // A metadata-only batch from the old reporter arrives later. There may be no subsequent
+    // child report (its collector can now be stopped), so ingest must reconcile the pending
+    // identity immediately against the already stored canonical report using MAC + freshness.
+    let mut mapping = child_batch(&legacy_agent, 1, 1, false, now() + 1.0, vec![]);
+    mapping.source = ChildSourceKind::Proxmox;
+    mapping.source_scope = "joined-cluster".into();
+    mapping.source_token = Some(token);
+    mapping.legacy_source_scope = Some("node-a-local".into());
+    mapping.legacy_identities = vec![LegacySourceIdentity {
+        kind: ChildDeviceKind::ProxmoxVm,
+        key: "99".into(),
+        incarnation: "old-remote-inc".into(),
+        canonical_incarnation: "shared-remote-inc".into(),
+    }];
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(mapping),
+        Some(("authorization", &format!("Bearer {legacy_credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let survivor: String = sqlx::query_scalar(
+        "SELECT survivor_id FROM source_device_aliases WHERE alias_id='remote-old'",
+    )
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(survivor, canonical);
+    let archived: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM source_devices WHERE lifecycle='archived'")
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        archived, 0,
+        "merged identities become aliases, not archives"
+    );
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pending_legacy_identities WHERE legacy_source_device_id='remote-old'",
+    )
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0);
+    let (status, old_url) = request(
+        &app,
+        "GET",
+        "/api/v1/hosts/remote-old",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(old_url["source_device_id"], canonical);
+    let (status, history) = request(
+        &app,
+        "GET",
+        "/api/v1/hosts/remote-old/source-metrics?hours=168",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(history.as_array().unwrap().len(), 2);
+    assert!(
+        history
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|point| point["source_device_id"] == "remote-old")
+    );
+}
+
+#[tokio::test]
+async fn authenticated_legacy_maps_reconcile_same_cluster_copies_before_owner_report() {
+    let (_dir, state, app, _) = setup().await;
+    let (first, first_credential, _) = enrolled(&state, &app).await;
+    let (second, second_credential, _) = enrolled(&state, &app).await;
+    let token = "d".repeat(64);
+    for (agent, id, old_scope, incarnation) in [
+        (&first, "old-a", "node-a-local", "old-a-inc"),
+        (&second, "old-b", "node-b-local", "old-b-inc"),
+    ] {
+        let mut old = child_device();
+        old.identity.kind = ChildDeviceKind::ProxmoxLxc;
+        old.identity.scope = old_scope.into();
+        old.identity.key = "241".into();
+        old.identity.incarnation = incarnation.into();
+        old.name = "guest".into();
+        old.interfaces.clear();
+        old.network_configuration = vec![GuestNetworkConfiguration {
+            name: "net0".into(),
+            bridge: Some("vmbr0".into()),
+            vlan_tag: None,
+            model: Some("virtio".into()),
+            mac: Some("02:00:00:00:00:41".into()),
+        }];
+        sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,body) VALUES(?,?, 'proxmox',?,?,?,'proxmox_lxc','running','guest',?,1,?)")
+            .bind(id).bind(agent).bind(old_scope).bind("241").bind(incarnation).bind(now() - 2.0).bind(serde_json::to_string(&old).unwrap())
+            .execute(&state.0.db).await.unwrap();
+    }
+
+    for (agent, credential, old_scope, incarnation) in [
+        (&first, &first_credential, "node-a-local", "old-a-inc"),
+        (&second, &second_credential, "node-b-local", "old-b-inc"),
+    ] {
+        let mut mapping = child_batch(agent, 1, 1, false, now(), vec![]);
+        mapping.source = ChildSourceKind::Proxmox;
+        mapping.source_scope = "joined-cluster".into();
+        mapping.source_token = Some(token.clone());
+        mapping.legacy_source_scope = Some(old_scope.into());
+        mapping.legacy_identities = vec![LegacySourceIdentity {
+            kind: ChildDeviceKind::ProxmoxLxc,
+            key: "241".into(),
+            incarnation: incarnation.into(),
+            canonical_incarnation: "shared-241-inc".into(),
+        }];
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(mapping),
+            Some(("authorization", &format!("Bearer {credential}"))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "same-cluster copies collapse by shared proof and MAC"
+    );
+    let survivor: String =
+        sqlx::query_scalar("SELECT survivor_id FROM source_device_aliases WHERE alias_id='old-b'")
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(survivor, "old-a");
+    let current_pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pending_legacy_identities WHERE legacy_source_device_id='old-a' AND canonical_incarnation='shared-241-inc'",
+    )
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        current_pending, 1,
+        "the surviving legacy row can migrate when its owner reports"
+    );
+    let projected = state.hosts().await.unwrap();
+    assert_eq!(
+        projected.len(),
+        3,
+        "two parent agents and one source guest row"
+    );
+}
+
+#[tokio::test]
 async fn legacy_identity_metadata_alone_cannot_merge_reused_guest_with_new_mac() {
     let (_dir, state, app, _cookie) = setup().await;
     let (first, first_credential, _) = enrolled(&state, &app).await;

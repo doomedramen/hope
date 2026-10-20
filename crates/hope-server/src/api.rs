@@ -729,6 +729,12 @@ async fn merge_source_device_inner(
                 .interfaces
                 .iter()
                 .filter_map(|i| i.mac.as_deref())
+                .chain(
+                    report
+                        .network_configuration
+                        .iter()
+                        .filter_map(|network| network.mac.as_deref()),
+                )
                 .map(str::to_ascii_lowercase)
                 .collect::<std::collections::HashSet<_>>()
         };
