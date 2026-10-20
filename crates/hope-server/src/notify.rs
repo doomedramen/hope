@@ -651,6 +651,11 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
 pub fn spawn(state: State) {
     for delivery in [false, true] {
         let state = state.clone();
+        let worker = if delivery {
+            "notification_delivery"
+        } else {
+            "notification_evaluation"
+        };
         let task = state.track();
         tokio::spawn(async move {
             let _task = task;
@@ -677,7 +682,13 @@ pub fn spawn(state: State) {
                 };
                 tokio::select! {
                     _=state.0.shutdown.cancelled()=>break,
-                    result=work=>if let Err(error)=result {tracing::warn!(%error,delivery,"notification background task failed");}
+                    result=work=>match result {
+                        Ok(()) => state.0.background.success(worker),
+                        Err(error) => {
+                            state.0.background.failure(worker);
+                            tracing::warn!(%error,delivery,"notification background task failed");
+                        }
+                    }
                 }
             }
         });

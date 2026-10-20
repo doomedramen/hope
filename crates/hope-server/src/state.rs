@@ -48,6 +48,7 @@ pub struct Inner {
     pub enrollment_ca: Option<String>,
     pub scheduler: crate::scanner::Scheduler,
     pub enrichment: crate::enrichment::Queue,
+    pub background: crate::health::BackgroundHealth,
     /// Cancelled when the process begins shutting down.
     pub shutdown: CancellationToken,
     pub proxies: crate::limits::TrustedProxies,
@@ -193,6 +194,7 @@ impl State {
                 .filter(|s| !s.trim().is_empty()),
             scheduler,
             enrichment: crate::enrichment::Queue::new(),
+            background: crate::health::BackgroundHealth::default(),
             shutdown: CancellationToken::new(),
             proxies: crate::limits::TrustedProxies::from_env()?,
             login_limit: crate::limits::Limiter::new(60.0, 10),

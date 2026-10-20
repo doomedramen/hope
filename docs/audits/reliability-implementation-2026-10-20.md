@@ -34,13 +34,13 @@ Follow-up reliability work after the baseline findings:
 - The reporting actor now services completed HTTP and child-delivery requests before draining its sample queue. A continuous stream of ready samples could otherwise starve accepted reports because the `select!` was biased toward sample collection. The regression test holds the mock response until a second sample finishes, then verifies that one-off reporting still completes.
 - The enrichment queue catches worker panics, logs the affected host, marks enrichment failed, clears its pending marker and continues processing later devices. A regression test simulates a panic and verifies both the visible failure state and that the next item completes.
 - Enrollment capacity is checked transactionally against active identities for both fresh enrollment and revoked-identity recovery. Revoked and uninstalled identities preserve history while freeing a slot; concurrent enrollment and reset tests verify the 250-agent ceiling and token retry behavior.
-- `/readyz` separates database readiness from process liveness with a one-second SQLite check and immediate shutdown refusal. It does not claim discovery or notification progress; loop health and queue/retention lag remain open follow-ups.
+- `/readyz` separates database readiness from process liveness with a one-second SQLite check and immediate shutdown refusal. Authenticated `/api/v1/system/status` reports background-loop progress, notification backlog age and host raw-metric retention lag; delivery success is distinguished from remote acceptance by the durable outbox depth and age.
 - The filesystem worker-cap test now gates its worker with channels instead of relying on a short sleep. The clock-order integration test compares SQLite `REAL` timestamps with a microsecond tolerance, avoiding platform-dependent last-bit differences. Other reporting deadlines allow for loaded CI and emulated builds.
 
 ## Validation
 
-- Linux x86_64 container checks: 278 passed, one intentionally ignored retention load test, including readiness, Linux ARP reconciliation, enrollment-capacity and enrichment panic recovery tests plus the storage-boundary compile-fail doctest; strict workspace Clippy and Rust formatting pass.
-- Native workspace tests: 277 passed and one intentionally ignored retention load test, including readiness, enrollment-capacity, enrichment panic recovery and storage-boundary compile-fail tests. The Linux-only ARP test runs in the Linux container suite.
+- Linux x86_64 container checks: 279 passed, one intentionally ignored retention load test, including readiness and operational-status tests, Linux ARP reconciliation, enrollment-capacity and enrichment panic recovery tests plus the storage-boundary compile-fail doctest; strict workspace Clippy and Rust formatting pass.
+- Native workspace tests: 278 passed and one intentionally ignored retention load test, including readiness and operational-status tests, enrollment-capacity, enrichment panic recovery and storage-boundary compile-fail tests. The Linux-only ARP test runs in the Linux container suite.
 - Web production build, TypeScript and ESLint pass.
 - Chromium/Playwright: 64 passed, including transport/recovery tests, measurement freshness checks and real-server live/source/clock history tests.
 - Release assembly harness: 20 passed.
@@ -53,6 +53,6 @@ The Rust, installer, release, shell, protocol and documentation checks were reru
 
 1. **Linux x86_64 acceptance.** Exercise actual packaged artifacts through fresh installation, upgrade, failed activation/restore, restart, interface replacement/raw-socket recovery, notification outage, database/disk pressure, guest churn and browser reconnection. Measure realistic inventory/history load and run a multi-day soak. The locally passing suites do not establish these release gates.
 
-Additional follow-ups from the baseline review remain: deliberate device retirement and purge semantics; background-loop health and queue/retention lag visibility; realistic populated-load measurements. The 250-agent ceiling now applies atomically to active identities, so revoked or uninstalled identities retain history without consuming an active slot. Discovery interface recovery is implemented, but its behavior on actual Linux x86_64 network changes remains unverified as noted above.
+Additional follow-ups from the baseline review remain: deliberate device retirement and purge semantics; source-metric retention lag visibility; realistic populated-load measurements. The 250-agent ceiling now applies atomically to active identities, so revoked or uninstalled identities retain history without consuming an active slot. Discovery interface recovery is implemented, but its behavior on actual Linux x86_64 network changes remains unverified as noted above.
 
 The project is materially more reliable, but the unverified Linux acceptance gates still prevent a recommendation for unattended use.

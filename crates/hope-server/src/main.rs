@@ -75,7 +75,10 @@ async fn main() -> Result<()> {
                 _ = timer.tick() => {}
             }
             if let Err(error) = metrics::retain(&maintenance).await {
+                maintenance.0.background.failure("retention");
                 tracing::error!(%error,"metric retention failed");
+            } else {
+                maintenance.0.background.success("retention");
             }
         }
     });

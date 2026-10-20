@@ -108,7 +108,9 @@ Capacity: up to 250 active agent identities and one administrator. Revoking or u
 
 ## Health checks
 
-`GET /healthz` is a process liveness check and stays successful while the HTTP process can answer. `GET /readyz` returns 200 only when the server is not shutting down and SQLite answers `SELECT 1` within one second; it returns 503 with the failed check otherwise. The Docker image uses `/healthz` so a database fault does not automatically restart the process. Use `/readyz` when a proxy or orchestrator should stop sending new work to a server that cannot reach its database. Neither endpoint confirms that discovery or notification delivery is progressing.
+`GET /healthz` is a process liveness check and stays successful while the HTTP process can answer. `GET /readyz` returns 200 only when the server is not shutting down and SQLite answers `SELECT 1` within one second; it returns 503 with the failed check otherwise. The Docker image uses `/healthz` so a database fault does not automatically restart the process. Use `/readyz` when a proxy or orchestrator should stop sending new work to a server that cannot reach its database.
+
+The authenticated `GET /api/v1/system/status` endpoint reports the last successful cycle and last error age for discovery, retention, notification evaluation and notification delivery. A task becomes stale after 15 minutes, 5 minutes, 3 minutes and 30 seconds respectively; it is `starting` until its first successful cycle. The response also reports notification outbox depth and oldest age, plus the oldest raw host metric sample and time beyond its 24-hour rollup boundary. Notification backlog older than 5 minutes or metric retention lag over 1 hour marks the overall status `degraded`. A successful delivery loop does not mean the remote notification service accepted every message; use the outbox age for that distinction. Source-metric retention lag is not included yet.
 
 ## Canonical URL and reverse proxy
 

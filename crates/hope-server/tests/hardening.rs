@@ -234,6 +234,77 @@ async fn readiness_checks_database_and_shutdown_while_liveness_stays_process_onl
 }
 
 #[tokio::test]
+async fn operational_status_is_admin_only_and_reports_worker_and_backlog_health() {
+    let env = env("http://localhost:8080").await;
+    assert_eq!(
+        send(
+            &env.app,
+            Request::get("/api/v1/system/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (cookie, _) = setup_session(&env).await;
+    for worker in [
+        "discovery",
+        "retention",
+        "notification_evaluation",
+        "notification_delivery",
+    ] {
+        env.state.0.background.success(worker);
+    }
+    let reference = now();
+    sqlx::query("INSERT INTO notification_outbox(alert_key,kind,destination,body,next_attempt,created_at) VALUES('test','offline','test','{}',?,?)")
+        .bind(reference)
+        .bind(reference - 400.0)
+        .execute(&env.state.0.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO metrics(agent_id,report_id,collected_at,resolution,body) VALUES('test','old-sample',?,30,'{}')")
+        .bind(reference - 90_000.0)
+        .execute(&env.state.0.db)
+        .await
+        .unwrap();
+
+    let response = send(
+        &env.app,
+        Request::get("/api/v1/system/status")
+            .header("cookie", cookie.clone())
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let status: Value = serde_json::from_str(&body_text(response).await).unwrap();
+    assert_eq!(status["status"], "degraded");
+    assert_eq!(status["database"], "ok");
+    assert_eq!(status["background_tasks"]["discovery"]["status"], "ok");
+    assert_eq!(status["notifications"]["pending"], 1);
+    assert!(
+        status["notifications"]["oldest_age_seconds"]
+            .as_f64()
+            .unwrap()
+            >= 400.0
+    );
+    assert!(status["metrics_retention"]["lag_seconds"].as_f64().unwrap() >= 3600.0);
+
+    env.state.0.background.failure("discovery");
+    let response = send(
+        &env.app,
+        Request::get("/api/v1/system/status")
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let status: Value = serde_json::from_str(&body_text(response).await).unwrap();
+    assert_eq!(status["background_tasks"]["discovery"]["status"], "failed");
+}
+
+#[tokio::test]
 async fn session_cookie_flags_follow_the_canonical_origin() {
     let secure = env("https://hope.example").await;
     let (_, set_cookie) = setup_session(&secure).await;

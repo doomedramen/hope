@@ -29,7 +29,9 @@ pub fn spawn(state: State) {
             _ = tokio::time::sleep(Duration::from_secs(20)) => {}
         }
         loop {
+            let mut cycle_ok = true;
             if let Err(error) = scheduled_scans(&state).await {
+                cycle_ok = false;
                 tracing::warn!(%error, "scheduled scans could not start");
             }
             if last_sweep.is_none_or(|t| t.elapsed() >= SWEEP_EVERY) {
@@ -41,7 +43,13 @@ pub fn spawn(state: State) {
                 traces = trace_routed(&state).await;
             }
             if let Err(error) = refresh_hosts(&state, &traces).await {
+                cycle_ok = false;
                 tracing::warn!(%error, "device refresh failed");
+            }
+            if cycle_ok {
+                state.0.background.success("discovery");
+            } else {
+                state.0.background.failure("discovery");
             }
             tokio::select! {
                 _ = state.0.shutdown.cancelled() => break,
