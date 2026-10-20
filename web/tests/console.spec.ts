@@ -5,6 +5,7 @@ import {
   type BrowserContext,
 } from "@playwright/test";
 import { randomUUID, randomBytes } from "node:crypto";
+import type { Bootstrap } from "@/lib/protocol";
 const password = "hope-browser-test-password";
 let adminState: Awaited<ReturnType<BrowserContext["storageState"]>> | undefined;
 const test = base.extend({
@@ -207,7 +208,7 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
     });
     expect(enrolled.ok(), await enrolled.text()).toBeTruthy();
     const credential = (await enrolled.json()).credential;
-    if (includeProxmox) {
+    if (includeProxmox && i === 0) {
       proxmoxAgent = agent;
       proxmoxCredential = credential;
     }
@@ -302,7 +303,9 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
                 bridge: "vmbr0",
                 vlan_tag: 42,
                 model: "virtio",
-                mac: "02:00:00:00:00:42",
+                // Deterministic test-only MAC; the UI route below models the
+                // canonical scan host created from this configured NIC.
+                mac: "02:fe:00:00:00:02",
               },
             ],
             disk_configuration: [
@@ -2300,7 +2303,55 @@ test.describe.serial("H.O.P.E console", () => {
         });
       },
     );
+    // The browser API has no scan-result ingestion endpoint. Shape the server's
+    // source-only fixture as the canonical DTO returned after a scan host with
+    // the configured NIC MAC has been associated with that Proxmox source.
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const bootstrap = (await response.json()) as Bootstrap;
+      const sourceGuest = bootstrap.hosts.find(
+        (host) => host.name === "dns-container",
+      );
+      expect(
+        sourceGuest,
+        `Bootstrap hosts: ${bootstrap.hosts.map((host) => `${host.id}:${host.name}:${host.source?.kind ?? "core"}`).join(", ")}`,
+      ).toBeTruthy();
+      const mergedGuest = {
+        ...sourceGuest!,
+        id: "scanned-dns-container",
+        discovery_method: "arp",
+        addresses: ["192.168.1.41"],
+        macs: ["02:fe:00:00:00:02"],
+      };
+      bootstrap.hosts = [
+        ...bootstrap.hosts.filter((host) => host.id !== sourceGuest!.id),
+        mergedGuest,
+      ];
+      await route.fulfill({ response, json: bootstrap });
+    });
+    const bootstrapResponse = page.waitForResponse((response) =>
+      response.url().endsWith("/api/v1/bootstrap"),
+    );
     await page.goto("/?view=hosts");
+    const bootstrap = (await (await bootstrapResponse).json()) as Bootstrap;
+    const guestHosts = bootstrap.hosts.filter(
+      (host) => host.name === "dns-container",
+    );
+    expect(guestHosts).toHaveLength(1);
+    expect(guestHosts[0].id).toBe("scanned-dns-container");
+    expect(guestHosts[0].source?.kind).toBe("proxmox_lxc");
+    expect(guestHosts[0].source_device_id).toBeTruthy();
+    expect(guestHosts[0].child?.identity.key).toBe("202");
+    expect(guestHosts[0].child?.metrics.memory_measurement).toBe(
+      "hypervisor_guest",
+    );
+    expect(guestHosts[0].child?.metrics.disk_read_bytes_per_second).toBe(2048);
+    expect(guestHosts[0].macs).toContain("02:fe:00:00:00:02");
+    await page.getByLabel("Search hosts").fill("dns-container");
+    await expect(
+      page.getByRole("row").filter({ hasText: "dns-container" }),
+    ).toHaveCount(1);
+    await page.getByLabel("Search hosts").fill("");
     await page.getByLabel("Search hosts").fill("proxmox-fixture-node");
     await page
       .getByRole("row")
@@ -2329,6 +2380,12 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("region", { name: "Source inventory" }),
     ).toContainText("Guest OS data observed");
+    await expect(
+      page.getByRole("region", { name: "Source inventory" }),
+    ).toContainText("Hypervisor memory");
+    await expect(
+      page.getByRole("region", { name: "Source inventory" }),
+    ).toContainText("Read 2.0 KiB/s");
     await expect(
       page.getByRole("region", { name: "Source inventory" }),
     ).toContainText("4.7 GiB used of 14.9 GiB");
@@ -2485,6 +2542,48 @@ test.describe.serial("H.O.P.E console", () => {
           { label: "Hardware identity", value: "same agent identity" },
         ],
       },
+      {
+        suggested_survivor_id: "guest-source",
+        review_only: true,
+        candidates: [
+          {
+            id: "guest-source",
+            name: "dns-container",
+            primary_ip: null,
+            device_type: "container",
+            platform: "Debian",
+            source_count: 1,
+            last_seen: Date.now() / 1000,
+            sources: ["proxmox_lxc"],
+          },
+          {
+            id: "scan-one",
+            name: "dns-container scan one",
+            primary_ip: "192.168.1.41",
+            device_type: "server",
+            platform: "Linux",
+            source_count: 1,
+            last_seen: Date.now() / 1000,
+            sources: ["scan"],
+          },
+          {
+            id: "scan-two",
+            name: "dns-container scan two",
+            primary_ip: "192.168.1.42",
+            device_type: "server",
+            platform: "Linux",
+            source_count: 1,
+            last_seen: Date.now() / 1000,
+            sources: ["scan"],
+          },
+        ],
+        evidence: [
+          {
+            label: "Configured NIC MAC",
+            value: "appears on two scanned hosts; identity is ambiguous",
+          },
+        ],
+      },
     ];
     await page.route("**/api/v1/devices/duplicate-groups", async (route) =>
       route.fulfill({ json: { groups } }),
@@ -2512,6 +2611,7 @@ test.describe.serial("H.O.P.E console", () => {
     });
     await page.getByRole("button", { name: "Review duplicates" }).click();
     await expect(dialog).toContainText("same agent identity");
+    await expect(dialog).toContainText("identity is ambiguous");
     await dialog.getByRole("button", { name: "Reconcile 1 groups" }).click();
     await expect
       .poll(() => reconciled)
