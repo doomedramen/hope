@@ -386,6 +386,57 @@ test.describe.serial("H.O.P.E console", () => {
     ).toBeDisabled();
     await page.keyboard.press("Escape");
   });
+  test("a stalled snapshot times out and a queued refresh recovers the console", async ({
+    page,
+  }) => {
+    await page.clock.install();
+    let attempts = 0;
+    let release!: () => void;
+    const stalled = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      if (++attempts === 1) {
+        await stalled;
+        await route.abort().catch(() => {});
+      } else await route.continue();
+    });
+    await page.goto("/?view=hosts");
+    await expect.poll(() => attempts).toBe(1);
+    await page.clock.runFor(21000);
+    await expect.poll(() => attempts).toBeGreaterThanOrEqual(2);
+    await expect(page.getByText("No devices yet")).toBeVisible();
+    await expect(
+      page.getByText("The server took too long to respond. Please try again."),
+    ).toHaveCount(0);
+    release();
+  });
+  test("a stalled authentication request presents a working retry", async ({
+    page,
+  }) => {
+    await page.clock.install();
+    let attempts = 0;
+    let release!: () => void;
+    const stalled = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route("**/api/v1/auth/status", async (route) => {
+      if (++attempts === 1) {
+        await stalled;
+        await route.abort().catch(() => {});
+      } else await route.continue();
+    });
+    await page.goto("/");
+    await expect.poll(() => attempts).toBe(1);
+    await page.clock.runFor(21000);
+    await expect(
+      page.getByText("Cannot reach H.O.P.E", { exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Retry connection" }).click();
+    await expect(page.getByText("No devices yet")).toBeVisible();
+    expect(attempts).toBe(2);
+    release();
+  });
   test("maps, hosts, selection, history, and manual relationships", async ({
     page,
     request,
@@ -1580,9 +1631,61 @@ test.describe.serial("H.O.P.E console", () => {
       // Well inside the 15-second fallback reload: the event itself carried the figures.
       await expect(row).toContainText(`${cpu}%`, { timeout: 5000 });
     }
+    // Join source inventory to this same device using the real ingestion endpoint. A later
+    // heartbeat must preserve this projection in the live event, without waiting for polling.
+    const scope = `browser-engine-${agent}`;
+    const child = await request.post("/api/v1/agent/children", {
+      headers: { authorization: `Bearer ${credential}` },
+      data: {
+        schema_version: 1,
+        batch_id: randomUUID(),
+        agent_id: agent,
+        source: "docker",
+        source_scope: scope,
+        sequence: 1,
+        inventory_generation: 1,
+        complete: true,
+        observed_at: Date.now() / 1000,
+        devices: [
+          {
+            identity: {
+              kind: "docker_container",
+              scope,
+              key: "live-source",
+              incarnation: "first",
+            },
+            name: "live-source",
+            lifecycle: "running",
+            interfaces: [
+              {
+                name: "eth0",
+                mac: "02:00:00:00:00:77",
+                addresses: ["192.168.1.77"],
+                gateway: null,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(child.ok(), await child.text()).toBeTruthy();
+    await row.getByText("live-node", { exact: true }).click();
+    const sourceInventory = page.getByRole("region", {
+      name: "Source inventory",
+      exact: true,
+    });
+    await expect(sourceInventory).toBeVisible();
+    await report(65);
+    await expect(
+      page.getByRole("region", { name: "Current readings", exact: true }),
+    ).toContainText("65%", { timeout: 5000 });
+    await expect(sourceInventory).toBeVisible();
+    await report(64);
+    await expect(
+      page.getByRole("region", { name: "Current readings", exact: true }),
+    ).toContainText("64%", { timeout: 5000 });
     // History stores one sample per 30 seconds, so these reports seconds apart
     // reach the chart only as live points.
-    await row.getByText("live-node", { exact: true }).click();
     await page.getByRole("tab", { name: "Metrics", exact: true }).click();
     const cpu = page
       .getByRole("complementary", { name: "Host details" })
@@ -2386,6 +2489,8 @@ test.describe.serial("H.O.P.E console", () => {
     request,
   }) => {
     await seed(request, true);
+    await page.clock.install();
+    let historicalCpu = 44;
     await page.route(
       "**/api/v1/hosts/*/source-metrics?hours=24",
       async (route) => {
@@ -2412,7 +2517,7 @@ test.describe.serial("H.O.P.E console", () => {
               collected_at: 1_699_999_000,
               resolution_seconds: 30,
               metrics: {
-                cpu_percent: 44,
+                cpu_percent: historicalCpu,
                 memory_used_bytes: 1024,
                 memory_total_bytes: 2048,
                 memory_measurement: "hypervisor_guest",
@@ -2558,6 +2663,9 @@ test.describe.serial("H.O.P.E console", () => {
     await sourceHistory.getByLabel("Historical source").click();
     await page.getByRole("option", { name: /^Merged source/ }).click();
     await expect(sourceHistory.getByRole("table")).toContainText("44.0%");
+    historicalCpu = 55;
+    await page.clock.runFor(31000);
+    await expect(sourceHistory.getByRole("table")).toContainText("55.0%");
     await expect(sourceHistory.getByRole("table").getByRole("row")).toHaveCount(
       2,
     );

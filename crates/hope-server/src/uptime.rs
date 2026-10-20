@@ -39,12 +39,16 @@ pub async fn configure(
     if host.uptime != input {
         // Configuration changes are not recoveries. Reset the debounce and open alerts silently.
         sqlx::query("DELETE FROM alerts WHERE host_id=? AND kind='uptime'")
-            .bind(&id)
+            .bind(&host.id)
             .execute(&state.0.db)
             .await?;
-        state.set_meta(&format!("uptime:{id}"), "{}").await?;
+        sqlx::query("DELETE FROM notification_outbox WHERE host_id=? AND kind='uptime'")
+            .bind(&host.id)
+            .execute(&state.0.db)
+            .await?;
+        state.set_meta(&format!("uptime:{}", host.id), "{}").await?;
         host.uptime = input;
-        state.save_host(&host).await?;
+        state.save_settings(&host).await?;
         state.changed();
     }
     Ok(Json(host))

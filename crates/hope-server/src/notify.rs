@@ -6,6 +6,7 @@
 //! first seen, except during a range's first scan (which would announce the whole network).
 use crate::{
     error::{ApiError, ApiResult},
+    notification_delivery,
     state::{State, now},
 };
 use axum::{Json, extract::State as Extract};
@@ -77,15 +78,29 @@ pub async fn put_settings(
     Json(input): Json<NotificationSettings>,
 ) -> ApiResult<Json<NotificationSettings>> {
     validate(&input)?;
+    let _guard = state.0.writes.lock().await;
     let current = settings(&state).await?;
     let updated = NotificationSettings {
         ntfy_server: input.ntfy_server.trim().trim_end_matches('/').to_string(),
         ntfy_topic: input.ntfy_topic.trim().to_string(),
         last_sent_at: current.last_sent_at,
-        last_error: current.last_error,
+        last_error: current.last_error.clone(),
         ..input.clone()
     };
     store(&state, &updated).await?;
+    if !updated.ntfy_enabled
+        || notification_delivery::destination(&updated)
+            != notification_delivery::destination(&current)
+    {
+        sqlx::query("DELETE FROM notification_outbox")
+            .execute(&state.0.db)
+            .await?;
+    } else {
+        sqlx::query("UPDATE notification_outbox SET next_attempt=?")
+            .bind(now())
+            .execute(&state.0.db)
+            .await?;
+    }
     match input.ntfy_token.as_deref() {
         Some("") => {
             sqlx::query("DELETE FROM meta WHERE key=?")
@@ -100,18 +115,19 @@ pub async fn put_settings(
 }
 
 pub async fn test(Extract(state): Extract<State>) -> ApiResult<Json<OkResponse>> {
-    let settings = settings(&state).await?;
+    let (settings, token) = delivery_settings(&state).await?;
     if settings.ntfy_topic.is_empty() {
         return Err(ApiError::bad("Save a topic first"));
     }
     send(
         &state,
         &settings,
+        token.as_deref(),
         Message {
             title: "H.O.P.E test notification".into(),
             body: "Notifications from this server reach you.".into(),
             priority: 3,
-            tags: "white_check_mark",
+            tags: "white_check_mark".into(),
             host_id: None,
         },
     )
@@ -120,22 +136,37 @@ pub async fn test(Extract(state): Extract<State>) -> ApiResult<Json<OkResponse>>
     Ok(Json(OkResponse { ok: true }))
 }
 
-struct Message {
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Message {
     title: String,
     body: String,
     /// ntfy priority, 1 (min) to 5 (urgent).
     priority: u8,
     /// Comma-separated ntfy tags (emoji short codes).
-    tags: &'static str,
-    host_id: Option<String>,
+    tags: String,
+    pub(crate) host_id: Option<String>,
 }
 
-async fn send(
+/// Bind credentials to the destination they were configured for before starting network I/O.
+pub(crate) async fn delivery_settings(
+    state: &State,
+) -> anyhow::Result<(NotificationSettings, Option<String>)> {
+    let _guard = state.0.writes.lock().await;
+    Ok((
+        settings(state).await?,
+        state
+            .meta(TOKEN_KEY)
+            .await?
+            .filter(|token| !token.is_empty()),
+    ))
+}
+
+pub(crate) async fn send(
     state: &State,
     settings: &NotificationSettings,
+    token: Option<&str>,
     message: Message,
 ) -> anyhow::Result<()> {
-    let token = state.meta(TOKEN_KEY).await?.filter(|t| !t.is_empty());
     let click = message
         .host_id
         .as_ref()
@@ -158,10 +189,17 @@ async fn send(
         request = request.bearer_auth(token);
     }
     let result = async {
-        let response = request.send().await?;
+        let mut response = request.send().await?;
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
+            let mut bytes = Vec::new();
+            while bytes.len() < 1024 {
+                let Some(chunk) = response.chunk().await? else {
+                    break;
+                };
+                bytes.extend_from_slice(&chunk[..chunk.len().min(1024 - bytes.len())]);
+            }
+            let text = String::from_utf8_lossy(&bytes);
             anyhow::bail!(
                 "HTTP {status}{}",
                 crate::fingerprint::clean(&text, 160)
@@ -172,7 +210,11 @@ async fn send(
         anyhow::Ok(())
     }
     .await;
+    let _guard = state.0.writes.lock().await;
     let mut record = self::settings(state).await?;
+    if notification_delivery::destination(&record) != notification_delivery::destination(settings) {
+        return result;
+    }
     match &result {
         Ok(()) => {
             record.last_sent_at = Some(now());
@@ -182,6 +224,11 @@ async fn send(
     }
     store(state, &record).await?;
     result
+}
+
+/// Deliver one bounded batch, independently of condition evaluation.
+pub async fn deliver_pending(state: &State) -> anyhow::Result<usize> {
+    notification_delivery::deliver(state).await
 }
 
 /// Announce a device seen for the first time, unless its range is still on its first scan.
@@ -215,15 +262,30 @@ pub async fn new_device(state: &State, host: &Host, network_id: &str) {
             format!("{address} ({detail}) joined a monitored range.")
         },
         priority: 3,
-        tags: "new",
+        tags: "new".into(),
         host_id: Some(host.id.clone()),
     };
-    let state = state.clone();
-    tokio::spawn(async move {
-        if let Err(error) = send(&state, &settings, message).await {
-            tracing::warn!(%error, "new-device notification failed");
-        }
-    });
+    let _guard = state.0.writes.lock().await;
+    let queued = async {
+        let mut tx = state.write_transaction().await?;
+        let queued = notification_delivery::enqueue(
+            &mut tx,
+            &settings,
+            &format!("{}:new_device", host.id),
+            "new_device",
+            false,
+            &message,
+        )
+        .await?;
+        tx.commit().await?;
+        anyhow::Ok(queued)
+    }
+    .await;
+    match queued {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!("notification outbox is full; new-device announcement omitted"),
+        Err(error) => tracing::warn!(%error, "new-device notification could not be queued"),
+    }
 }
 
 /// A problem worth a notification: (alert key, category, severity tag, message).
@@ -424,7 +486,6 @@ fn resource_observed(host: &Host, key: &str, at: f64) -> bool {
 
 /// Open and close alerts, notifying as configured.
 pub async fn evaluate(state: &State) -> anyhow::Result<()> {
-    let settings = settings(state).await?;
     let hosts = state.hosts().await?;
     let mut last_scan: HashMap<String, (f64, u32)> = HashMap::new();
     for network in crate::api::networks(state)
@@ -457,9 +518,12 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
     for (problem, host_id) in crate::uptime::problems(state, &hosts, now, &last_scan).await? {
         current.insert(problem.key.clone(), (problem, host_id));
     }
+    let _guard = state.0.writes.lock().await;
+    let settings = settings(state).await?;
+    let mut tx = state.write_transaction().await?;
     let open: HashMap<String, (String, String)> =
         sqlx::query_as::<_, (String, String, String)>("SELECT key, message, kind FROM alerts")
-            .fetch_all(&state.0.db)
+            .fetch_all(&mut *tx)
             .await?
             .into_iter()
             .map(|(key, message, kind)| (key, (message, kind)))
@@ -469,22 +533,6 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
         if open.contains_key(key) {
             continue;
         }
-        sqlx::query(
-            "INSERT OR IGNORE INTO alerts(key,host_id,kind,message,opened_at) VALUES(?,?,?,?,?)",
-        )
-        .bind(key)
-        .bind(host_id)
-        .bind(if key.contains(":uptime:") {
-            "uptime"
-        } else if problem.offline {
-            "offline"
-        } else {
-            "resource"
-        })
-        .bind(&problem.message)
-        .bind(now)
-        .execute(&state.0.db)
-        .await?;
         let wanted = if key.contains(":uptime:") {
             true
         } else if problem.offline {
@@ -505,13 +553,40 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
                     "red_circle"
                 } else {
                     "warning"
-                },
+                }
+                .into(),
                 host_id: Some(host_id.clone()),
             };
-            if let Err(error) = send(state, &settings, message).await {
-                tracing::warn!(%error, "notification failed");
+            let kind = if key.contains(":uptime:") {
+                "uptime"
+            } else if problem.offline {
+                "offline"
+            } else {
+                "resource"
+            };
+            if !notification_delivery::enqueue(&mut tx, &settings, key, kind, false, &message)
+                .await?
+            {
+                tracing::warn!("notification outbox is full; postponing alert transition");
+                continue;
             }
         }
+        sqlx::query(
+            "INSERT OR IGNORE INTO alerts(key,host_id,kind,message,opened_at) VALUES(?,?,?,?,?)",
+        )
+        .bind(key)
+        .bind(host_id)
+        .bind(if key.contains(":uptime:") {
+            "uptime"
+        } else if problem.offline {
+            "offline"
+        } else {
+            "resource"
+        })
+        .bind(&problem.message)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
     }
     for (key, (message, kind)) in &open {
         if current.contains_key(key) {
@@ -525,10 +600,6 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
         {
             continue;
         }
-        sqlx::query("DELETE FROM alerts WHERE key=?")
-            .bind(key)
-            .execute(&state.0.db)
-            .await?;
         let wanted = if kind == "uptime" {
             hosts
                 .iter()
@@ -547,15 +618,60 @@ pub async fn evaluate(state: &State) -> anyhow::Result<()> {
                 title: format!("Resolved: {message}"),
                 body: "This problem has cleared.".into(),
                 priority: 2,
-                tags: "white_check_mark",
+                tags: "white_check_mark".into(),
                 host_id,
             };
-            if let Err(error) = send(state, &settings, message).await {
-                tracing::warn!(%error, "recovery notification failed");
+            if !notification_delivery::enqueue(&mut tx, &settings, key, kind, true, &message)
+                .await?
+            {
+                tracing::warn!("notification outbox is full; postponing recovery transition");
+                continue;
             }
         }
+        sqlx::query("DELETE FROM alerts WHERE key=?")
+            .bind(key)
+            .execute(&mut *tx)
+            .await?;
     }
+    tx.commit().await?;
     Ok(())
+}
+
+/// Independent, cancellation-aware tasks: a slow integration cannot delay discovery or evaluation.
+pub fn spawn(state: State) {
+    for delivery in [false, true] {
+        let state = state.clone();
+        let task = state.track();
+        tokio::spawn(async move {
+            let _task = task;
+            if !delivery {
+                tokio::select! {
+                    _=state.0.shutdown.cancelled()=>return,
+                    _=tokio::time::sleep(std::time::Duration::from_secs(20))=>{}
+                }
+            }
+            let mut timer = tokio::time::interval(std::time::Duration::from_secs(if delivery {
+                1
+            } else {
+                60
+            }));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                let work = async {
+                    timer.tick().await;
+                    if delivery {
+                        deliver_pending(&state).await.map(|_| ())
+                    } else {
+                        evaluate(&state).await
+                    }
+                };
+                tokio::select! {
+                    _=state.0.shutdown.cancelled()=>break,
+                    result=work=>if let Err(error)=result {tracing::warn!(%error,delivery,"notification background task failed");}
+                }
+            }
+        });
+    }
 }
 
 #[cfg(test)]

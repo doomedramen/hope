@@ -11,10 +11,13 @@ pub mod enrichment;
 pub mod error;
 pub mod fingerprint;
 pub mod headers;
+pub mod identity;
+pub mod inventory;
 pub mod lifecycle;
 pub mod limits;
 pub mod metrics;
 pub mod migrations;
+mod notification_delivery;
 pub mod notify;
 pub mod releases;
 pub mod scanner;
@@ -97,7 +100,9 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .nest("/api/v1", private.merge(public))
         .route(
             "/healthz",
-            get(|| async { axum::Json(serde_json::json!({"status":"ok"})) }),
+            get(|| async {
+                axum::Json(serde_json::json!({"status":"ok", "pid":std::process::id()}))
+            }),
         )
         .route("/agent/install", get(releases::installer))
         .route("/agent/uninstall", get(releases::uninstaller))

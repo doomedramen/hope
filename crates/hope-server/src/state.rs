@@ -1,3 +1,4 @@
+use crate::inventory::{SourceSettings, StoredHost};
 use anyhow::{Context, Result};
 use hope_protocol::{
     AssociationStatus, Capabilities, ChildDeviceKind, ChildDeviceReport, DeviceAssociation,
@@ -35,6 +36,7 @@ pub struct Inner {
     /// Seconds between samples that agents are asked to report at.
     pub report_interval: std::sync::atomic::AtomicU32,
     pub writes: Mutex<()>,
+    pub notification_delivery: Mutex<()>,
     pub scans: Mutex<HashMap<String, CancellationToken>>,
     /// Identifiers of SSH jobs whose tasks are running in this process.
     pub installs: Mutex<HashSet<String>>,
@@ -182,6 +184,7 @@ impl State {
             events,
             report_interval: std::sync::atomic::AtomicU32::new(report_interval),
             writes: Mutex::new(()),
+            notification_delivery: Mutex::new(()),
             scans: Mutex::new(HashMap::new()),
             installs: Mutex::new(HashSet::new()),
             ssh_limits: std::sync::Mutex::new(crate::ssh::Limits::default()),
@@ -279,6 +282,12 @@ impl State {
             Err(_) => self.changed(),
         }
     }
+    pub async fn publish_host(&self, id: &str) {
+        match self.host(id).await {
+            Ok(Some(view)) => self.host_changed(&view),
+            _ => self.changed(),
+        }
+    }
     pub fn report_interval(&self) -> u32 {
         self.0
             .report_interval
@@ -295,19 +304,74 @@ impl State {
             .bind(key).bind(value).execute(&self.0.db).await?;
         Ok(())
     }
+    pub async fn stored_hosts(&self) -> Result<Vec<StoredHost>> {
+        let bodies: Vec<String> =
+            sqlx::query_scalar("SELECT body FROM hosts ORDER BY name COLLATE NOCASE")
+                .fetch_all(&self.0.db)
+                .await?;
+        bodies.iter().map(|body| StoredHost::decode(body)).collect()
+    }
+    pub async fn resolve_id(&self, id: &str) -> Result<String> {
+        let mut current = id.to_owned();
+        let mut seen = HashSet::new();
+        while seen.insert(current.clone()) {
+            let next: Option<String> = sqlx::query_scalar("SELECT survivor_id FROM device_id_aliases WHERE alias_id=? UNION ALL SELECT survivor_id FROM source_device_aliases WHERE alias_id=? LIMIT 1")
+                .bind(&current).bind(&current).fetch_optional(&self.0.db).await?;
+            match next {
+                Some(next) => current = next,
+                None => return Ok(current),
+            }
+        }
+        anyhow::bail!("cyclic device alias")
+    }
+    pub async fn stored_host(&self, id: &str) -> Result<Option<StoredHost>> {
+        let id = self.resolve_id(id).await?;
+        let body: Option<String> = sqlx::query_scalar("SELECT body FROM hosts WHERE id=?")
+            .bind(&id)
+            .fetch_optional(&self.0.db)
+            .await?;
+        body.map(|body| StoredHost::decode(&body)).transpose()
+    }
+    /// Persist only user-editable fields, never the observation fields of a device view.
+    pub async fn save_settings(&self, view: &Host) -> Result<()> {
+        let settings = SourceSettings::from_view(view);
+        if let Some(mut record) = self.stored_host(&view.id).await? {
+            settings.apply(&mut record);
+            self.save_host(&record).await?;
+        } else {
+            sqlx::query("INSERT INTO source_device_settings(source_device_id,body) VALUES(?,?) ON CONFLICT(source_device_id) DO UPDATE SET body=excluded.body")
+                .bind(&view.id).bind(serde_json::to_string(&settings)?).execute(&self.0.db).await?;
+        }
+        Ok(())
+    }
     pub async fn hosts(&self) -> Result<Vec<Host>> {
-        let rows = sqlx::query("SELECT body FROM hosts ORDER BY name COLLATE NOCASE")
-            .fetch_all(&self.0.db)
+        self.device_views(None).await
+    }
+    async fn device_views(&self, id: Option<&str>) -> Result<Vec<Host>> {
+        // All pieces of a view come from one SQLite snapshot during concurrent writes.
+        let mut tx = self.0.db.begin().await?;
+        let rows = sqlx::query("SELECT body FROM hosts WHERE ? IS NULL OR id=? OR id=(SELECT host_id FROM source_devices WHERE id=?) ORDER BY name COLLATE NOCASE")
+            .bind(id).bind(id).bind(id).fetch_all(&mut *tx)
             .await?;
         let mut hosts: Vec<Host> = rows
             .into_iter()
-            .map(|r| serde_json::from_str(r.get("body")).context("invalid stored host"))
+            .map(|r| StoredHost::decode(r.get("body")).map(StoredHost::into_view))
             .collect::<Result<_>>()?;
-        let networks = crate::api::networks(self)
-            .await
-            .map_err(|error| anyhow::anyhow!(error.1))?;
-        let association_rows = sqlx::query("SELECT a.source_device_id,a.host_id,h.name,a.status,a.reason,a.evidence FROM device_associations a JOIN hosts h ON h.id=a.host_id ORDER BY CASE a.status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,h.name COLLATE NOCASE")
-            .fetch_all(&self.0.db).await?;
+        let networks =
+            sqlx::query("SELECT id,name,cidr,enabled,interval_minutes FROM networks ORDER BY name")
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .map(|row| Network {
+                    id: row.get("id"),
+                    name: row.get("name"),
+                    cidr: row.get("cidr"),
+                    enabled: row.get("enabled"),
+                    interval_minutes: row.get::<i64, _>("interval_minutes") as u32,
+                })
+                .collect::<Vec<_>>();
+        let association_rows = sqlx::query("SELECT a.source_device_id,a.host_id,h.name,a.status,a.reason,a.evidence FROM device_associations a JOIN hosts h ON h.id=a.host_id WHERE ? IS NULL OR a.source_device_id=? OR a.host_id=? OR a.host_id=(SELECT host_id FROM source_devices WHERE id=?) ORDER BY CASE a.status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,h.name COLLATE NOCASE")
+            .bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *tx).await?;
         let mut associations = HashMap::<String, Vec<DeviceAssociation>>::new();
         for row in association_rows {
             associations
@@ -315,23 +379,24 @@ impl State {
                 .or_default()
                 .push(source_association(&row)?);
         }
-        let confirmed_host_owners: HashMap<String, String> = sqlx::query(
-            "SELECT host_id,source_device_id FROM device_associations WHERE status='confirmed'",
-        )
-        .fetch_all(&self.0.db)
-        .await?
-        .into_iter()
-        .map(|row| (row.get("host_id"), row.get("source_device_id")))
-        .collect();
-        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id)")
-            .fetch_all(&self.0.db).await?;
-        let mut service_relationships = source_service_relationships(&self.0.db, None).await?;
+        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) AND (? IS NULL OR d.id=? OR d.host_id=? OR d.host_id=(SELECT host_id FROM source_devices WHERE id=?))")
+            .bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *tx).await?;
+        let mut service_relationships = source_service_relationships(&mut tx, id).await?;
+        let mut settings: HashMap<String, String> =
+            sqlx::query_as("SELECT source_device_id,body FROM source_device_settings WHERE ? IS NULL OR source_device_id=? OR source_device_id IN (SELECT id FROM source_devices WHERE host_id=? OR host_id=(SELECT host_id FROM source_devices WHERE id=?))")
+                .bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .collect();
         for row in children {
             let mut source = source_device_host(&row)?;
             if let Some(id) = &source.source_device_id {
                 source
                     .relationships
                     .extend(service_relationships.remove(id).unwrap_or_default());
+            }
+            if let Some(settings) = settings.remove(&source.id) {
+                serde_json::from_str::<SourceSettings>(&settings)?.apply(&mut source);
             }
             source.network_ids = source_networks(&networks, &source.addresses);
             source.associations = source
@@ -344,36 +409,7 @@ impl State {
                 .ok()
                 .flatten()
                 .and_then(|target_id| hosts.iter().position(|host| host.id == target_id));
-            let fallback_target = if linked_target.is_none() {
-                projected_unique_scan_match(&source, &hosts, &networks, &confirmed_host_owners)
-            } else {
-                None
-            };
-            let target_index = linked_target.or_else(|| {
-                fallback_target.as_ref().and_then(|candidate| {
-                    hosts.iter().position(|host| host.id == candidate.host_id)
-                })
-            });
-            if let Some(candidate) = fallback_target {
-                if let Some(association) = source
-                    .associations
-                    .iter_mut()
-                    .find(|association| association.host_id == candidate.host_id)
-                {
-                    association.status = AssociationStatus::Confirmed;
-                    association.reason = candidate.reason;
-                    association.evidence = candidate.evidence;
-                } else {
-                    source.associations.push(DeviceAssociation {
-                        host_id: candidate.host_id,
-                        host_name: candidate.host_name,
-                        status: AssociationStatus::Confirmed,
-                        reason: candidate.reason,
-                        evidence: candidate.evidence,
-                    });
-                }
-            }
-            if let Some(target_index) = target_index {
+            if let Some(target_index) = linked_target {
                 let target = &mut hosts[target_index];
                 merge_source_host(target, source);
             } else {
@@ -384,109 +420,58 @@ impl State {
             host.primary_ip = crate::addresses::primary_ip(&host.addresses, &networks);
         }
         hosts.sort_by_key(|host| host.name.to_lowercase());
+        tx.commit().await?;
         Ok(hosts)
     }
     pub async fn host(&self, id: &str) -> Result<Option<Host>> {
-        let id: String = sqlx::query_scalar("SELECT survivor_id FROM device_id_aliases WHERE alias_id=? UNION ALL SELECT survivor_id FROM source_device_aliases WHERE alias_id=? LIMIT 1")
-            .bind(id).bind(id).fetch_optional(&self.0.db).await?.unwrap_or_else(|| id.to_string());
-        let value: Option<String> = sqlx::query_scalar("SELECT body FROM hosts WHERE id=?")
-            .bind(&id)
-            .fetch_optional(&self.0.db)
-            .await?;
-        if let Some(body) = value {
-            let mut host: Host = serde_json::from_str(&body).context("invalid stored host")?;
-            let networks = crate::api::networks(self)
-                .await
-                .map_err(|error| anyhow::anyhow!(error.1))?;
-            host.primary_ip = crate::addresses::primary_ip(&host.addresses, &networks);
-            return Ok(Some(host));
-        }
-        let row = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE d.id=?")
-            .bind(&id).fetch_optional(&self.0.db).await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let mut source = source_device_host(&row)?;
-        source.relationships.extend(
-            source_service_relationships(&self.0.db, Some(&id))
-                .await?
-                .remove(&id)
-                .unwrap_or_default(),
-        );
-        let networks = crate::api::networks(self)
-            .await
-            .map_err(|error| anyhow::anyhow!(error.1))?;
-        source.network_ids = source_networks(&networks, &source.addresses);
-        source.primary_ip = crate::addresses::primary_ip(&source.addresses, &networks);
-        source.associations = self.source_associations(&source.source_device_id).await?;
-        Ok(Some(source))
-    }
-    async fn source_associations(
-        &self,
-        source_device_id: &Option<String>,
-    ) -> Result<Vec<DeviceAssociation>> {
-        let Some(source_device_id) = source_device_id else {
-            return Ok(vec![]);
-        };
-        let rows = sqlx::query("SELECT a.host_id,h.name,a.status,a.reason,a.evidence FROM device_associations a JOIN hosts h ON h.id=a.host_id WHERE a.source_device_id=? ORDER BY CASE a.status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,h.name COLLATE NOCASE")
-            .bind(source_device_id).fetch_all(&self.0.db).await?;
-        rows.iter().map(source_association).collect()
+        let id = self.resolve_id(id).await?;
+        Ok(self
+            .device_views(Some(&id))
+            .await?
+            .into_iter()
+            .find(|host| host.id == id || host.source_device_id.as_deref() == Some(id.as_str())))
     }
     /// Callers serialize host read-modify-write operations using `writes`.
-    pub async fn save_host(&self, host: &Host) -> Result<()> {
+    /// Reserve SQLite's writer before reading state that will be changed in this transaction.
+    /// Some independent single-statement writers (for example SSH progress) do not use `writes`.
+    /// A deferred read transaction cannot safely upgrade after one of those writers commits.
+    pub(crate) async fn write_transaction(
+        &self,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>> {
+        Ok(self.0.db.begin_with("BEGIN IMMEDIATE").await?)
+    }
+
+    pub async fn save_host(&self, host: &StoredHost) -> Result<()> {
+        host.validate()?;
+        let mut tx = self.write_transaction().await?;
+        let old: Option<String> = sqlx::query_scalar("SELECT body FROM hosts WHERE id=?")
+            .bind(&host.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let old = old.map(|body| StoredHost::decode(&body)).transpose()?;
+        let identity_changed = old.is_none_or(|old| {
+            old.addresses != host.addresses
+                || old.macs != host.macs
+                || old.name != host.name
+                || (old.last_seen < now() - 7.0 * 86400.0
+                    && host.last_seen >= now() - 7.0 * 86400.0)
+        });
         sqlx::query("INSERT INTO hosts(id,agent_id,name,body) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET agent_id=excluded.agent_id,name=excluded.name,body=excluded.body")
             .bind(&host.id).bind(&host.agent_id).bind(&host.name).bind(serde_json::to_string(host)?)
-            .execute(&self.0.db).await?;
+            .execute(&mut *tx).await?;
+        if identity_changed {
+            crate::identity::reconcile(&mut tx).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 }
 
-/// A source report may predate the scan row that identifies the same guest. Re-evaluate a
-/// unique, strong interface match while projecting inventory so a stopped collector cannot
-/// leave two rows visible indefinitely. This is read-only projection; only fresh source reports
-/// persist associations. Explicit rejections and already-claimed scan hosts always win.
-fn projected_unique_scan_match(
-    source: &Host,
-    hosts: &[Host],
-    networks: &[Network],
-    confirmed_host_owners: &HashMap<String, String>,
-) -> Option<crate::associations::Candidate> {
-    let source_id = source.source_device_id.as_deref()?;
-    let child = source.child.as_ref()?;
-    let candidates = crate::associations::candidates(child, hosts, networks);
-    let candidate = candidates.into_iter().find(|candidate| candidate.strong)?;
-    if source.associations.iter().any(|association| {
-        association.host_id == candidate.host_id
-            && association.status == AssociationStatus::Rejected
-    }) {
-        return None;
-    }
-    let host = hosts.iter().find(|host| host.id == candidate.host_id)?;
-    if host.agent_id.is_some()
-        || host
-            .source_device_id
-            .as_deref()
-            .is_some_and(|owner| owner != source_id)
-        || confirmed_host_owners
-            .get(&candidate.host_id)
-            .is_some_and(|owner| owner != source_id)
-    {
-        return None;
-    }
-    Some(candidate)
-}
-
 async fn source_service_relationships(
-    db: &SqlitePool,
-    source_device_id: Option<&str>,
+    db: &mut sqlx::SqliteConnection,
+    id: Option<&str>,
 ) -> Result<HashMap<String, Vec<DeviceRelationship>>> {
-    let rows = if let Some(id) = source_device_id {
-        sqlx::query("SELECT from_device_id,to_device_id,detail FROM device_relationships WHERE kind='exposes_service' AND source_device_id=?")
-            .bind(id).fetch_all(db).await?
-    } else {
-        sqlx::query("SELECT from_device_id,to_device_id,detail FROM device_relationships WHERE kind='exposes_service'")
-            .fetch_all(db).await?
-    };
+    let rows = sqlx::query("SELECT from_device_id,to_device_id,detail FROM device_relationships WHERE kind='exposes_service' AND (? IS NULL OR source_device_id=? OR source_device_id IN (SELECT id FROM source_devices WHERE host_id=? OR host_id=(SELECT host_id FROM source_devices WHERE id=?)))").bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *db).await?;
     let mut relationships = HashMap::<String, Vec<DeviceRelationship>>::new();
     for row in rows {
         let from_device_id: String = row.get("from_device_id");
@@ -605,6 +590,18 @@ fn source_networks(networks: &[Network], addresses: &[String]) -> Vec<String> {
 }
 
 fn merge_source_host(target: &mut Host, source: Host) {
+    if target.name_override.is_none() {
+        target.name_override = source.name_override.clone();
+    }
+    if target.icon_override.is_none() {
+        target.icon_override = source.icon_override.clone();
+    }
+    if target.device.is_none() {
+        target.device = source.device.clone();
+    }
+    if !target.uptime.enabled {
+        target.uptime = source.uptime.clone();
+    }
     for address in source.addresses {
         if !target.addresses.contains(&address) {
             target.addresses.push(address);

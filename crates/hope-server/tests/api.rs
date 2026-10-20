@@ -4,6 +4,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use hope_protocol::*;
+use hope_server::inventory::StoredHost;
 use hope_server::{
     agents, metrics, router,
     state::{State, hash, now},
@@ -74,7 +75,7 @@ async fn host_primary_ip_requires_a_usable_address_in_any_configured_cidr() {
         .unwrap();
     }
 
-    let mut host = Host::new("host-managed".into(), "managed host".into(), "agent");
+    let mut host = StoredHost::new("host-managed".into(), "managed host".into(), "agent");
     host.addresses = vec![
         "127.0.0.1".into(),
         "169.254.20.1".into(),
@@ -87,7 +88,7 @@ async fn host_primary_ip_requires_a_usable_address_in_any_configured_cidr() {
     assert_eq!(projected.primary_ip.as_deref(), Some("10.20.3.8"));
     assert_eq!(projected.addresses, host.addresses);
 
-    let mut unmanaged = Host::new("host-unmanaged".into(), "unmanaged host".into(), "agent");
+    let mut unmanaged = StoredHost::new("host-unmanaged".into(), "unmanaged host".into(), "agent");
     unmanaged.addresses = vec![
         "127.0.0.1".into(),
         "169.254.20.1".into(),
@@ -171,6 +172,12 @@ async fn enrolled(state: &State, app: &Router) -> (String, String, String) {
         body["credential"].as_str().expect("credential").into(),
         token,
     )
+}
+
+async fn evaluate_notifications(state: &State) -> anyhow::Result<()> {
+    hope_server::notify::evaluate(state).await?;
+    hope_server::notify::deliver_pending(state).await?;
+    Ok(())
 }
 
 fn child_batch(
@@ -1684,7 +1691,7 @@ async fn source_matches_can_be_rejected_confirmed_and_unlinked_without_losing_so
         .execute(&state.0.db)
         .await
         .unwrap();
-    let mut scanned = Host::new("scanned-device".into(), "scanned device".into(), "tcp");
+    let mut scanned = StoredHost::new("scanned-device".into(), "scanned device".into(), "tcp");
     scanned.addresses = vec!["192.168.1.20".into()];
     scanned.macs = vec!["02:00:00:00:00:99".into()];
     scanned.network_ids = vec!["lan".into()];
@@ -1797,7 +1804,7 @@ async fn unique_interface_matches_auto_link_without_changing_discovered_host_id(
         .execute(&state.0.db)
         .await
         .unwrap();
-    let mut scanned = Host::new("scanned-device".into(), "scanned device".into(), "tcp");
+    let mut scanned = StoredHost::new("scanned-device".into(), "scanned device".into(), "tcp");
     scanned.addresses = vec!["192.168.1.20".into()];
     scanned.macs = vec!["02:00:00:00:00:02".into()];
     scanned.network_ids = vec!["lan".into()];
@@ -1863,7 +1870,7 @@ async fn proxmox_configured_nic_mac_links_guest_to_unique_scanned_host() {
         .execute(&state.0.db)
         .await
         .unwrap();
-    let mut scanned = Host::new("scanned-lxc".into(), "sabnzbd".into(), "arp");
+    let mut scanned = StoredHost::new("scanned-lxc".into(), "sabnzbd".into(), "arp");
     scanned.addresses = vec!["192.168.1.41".into()];
     scanned.macs = vec!["02:00:00:00:00:41".into()];
     scanned.last_seen = now();
@@ -1947,14 +1954,14 @@ async fn proxmox_configured_nic_mac_links_guest_to_unique_scanned_host() {
 }
 
 #[tokio::test]
-async fn stale_source_projects_into_later_unique_scan_match_without_another_child_report() {
+async fn stale_source_reconciles_on_later_scan_without_another_child_report() {
     let (_dir, state, app, cookie) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;
     sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('managed-network','Managed network','192.168.1.0/24',1,5)")
         .execute(&state.0.db)
         .await
         .unwrap();
-    let mut scanned = Host::new("scanned-lxc".into(), "sabnzbd".into(), "arp");
+    let mut scanned = StoredHost::new("scanned-lxc".into(), "sabnzbd".into(), "arp");
     scanned.addresses = vec!["192.168.1.41".into()];
     scanned.macs = vec!["02:00:00:00:00:41".into()];
     scanned.last_seen = now() - 8.0 * 86400.0;
@@ -2004,6 +2011,17 @@ async fn stale_source_projects_into_later_unique_scan_match_without_another_chil
     // new child report can trigger the write-time association path.
     scanned.last_seen = now();
     state.save_host(&scanned).await.unwrap();
+    let linked: Option<String> =
+        sqlx::query_scalar("SELECT host_id FROM source_devices WHERE id=?")
+            .bind(&source_id)
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        linked.as_deref(),
+        Some("scanned-lxc"),
+        "scan persistence must commit the association before any inventory read"
+    );
     let hosts = state.hosts().await.unwrap();
     assert_eq!(hosts.len(), 2, "one parent and one canonical guest row");
     let combined = hosts.iter().find(|host| host.id == "scanned-lxc").unwrap();
@@ -2059,7 +2077,7 @@ async fn stale_source_projection_keeps_ambiguous_mac_candidates_separate() {
     let (agent, credential, _) = enrolled(&state, &app).await;
     let mac = "02:00:00:00:00:41";
     for id in ["scanned-a", "scanned-b"] {
-        let mut scanned = Host::new(id.into(), "sabnzbd".into(), "arp");
+        let mut scanned = StoredHost::new(id.into(), "sabnzbd".into(), "arp");
         scanned.addresses = vec!["192.168.1.41".into()];
         scanned.macs = vec![mac.into()];
         scanned.last_seen = now();
@@ -2114,7 +2132,7 @@ async fn linked_scan_presence_prevents_source_archival_until_the_scan_goes_stale
         .await
         .unwrap();
     let t0 = now() - 620.0;
-    let mut scanned = Host::new("scanned-device".into(), "web".into(), "tcp");
+    let mut scanned = StoredHost::new("scanned-device".into(), "web".into(), "tcp");
     scanned.addresses = vec!["192.168.1.20".into()];
     scanned.macs = vec!["02:00:00:00:00:02".into()];
     scanned.last_seen = t0;
@@ -2573,7 +2591,7 @@ async fn revoked_identity_requires_bound_token_and_new_secret_for_recovery() {
         .execute(&state.0.db)
         .await
         .unwrap();
-    let mut host = state.host(&host_id).await.unwrap().unwrap();
+    let mut host = state.stored_host(&host_id).await.unwrap().unwrap();
     host.addresses = vec![
         "127.0.0.1".into(),
         "169.254.1.2".into(),
@@ -2729,7 +2747,7 @@ async fn retention_merges_late_samples_without_replacing_completed_bucket() {
     );
 }
 
-fn discovered(id: &str, address: &str, mac: &str) -> Host {
+fn discovered(id: &str, address: &str, mac: &str) -> StoredHost {
     serde_json::from_value(json!({"id":id,"agent_id":null,"name":id,"addresses":[address],"macs":[mac],"network_ids":[],"last_seen":now(),"last_report":null,"discovery_method":"arp","inventory":null,"metrics":null,"collectors":[],"services":[{"port":22,"name":"SSH","observed_at":now()}]})).expect("discovered host")
 }
 
@@ -2888,7 +2906,11 @@ async fn independent_map_edits_are_atomic_and_retryable() {
         .find(|host| host.agent_id.as_deref() == Some(&agent_id))
         .expect("enrolled host")
         .id;
-    let mut other = state.host(&host_id).await.expect("query").expect("host");
+    let mut other = state
+        .stored_host(&host_id)
+        .await
+        .expect("query")
+        .expect("host");
     other.id = Uuid::new_v4().to_string();
     other.agent_id = None;
     state.save_host(&other).await.expect("other host");
@@ -2971,12 +2993,22 @@ async fn independent_map_edits_are_atomic_and_retryable() {
 type Seen = std::sync::Arc<tokio::sync::Mutex<Vec<(Option<String>, Value)>>>;
 /// A stand-in ntfy server that records each publish (authorization header and JSON body).
 async fn fake_ntfy(status: u16) -> (String, Seen) {
+    let (server, seen, _) = fake_ntfy_switchable(status).await;
+    (server, seen)
+}
+
+async fn fake_ntfy_switchable(
+    status: u16,
+) -> (String, Seen, std::sync::Arc<std::sync::atomic::AtomicU16>) {
+    let status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(status));
+    let response_status = status.clone();
     let seen: Seen = Default::default();
     let record = seen.clone();
     let app = Router::new().route(
         "/",
         axum::routing::post(move |headers: axum::http::HeaderMap, body: String| {
             let record = record.clone();
+            let status = response_status.clone();
             async move {
                 let auth = headers
                     .get("authorization")
@@ -2986,7 +3018,8 @@ async fn fake_ntfy(status: u16) -> (String, Seen) {
                     .lock()
                     .await
                     .push((auth, serde_json::from_str(&body).unwrap_or(Value::Null)));
-                StatusCode::from_u16(status).expect("status")
+                StatusCode::from_u16(status.load(std::sync::atomic::Ordering::SeqCst))
+                    .expect("status")
             }
         }),
     );
@@ -2997,7 +3030,7 @@ async fn fake_ntfy(status: u16) -> (String, Seen) {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{address}"), seen)
+    (format!("http://{address}"), seen, status)
 }
 
 fn settings(server: &str, token: Value) -> Value {
@@ -3114,14 +3147,12 @@ async fn alerts_notify_once_when_they_open_and_again_when_they_clear() {
         Some(("cookie", cookie.as_str())),
     )
     .await;
-    let mut host = Host::new("pve".into(), "pve1".into(), "agent");
+    let mut host = StoredHost::new("pve".into(), "pve1".into(), "agent");
     host.agent_id = Some("agent-1".into());
     host.last_report = Some(now() - 900.0);
     state.save_host(&host).await.expect("host");
-    hope_server::notify::evaluate(&state)
-        .await
-        .expect("evaluate");
-    hope_server::notify::evaluate(&state)
+    evaluate_notifications(&state).await.expect("evaluate");
+    evaluate_notifications(&state)
         .await
         .expect("evaluate again");
     {
@@ -3141,9 +3172,7 @@ async fn alerts_notify_once_when_they_open_and_again_when_they_clear() {
     }
     host.last_report = Some(now());
     state.save_host(&host).await.expect("host");
-    hope_server::notify::evaluate(&state)
-        .await
-        .expect("evaluate");
+    evaluate_notifications(&state).await.expect("evaluate");
     let published = seen.lock().await;
     assert_eq!(published.len(), 2);
     assert_eq!(
@@ -3169,7 +3198,7 @@ async fn missing_storage_telemetry_does_not_send_a_false_recovery() {
         Some(("cookie", cookie.as_str())),
     )
     .await;
-    let mut host = Host::new("storage".into(), "storage".into(), "agent");
+    let mut host = StoredHost::new("storage".into(), "storage".into(), "agent");
     host.agent_id = Some("storage-agent".into());
     host.last_report = Some(now());
     host.metrics = Some(Metrics {
@@ -3188,14 +3217,14 @@ async fn missing_storage_telemetry_does_not_send_a_false_recovery() {
         detail: None,
     }];
     state.save_host(&host).await.expect("host");
-    hope_server::notify::evaluate(&state)
+    evaluate_notifications(&state)
         .await
         .expect("open disk alert");
     assert_eq!(seen.lock().await.len(), 1);
     host.metrics.as_mut().unwrap().disks.clear();
     host.collectors[0].available = false;
     state.save_host(&host).await.expect("unknown storage");
-    hope_server::notify::evaluate(&state)
+    evaluate_notifications(&state)
         .await
         .expect("keep unknown alert");
     assert_eq!(seen.lock().await.len(), 1, "unknown is not recovery");
@@ -3213,9 +3242,7 @@ async fn missing_storage_telemetry_does_not_send_a_false_recovery() {
     });
     host.collectors[0].available = true;
     state.save_host(&host).await.expect("healthy storage");
-    hope_server::notify::evaluate(&state)
-        .await
-        .expect("recover");
+    evaluate_notifications(&state).await.expect("recover");
     assert_eq!(
         seen.lock().await.len(),
         2,
@@ -3227,7 +3254,7 @@ async fn missing_storage_telemetry_does_not_send_a_false_recovery() {
 async fn device_types_can_be_set_by_hand_and_scan_intervals_are_validated() {
     let (_dir, state, app, cookie) = setup().await;
     let auth = Some(("cookie", cookie.as_str()));
-    let mut host = Host::new("box".into(), "192.168.1.9".into(), "icmp");
+    let mut host = StoredHost::new("box".into(), "192.168.1.9".into(), "icmp");
     host.addresses = vec!["192.168.1.9".into()];
     host.services = vec![Service {
         port: 8006,
@@ -3773,11 +3800,11 @@ async fn uptime_is_opt_in_validated_and_notifies_port_transitions() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let mut host = Host::new("uptime-box".into(), "Box".into(), "icmp");
+    let mut host = StoredHost::new("uptime-box".into(), "Box".into(), "icmp");
     host.addresses = vec!["127.0.0.1".into()];
     state.save_host(&host).await.unwrap();
     for _ in 0..2 {
-        hope_server::notify::evaluate(&state).await.unwrap();
+        evaluate_notifications(&state).await.unwrap();
     }
     assert!(seen.lock().await.is_empty(), "off by default");
     let path = "/api/v1/hosts/uptime-box/uptime";
@@ -3803,10 +3830,10 @@ async fn uptime_is_opt_in_validated_and_notifies_port_transitions() {
     let (status, saved) = request(&app, "PUT", path, config, auth).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(saved["uptime"]["ports"], json!([port]));
-    hope_server::notify::evaluate(&state).await.unwrap();
+    evaluate_notifications(&state).await.unwrap();
     assert!(seen.lock().await.is_empty(), "first failure is debounced");
     for _ in 0..2 {
-        hope_server::notify::evaluate(&state).await.unwrap();
+        evaluate_notifications(&state).await.unwrap();
     }
     assert_eq!(
         seen.lock().await.len(),
@@ -3816,11 +3843,11 @@ async fn uptime_is_opt_in_validated_and_notifies_port_transitions() {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap();
-    hope_server::notify::evaluate(&state).await.unwrap();
+    evaluate_notifications(&state).await.unwrap();
     assert_eq!(seen.lock().await.len(), 2, "recovery");
     drop(listener);
     for _ in 0..2 {
-        hope_server::notify::evaluate(&state).await.unwrap();
+        evaluate_notifications(&state).await.unwrap();
     }
     assert_eq!(seen.lock().await.len(), 3, "new outage");
     request(
@@ -3831,7 +3858,7 @@ async fn uptime_is_opt_in_validated_and_notifies_port_transitions() {
         auth,
     )
     .await;
-    hope_server::notify::evaluate(&state).await.unwrap();
+    evaluate_notifications(&state).await.unwrap();
     assert_eq!(seen.lock().await.len(), 3, "disabling is silent");
 }
 
@@ -3844,7 +3871,7 @@ async fn uptime_device_alerts_respect_connector_and_recovery_switches() {
     config["notify_offline"] = json!(false);
     config["notify_recovery"] = json!(false);
     request(&app, "PUT", "/api/v1/notifications", config.clone(), auth).await;
-    let mut host = Host::new("device-monitor".into(), "Device".into(), "agent");
+    let mut host = StoredHost::new("device-monitor".into(), "Device".into(), "agent");
     host.agent_id = Some("agent".into());
     host.last_report = Some(now() - 1000.0);
     state.save_host(&host).await.unwrap();
@@ -3858,21 +3885,797 @@ async fn uptime_device_alerts_respect_connector_and_recovery_switches() {
     .await;
     assert_eq!(status, StatusCode::OK);
     for _ in 0..3 {
-        hope_server::notify::evaluate(&state).await.unwrap();
+        evaluate_notifications(&state).await.unwrap();
     }
     assert_eq!(seen.lock().await.len(), 1);
     assert_eq!(seen.lock().await[0].1["title"], "Device is down");
-    host = state.host(&host.id).await.unwrap().unwrap();
+    host = state.stored_host(&host.id).await.unwrap().unwrap();
     host.last_report = Some(now());
     state.save_host(&host).await.unwrap();
-    hope_server::notify::evaluate(&state).await.unwrap();
+    evaluate_notifications(&state).await.unwrap();
     assert_eq!(seen.lock().await.len(), 1, "recovery disabled");
     config["ntfy_enabled"] = json!(false);
     request(&app, "PUT", "/api/v1/notifications", config, auth).await;
     host.last_report = Some(now() - 1000.0);
     state.save_host(&host).await.unwrap();
     for _ in 0..2 {
-        hope_server::notify::evaluate(&state).await.unwrap();
+        evaluate_notifications(&state).await.unwrap();
     }
     assert_eq!(seen.lock().await.len(), 1, "connector disabled");
+}
+
+#[tokio::test]
+async fn identity_unlink_survives_reads_reports_and_explicit_reset() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('lan','LAN','192.168.1.0/24',1,5)").execute(&state.0.db).await.unwrap();
+    let mut scanned = StoredHost::new("identity-scan".into(), "scan".into(), "arp");
+    scanned.addresses = vec!["192.168.1.20".into()];
+    scanned.macs = vec!["02:00:00:00:00:02".into()];
+    scanned.last_seen = now();
+    state.save_host(&scanned).await.unwrap();
+    let bearer = format!("Bearer {credential}");
+    let post_child = |sequence| {
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(child_batch(
+                &agent,
+                sequence,
+                sequence,
+                true,
+                now(),
+                vec![child_device()]
+            )),
+            Some(("authorization", &bearer)),
+        )
+    };
+    assert_eq!(post_child(1).await.0, StatusCode::OK);
+    let source_id = state
+        .hosts()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|h| h.id == "identity-scan")
+        .unwrap()
+        .source_device_id
+        .unwrap();
+    let path = format!("/api/v1/hosts/{source_id}/association");
+    let (status, body) = request(
+        &app,
+        "POST",
+        &path,
+        json!({"action":"unlink","host_id":"identity-scan"}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for _ in 0..2 {
+        let hosts = state.hosts().await.unwrap();
+        assert!(
+            hosts
+                .iter()
+                .find(|h| h.id == "identity-scan")
+                .unwrap()
+                .child
+                .is_none(),
+            "unlink must not be undone by projection"
+        );
+    }
+    assert_eq!(post_child(2).await.0, StatusCode::OK);
+    assert!(
+        state
+            .host("identity-scan")
+            .await
+            .unwrap()
+            .unwrap()
+            .child
+            .is_none()
+    );
+    // The UI exposes Reset for rejected/unlinked associations, allowing auto-matching again.
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            &path,
+            json!({"action":"unlink","host_id":"identity-scan"}),
+            Some(("cookie", &cookie))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(post_child(3).await.0, StatusCode::OK);
+    assert!(
+        state
+            .hosts()
+            .await
+            .unwrap()
+            .iter()
+            .find(|h| h.id == "identity-scan")
+            .unwrap()
+            .child
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn identity_network_refresh_does_not_persist_source_projections() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('lan','LAN','192.168.1.0/24',1,5)").execute(&state.0.db).await.unwrap();
+    let mut scanned = StoredHost::new("identity-scan".into(), "scan".into(), "arp");
+    scanned.addresses = vec!["192.168.1.20".into()];
+    scanned.macs = vec!["02:00:00:00:00:02".into()];
+    scanned.last_seen = now();
+    state.save_host(&scanned).await.unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(child_batch(&agent, 1, 1, true, now(), vec![child_device()])),
+            Some(("authorization", &format!("Bearer {credential}")))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let source_id = state
+        .hosts()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|h| h.id == "identity-scan")
+        .unwrap()
+        .source_device_id
+        .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/networks",
+            json!({"name":"Other","cidr":"10.20.0.0/24"}),
+            Some(("cookie", &cookie))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            &format!("/api/v1/hosts/{source_id}/association"),
+            json!({"action":"reject","host_id":"identity-scan"}),
+            Some(("cookie", &cookie))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let hosts = state.hosts().await.unwrap();
+    assert_eq!(
+        hosts
+            .iter()
+            .filter(|h| h.source_device_id.as_deref() == Some(&source_id))
+            .count(),
+        1,
+        "detached source must appear exactly once"
+    );
+    let stored: String = sqlx::query_scalar("SELECT body FROM hosts WHERE id='identity-scan'")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    let stored: Host = serde_json::from_str(&stored).unwrap();
+    assert!(stored.child.is_none());
+    assert!(stored.source_device_id.is_none());
+}
+
+#[tokio::test]
+async fn identity_live_event_preserves_the_snapshot_source_view() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('lan','LAN','192.168.1.0/24',1,5)").execute(&state.0.db).await.unwrap();
+    let host_id = state.hosts().await.unwrap()[0].id.clone();
+    for round in 0..2 {
+        let report = AgentReport {
+            schema_version: SCHEMA_VERSION,
+            report_id: Uuid::new_v4().to_string(),
+            agent_id: agent.clone(),
+            collected_at: now(),
+            inventory: None,
+            metrics: Metrics::default(),
+            collectors: vec![],
+        };
+        let mut events = state.0.events.subscribe();
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/v1/agent/report",
+                json!(report),
+                Some(("authorization", &bearer))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let hope_server::state::Change::Host(body) = events.recv().await.unwrap() else {
+            panic!("expected host event")
+        };
+        if round == 1 {
+            let live: Host = serde_json::from_str(&body).unwrap();
+            let snapshot = state
+                .hosts()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|host| host.id == host_id)
+                .unwrap();
+            assert!(snapshot.child.is_some());
+            assert_eq!(
+                serde_json::to_value(live).unwrap(),
+                serde_json::to_value(snapshot).unwrap()
+            );
+        } else {
+            let mut child = child_device();
+            child.interfaces = inventory().interfaces;
+            assert_eq!(
+                request(
+                    &app,
+                    "POST",
+                    "/api/v1/agent/children",
+                    json!(child_batch(&agent, 1, 1, true, now(), vec![child])),
+                    Some(("authorization", &bearer))
+                )
+                .await
+                .0,
+                StatusCode::OK
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn identity_source_settings_survive_reports_without_materializing_a_host() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(child_batch(&agent, 1, 1, true, now(), vec![child_device()])),
+            Some(("authorization", &bearer))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let source_id: String = sqlx::query_scalar("SELECT id FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    for (suffix, body) in [
+        (
+            "identity",
+            json!({"name":"My workload","icon":"selfhst:nginx"}),
+        ),
+        ("type", json!({"kind":"server"})),
+        (
+            "uptime",
+            json!({"enabled":true,"device":false,"ports":[80]}),
+        ),
+    ] {
+        let (status, body) = request(
+            &app,
+            "PUT",
+            &format!("/api/v1/hosts/{source_id}/{suffix}"),
+            body,
+            Some(("cookie", &cookie)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let mut child = child_device();
+    child.name = "A new source name".into();
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(child_batch(&agent, 2, 2, true, now(), vec![child])),
+            Some(("authorization", &bearer))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let host = state.host(&source_id).await.unwrap().unwrap();
+    assert_eq!(host.name_override.as_deref(), Some("My workload"));
+    assert_eq!(host.icon_override.as_deref(), Some("selfhst:nginx"));
+    assert!(host.device.unwrap().manual);
+    assert_eq!(host.uptime.ports, vec![80]);
+    assert!(host.uptime.enabled);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hosts WHERE id=?")
+        .bind(&source_id)
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "settings must not create a physical host for a source-only device"
+    );
+}
+
+#[tokio::test]
+async fn identity_migration_repairs_saved_views_and_keeps_settings_and_old_links() {
+    let (dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let mut scanned = StoredHost::new("migration-scan".into(), "scan".into(), "arp");
+    scanned.addresses = vec!["192.168.1.20".into()];
+    scanned.macs = vec!["02:00:00:00:00:02".into()];
+    scanned.last_seen = now();
+    state.save_host(&scanned).await.unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(child_batch(&agent, 1, 1, true, now(), vec![child_device()])),
+            Some(("authorization", &bearer))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let projected = state.host("migration-scan").await.unwrap().unwrap();
+    let source_id = projected.source_device_id.clone().unwrap();
+    // Recreate the schema and persisted projection corruption produced by v14.
+    sqlx::raw_sql("DROP INDEX confirmed_source_device; DROP INDEX confirmed_scan_host; ALTER TABLE device_associations DROP COLUMN manual; DROP TABLE source_device_settings; PRAGMA user_version=14;").execute(&state.0.db).await.unwrap();
+    sqlx::query("UPDATE hosts SET body=? WHERE id='migration-scan'")
+        .bind(serde_json::to_string(&projected).unwrap())
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    let mut ghost = Host::new(source_id.clone(), "workload".into(), "docker");
+    ghost.source = projected.source.clone();
+    ghost.child = projected.child.clone();
+    ghost.source_device_id = Some(source_id.clone());
+    ghost.name_override = Some("Keep my name".into());
+    ghost.icon_override = Some("selfhst:nginx".into());
+    ghost.uptime = UptimeSettings {
+        enabled: true,
+        device: false,
+        ports: vec![80],
+    };
+    sqlx::query("INSERT INTO hosts(id,name,body) VALUES(?,?,?)")
+        .bind(&ghost.id)
+        .bind(&ghost.name)
+        .bind(serde_json::to_string(&ghost).unwrap())
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO source_device_aliases(alias_id,survivor_id) VALUES('old-source-url',?)",
+    )
+    .bind(&source_id)
+    .execute(&state.0.db)
+    .await
+    .unwrap();
+    let capabilities = state.0.capabilities.clone();
+    state.0.db.close().await;
+    let state = State::open_with_agent_ca(
+        dir.path().join("test.db").to_str().unwrap(),
+        "http://localhost:8080".into(),
+        "releases".into(),
+        capabilities,
+        None,
+    )
+    .await
+    .unwrap();
+    let host = state.host("old-source-url").await.unwrap().unwrap();
+    assert_eq!(host.id, "migration-scan");
+    assert_eq!(host.name_override.as_deref(), Some("Keep my name"));
+    assert!(host.uptime.enabled);
+    assert_eq!(state.hosts().await.unwrap().len(), 2);
+    let stored = state.stored_host("migration-scan").await.unwrap().unwrap();
+    assert!(stored.child.is_none());
+    assert!(stored.source_device_id.is_none());
+    assert!(state.stored_host(&source_id).await.unwrap().is_none());
+    assert_eq!(
+        state
+            .host(&source_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .source_device_id,
+        Some(source_id.clone())
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM source_metrics WHERE source_device_id=?")
+            .bind(&source_id)
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+    // Opening a repaired database repeatedly must be harmless.
+    hope_server::migrations::run(&state.0.db).await.unwrap();
+}
+
+#[tokio::test]
+async fn identity_database_prevents_two_confirmed_sources_for_one_host() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let mut scanned = StoredHost::new("single-owner".into(), "scan".into(), "arp");
+    scanned.addresses = vec!["192.168.1.20".into()];
+    scanned.macs = vec!["02:00:00:00:00:02".into()];
+    scanned.last_seen = now();
+    state.save_host(&scanned).await.unwrap();
+    let mut other = child_device();
+    other.identity.key = "other-child".into();
+    other.interfaces.clear();
+    other.name = "other".into();
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(child_batch(
+                &agent,
+                1,
+                1,
+                true,
+                now(),
+                vec![child_device(), other]
+            )),
+            Some(("authorization", &format!("Bearer {credential}")))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let source_id: String =
+        sqlx::query_scalar("SELECT id FROM source_devices WHERE source_key='other-child'")
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            &format!("/api/v1/hosts/{source_id}/association"),
+            json!({"action":"confirm","host_id":"single-owner"}),
+            Some(("cookie", &cookie))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(sqlx::query("INSERT INTO device_associations(source_device_id,host_id,status,reason,evidence,evidence_hash,updated_at) VALUES(?,'single-owner','confirmed','test','[]','hash',1)").bind(&source_id).execute(&state.0.db).await.is_err());
+}
+
+#[tokio::test]
+async fn notification_outbox_retries_after_restart_and_keeps_recovery_in_order() {
+    let (dir, state, app, cookie) = setup().await;
+    let (server, seen, response_status) = fake_ntfy_switchable(503).await;
+    let (status, _) = request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        settings(&server, Value::Null),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut host = StoredHost::new("retry".into(), "retry host".into(), "agent");
+    host.agent_id = Some("retry-agent".into());
+    host.last_report = Some(now() - 900.0);
+    state.save_host(&host).await.unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    assert!(
+        seen.lock().await.is_empty(),
+        "evaluation does no network I/O"
+    );
+    assert_eq!(
+        hope_server::notify::deliver_pending(&state).await.unwrap(),
+        0
+    );
+    let retry: (i64, f64) = sqlx::query_as("SELECT attempts,next_attempt FROM notification_outbox")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(retry.0, 1);
+    assert!(retry.1 > now());
+    host.last_report = Some(now());
+    state.save_host(&host).await.unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    assert_eq!(
+        hope_server::notify::deliver_pending(&state).await.unwrap(),
+        0
+    );
+    assert_eq!(
+        seen.lock().await.len(),
+        1,
+        "recovery waits behind the failed opening message"
+    );
+    let capabilities = state.0.capabilities.clone();
+    state.0.db.close().await;
+    let reopened = State::open(
+        dir.path().join("test.db").to_str().unwrap(),
+        "http://localhost:8080".into(),
+        "releases".into(),
+        capabilities,
+    )
+    .await
+    .unwrap();
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox")
+        .fetch_one(&reopened.0.db)
+        .await
+        .unwrap();
+    assert_eq!(pending, 2, "both transitions survive a restart");
+    response_status.store(200, std::sync::atomic::Ordering::SeqCst);
+    sqlx::query("UPDATE notification_outbox SET next_attempt=0")
+        .execute(&reopened.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        hope_server::notify::deliver_pending(&reopened)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        hope_server::notify::deliver_pending(&reopened)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        hope_server::notify::deliver_pending(&reopened)
+            .await
+            .unwrap(),
+        0
+    );
+    let messages = seen.lock().await;
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0].1["title"], messages[1].1["title"]);
+    assert!(
+        messages[2].1["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Resolved:")
+    );
+    assert!(
+        hope_server::notify::settings(&reopened)
+            .await
+            .unwrap()
+            .last_error
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn notification_outbox_capacity_postpones_transitions_without_losing_them() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (server, _) = fake_ntfy(200).await;
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        settings(&server, Value::Null),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    sqlx::query("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<4096) INSERT INTO notification_outbox(alert_key,kind,destination,body,next_attempt,created_at) SELECT 'full-'||x,'resource','fixture','{}',0,0 FROM n").execute(&state.0.db).await.unwrap();
+    let mut host = StoredHost::new("capacity".into(), "capacity host".into(), "agent");
+    host.agent_id = Some("capacity-agent".into());
+    host.last_report = Some(now() - 900.0);
+    state.save_host(&host).await.unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alerts")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        open, 0,
+        "a full queue must not consume an unsent transition"
+    );
+    sqlx::query("DELETE FROM notification_outbox WHERE id=1")
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM notification_outbox),(SELECT COUNT(*) FROM alerts)",
+    )
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(counts, (4096, 1));
+    host.last_report = Some(now());
+    state.save_host(&host).await.unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alerts")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(open, 1, "recovery also waits for queue capacity");
+    sqlx::query("DELETE FROM notification_outbox WHERE id=2")
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM notification_outbox),(SELECT COUNT(*) FROM alerts)",
+    )
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(counts, (4096, 0));
+}
+
+#[tokio::test]
+async fn notification_settings_cancel_pending_delivery_for_disabled_or_changed_destinations() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (server, seen) = fake_ntfy(503).await;
+    let mut config = settings(&server, Value::Null);
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        config.clone(),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    let mut host = StoredHost::new("cancel".into(), "cancel host".into(), "agent");
+    host.agent_id = Some("cancel-agent".into());
+    host.last_report = Some(now() - 900.0);
+    state.save_host(&host).await.unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    config["ntfy_topic"] = json!("different-topic");
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        config.clone(),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(
+        hope_server::notify::deliver_pending(&state).await.unwrap(),
+        0
+    );
+    assert!(
+        seen.lock().await.is_empty(),
+        "old messages cannot leak to a new topic"
+    );
+    host.last_report = Some(now());
+    state.save_host(&host).await.unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    config["ntfy_enabled"] = json!(false);
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        config,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(
+        hope_server::notify::deliver_pending(&state).await.unwrap(),
+        0
+    );
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(pending, 0);
+    assert!(seen.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn slow_notification_delivery_does_not_block_evaluation_or_shutdown() {
+    let (dir, state, app, cookie) = setup().await;
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let request_entered = entered.clone();
+    let ntfy = Router::new().route(
+        "/",
+        axum::routing::post(move || {
+            let request_entered = request_entered.clone();
+            async move {
+                request_entered.notify_one();
+                std::future::pending::<StatusCode>().await
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    let ntfy_task = tokio::spawn(async move { axum::serve(listener, ntfy).await.unwrap() });
+    request(
+        &app,
+        "PUT",
+        "/api/v1/notifications",
+        settings(&server, Value::Null),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    let mut host = StoredHost::new("slow".into(), "slow host".into(), "agent");
+    host.agent_id = Some("slow-agent".into());
+    host.last_report = Some(now() - 900.0);
+    state.save_host(&host).await.unwrap();
+    hope_server::notify::evaluate(&state).await.unwrap();
+    hope_server::notify::spawn(state.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .expect("delivery starts");
+    host.last_report = Some(now());
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        state.save_host(&host).await.unwrap();
+        hope_server::notify::evaluate(&state).await.unwrap();
+    })
+    .await
+    .expect("condition evaluation stays responsive during HTTP I/O");
+    let capabilities = state.0.capabilities.clone();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        hope_server::lifecycle::settle(&state, std::time::Duration::from_secs(2)),
+    )
+    .await
+    .expect("shutdown cancels delivery");
+    assert_eq!(
+        state
+            .0
+            .active_tasks
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    let reopened = State::open(
+        dir.path().join("test.db").to_str().unwrap(),
+        "http://localhost:8080".into(),
+        "releases".into(),
+        capabilities,
+    )
+    .await
+    .unwrap();
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox")
+        .fetch_one(&reopened.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        pending, 2,
+        "cancellation keeps unacknowledged messages durable"
+    );
+    ntfy_task.abort();
+}
+
+#[tokio::test]
+async fn inventory_writes_wait_for_an_independent_sqlite_writer_before_reading() {
+    let (_dir, state, _app, _) = setup().await;
+    let mut host = StoredHost::new("concurrent".into(), "before".into(), "agent");
+    state.save_host(&host).await.unwrap();
+    // SSH progress and other single-statement writers do not take the inventory mutex.
+    let mut writer = state.0.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    sqlx::query("INSERT INTO meta(key,value) VALUES('independent-writer','held')")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    host.name = "after".into();
+    let save = state.save_host(&host);
+    tokio::pin!(save);
+    tokio::select! {
+        result = &mut save => panic!("inventory write must wait for the writer reservation: {result:?}"),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+    }
+    writer.commit().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), &mut save)
+        .await
+        .expect("writer is released")
+        .expect("save succeeds without a stale-snapshot upgrade");
+    assert_eq!(state.host(&host.id).await.unwrap().unwrap().name, "after");
 }

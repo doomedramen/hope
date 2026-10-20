@@ -206,17 +206,25 @@ pub fn layout(
 }
 
 /// Set each host's parent from the layout. Returns the hosts that changed.
-pub fn assign(hosts: &mut [Host], layout: &Layout, networks: &[Network]) -> Vec<usize> {
+pub fn assign<T: std::borrow::Borrow<Host> + std::borrow::BorrowMut<Host>>(
+    hosts: &mut [T],
+    layout: &Layout,
+    networks: &[Network],
+) -> Vec<usize> {
     let by_address: HashMap<String, String> = hosts
         .iter()
-        .flat_map(|h| h.addresses.iter().map(|a| (a.clone(), h.id.clone())))
+        .flat_map(|h| {
+            let h = h.borrow();
+            h.addresses.iter().map(|a| (a.clone(), h.id.clone()))
+        })
         .collect();
     let names: HashMap<&str, (&str, &str)> = networks
         .iter()
         .map(|n| (n.id.as_str(), (n.name.as_str(), n.cidr.as_str())))
         .collect();
     let mut changed = vec![];
-    for (index, host) in hosts.iter_mut().enumerate() {
+    for (index, record) in hosts.iter_mut().enumerate() {
+        let host = record.borrow_mut();
         let mut parent: Option<(String, String)> = None;
         // A router: its upstream router.
         for address in &host.addresses {
@@ -270,7 +278,7 @@ pub async fn ensure_router_hosts(state: &State, layout: &Layout) -> anyhow::Resu
         if known.contains(&address) {
             continue;
         }
-        let mut host = Host::new(
+        let mut host = crate::inventory::StoredHost::new(
             uuid::Uuid::new_v4().to_string(),
             address.clone(),
             "traceroute",

@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
         }
     });
     hope_server::discovery::spawn(state.clone());
+    hope_server::notify::spawn(state.clone());
     let bind = std::env::var("HOPE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind,"H.O.P.E is listening");

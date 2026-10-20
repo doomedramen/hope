@@ -3,7 +3,7 @@ use crate::{
     state::{State, now},
 };
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use hope_protocol::{Capabilities, Host, Network, ScanJob, ScanStatus, Service};
+use hope_protocol::{Capabilities, Network, ScanJob, ScanStatus, Service};
 use ipnet::Ipv4Net;
 use sqlx::Row;
 use std::{
@@ -415,7 +415,7 @@ async fn persist_observation(
         return Ok(());
     }
     let address = ip.to_string();
-    let hosts = state.hosts().await?;
+    let hosts = state.stored_hosts().await?;
     let candidates: Vec<_> = hosts
         .iter()
         .filter(|host| {
@@ -436,7 +436,8 @@ async fn persist_observation(
         .first()
         .map(|host| (*host).clone())
         .unwrap_or_else(|| {
-            let mut host = Host::new(Uuid::new_v4().to_string(), address.clone(), "");
+            let mut host =
+                crate::inventory::StoredHost::new(Uuid::new_v4().to_string(), address.clone(), "");
             host.addresses = vec![address];
             host.last_seen = now();
             host
@@ -473,7 +474,7 @@ async fn persist_observation(
         state
             .0
             .enrichment
-            .enqueue(state.clone(), host.id, ip, cancel.clone())
+            .enqueue(state.clone(), host.id.clone(), ip, cancel.clone())
             .await;
     }
     Ok(())
@@ -556,7 +557,7 @@ mod tests {
     async fn ambiguous_observations_do_not_create_repeated_duplicates() {
         let (_directory, state, _) = fixture().await;
         for id in ["first", "second"] {
-            let host: Host = serde_json::from_value(serde_json::json!({"id":id,"agent_id":null,"name":id,"addresses":["192.168.1.10"],"macs":[],"network_ids":[],"last_seen":0,"last_report":null,"discovery_method":"tcp","inventory":null,"metrics":null,"collectors":[],"services":[]})).expect("host");
+            let host: crate::inventory::StoredHost = serde_json::from_value(serde_json::json!({"id":id,"agent_id":null,"name":id,"addresses":["192.168.1.10"],"macs":[],"network_ids":[],"last_seen":0,"last_report":null,"discovery_method":"tcp","inventory":null,"metrics":null,"collectors":[],"services":[]})).expect("host");
             state.save_host(&host).await.expect("save");
         }
         let job = ScanJob {

@@ -33,25 +33,42 @@ import type { MetricPoint, Metrics, SourceMetricPoint } from "@/lib/protocol";
 export type HistoryWindow = "1" | "6" | "24" | "168";
 
 export function SourceMetricHistory({ hostId }: { hostId: string }) {
-  const [points, setPoints] = useState<SourceMetricPoint[] | null>(null);
+  const [result, setResult] = useState<{
+    hostId: string;
+    points: SourceMetricPoint[] | null;
+    error: string;
+  } | null>(null);
   const [selectedSource, setSelectedSource] = useState(hostId);
-  const [error, setError] = useState("");
   useEffect(() => {
-    let alive = true;
-    api<SourceMetricPoint[]>(`/hosts/${hostId}/source-metrics?hours=24`)
-      .then((result) => {
-        if (alive) {
-          setPoints(result);
-          setError("");
-        }
-      })
-      .catch((cause: Error) => {
-        if (alive) setError(cause.message);
-      });
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        const points = await api<SourceMetricPoint[]>(
+          `/hosts/${hostId}/source-metrics?hours=24`,
+          { signal: controller.signal },
+        );
+        if (!controller.signal.aborted)
+          setResult({ hostId, points, error: "" });
+      } catch (cause) {
+        if (!controller.signal.aborted)
+          setResult((previous) => ({
+            hostId,
+            points: previous?.hostId === hostId ? previous.points : null,
+            error: (cause as Error).message,
+          }));
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(refresh, 30000);
+      }
+    };
+    void refresh();
     return () => {
-      alive = false;
+      controller.abort();
+      clearTimeout(timer);
     };
   }, [hostId]);
+  const points = result?.hostId === hostId ? result.points : null;
+  const error = result?.hostId === hostId ? result.error : "";
   const sourceIds = [
     ...new Set((points ?? []).map((point) => point.source_device_id ?? hostId)),
   ];
@@ -234,22 +251,25 @@ export function useHistory(
       ),
     });
   const bucket = BUCKET_SECONDS[hours] || RAW_RELOAD_SECONDS;
-  const reload = collectedAt ? Math.floor(collectedAt / bucket) : 0;
+  const reload = Math.floor(Math.max(now, collectedAt ?? 0) / bucket);
   useEffect(() => {
-    let alive = true;
-    api<MetricPoint[]>(`/hosts/${hostId}/metrics?hours=${hours}`)
+    const controller = new AbortController();
+    api<MetricPoint[]>(`/hosts/${hostId}/metrics?hours=${hours}`, {
+      signal: controller.signal,
+    })
       .then((p) => {
-        if (alive) {
+        if (!controller.signal.aborted) {
           setResult({ hostId, hours, points: p });
           setFetchedAt(Date.now() / 1000);
           setFailure(null);
         }
       })
       .catch((e) => {
-        if (alive) setFailure({ hostId, hours, message: e.message });
+        if (!controller.signal.aborted)
+          setFailure({ hostId, hours, message: e.message });
       });
     return () => {
-      alive = false;
+      controller.abort();
     };
   }, [hostId, hours, reload]);
   const stored =

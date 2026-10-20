@@ -72,12 +72,7 @@ pub async fn serve(Extract(state): Extract<State>, request: Request) -> Response
     }
 }
 
-const PLATFORMS: [(&str, &str); 4] = [
-    ("linux", "x86_64"),
-    ("linux", "aarch64"),
-    ("macos", "x86_64"),
-    ("macos", "aarch64"),
-];
+const PLATFORMS: [(&str, &str); 1] = [("linux", "x86_64")];
 const MANIFEST_LIMIT: u64 = 64 * 1024;
 const SIGNATURE_LIMIT: u64 = 16 * 1024;
 
@@ -303,21 +298,16 @@ LrmW2OY0Z47dqhFZxgYSGmKSGPOX8uIferQ1dBjahj6ZAgMBAAE=
         write(dir, "manifest.json.sig", b"sig");
     }
 
-    const ALL: [&str; 4] = [
-        "linux-x86_64",
-        "linux-aarch64",
-        "macos-x86_64",
-        "macos-aarch64",
-    ];
+    const ALL: [&str; 1] = ["linux-x86_64"];
 
     #[tokio::test]
     async fn manifest_lists_exactly_its_platforms() {
         let dir = tempfile::tempdir().expect("dir");
         release(dir.path(), &ALL, false);
         assert_eq!(packaged_platforms(dir.path()).await, ALL);
-        let partial = tempfile::tempdir().expect("dir");
-        release(partial.path(), &["linux-x86_64"], true);
-        assert_eq!(packaged_platforms(partial.path()).await, ["linux-x86_64"]);
+        let unsupported = tempfile::tempdir().expect("dir");
+        release(unsupported.path(), &["macos-aarch64"], true);
+        assert!(packaged_platforms(unsupported.path()).await.is_empty());
     }
 
     #[tokio::test]
@@ -385,16 +375,16 @@ LrmW2OY0Z47dqhFZxgYSGmKSGPOX8uIferQ1dBjahj6ZAgMBAAE=
     }
 
     #[tokio::test]
-    async fn a_complete_manifest_must_list_every_platform() {
+    async fn a_complete_manifest_must_list_the_supported_platform() {
         let dir = tempfile::tempdir().expect("dir");
-        release(dir.path(), &["linux-x86_64"], false);
+        release(dir.path(), &[], false);
         assert!(packaged_platforms(dir.path()).await.is_empty());
     }
 
     #[tokio::test]
     async fn without_a_manifest_nothing_is_offered() {
         let dir = tempfile::tempdir().expect("dir");
-        release(dir.path(), &["linux-x86_64", "macos-aarch64"], true);
+        release(dir.path(), &["macos-aarch64"], true);
         std::fs::remove_file(dir.path().join("manifest.json")).expect("rm");
         assert!(packaged_platforms(dir.path()).await.is_empty());
     }
@@ -418,19 +408,30 @@ LrmW2OY0Z47dqhFZxgYSGmKSGPOX8uIferQ1dBjahj6ZAgMBAAE=
         let root = tempfile::tempdir().expect("dir");
         for (name, platforms) in [
             ("1.0.0-aaaa", vec!["linux-x86_64"]),
-            ("1.1.0-bbbb", vec!["macos-aarch64"]),
+            ("1.1.0-bbbb", vec!["linux-x86_64"]),
         ] {
             std::fs::create_dir(root.path().join(name)).expect("mkdir");
-            release(&root.path().join(name), &platforms, true);
+            let directory = root.path().join(name);
+            release(&directory, &platforms, false);
+            let manifest = std::fs::read_to_string(directory.join("manifest.json")).unwrap();
+            write(
+                &directory,
+                "manifest.json",
+                manifest
+                    .replace("0.1.0", name.split('-').next().unwrap())
+                    .as_bytes(),
+            );
         }
         let current = root.path().join("current");
         std::os::unix::fs::symlink("1.0.0-aaaa", &current).expect("link");
         let live = release_directory(root.path().to_str().expect("path")).await;
         assert_eq!(packaged_platforms(&live).await, ["linux-x86_64"]);
+        assert_eq!(published_version(&live).await.as_deref(), Some("1.0.0"));
         std::fs::remove_file(&current).expect("rm");
         std::os::unix::fs::symlink("1.1.0-bbbb", &current).expect("link");
         let live = release_directory(root.path().to_str().expect("path")).await;
-        assert_eq!(packaged_platforms(&live).await, ["macos-aarch64"]);
+        assert_eq!(packaged_platforms(&live).await, ["linux-x86_64"]);
+        assert_eq!(published_version(&live).await.as_deref(), Some("1.1.0"));
         // No `current`: the directory itself is the release.
         std::fs::remove_file(&current).expect("rm");
         let flat = release_directory(root.path().to_str().expect("path")).await;

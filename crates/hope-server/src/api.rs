@@ -38,34 +38,8 @@ pub async fn get_host(
     Extract(state): Extract<State>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Host>> {
-    let resolved = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
-    let associated_host: Option<String> =
-        sqlx::query_scalar("SELECT host_id FROM source_devices WHERE id=?")
-            .bind(resolved.source_device_id.as_deref().unwrap_or(&resolved.id))
-            .fetch_optional(&state.0.db)
-            .await?;
-    if let Some(host_id) = associated_host
-        && let Some(host) = state
-            .hosts()
-            .await?
-            .into_iter()
-            .find(|host| host.id == host_id)
-    {
-        return Ok(Json(host));
-    }
     Ok(Json(
-        state
-            .hosts()
-            .await?
-            .into_iter()
-            .find(|host| {
-                host.id == resolved.id
-                    || resolved
-                        .source_device_id
-                        .as_ref()
-                        .is_some_and(|source_id| host.source_device_id.as_ref() == Some(source_id))
-            })
-            .unwrap_or(resolved),
+        state.host(&id).await?.ok_or_else(ApiError::not_found)?,
     ))
 }
 pub async fn matching_networks(state: &State, addresses: &[String]) -> ApiResult<Vec<String>> {
@@ -178,10 +152,13 @@ pub async fn add_network(
         .bind(network.interval_minutes)
         .execute(&state.0.db)
         .await?;
-    for mut host in state.hosts().await? {
+    for mut host in state.stored_hosts().await? {
         host.network_ids = matching_networks(&state, &host.addresses).await?;
         state.save_host(&host).await?;
     }
+    let mut tx = state.write_transaction().await?;
+    crate::identity::reconcile(&mut tx).await?;
+    tx.commit().await?;
     state.changed();
     Ok(Json(network))
 }
@@ -191,6 +168,7 @@ pub async fn update_network(
     Path(id): Path<String>,
     Json(body): Json<NetworkUpdate>,
 ) -> ApiResult<Json<OkResponse>> {
+    let _guard = state.0.writes.lock().await;
     if !networks(&state).await?.iter().any(|n| n.id == id) {
         return Err(ApiError::not_found());
     }
@@ -208,6 +186,9 @@ pub async fn update_network(
             .execute(&state.0.db)
             .await?;
     }
+    let mut tx = state.write_transaction().await?;
+    crate::identity::reconcile(&mut tx).await?;
+    tx.commit().await?;
     state.changed();
     Ok(Json(OkResponse { ok: true }))
 }
@@ -230,7 +211,7 @@ pub async fn delete_network(
         scanner::cancel(&state, &scan).await?;
     }
     let _guard = state.0.writes.lock().await;
-    let mut tx = state.0.db.begin().await?;
+    let mut tx = state.write_transaction().await?;
     sqlx::query("DELETE FROM networks WHERE id=?")
         .bind(&id)
         .execute(&mut *tx)
@@ -239,7 +220,7 @@ pub async fn delete_network(
         .bind(&id)
         .execute(&mut *tx)
         .await?;
-    for mut host in state.hosts().await? {
+    for mut host in state.stored_hosts().await? {
         if host.network_ids.iter().any(|n| n == &id) {
             host.network_ids.retain(|n| n != &id);
             sqlx::query("UPDATE hosts SET body=? WHERE id=?")
@@ -395,9 +376,12 @@ pub async fn merge(
     if target == body.source_id {
         return Err(ApiError::bad("Select two different hosts"));
     }
-    let mut target = state.host(&target).await?.ok_or_else(ApiError::not_found)?;
+    let mut target = state
+        .stored_host(&target)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let source = state
-        .host(&body.source_id)
+        .stored_host(&body.source_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let target_has_agent = target.agent_id.is_some() && !target.agent_uninstalled;
@@ -410,6 +394,7 @@ pub async fn merge(
             "Select the enrolled agent as the destination",
         ));
     }
+    let source = source.into_view();
     for address in source.addresses {
         if !target.addresses.contains(&address) {
             target.addresses.push(address);
@@ -446,7 +431,14 @@ pub async fn merge(
         p.id != source.id && p.id.rsplit_once(':').is_none_or(|(_, id)| id != source.id)
     });
     map.revision = next_revision(map.revision)?;
-    let mut tx = state.0.db.begin().await?;
+    let mut tx = state.write_transaction().await?;
+    let linked_sources: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT source_device_id) FROM device_associations WHERE host_id IN (?,?) AND status='confirmed'")
+        .bind(&source.id).bind(&target.id).fetch_one(&mut *tx).await?;
+    if linked_sources > 1 {
+        return Err(ApiError::bad(
+            "Unlink the conflicting source devices before merging these hosts",
+        ));
+    }
     // Keep child inventory, links, and their source-specific history attached to the survivor.
     move_source_host_references(&mut tx, &source.id, &target.id).await?;
     sqlx::query("UPDATE hosts SET body=? WHERE id=?")
@@ -468,7 +460,12 @@ pub async fn merge(
     sqlx::query("INSERT INTO meta(key,value) VALUES('map',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(serde_json::to_string(&map)?).execute(&mut *tx).await?;
     tx.commit().await?;
     state.changed();
-    Ok(Json(target))
+    Ok(Json(
+        state
+            .host(&target.id)
+            .await?
+            .ok_or_else(ApiError::not_found)?,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -639,7 +636,7 @@ pub async fn reconcile_duplicate_groups(
     Json(request): Json<ReconcileDuplicates>,
 ) -> ApiResult<Json<ReconcileResponse>> {
     let _guard = state.0.writes.lock().await;
-    let mut tx = state.0.db.begin().await?;
+    let mut tx = state.write_transaction().await?;
     let mut merged = Vec::new();
     for group in request.merges {
         if group.duplicate_ids.len() > 100 || group.duplicate_ids.contains(&group.survivor_id) {
@@ -671,6 +668,7 @@ pub async fn reconcile_duplicate_groups(
             merged_ids,
         });
     }
+    crate::identity::reconcile(&mut tx).await?;
     tx.commit().await?;
     state.changed();
     Ok(Json(ReconcileResponse { merged }))
@@ -752,7 +750,7 @@ async fn merge_source_device_inner(
     if exact_identity && legacy_reporter.is_none() {
         crate::metrics::merge_source_history(tx, survivor, duplicate).await?;
     }
-    sqlx::query("INSERT OR IGNORE INTO device_associations SELECT ?,host_id,status,reason,evidence,evidence_hash,updated_at FROM device_associations WHERE source_device_id=?").bind(survivor).bind(duplicate).execute(&mut **tx).await?;
+    crate::identity::merge_associations(tx, survivor, duplicate).await?;
     sqlx::query("UPDATE source_devices SET host_id=COALESCE(host_id,(SELECT host_id FROM source_devices WHERE id=?)) WHERE id=?").bind(duplicate).bind(survivor).execute(&mut **tx).await?;
     sqlx::query("INSERT OR IGNORE INTO device_relationships SELECT CASE WHEN from_device_id=? THEN ? ELSE from_device_id END,CASE WHEN to_device_id=? THEN ? ELSE to_device_id END,kind,detail,?,observed_at FROM device_relationships WHERE source_device_id=? AND kind!='runs_on'")
         .bind(duplicate).bind(survivor).bind(duplicate).bind(survivor).bind(survivor).bind(duplicate).execute(&mut **tx).await?;
@@ -888,7 +886,7 @@ pub async fn set_device_type(
             crate::classify::refresh(&mut host, &state.gateway_set());
         }
     }
-    state.save_host(&host).await?;
+    state.save_settings(&host).await?;
     state.changed();
     Ok(Json(host))
 }
@@ -926,7 +924,7 @@ pub async fn set_host_identity(
     let mut host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
     host.name_override = body.name;
     host.icon_override = body.icon;
-    state.save_host(&host).await?;
+    state.save_settings(&host).await?;
     state.changed();
     Ok(Json(host))
 }

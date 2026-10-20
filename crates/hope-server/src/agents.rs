@@ -1,6 +1,7 @@
 use crate::{
     auth::limited,
     error::{ApiError, ApiResult},
+    inventory::StoredHost,
     limits::ClientKey,
     state::{State, hash, now, secret},
 };
@@ -11,7 +12,7 @@ use axum::{
 };
 use hope_protocol::{
     AgentReport, AssociationUpdate, ChildReportBatch, ChildReportResponse, ChildSourceKind,
-    EnrollmentRequest, EnrollmentResponse, Host, Inventory, Network, SCHEMA_VERSION,
+    EnrollmentRequest, EnrollmentResponse, Host, Inventory, SCHEMA_VERSION,
 };
 use hope_protocol::{
     EnrollmentTokenRequest, EnrollmentTokenResponse, HISTORY_SAMPLE_SECONDS, OkResponse,
@@ -240,7 +241,7 @@ async fn enroll_inner(
     if let Some((credential_hash, revoked)) = existing {
         if revoked {
             // Only an administrator-issued, identity-bound token can replace a revoked secret.
-            let mut tx = state.0.db.begin().await?;
+            let mut tx = state.write_transaction().await?;
             let consumed = sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND expires_at>? AND used_at IS NULL AND reset_agent_id=?")
                 .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).bind(&request.agent_id).execute(&mut *tx).await?.rows_affected();
             if consumed != 1 || credential_hash == hash(&request.credential) {
@@ -255,7 +256,7 @@ async fn enroll_inner(
                 .bind(&request.agent_id)
                 .fetch_one(&mut *tx)
                 .await?;
-            let mut host: Host = serde_json::from_str(&body)?;
+            let mut host = StoredHost::decode(&body)?;
             host.agent_revoked = false;
             host.agent_uninstalled = false;
             sqlx::query("UPDATE hosts SET body=? WHERE agent_id=?")
@@ -293,7 +294,7 @@ async fn enroll_inner(
     }
     let addresses = inventory_addresses(&request.inventory);
     let macs = inventory_macs(&request.inventory);
-    let hosts = state.hosts().await?;
+    let hosts = state.stored_hosts().await?;
     // IP alone is insufficient: DHCP may have reassigned it since discovery.
     let candidates: Vec<_> = hosts
         .into_iter()
@@ -302,7 +303,7 @@ async fn enroll_inner(
     let mut host = if candidates.len() == 1 {
         candidates[0].clone()
     } else {
-        Host::new(Uuid::new_v4().to_string(), String::new(), "agent")
+        StoredHost::new(Uuid::new_v4().to_string(), String::new(), "agent")
     };
     host.agent_id = Some(request.agent_id.clone());
     host.name = request.inventory.hostname.clone();
@@ -313,7 +314,7 @@ async fn enroll_inner(
     host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
     crate::classify::refresh(&mut host, &state.gateway_set());
     let credential = request.credential;
-    let mut tx = state.0.db.begin().await?;
+    let mut tx = state.write_transaction().await?;
     let changed=sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND used_at IS NULL AND expires_at>? AND reset_agent_id IS NULL")
         .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
@@ -326,6 +327,7 @@ async fn enroll_inner(
         .await?;
     sqlx::query("INSERT INTO hosts(id,agent_id,name,body) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET agent_id=excluded.agent_id,name=excluded.name,body=excluded.body")
         .bind(&host.id).bind(&host.agent_id).bind(&host.name).bind(serde_json::to_string(&host)?).execute(&mut *tx).await?;
+    crate::identity::reconcile(&mut tx).await?;
     tx.commit().await?;
     state.changed();
     Ok(Json(EnrollmentResponse {
@@ -403,7 +405,7 @@ pub async fn report(
         .fetch_optional(&state.0.db)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let mut host: Host = serde_json::from_str(row.get("body"))?;
+    let mut host = StoredHost::decode(row.get("body"))?;
     let duplicate: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM metrics WHERE agent_id=? AND report_id=?)")
             .bind(&report.agent_id)
@@ -431,7 +433,7 @@ pub async fn report(
     .bind(report.collected_at + spacing)
     .fetch_one(&state.0.db)
     .await?;
-    let mut tx = state.0.db.begin().await?;
+    let mut tx = state.write_transaction().await?;
     if !crowded {
         sqlx::query(
             "INSERT OR IGNORE INTO metrics(agent_id,report_id,collected_at,body) VALUES(?,?,?,?)",
@@ -443,6 +445,7 @@ pub async fn report(
         .execute(&mut *tx)
         .await?;
     }
+    let identity_changed = report.inventory.is_some() || host.last_seen < now() - 7.0 * 86400.0;
     host.last_report = Some(now());
     host.last_seen = now();
     if let Some(version) = agent_version(&headers) {
@@ -470,8 +473,16 @@ pub async fn report(
         .bind(&report.agent_id)
         .execute(&mut *tx)
         .await?;
+    let association_changed = if identity_changed {
+        crate::identity::reconcile(&mut tx).await?
+    } else {
+        false
+    };
     tx.commit().await?;
-    state.host_changed(&host);
+    state.publish_host(&host.id).await;
+    if association_changed {
+        state.changed();
+    }
     Ok(Json(response))
 }
 
@@ -566,7 +577,7 @@ pub async fn child_report(
         ChildSourceKind::Docker => "docker",
         ChildSourceKind::Proxmox => "proxmox",
     };
-    let mut tx = state.0.db.begin().await?;
+    let mut tx = state.write_transaction().await?;
     let shared_scope = if let Some(token) = batch.source_token.as_deref() {
         if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(ApiError::bad("Invalid shared source token"));
@@ -996,108 +1007,7 @@ pub async fn child_report(
         }
     }
 
-    let scan_hosts = sqlx::query("SELECT body FROM hosts")
-        .fetch_all(&mut *tx)
-        .await?
-        .into_iter()
-        .map(|row| {
-            let body: String = row.get("body");
-            serde_json::from_str::<Host>(&body).map_err(anyhow::Error::from)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let networks =
-        sqlx::query("SELECT id,name,cidr,enabled,interval_minutes FROM networks WHERE enabled=1")
-            .fetch_all(&mut *tx)
-            .await?
-            .into_iter()
-            .map(|row| Network {
-                id: row.get("id"),
-                name: row.get("name"),
-                cidr: row.get("cidr"),
-                enabled: row.get("enabled"),
-                interval_minutes: row.get::<i64, _>("interval_minutes") as u32,
-            })
-            .collect::<Vec<_>>();
-    let confirmed_rows = sqlx::query(
-        "SELECT source_device_id,host_id FROM device_associations WHERE status='confirmed'",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut confirmed_by_source = HashMap::new();
-    let mut confirmed_hosts = HashMap::new();
-    for row in confirmed_rows {
-        let source_id: String = row.get("source_device_id");
-        let host_id: String = row.get("host_id");
-        confirmed_by_source.insert(source_id.clone(), host_id.clone());
-        confirmed_hosts.insert(host_id, source_id);
-    }
-    for device in &batch.devices {
-        let id = &source_ids[device.identity.key.as_str()];
-        if !fresh_source_ids.contains(id) {
-            continue;
-        }
-        let candidates = crate::associations::candidates(device, &scan_hosts, &networks);
-        let existing_confirmed = confirmed_by_source.get(id).cloned();
-        let mut candidate_hosts = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            candidate_hosts.push(candidate.host_id.clone());
-            let evidence = serde_json::to_string(&candidate.evidence)?;
-            let evidence_hash = hash(&evidence);
-            let may_confirm = candidate.strong
-                && confirmed_hosts
-                    .get(&candidate.host_id)
-                    .is_none_or(|source_id| source_id == id)
-                && existing_confirmed
-                    .as_deref()
-                    .is_none_or(|confirmed| confirmed == candidate.host_id);
-            let status = if may_confirm {
-                confirmed_hosts.insert(candidate.host_id.clone(), id.clone());
-                confirmed_by_source.insert(id.clone(), candidate.host_id.clone());
-                "confirmed"
-            } else {
-                "suggested"
-            };
-            sqlx::query("INSERT INTO device_associations(source_device_id,host_id,status,reason,evidence,evidence_hash,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_device_id,host_id) DO UPDATE SET status=CASE WHEN device_associations.status='confirmed' THEN 'confirmed' WHEN device_associations.status='rejected' AND device_associations.evidence_hash=excluded.evidence_hash THEN 'rejected' ELSE excluded.status END,reason=excluded.reason,evidence=excluded.evidence,evidence_hash=excluded.evidence_hash,updated_at=CASE WHEN device_associations.status='confirmed' OR (device_associations.status='rejected' AND device_associations.evidence_hash=excluded.evidence_hash) THEN device_associations.updated_at ELSE excluded.updated_at END")
-                .bind(id)
-                .bind(&candidate.host_id)
-                .bind(status)
-                .bind(&candidate.reason)
-                .bind(evidence)
-                .bind(evidence_hash)
-                .bind(batch.observed_at)
-                .execute(&mut *tx)
-                .await?;
-        }
-        if candidate_hosts.is_empty() {
-            sqlx::query(
-                "DELETE FROM device_associations WHERE source_device_id=? AND status IN ('suggested','rejected')",
-            )
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            let placeholders = vec!["?"; candidate_hosts.len()].join(",");
-            let query = format!(
-                "DELETE FROM device_associations WHERE source_device_id=? AND status IN ('suggested','rejected') AND host_id NOT IN ({placeholders})"
-            );
-            let mut delete = sqlx::query(&query).bind(id);
-            for host_id in &candidate_hosts {
-                delete = delete.bind(host_id);
-            }
-            delete.execute(&mut *tx).await?;
-        }
-        let confirmed: Option<String> = sqlx::query_scalar(
-            "SELECT host_id FROM device_associations WHERE source_device_id=? AND status='confirmed' LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        sqlx::query("UPDATE source_devices SET host_id=? WHERE id=?")
-            .bind(confirmed)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
+    crate::identity::reconcile_sources(&mut tx, &fresh_source_ids).await?;
 
     if authoritative_complete {
         if let Some(inventory_id) = &batch.inventory_id {
@@ -1185,98 +1095,8 @@ pub async fn update_association(
     Path(source_device_id): Path<String>,
     Json(update): Json<AssociationUpdate>,
 ) -> ApiResult<Json<Host>> {
-    let _guard = state.0.writes.lock().await;
-    let source: Option<String> = sqlx::query_scalar("SELECT body FROM source_devices WHERE id=?")
-        .bind(&source_device_id)
-        .fetch_optional(&state.0.db)
-        .await?;
-    let Some(source) = source else {
-        return Err(ApiError::not_found());
-    };
-    let device: hope_protocol::ChildDeviceReport = serde_json::from_str(&source)?;
-    let (host_id, action) = match update {
-        AssociationUpdate::Confirm { host_id } => (host_id, "confirmed"),
-        AssociationUpdate::Reject { host_id } => (host_id, "rejected"),
-        AssociationUpdate::Unlink { host_id } => (host_id, "unlinked"),
-    };
-    let target_body: Option<String> = sqlx::query_scalar("SELECT body FROM hosts WHERE id=?")
-        .bind(&host_id)
-        .fetch_optional(&state.0.db)
-        .await?;
-    let Some(target_body) = target_body else {
-        return Err(ApiError::not_found());
-    };
-    let target_host: Host = serde_json::from_str(&target_body)?;
-    let networks = crate::api::networks(&state)
-        .await?
-        .into_iter()
-        .filter(|network| network.enabled)
-        .collect::<Vec<_>>();
-    let candidate =
-        crate::associations::candidates(&device, std::slice::from_ref(&target_host), &networks)
-            .into_iter()
-            .find(|candidate| candidate.host_id == host_id);
-    let evidence = candidate
-        .as_ref()
-        .map(|candidate| candidate.evidence.clone())
-        .unwrap_or_default();
-    let evidence_json = serde_json::to_string(&evidence)?;
-    let evidence_hash = hash(&evidence_json);
-
-    let mut tx = state.0.db.begin().await?;
-    if action == "unlinked" {
-        sqlx::query("DELETE FROM device_associations WHERE source_device_id=? AND host_id=?")
-            .bind(&source_device_id)
-            .bind(&host_id)
-            .execute(&mut *tx)
-            .await?;
-    } else {
-        if action == "confirmed" {
-            let taken: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM device_associations WHERE host_id=? AND status='confirmed' AND source_device_id!=?)")
-                .bind(&host_id)
-                .bind(&source_device_id)
-                .fetch_one(&mut *tx)
-                .await?;
-            if taken {
-                return Err(ApiError::bad(
-                    "This discovered host is already linked to another source device",
-                ));
-            }
-            sqlx::query("DELETE FROM device_associations WHERE source_device_id=? AND status='confirmed' AND host_id!=?")
-                .bind(&source_device_id)
-                .bind(&host_id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        sqlx::query("INSERT INTO device_associations(source_device_id,host_id,status,reason,evidence,evidence_hash,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_device_id,host_id) DO UPDATE SET status=excluded.status,reason=excluded.reason,evidence=excluded.evidence,evidence_hash=excluded.evidence_hash,updated_at=excluded.updated_at")
-            .bind(&source_device_id)
-            .bind(&host_id)
-            .bind(action)
-            .bind(if action == "confirmed" { "Manually confirmed" } else { "Rejected by administrator" })
-            .bind(&evidence_json)
-            .bind(&evidence_hash)
-            .bind(now())
-            .execute(&mut *tx)
-            .await?;
-    }
-    let confirmed: Option<String> = sqlx::query_scalar(
-        "SELECT host_id FROM device_associations WHERE source_device_id=? AND status='confirmed' LIMIT 1",
-    )
-    .bind(&source_device_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE source_devices SET host_id=? WHERE id=?")
-        .bind(confirmed)
-        .bind(&source_device_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    state.changed();
     Ok(Json(
-        state
-            .host(&host_id)
-            .await?
-            .ok_or_else(ApiError::not_found)?,
+        crate::identity::change(&state, &source_device_id, update).await?,
     ))
 }
 
@@ -1330,7 +1150,11 @@ async fn offered_release(state: &State) -> ApiResult<String> {
         .await
         .ok_or_else(|| ApiError::bad("This server publishes no signed agent release to update to"))
 }
-async fn mark_update_requested(state: &State, host: &mut Host, release: &str) -> ApiResult<()> {
+async fn mark_update_requested(
+    state: &State,
+    host: &mut StoredHost,
+    release: &str,
+) -> ApiResult<()> {
     host.update_requested_at = Some(now());
     host.update_target = Some(release.to_string());
     sqlx::query("UPDATE hosts SET body=? WHERE id=?")
@@ -1338,7 +1162,7 @@ async fn mark_update_requested(state: &State, host: &mut Host, release: &str) ->
         .bind(&host.id)
         .execute(&state.0.db)
         .await?;
-    state.host_changed(host);
+    state.publish_host(&host.id).await;
     Ok(())
 }
 /// Ask one host's agent to update to the release this server offers. The agent learns of it in
@@ -1348,7 +1172,10 @@ pub async fn request_update(
     Path(id): Path<String>,
 ) -> ApiResult<Json<OkResponse>> {
     let _guard = state.0.writes.lock().await;
-    let mut host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
+    let mut host = state
+        .stored_host(&id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let release = offered_release(&state).await?;
     if let Some(reason) = update_blocker(&host, &release) {
         return Err(ApiError::bad(reason));
@@ -1363,7 +1190,7 @@ pub async fn request_all_updates(
     let _guard = state.0.writes.lock().await;
     let release = offered_release(&state).await?;
     let mut requested = 0;
-    for mut host in state.hosts().await? {
+    for mut host in state.stored_hosts().await? {
         if update_blocker(&host, &release).is_none() {
             mark_update_requested(&state, &mut host, &release).await?;
             requested += 1;
@@ -1393,7 +1220,7 @@ pub async fn complete_uninstall(
 pub async fn complete_uninstall_by_id(state: &State, id: &str) -> ApiResult<()> {
     let _guard = state.0.writes.lock().await;
     let networks = crate::api::networks(state).await?;
-    let mut tx = state.0.db.begin().await?;
+    let mut tx = state.write_transaction().await?;
     let updated = sqlx::query("UPDATE agents SET revoked=1 WHERE id=?")
         .bind(id)
         .execute(&mut *tx)
@@ -1409,7 +1236,7 @@ pub async fn complete_uninstall_by_id(state: &State, id: &str) -> ApiResult<()> 
     let Some(body) = body else {
         return Err(ApiError::not_found());
     };
-    let mut host: Host = serde_json::from_str(&body)?;
+    let mut host = StoredHost::decode(&body)?;
     host.agent_revoked = true;
     host.agent_uninstalled = true;
     host.update_requested_at = None;
@@ -1432,12 +1259,12 @@ pub async fn complete_uninstall_by_id(state: &State, id: &str) -> ApiResult<()> 
 
 pub async fn revoke_by_id(state: &State, id: &str) -> ApiResult<()> {
     let _guard = state.0.writes.lock().await;
-    let mut tx = state.0.db.begin().await?;
+    let mut tx = state.write_transaction().await?;
     sqlx::query("UPDATE agents SET revoked=1 WHERE id=?")
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    for mut host in state.hosts().await? {
+    for mut host in state.stored_hosts().await? {
         if host.agent_id.as_deref() == Some(id) {
             host.agent_revoked = true;
             sqlx::query("UPDATE hosts SET body=? WHERE id=?")

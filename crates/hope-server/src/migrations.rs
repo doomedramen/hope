@@ -4,10 +4,10 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 14;
+const LATEST: i64 = 16;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&mut *tx)
         .await?;
@@ -109,7 +109,81 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     }
+    if version < 15 {
+        sqlx::raw_sql(include_str!("migrations/0015_inventory_boundaries.sql"))
+            .execute(&mut *tx)
+            .await?;
+        repair_projected_hosts(&mut tx).await?;
+        // Old versions did not enforce one confirmed source per host (or vice versa).
+        let associations = sqlx::query("SELECT source_device_id,host_id FROM device_associations WHERE status='confirmed' ORDER BY manual DESC,updated_at DESC,source_device_id,host_id").fetch_all(&mut *tx).await?;
+        let mut sources = std::collections::HashSet::new();
+        let mut hosts = std::collections::HashSet::new();
+        for row in associations {
+            let source: String = row.get("source_device_id");
+            let host: String = row.get("host_id");
+            if sources.contains(&source) || hosts.contains(&host) {
+                sqlx::query("UPDATE device_associations SET status='suggested',manual=0 WHERE source_device_id=? AND host_id=?").bind(source).bind(host).execute(&mut *tx).await?;
+            } else {
+                sources.insert(source);
+                hosts.insert(host);
+            }
+        }
+        sqlx::raw_sql("CREATE UNIQUE INDEX confirmed_source_device ON device_associations(source_device_id) WHERE status='confirmed'; CREATE UNIQUE INDEX confirmed_scan_host ON device_associations(host_id) WHERE status='confirmed';").execute(&mut *tx).await?;
+        crate::identity::reconcile(&mut tx).await?;
+        sqlx::query("PRAGMA user_version = 15")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 16 {
+        sqlx::raw_sql(include_str!("migrations/0016_notification_outbox.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 16")
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
+    Ok(())
+}
+
+/// Remove source projections previously materialized by scan/classification/settings writers.
+/// Source-only settings survive separately; physical/agent rows and their history keep their IDs.
+async fn repair_projected_hosts(db: &mut SqliteConnection) -> Result<()> {
+    let rows=sqlx::query("SELECT id,agent_id,body,EXISTS(SELECT 1 FROM source_devices d WHERE d.id=hosts.id) AS is_source FROM hosts").fetch_all(&mut *db).await?;
+    for row in rows {
+        let mut host: hope_protocol::Host = serde_json::from_str(row.get("body"))?;
+        let is_source: bool = row.get("is_source");
+        if is_source && row.get::<Option<String>, _>("agent_id").is_none() {
+            sqlx::query("INSERT INTO source_device_settings(source_device_id,body) VALUES(?,?)")
+                .bind(&host.id)
+                .bind(serde_json::to_string(
+                    &crate::inventory::SourceSettings::from_view(&host),
+                )?)
+                .execute(&mut *db)
+                .await?;
+            sqlx::query("DELETE FROM device_associations WHERE host_id=?")
+                .bind(&host.id)
+                .execute(&mut *db)
+                .await?;
+            sqlx::query("DELETE FROM hosts WHERE id=?")
+                .bind(&host.id)
+                .execute(&mut *db)
+                .await?;
+        } else {
+            host.source = None;
+            host.source_device_id = None;
+            host.source_observed_at = None;
+            host.lifecycle = None;
+            host.child = None;
+            host.associations.clear();
+            host.relationships.clear();
+            sqlx::query("UPDATE hosts SET body=? WHERE id=?")
+                .bind(serde_json::to_string(&host)?)
+                .bind(&host.id)
+                .execute(&mut *db)
+                .await?;
+        }
+    }
     Ok(())
 }
 
@@ -226,7 +300,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 14);
+        assert_eq!(version, 16);
         for table in [
             "child_batch_heads",
             "child_batches",

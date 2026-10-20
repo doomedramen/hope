@@ -523,13 +523,7 @@ pub async fn source_history(
     Path(id): Path<String>,
     Query(window): Query<Window>,
 ) -> ApiResult<Json<Vec<SourceMetricPoint>>> {
-    let host = state
-        .hosts()
-        .await?
-        .into_iter()
-        .find(|host| host.id == id || host.source_device_id.as_deref() == Some(id.as_str()))
-        .or(state.host(&id).await?)
-        .ok_or_else(ApiError::not_found)?;
+    let host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
     let mut source_ids = match host.source_device_id {
         Some(id) => vec![id],
         None => sqlx::query_scalar::<_, String>(
@@ -636,7 +630,7 @@ async fn retain_at(state: &State, reference: f64) -> anyhow::Result<()> {
         let agent: String = group.get("agent_id");
         let bucket: i64 = group.get("bucket");
         let from = (bucket * 300) as f64;
-        let mut tx = state.0.db.begin().await?;
+        let mut tx = state.write_transaction().await?;
         let existing =
             sqlx::query("SELECT body,statistics,latest_collected_at FROM metrics WHERE agent_id=? AND report_id=?")
                 .bind(&agent)
@@ -687,7 +681,7 @@ async fn retain_at(state: &State, reference: f64) -> anyhow::Result<()> {
     }
     retain_source_metrics(state, cutoff, start).await?;
     let _guard = state.0.writes.lock().await;
-    let mut tx = state.0.db.begin().await?;
+    let mut tx = state.write_transaction().await?;
     sqlx::query("DELETE FROM metrics WHERE rowid IN (SELECT rowid FROM metrics WHERE collected_at<? AND (resolution=30 OR collected_at+resolution<=?) LIMIT 5000)")
         .bind(reference - 7.0 * 86400.0)
         .bind(reference - 7.0 * 86400.0)
@@ -735,7 +729,7 @@ async fn retain_source_metrics(
         let source_id: String = group.get("source_device_id");
         let bucket: i64 = group.get("bucket");
         let from = bucket as f64 * 300.0;
-        let mut tx = state.0.db.begin().await?;
+        let mut tx = state.write_transaction().await?;
         let existing: Option<String> = sqlx::query_scalar(
             "SELECT statistics FROM source_metric_rollups WHERE source_device_id=? AND bucket=?",
         )

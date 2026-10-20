@@ -9,6 +9,7 @@ use axum::{
 };
 use futures::future::BoxFuture;
 use hope_protocol::*;
+use hope_server::inventory::StoredHost;
 use hope_server::{
     agents, router, ssh,
     state::{State, hash, now, secret},
@@ -270,7 +271,7 @@ async fn fixture_with(agent: Option<(&str, &str)>, ca: Option<&str>) -> Fixture 
         }
     });
     let host_id = Uuid::new_v4().to_string();
-    let mut host = Host::new(host_id.clone(), "target".into(), "tcp");
+    let mut host = StoredHost::new(host_id.clone(), "target".into(), "tcp");
     host.addresses = vec!["127.0.0.1".into()];
     host.macs = vec!["02:00:00:00:00:77".into()];
     if let Some((agent, credential)) = agent {
@@ -315,7 +316,12 @@ async fn fixture() -> Fixture {
 impl Fixture {
     /// Enrollment replaces the host's addresses with the agent's non-loopback ones.
     async fn restore_address(&self) {
-        let mut host = self.state.host(&self.host_id).await.unwrap().unwrap();
+        let mut host = self
+            .state
+            .stored_host(&self.host_id)
+            .await
+            .unwrap()
+            .unwrap();
         host.addresses = vec!["127.0.0.1".into()];
         self.state.save_host(&host).await.unwrap();
     }
@@ -1282,7 +1288,7 @@ async fn only_one_job_may_run_per_host_or_ssh_address() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.to_string().contains("already running"));
     // A different host record sharing the same address and port is the same SSH endpoint.
-    let mut twin = f.state.host(&f.host_id).await.unwrap().unwrap();
+    let mut twin = f.state.stored_host(&f.host_id).await.unwrap().unwrap();
     twin.id = Uuid::new_v4().to_string();
     twin.macs = vec![];
     f.state.save_host(&twin).await.unwrap();

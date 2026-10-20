@@ -70,7 +70,7 @@ impl Queue {
 }
 async fn status(state: &State, id: &str, status: EnrichmentStatus) {
     let _guard = state.0.writes.lock().await;
-    if let Ok(Some(mut host)) = state.host(id).await {
+    if let Ok(Some(mut host)) = state.stored_host(id).await {
         host.enrichment_status = status;
         if let Err(error) = state.save_host(&host).await {
             tracing::warn!(%error, "enrichment status could not be saved");
@@ -97,10 +97,15 @@ async fn enrich(work: Work) {
         cancel,
     } = work;
     status(&state, &id, EnrichmentStatus::Running).await;
-    let rescan = state.host(&id).await.ok().flatten().is_some_and(|h| {
-        h.ports_scanned_at
-            .is_none_or(|at| now() - at > PORT_RESCAN_SECONDS)
-    });
+    let rescan = state
+        .stored_host(&id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|h| {
+            h.ports_scanned_at
+                .is_none_or(|at| now() - at > PORT_RESCAN_SECONDS)
+        });
     let result = tokio::select! {
         _ = cancel.cancelled() => { status(&state, &id, EnrichmentStatus::Cancelled).await; return; }
         result = timeout(Duration::from_secs(30), async {
@@ -134,7 +139,7 @@ async fn enrich(work: Work) {
         status(&state, &id, EnrichmentStatus::Cancelled).await;
         return;
     }
-    if let Ok(Some(mut host)) = state.host(&id).await {
+    if let Ok(Some(mut host)) = state.stored_host(&id).await {
         if let Some(open) = services {
             // A full scan is authoritative for the common ports; anything else (seen by an agent or
             // a quick probe outside the list) is kept.

@@ -67,6 +67,7 @@ import {
 import { ToastProvider, useToast } from "@/components/toast";
 import { api, del, post, put } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
+import { useInventory } from "@/lib/use-inventory";
 import {
   HOST_FILTERS,
   HOST_FILTER_HINTS,
@@ -77,7 +78,6 @@ import {
 } from "@/lib/fleet";
 import type {
   AuthStatus as Auth,
-  Bootstrap,
   Host,
   MapState,
   MapEdit,
@@ -213,9 +213,7 @@ export function Console() {
 function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const toast = useToast();
   const { theme, dark, setTheme } = useTheme();
-  const [data, setData] = useState<Bootstrap | null>(null);
-  const [error, setError] = useState("");
-  const [connected, setConnected] = useState(false);
+  const { data, setData, error, setError, connected, refresh } = useInventory();
   const [location, setLocation] = useState(readLocation);
   // The inventory view a host page returns to and keeps highlighted.
   const [lastInventory, setLastInventory] = useState<
@@ -241,83 +239,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
-  const refreshPending = useRef(false);
-  const knownHosts = useRef(new Set<string>());
-  const refresh = useCallback(async () => {
-    if (refreshPending.current) return;
-    refreshPending.current = true;
-    try {
-      const latest = await api<Bootstrap>("/bootstrap");
-      knownHosts.current = new Set(latest.hosts.map((host) => host.id));
-      setData((previous) => {
-        if (!previous) return latest;
-        // A live host update may have landed while this snapshot was in flight.
-        const live = new globalThis.Map(
-          previous.hosts.map((host) => [host.id, host]),
-        );
-        const hosts = latest.hosts.map((host) => {
-          const newer = live.get(host.id);
-          return newer && (newer.last_report ?? 0) > (host.last_report ?? 0)
-            ? newer
-            : host;
-        });
-        return {
-          ...latest,
-          hosts,
-          map:
-            previous.map.revision > latest.map.revision
-              ? previous.map
-              : latest.map,
-        };
-      });
-      setError("");
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      refreshPending.current = false;
-    }
-  }, []);
   useEffect(() => {
-    const initialRefresh = setTimeout(() => {
-      void refresh();
-    }, 0);
-    const source = new EventSource("/api/v1/events");
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    source.onopen = () => setConnected(true);
-    source.onerror = () => setConnected(false);
-    const schedule = () => {
-      if (!timer)
-        timer = setTimeout(() => {
-          timer = undefined;
-          void refresh();
-        }, 500);
-    };
-    source.addEventListener("refresh", schedule);
-    // An agent report carries the host's new state: apply it in place.
-    source.addEventListener("host", (event) => {
-      let host: Host;
-      try {
-        host = JSON.parse((event as MessageEvent<string>).data) as Host;
-      } catch {
-        return schedule();
-      }
-      if (!knownHosts.current.has(host.id)) return schedule();
-      setData((previous) =>
-        previous
-          ? {
-              ...previous,
-              hosts: previous.hosts.map((existing) =>
-                existing.id === host.id ? host : existing,
-              ),
-            }
-          : previous,
-      );
-    });
-    // The server dropped events for this slow client: reload everything.
-    source.addEventListener("resync", schedule);
-    const fallback = setInterval(() => {
-      void refresh();
-    }, 15000);
     const navigate = () => {
       const next = readLocation();
       if (
@@ -330,13 +252,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     };
     window.addEventListener("popstate", navigate);
     return () => {
-      clearTimeout(initialRefresh);
-      source.close();
-      clearTimeout(timer);
-      clearInterval(fallback);
       window.removeEventListener("popstate", navigate);
     };
-  }, [refresh]);
+  }, []);
   const go = useCallback(
     (
       next: Partial<{
@@ -517,7 +435,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     return () => {
       cancelled = true;
     };
-  }, [selected, host, location.view, data, go]);
+  }, [selected, host, location.view, data, go, setData]);
   const scans =
     data?.scans.filter(
       (job, i, all) =>

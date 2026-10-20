@@ -1,9 +1,9 @@
 //! The background discovery loop. Every minute it starts scheduled scans that are due (gently
 //! paced, see `scanner`), every five minutes it listens for mDNS and SSDP announcements and reads
 //! the routing table, every hour it traces routed ranges, and after each step it brings vendors,
-//! device types, names and parents up to date and evaluates notifications.
+//! device types, names and parents up to date on its own schedule.
 use crate::{
-    api, classify, fingerprint, notify, scanner,
+    api, classify, fingerprint, scanner,
     state::{State, now},
     topology,
 };
@@ -42,9 +42,6 @@ pub fn spawn(state: State) {
             }
             if let Err(error) = refresh_hosts(&state, &traces).await {
                 tracing::warn!(%error, "device refresh failed");
-            }
-            if let Err(error) = notify::evaluate(&state).await {
-                tracing::warn!(%error, "notification evaluation failed");
             }
             tokio::select! {
                 _ = state.0.shutdown.cancelled() => break,
@@ -146,7 +143,7 @@ async fn refresh_hosts(
     }
     topology::ensure_router_hosts(state, &layout).await?;
     let _guard = state.0.writes.lock().await;
-    let mut hosts = state.hosts().await?;
+    let mut hosts = state.stored_hosts().await?;
     let mut changed = vec![false; hosts.len()];
     for (index, host) in hosts.iter_mut().enumerate() {
         let before = host.evidence.clone();

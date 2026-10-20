@@ -1,33 +1,55 @@
 import { hostState } from "@/lib/fleet";
 
+/** Covers headers and body; callers can cancel work when its view is disposed. */
 export async function api<T>(
   path: string,
-  options: RequestInit = {},
+  options: RequestInit & { timeoutMs?: number } = {},
 ): Promise<T> {
-  const headers = new Headers(options.headers);
-  if (!headers.has("Content-Type"))
-    headers.set("Content-Type", "application/json");
-  const response = await fetch(`/api/v1${path}`, {
-    ...options,
-    credentials: "same-origin",
-    cache: "no-store",
-    headers,
-  });
-  if (!response.ok) {
-    if (response.status === 401 && !path.startsWith("/auth/"))
-      window.dispatchEvent(new Event("hope:session-expired"));
-    const body: unknown = await response.json().catch(() => null);
-    const message =
-      body !== null &&
-      typeof body === "object" &&
-      "error" in body &&
-      typeof body.error === "string" &&
-      body.error.trim()
-        ? body.error
-        : `Request failed (${response.status})`;
-    throw Object.assign(new Error(message), { status: response.status });
+  const { timeoutMs = 20000, signal, ...request } = options;
+  const controller = new AbortController();
+  const cancel = () => controller.abort(signal?.reason);
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener("abort", cancel, { once: true });
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    const headers = new Headers(request.headers);
+    if (!headers.has("Content-Type"))
+      headers.set("Content-Type", "application/json");
+    const response = await fetch(`/api/v1${path}`, {
+      ...request,
+      signal: controller.signal,
+      credentials: "same-origin",
+      cache: "no-store",
+      headers,
+    });
+    if (!response.ok) {
+      if (response.status === 401 && !path.startsWith("/auth/"))
+        window.dispatchEvent(new Event("hope:session-expired"));
+      const body: unknown = await response.json().catch(() => null);
+      controller.signal.throwIfAborted();
+      const message =
+        body !== null &&
+        typeof body === "object" &&
+        "error" in body &&
+        typeof body.error === "string" &&
+        body.error.trim()
+          ? body.error
+          : `Request failed (${response.status})`;
+      throw Object.assign(new Error(message), { status: response.status });
+    }
+    return await response.json();
+  } catch (error) {
+    if (timedOut)
+      throw new Error("The server took too long to respond. Please try again.");
+    throw error;
+  } finally {
+    clearTimeout(deadline);
+    signal?.removeEventListener("abort", cancel);
   }
-  return response.json();
 }
 export const post = <T>(path: string, data: unknown = {}) =>
   api<T>(path, { method: "POST", body: JSON.stringify(data) });
