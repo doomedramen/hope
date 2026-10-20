@@ -8,11 +8,14 @@ tests/gates/run.sh build    # images, signed release 0.1.0 (and artifacts for 0.
 tests/gates/run.sh up       # network, server, Caddy, administrator
 tests/gates/run.sh proxy | matrix | ssh | report | down
 tests/gates/run.sh clean-caches   # remove the cargo cache volumes created by build-agent-docker.sh
+tests/gates/run.sh server-install # package Linux x86_64 server, then test real systemd install/recovery
 ```
 
 Requirements: Docker, Python 3.9+, OpenSSL, `ssh-keygen`, `rsync`, `git`. The release and installer cells target Linux x86_64; on an ARM64 development host Docker must provide x86_64 emulation. This fixture does not validate macOS or Linux ARM64 releases.
 
-`HOPEGATE_WORK=DIR` selects the working directory (default: a new directory under the system temporary directory). It holds the throwaway release signing key, CA, SSH key, generated passwords, staged artifacts, the temporary releases root and `results.json`. It must be outside the repository (the assembler refuses a key inside it) and is never deleted by the script; remove it yourself.
+`HOPEGATE_WORK=DIR` selects the working directory (default: a new directory under the system temporary directory). Its contents depend on the selected gate and can include throwaway keys, certificates, passwords, staged artifacts, and results. It must be outside the repository (the assembler refuses a key inside it) and is never deleted by the script; remove it yourself.
+
+`server-install` builds the current server package with the Docker `server-package` target unless `--package-dir DIR` points to an already built package. It starts a privileged, disposable Debian 13 x86_64 container with systemd as PID 1, runs the actual host installer, creates a network through the authenticated API, repeats activation to check persistence, then feeds the installer a checksum-valid package whose server exits during startup. The gate passes only when activation fails, the original systemd service and database return, and a subsequent install succeeds. The container is isolated to the CI runner or local Docker VM. This exercises the real Linux service manager and activation rollback; it does not cover Proxmox LXC/pmxcfs or power-loss interruption.
 
 ## What it does
 
@@ -24,6 +27,7 @@ Requirements: Docker, Python 3.9+, OpenSSL, `ssh-keygen`, `rsync`, `git`. The re
 | Release | `scripts/build-agent-docker.sh` for Linux x86_64 musl and `scripts/assemble-release.sh` into a temporary releases root mounted read-only into the server. Version 0.1.1 is built from a temporary clone of the tree with only the workspace version bumped, so the repository's version is never changed |
 | Proxy gates | TLS only with the CA, Secure/HttpOnly/HSTS/no-store through Caddy, Origin check, SSE latency through Caddy, rate-limit key is the client (two containers, spoofed `X-Forwarded-For` ignored), negative control without `HOPE_TRUSTED_PROXIES` |
 | Installer matrix | On Linux x86_64: console command as root with custom CA, reinstall, interrupted upgrade (SIGTERM at `wait-report`), upgrade, downgrade refusal and `HOPE_ALLOW_DOWNGRADE`, uninstall with identity kept, reinstall, purge, non-root with sudo, non-root without sudo (with and without a user manager). Each cell checks the service state, that the running `MainPID` equals the accepted `process_id` of `hope-agent status`, that the binary SHA-256 equals the signed manifest and that the server saw a fresh report |
+| Server install gate | `server-install`: checksummed package install, repeat activation, persisted API-created data, failed-service rollback and recovery reinstall under Debian systemd |
 | SSH jobs | Real sshd, jobs created through the HTTP API: changed host key (sshd saw no authentication attempt), wrong password, password install, key reinstall of the same agent, non-root without sudo (`LINGER_REQUIRED` without lingering; with lingering a user service that still reports 45 s after the session ended), dropped connection (session killed / container killed). Then the database files and server and proxy logs are searched for every password, the private key and every issued enrollment token |
 
 ## Limits

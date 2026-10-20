@@ -22,6 +22,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && mkdir -p /build/dist \
     && cp target/release/hope-server target/release/hope-agent /build/dist/
 
+# Reproducible Linux x86_64 server package for installation and activation gates.
+FROM rust-source AS server-package
+COPY LICENSE ./LICENSE
+COPY --from=web /build/web/out ./web/out
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --locked -p hope-server \
+    && sh scripts/package-server.sh --no-build --out /build/dist
+
 FROM rust-source AS checks
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \

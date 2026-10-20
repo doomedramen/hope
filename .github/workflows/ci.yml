@@ -6,12 +6,7 @@ on:
   pull_request:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      privileged:
-        description: "Run the privileged service-installation job (disposable runners only)"
-        type: boolean
-        default: false
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -136,11 +131,11 @@ jobs:
           retention-days: 7
 
   server-package:
-    # Proves scripts/package-server.sh (what install-hope.sh downloads) builds on a clean runner,
-    # then exercises the installer's download, checksum and layout paths from the package.
+    # Builds the actual server release package and exercises its download, checksum, layout,
+    # systemd activation, repeat install and rollback paths inside a disposable runner container.
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
@@ -154,6 +149,8 @@ jobs:
       - run: sh scripts/package-server.sh --out dist/server
       - run: cd dist/server && sha256sum -c SHA256SUMS-server
       - run: python3 -I -m unittest discover -s tests/installer -p 'test_server_installer.py' -v
+      - name: Real Debian systemd server install, repeat activation and rollback
+        run: tests/gates/run.sh server-install --package-dir dist/server
 
   updater-gate:
     # The agent updater under real systemd: a Debian 13 container with systemd as PID 1, the real
@@ -199,24 +196,3 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
           HOPE_SIGNING_KEY="$key" sh scripts/assemble-release.sh --staging dist/agents --version "$version" --out "$RUNNER_TEMP/release"
           cat "$RUNNER_TEMP/release/current/manifest.json"
-
-  install-matrix-privileged:
-    # NOT part of pull-request CI. Manually dispatched only, and only on a disposable runner:
-    # real service-manager installation changes the machine. The service tests are not written yet,
-    # so this job deliberately fails after preparing artifacts; a green run must never be read as
-    # installation evidence. See docs/validation.md.
-    if: github.event_name == 'workflow_dispatch' && inputs.privileged
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v4
-        with: { persist-credentials: false }
-      - run: echo "Disposable runner ${{ runner.os }} ${{ runner.arch }}"
-      - name: Real installation matrix
-        run: |
-          echo "::error::Service installation tests (systemd/launchd, system and user mode, upgrade, interrupted activation) are not implemented."
-          exit 1

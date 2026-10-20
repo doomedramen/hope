@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -185,6 +186,20 @@ class Activation:
                 raise ActivationError(f'hope.service did not become healthy at {url}')
             time.sleep(0.25)
 
+    def diagnostics(self):
+        for arguments in (("systemctl", "status", "hope", "--no-pager"),
+                          ("journalctl", "-u", "hope", "-n", "40", "--no-pager")):
+            try:
+                result = command(*arguments, check=False, timeout=3)
+            except (OSError, subprocess.SubprocessError) as error:
+                print("Activation diagnostics unavailable (" + " ".join(arguments[:2]) + "): " + str(error),
+                      file=sys.stderr)
+                continue
+            output = (result.stdout + result.stderr).strip()
+            output = re.sub(r"first-run setup token: [A-Za-z0-9_-]+", "first-run setup token: [redacted]", output)
+            if output:
+                print("Activation diagnostics (" + " ".join(arguments[:2]) + "):\n" + output, file=sys.stderr)
+
     def finish(self):
         previous = self.state / 'previous'
         remove(previous)
@@ -332,7 +347,13 @@ class Activation:
             self.record(plan)
             self.finish()
             print('Server activation verified; previous files and database retained in ' + str(self.state / 'previous'))
-        except BaseException:
+        except BaseException as error:
+            interrupted = isinstance(error, ActivationError) and str(error).startswith('Activation interrupted by signal ')
+            if plan['phase'] == 'ready' and not interrupted:
+                try:
+                    self.diagnostics()
+                except BaseException as diagnostic_error:
+                    print(f'Activation diagnostics failed: {diagnostic_error}', file=sys.stderr)
             try:
                 self.recover()
             except BaseException as error:
