@@ -18,7 +18,7 @@ use hope_protocol::{
     EnrollmentTokenRequest, EnrollmentTokenResponse, HISTORY_SAMPLE_SECONDS, OkResponse,
     ReportResponse, UPDATE_REQUEST_SECONDS, UpdateRequested, version_newer,
 };
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -242,6 +242,7 @@ async fn enroll_inner(
         if revoked {
             // Only an administrator-issued, identity-bound token can replace a revoked secret.
             let mut tx = state.write_transaction().await?;
+            ensure_agent_capacity(&mut tx).await?;
             let consumed = sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND expires_at>? AND used_at IS NULL AND reset_agent_id=?")
                 .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).bind(&request.agent_id).execute(&mut *tx).await?.rows_affected();
             if consumed != 1 || credential_hash == hash(&request.credential) {
@@ -284,14 +285,6 @@ async fn enroll_inner(
             report_interval_seconds: 30,
         }));
     }
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents")
-        .fetch_one(&state.0.db)
-        .await?;
-    if count >= 250 {
-        return Err(ApiError::bad(
-            "This installation supports at most 250 agent identities",
-        ));
-    }
     let addresses = inventory_addresses(&request.inventory);
     let macs = inventory_macs(&request.inventory);
     let hosts = state.stored_hosts().await?;
@@ -315,6 +308,7 @@ async fn enroll_inner(
     crate::classify::refresh(&mut host, &state.gateway_set());
     let credential = request.credential;
     let mut tx = state.write_transaction().await?;
+    ensure_agent_capacity(&mut tx).await?;
     let changed=sqlx::query("UPDATE enrollment_tokens SET used_at=?,agent_id=? WHERE token_hash=? AND used_at IS NULL AND expires_at>? AND reset_agent_id IS NULL")
         .bind(now()).bind(&request.agent_id).bind(hash(&request.token)).bind(now()).execute(&mut *tx).await?.rows_affected();
     if changed != 1 {
@@ -334,6 +328,18 @@ async fn enroll_inner(
         credential,
         report_interval_seconds: 30,
     }))
+}
+
+async fn ensure_agent_capacity(tx: &mut Transaction<'_, Sqlite>) -> ApiResult<()> {
+    let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE revoked=0")
+        .fetch_one(&mut **tx)
+        .await?;
+    if active >= 250 {
+        return Err(ApiError::bad(
+            "This installation supports at most 250 active agent identities",
+        ));
+    }
+    Ok(())
 }
 
 pub async fn report(

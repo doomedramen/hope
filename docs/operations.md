@@ -104,7 +104,7 @@ Without Docker: `make build` (type generation, static web export, `cargo build -
 | `HOPE_TRUSTED_PROXIES` | empty | Reverse proxies whose `X-Forwarded-For` is believed |
 | `RUST_LOG` | `hope_server=info` | Log filter |
 
-Capacity: up to 250 agent identities (enrollment beyond that is refused) and one administrator.
+Capacity: up to 250 active agent identities and one administrator. Revoking or uninstalling an agent releases its slot; its identity and device history remain available, and an identity-bound reset can reactivate it when capacity is available.
 
 ## Canonical URL and reverse proxy
 

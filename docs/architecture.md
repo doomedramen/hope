@@ -80,7 +80,7 @@ Container CPU and memory gauges are averaged by daemon container ID. Containers 
 
 ## Identity reconciliation
 
-Discovery identifies hosts by address and MAC; agents identify themselves by UUID. At enrollment (`agents::enroll_inner`) an agent is attached to an existing host only when exactly one unassigned host shares one of its MAC addresses; IP alone never matches because of DHCP reuse. Otherwise a new host is created and an administrator can merge (`POST /hosts/{id}/merge`), which keeps history and removes map positions of the merged-away record in every mode. Repeated discovery of an ambiguous MAC does not create new records. A revoked identity keeps its host; an identity-bound reset token replaces its credential. Limit: at most 250 agent identities.
+Discovery identifies hosts by address and MAC; agents identify themselves by UUID. At enrollment (`agents::enroll_inner`) an agent is attached to an existing host only when exactly one unassigned host shares one of its MAC addresses; IP alone never matches because of DHCP reuse. Otherwise a new host is created and an administrator can merge (`POST /hosts/{id}/merge`), which keeps history and removes map positions of the merged-away record in every mode. Repeated discovery of an ambiguous MAC does not create new records. A revoked identity keeps its host; an identity-bound reset token replaces its credential. Capacity is 250 active identities; revocation frees a slot while preserving the prior identity and history.
 
 ## Security model
 

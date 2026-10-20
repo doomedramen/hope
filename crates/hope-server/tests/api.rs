@@ -545,6 +545,134 @@ async fn token_is_single_use_and_expired_token_cannot_enroll() {
         StatusCode::UNAUTHORIZED
     );
 }
+
+#[tokio::test]
+async fn enrollment_capacity_counts_active_agents_and_is_atomic_for_new_and_reset_enrollment() {
+    let (_dir, state, app, _) = setup().await;
+    let active_ids: Vec<_> = (0..249).map(|_| Uuid::new_v4().to_string()).collect();
+    for (index, id) in active_ids.iter().enumerate() {
+        sqlx::query("INSERT INTO agents(id,credential_hash,revoked) VALUES(?,?,0)")
+            .bind(id)
+            .bind(hash(&format!("active-{index}")))
+            .execute(&state.0.db)
+            .await
+            .unwrap();
+    }
+    for index in 0..250 {
+        sqlx::query("INSERT INTO agents(id,credential_hash,revoked) VALUES(?,?,1)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(hash(&format!("revoked-{index}")))
+            .execute(&state.0.db)
+            .await
+            .unwrap();
+    }
+
+    let reset_id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO agents(id,credential_hash,revoked) VALUES(?,?,1)")
+        .bind(&reset_id)
+        .bind(hash("reset-agent-old-credential"))
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    let mut reset_host = StoredHost::new(reset_id.clone(), "reset host".into(), "agent");
+    reset_host.agent_id = Some(reset_id.clone());
+    reset_host.agent_revoked = true;
+    sqlx::query("INSERT INTO hosts(id,agent_id,name,body) VALUES(?,?,?,?)")
+        .bind(&reset_host.id)
+        .bind(&reset_id)
+        .bind(&reset_host.name)
+        .bind(serde_json::to_string(&reset_host).unwrap())
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+
+    let first_token = agents::issue_token(&state).await.unwrap();
+    let second_token = agents::issue_token(&state).await.unwrap();
+    let first = EnrollmentRequest {
+        schema_version: 1,
+        token: first_token,
+        agent_id: Uuid::new_v4().to_string(),
+        credential: hope_server::state::secret(),
+        inventory: inventory(),
+    };
+    let second = EnrollmentRequest {
+        schema_version: 1,
+        token: second_token,
+        agent_id: Uuid::new_v4().to_string(),
+        credential: hope_server::state::secret(),
+        inventory: inventory(),
+    };
+    let (first_result, second_result) = tokio::join!(
+        request(&app, "POST", "/api/v1/agent/enroll", json!(first), None),
+        request(&app, "POST", "/api/v1/agent/enroll", json!(second), None),
+    );
+    let statuses = [first_result.0, second_result.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::BAD_REQUEST)
+            .count(),
+        1
+    );
+    let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE revoked=0")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(active, 250);
+
+    let reset_token = agents::issue_token_for_reset(&state, Some(&reset_id))
+        .await
+        .unwrap();
+    let reset_request = EnrollmentRequest {
+        schema_version: 1,
+        token: reset_token.clone(),
+        agent_id: reset_id.clone(),
+        credential: hope_server::state::secret(),
+        inventory: inventory(),
+    };
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/enroll",
+            json!(reset_request.clone()),
+            None,
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    sqlx::query("UPDATE agents SET revoked=1 WHERE id=?")
+        .bind(&active_ids[0])
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/enroll",
+            json!(reset_request),
+            None,
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE revoked=0")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(active, 250);
+}
+
 #[tokio::test]
 async fn reporting_deduplicates_and_keeps_identity_after_dhcp_and_rejects_revocation() {
     let (_dir, state, app, cookie) = setup().await;
