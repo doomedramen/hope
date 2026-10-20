@@ -408,6 +408,29 @@ fn token_of(command: &str) -> String {
     let start = command.find(marker).expect("token in command") + marker.len();
     command[start..start + 64].to_string()
 }
+async fn wait_for_stage(state: &State, expected: InstallStage) {
+    let expected = serde_json::to_value(expected)
+        .expect("stage json")
+        .as_str()
+        .expect("stage string")
+        .to_owned();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let stage: Option<String> = sqlx::query_scalar(
+                "SELECT stage FROM install_jobs WHERE status='running' ORDER BY created_at DESC LIMIT 1",
+            )
+            .fetch_optional(&state.0.db)
+            .await
+            .expect("running job stage");
+            if stage.as_deref() == Some(expected.as_str()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("installer did not reach {expected}"));
+}
 fn inventory() -> Inventory {
     inventory_with("02:00:00:00:00:77", &["127.0.0.1", "192.168.1.77"])
 }
@@ -474,8 +497,8 @@ fn enroll_with(
     Step::Run(Arc::new(move |command| {
         let (state, agent, credential) = (state.clone(), agent.clone(), credential.clone());
         Box::pin(async move {
-            // Real services start seconds after the `activate` line; let the job observe it first.
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            // Wait for the persisted phase instead of guessing how long the job reader needs.
+            wait_for_stage(&state, InstallStage::Activate).await;
             let _ = agents::enroll(
                 Extract(state.clone()),
                 axum::extract::Extension(hope_server::limits::ClientKey("test".into())),
@@ -495,12 +518,13 @@ fn enroll_with(
     }))
 }
 /// Simulates a reinstalled agent that keeps its credential and sends a fresh report.
-fn report_only(state: &State, agent: &str, credential: &str) -> Step {
+fn report_only(state: &State, agent: &str, credential: &str, stage: InstallStage) -> Step {
     let (state, agent, credential) = (state.clone(), agent.to_string(), credential.to_string());
     Step::Run(Arc::new(move |_| {
-        let (state, agent, credential) = (state.clone(), agent.clone(), credential.clone());
+        let (state, agent, credential, stage) =
+            (state.clone(), agent.clone(), credential.clone(), stage);
         Box::pin(async move {
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            wait_for_stage(&state, stage).await;
             send_report(&state, &agent, &credential).await
         })
     }))
@@ -986,7 +1010,7 @@ async fn restart_marks_running_jobs_interrupted_and_history_survives() {
         .await;
     assert_eq!(status, StatusCode::OK);
     let id = job["id"].as_str().unwrap().to_string();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_stage(&f.state, InstallStage::Stage).await;
     let (_, running) = f
         .call("GET", &format!("/api/v1/ssh/jobs/{id}"), json!({}))
         .await;
@@ -1025,7 +1049,12 @@ async fn reinstall_keeps_credential_and_succeeds_without_consuming_the_new_token
         "write-unit",
         "activate",
     ]);
-    steps.push(report_only(&f.state, &agent, &credential));
+    steps.push(report_only(
+        &f.state,
+        &agent,
+        &credential,
+        InstallStage::Activate,
+    ));
     steps.extend(phases(&["wait-report", "complete"]));
     steps.push(Step::Exit(0));
     f.script(steps);
@@ -1153,7 +1182,16 @@ async fn ssh_uninstall_requires_an_enrolled_agent_and_a_matching_host_key() {
 async fn install_cannot_start_while_uninstall_is_running_for_the_host() {
     let (agent, credential) = (Uuid::new_v4().to_string(), secret());
     let f = fixture_with(Some((&agent, &credential)), None).await;
-    let mut steps = vec![Step::Sleep(Duration::from_millis(250))];
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let release_rx = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+    let mut steps = vec![Step::Run(Arc::new(move |_| {
+        let release_rx = release_rx.clone();
+        Box::pin(async move {
+            if let Some(receiver) = release_rx.lock().await.take() {
+                let _ = receiver.await;
+            }
+        })
+    }))];
     steps.extend(phases(&["preflight", "uninstall", "complete"]));
     steps.push(Step::Exit(0));
     f.script(steps);
@@ -1166,6 +1204,7 @@ async fn install_cannot_start_while_uninstall_is_running_for_the_host() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body.to_string().contains("already running"));
+    release_tx.send(()).expect("release uninstall fixture");
     assert_eq!(
         f.wait(started["id"].as_str().unwrap()).await["status"],
         "completed"
@@ -1178,7 +1217,12 @@ async fn reinstall_does_not_trust_a_report_sent_before_activation() {
     let f = fixture_with(Some((&agent, &credential)), None).await;
     // The old service reports while the installer is still preparing; nothing follows activation.
     let mut steps = phases(&["preflight", "stage"]);
-    steps.push(report_only(&f.state, &agent, &credential));
+    steps.push(report_only(
+        &f.state,
+        &agent,
+        &credential,
+        InstallStage::Stage,
+    ));
     steps.extend(phases(&["activate", "wait-report", "complete"]));
     steps.push(Step::Exit(0));
     f.script(steps);
@@ -1335,7 +1379,12 @@ async fn completion_without_a_stop_or_replacement_phase_is_not_confirmed_by_a_st
     let (agent, credential) = (Uuid::new_v4().to_string(), secret());
     let f = fixture_with(Some((&agent, &credential)), None).await;
     let mut steps = phases(&["preflight", "stage"]);
-    steps.push(report_only(&f.state, &agent, &credential));
+    steps.push(report_only(
+        &f.state,
+        &agent,
+        &credential,
+        InstallStage::Stage,
+    ));
     steps.extend(phases(&["complete"]));
     steps.push(Step::Exit(0));
     f.script(steps);
@@ -1392,7 +1441,7 @@ async fn shutdown_settles_running_job_as_interrupted_within_the_deadline() {
         .await;
     assert_eq!(status, StatusCode::OK);
     let id = job["id"].as_str().unwrap().to_string();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_stage(&f.state, InstallStage::Stage).await;
     let (_, running) = f
         .call("GET", &format!("/api/v1/ssh/jobs/{id}"), json!({}))
         .await;
