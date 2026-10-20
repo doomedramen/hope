@@ -47,7 +47,7 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { StatusPill } from "@/components/status-pill";
-import { HostIcon } from "@/components/host-table";
+import { HostIcon, HostTable } from "@/components/host-table";
 import { ContainerAppIcon } from "@/components/container-app-icon";
 import {
   Table,
@@ -505,15 +505,9 @@ export function HostDetails({
                       <dt>Disk I/O</dt>
                       <dd>
                         Read{" "}
-                        {rate(
-                          host.child?.metrics.disk_read_bytes_per_second,
-                        )}{" "}
-                        ({bytes(host.child?.metrics.disk_read_bytes)}) ·
-                        Write{" "}
-                        {rate(
-                          host.child?.metrics
-                            .disk_write_bytes_per_second,
-                        )}{" "}
+                        {rate(host.child?.metrics.disk_read_bytes_per_second)} (
+                        {bytes(host.child?.metrics.disk_read_bytes)}) · Write{" "}
+                        {rate(host.child?.metrics.disk_write_bytes_per_second)}{" "}
                         ({bytes(host.child?.metrics.disk_write_bytes)})
                       </dd>
                       <dt>Network I/O</dt>
@@ -528,16 +522,12 @@ export function HostDetails({
                       <dd>
                         {host.child?.metrics.uptime_seconds == null
                           ? "—"
-                          : uptimeDuration(
-                              host.child?.metrics.uptime_seconds,
-                            )}
+                          : uptimeDuration(host.child?.metrics.uptime_seconds)}
                       </dd>
                       <dt>Guest agent</dt>
                       <dd>
-                        {host.child?.guest_agent_status?.replaceAll(
-                          "_",
-                          " ",
-                        ) ?? "—"}
+                        {host.child?.guest_agent_status?.replaceAll("_", " ") ??
+                          "—"}
                       </dd>
                       {host.child?.guest_os && (
                         <>
@@ -549,8 +539,7 @@ export function HostDetails({
                               host.child?.guest_os?.kernel_release,
                             ]
                               .filter(Boolean)
-                              .join(" · ") ||
-                              "—"}
+                              .join(" · ") || "—"}
                           </dd>
                           <dt>Guest OS data observed</dt>
                           <dd>
@@ -566,8 +555,9 @@ export function HostDetails({
                           <Fragment key={filesystem.mountpoint}>
                             <dt>Filesystem {filesystem.mountpoint}</dt>
                             <dd>
-                              {filesystem.filesystem_type ?? "Filesystem"} · {bytes(filesystem.used_bytes)}{" "}
-                              used of {bytes(filesystem.total_bytes)} · observed{" "}
+                              {filesystem.filesystem_type ?? "Filesystem"} ·{" "}
+                              {bytes(filesystem.used_bytes)} used of{" "}
+                              {bytes(filesystem.total_bytes)} · observed{" "}
                               <Age value={filesystem.observed_at} lower />
                             </dd>
                           </Fragment>
@@ -579,7 +569,9 @@ export function HostDetails({
                             <dt>Proxmox NIC {network.name}</dt>
                             <dd>
                               {[
-                                network.bridge ? `Bridge ${network.bridge}` : null,
+                                network.bridge
+                                  ? `Bridge ${network.bridge}`
+                                  : null,
                                 network.vlan_tag != null
                                   ? `VLAN ${network.vlan_tag}`
                                   : null,
@@ -592,24 +584,22 @@ export function HostDetails({
                           </Fragment>
                         ),
                       )}
-                      {(host.child?.disk_configuration ?? []).map(
-                        (disk) => (
-                          <Fragment key={`config-disk-${disk.name}`}>
-                            <dt>Configured disk {disk.name}</dt>
-                            <dd>
-                              {[
-                                disk.size_bytes != null
-                                  ? bytes(disk.size_bytes)
-                                  : null,
-                                disk.storage,
-                                disk.volume,
-                              ]
-                                .filter(Boolean)
-                                .join(" · ") || "No configuration reported"}
-                            </dd>
-                          </Fragment>
-                        ),
-                      )}
+                      {(host.child?.disk_configuration ?? []).map((disk) => (
+                        <Fragment key={`config-disk-${disk.name}`}>
+                          <dt>Configured disk {disk.name}</dt>
+                          <dd>
+                            {[
+                              disk.size_bytes != null
+                                ? bytes(disk.size_bytes)
+                                : null,
+                              disk.storage,
+                              disk.volume,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") || "No configuration reported"}
+                          </dd>
+                        </Fragment>
+                      ))}
                     </>
                   )}
                   {host.child.health && (
@@ -687,10 +677,7 @@ export function HostDetails({
                       <dd>
                         {[iface.mac, ...iface.addresses]
                           .filter(Boolean)
-                          .concat(
-                            [
-                                                          ].filter(Boolean),
-                          )
+                          .concat([].filter(Boolean))
                           .join(" · ") || "No address reported"}
                       </dd>
                     </Fragment>
@@ -1171,101 +1158,18 @@ export function HostDetails({
                     No VMs or LXCs are currently reported for this Proxmox node.
                   </p>
                 ) : (
-                  <Table className="container-table">
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Guest</TableHead>
-                        <TableHead>Type</TableHead>
-                        <TableHead>State</TableHead>
-                        <TableHead>CPU</TableHead>
-                        <TableHead>Hypervisor memory</TableHead>
-                        <TableHead>Hypervisor storage</TableHead>
-                        <TableHead>Configured disks</TableHead>
-                        <TableHead>Disk I/O</TableHead>
-                        <TableHead>Guest OS</TableHead>
-                        <TableHead>Uptime</TableHead>
-                        <TableHead>VMID</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {proxmoxGuests.map((guest) => {
-                        const child = guest.child;
-                        const kind = guest.source?.kind;
-                        return (
-                          <TableRow key={guest.id}>
-                            <TableCell>
-                              <Button
-                                variant="link"
-                                className="container-name-link"
-                                onClick={() => onOpenHost(guest)}
-                              >
-                                {guest.name}
-                              </Button>
-                            </TableCell>
-                            <TableCell>
-                              {kind === "proxmox_lxc" ? "LXC" : "VM"}
-                            </TableCell>
-                            <TableCell>
-                              <span
-                                className="status-pill"
-                                data-tone={
-                                  child?.lifecycle === "running"
-                                    ? "good"
-                                    : "neutral"
-                                }
-                              >
-                                {child?.status ?? child?.lifecycle ?? "Unknown"}
-                              </span>
-                            </TableCell>
-                            <TableCell>
-                              {percentage(child?.metrics.cpu_percent ?? null)}
-                            </TableCell>
-                            <TableCell>
-                              {child?.metrics.memory_measurement ===
-                                "hypervisor_guest" &&
-                              child.metrics.memory_used_bytes != null
-                                ? `${bytes(child.metrics.memory_used_bytes)} / ${bytes(child.metrics.memory_total_bytes)}`
-                                : child?.memory_bytes != null
-                                  ? `${bytes(child.memory_bytes)} allocated`
-                                  : "—"}
-                            </TableCell>
-                            <TableCell>
-                              {child?.metrics.disk_used_bytes == null
-                                ? "—"
-                                : `${bytes(child.metrics.disk_used_bytes)} used / ${bytes(child.metrics.disk_total_bytes)}`}
-                            </TableCell>
-                            <TableCell>
-                              {guest.child?.disk_configuration.length
-                                ? guest.child.disk_configuration
-                                    .map((disk) => `${disk.name}: ${disk.size_bytes == null ? "—" : bytes(disk.size_bytes)}`)
-                                    .join(" · ")
-                                : "—"}
-                            </TableCell>
-                            <TableCell>
-                              {child
-                                ? `↓ ${rate(guest.child?.metrics.disk_read_bytes_per_second)} · ↑ ${rate(guest.child?.metrics.disk_write_bytes_per_second)}`
-                                : "—"}
-                            </TableCell>
-                            <TableCell>
-                              {guest.child?.guest_os?.name ??
-                                "—"}
-                            </TableCell>
-                            <TableCell>
-                              {guest.child?.metrics.uptime_seconds ==
-                              null
-                                ? "—"
-                                : uptimeDuration(
-                                    guest.child?.metrics.uptime_seconds,
-                                  )}
-                            </TableCell>
-                            <TableCell className="mono">
-                              {child?.identity.key ?? "—"}
-                            </TableCell>
-                          </TableRow>
+                  <div className="overflow-hidden rounded-xl border">
+                    <HostTable
+                      hosts={proxmoxGuests}
+                      selected={null}
+                      select={(id) => {
+                        const guest = proxmoxGuests.find(
+                          (item) => item.id === id,
                         );
-                      })}
-                    </TableBody>
-                  </Table>
+                        if (guest) onOpenHost(guest);
+                      }}
+                    />
+                  </div>
                 )}
               </section>
             </TabsContent>

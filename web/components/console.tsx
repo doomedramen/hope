@@ -371,13 +371,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     [],
   );
   const select = useCallback(
-    (id: string | null) => {
-      go(
-        id && window.matchMedia("(max-width: 720px)").matches
-          ? { view: "host", host: id }
-          : { host: id },
-      );
-    },
+    (id: string) => go({ view: "host", host: id }),
     [go],
   );
   const setView = useCallback(
@@ -574,19 +568,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     setNetwork("all");
     setView(next);
   };
-  const selectHost = useCallback(
-    (target: Host) => {
-      if (
-        view === "overview" ||
-        view === "host" ||
-        view === "agents" ||
-        view === "networks"
-      )
-        go({ view: "host", host: target.id });
-      else select(target.id);
-    },
-    [go, select, view],
-  );
+  const selectHost = useCallback((target: Host) => select(target.id), [select]);
   const closeHostPage = useCallback(
     () => go({ view: lastInventory, host: null }),
     [go, lastInventory],
@@ -1408,30 +1390,6 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                   </button>
                 </footer>
               </section>
-              {host && (
-                <HostDetails
-                  key={host.id}
-                  host={host}
-                  hosts={hosts}
-                  close={() => select(null)}
-                  expand={() => go({ view: "host" })}
-                  agentRelease={data.agent_release}
-                  upgradeCommand={data.agent_upgrade_command}
-                  install={() => setInstallOpen(true)}
-                  refresh={() => {
-                    void refresh();
-                  }}
-                  notify={toast}
-                  onOpenHost={selectHost}
-                  onOpenContainer={(containerId) =>
-                    go({
-                      view: "container",
-                      host: host.id,
-                      container: containerId,
-                    })
-                  }
-                />
-              )}
             </div>
           </div>
         )}

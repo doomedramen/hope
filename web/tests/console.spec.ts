@@ -428,7 +428,9 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
     ).toContainText("AMD Ryzen");
-    await expect(page).toHaveURL(/host=/);
+    await expect(page).toHaveURL(/view=host&host=/);
+    await expect(page.getByTestId("network-map")).toHaveCount(0);
+    await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByRole("button", { name: "List", exact: true }).click();
     await expect(page.getByRole("table")).toContainText("atlas-nas");
     await expect(
@@ -439,7 +441,9 @@ test.describe.serial("H.O.P.E console", () => {
     ).toContainText(/\d+ issues/);
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
-    ).toBeVisible();
+    ).toHaveCount(0);
+    await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
+    await expect(page.getByRole("table")).toHaveCount(0);
     const hostDetails = page.getByRole("complementary", {
       name: "Host details",
     });
@@ -491,10 +495,10 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       hostDetails.getByRole("tab", { name: "Containers" }),
     ).toHaveCount(0);
+    await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByLabel("Search hosts").fill("workshop");
     await expect(page.getByRole("table").getByRole("row")).toHaveCount(2);
     await page.getByLabel("Search hosts").fill("");
-    await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByRole("button", { name: "Map", exact: true }).click();
     await page.getByRole("button", { name: "Subnets", exact: true }).click();
     await expect(page.getByTestId("subnet-group").first()).toBeVisible();
@@ -685,8 +689,11 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("button", { name: "List", exact: true }).click();
     await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`host=${host.id}`));
+    await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByRole("button", { name: "studio-mac", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`host=${other.id}`));
+    await page.goBack();
+    await expect(page.getByRole("table")).toBeVisible();
     await page.goBack();
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
@@ -1136,7 +1143,6 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(details.getByTestId("chart-Filesystem usage")).toContainText(
       "/ · nvme0 · 372.5 GiB of 931.3 GiB",
     );
-    await page.getByRole("button", { name: "Open host page" }).click();
     await expect(page).toHaveURL(/view=host&host=/);
     await expect(
       page.getByRole("heading", { name: "Host", exact: true }),
@@ -1328,9 +1334,11 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByText("atlas-nas is now marked as server."),
     ).toBeVisible();
     await expect(device).toContainText("set by you");
+    await page.getByRole("button", { name: "Close host details" }).click();
     await expect(
       page.getByRole("row").filter({ hasText: "atlas-nas" }),
     ).toContainText("Server");
+    await atlasRow.click();
     await page.screenshot({ path: "test-results/hope-device.png" });
     await page.getByRole("combobox", { name: "Device type" }).click();
     await page
@@ -1380,6 +1388,7 @@ test.describe.serial("H.O.P.E console", () => {
         (host: { name: string }) => host.name === "atlas-nas",
       ).uptime,
     ).toEqual({ enabled: true, device: true, ports: [443, 8080] });
+    await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByRole("button", { name: "1 uptime monitored" }).click();
     await expect(
       page.getByRole("button", { name: "1 uptime monitored" }),
@@ -1388,6 +1397,8 @@ test.describe.serial("H.O.P.E console", () => {
     await page
       .getByRole("button", { name: "Clear filters", exact: true })
       .click();
+    await atlasRow.click();
+    await page.getByRole("tab", { name: "Settings", exact: true }).click();
     await uptime.getByLabel("Enable uptime monitoring").uncheck();
     await uptime
       .getByRole("button", { name: "Save uptime monitoring" })
@@ -1397,6 +1408,10 @@ test.describe.serial("H.O.P.E console", () => {
       .getByRole("textbox", { name: "Name (Alias)" })
       .fill("Cinema Xbox");
     await page.getByRole("button", { name: "Save name" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Cinema Xbox", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Close host details" }).click();
     await expect(
       page.getByRole("row").filter({ hasText: "Cinema Xbox" }),
     ).toBeVisible();
@@ -1436,6 +1451,7 @@ test.describe.serial("H.O.P.E console", () => {
         )
         .toBeTruthy();
       if (width === 375) {
+        await page.getByRole("button", { name: "Close host details" }).click();
         const table = page.locator(".host-table");
         await expect(
           table.getByRole("columnheader", { name: "Status" }),
@@ -1446,6 +1462,9 @@ test.describe.serial("H.O.P.E console", () => {
               element.scrollWidth <= element.parentElement!.clientWidth,
           ),
         ).toBeTruthy();
+        await page
+          .getByRole("button", { name: "atlas-nas", exact: true })
+          .click();
       }
       const readings = page.locator(".reading-meter-card");
       for (const reading of await readings.all()) {
@@ -1721,6 +1740,7 @@ test.describe.serial("H.O.P.E console", () => {
     );
 
     // An agent with an updater is asked with one click, then shows as waiting.
+    await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByRole("row").filter({ hasText: "studio-mac" }).click();
     await details.getByRole("tab", { name: "Settings", exact: true }).click();
     await expect(card).toContainText("after checking the release's signature");
@@ -1733,6 +1753,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(card.getByRole("button", { name: "Ask again" })).toBeVisible();
 
     // An agent that is up to date has no card at all.
+    await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByRole("row").filter({ hasText: "compute-node" }).click();
     await expect(details.getByText("Agent 0.1.60")).toBeVisible();
     await details.getByRole("tab", { name: "Settings", exact: true }).click();
@@ -1805,6 +1826,25 @@ test.describe.serial("H.O.P.E console", () => {
     await navigation.getByRole("button", { name: "Overview" }).click();
     await navigation.getByRole("button", { name: "Devices" }).click();
     await expect(page).toHaveURL(/view=map/);
+    await page.getByLabel("Search hosts").fill("atlas-nas");
+    await page.locator(".map-device").filter({ hasText: "atlas-nas" }).click();
+    await expect(page).toHaveURL(/view=host&host=/);
+    await expect(page.locator(".host-page")).toBeVisible();
+    await expect(page.locator(".inventory-layout")).toHaveCount(0);
+    await page.getByRole("button", { name: "Close host details" }).click();
+    await expect(page).toHaveURL(/view=map/);
+    await expect(page.getByLabel("Search hosts")).toHaveValue("atlas-nas");
+    await page.getByRole("button", { name: "List", exact: true }).click();
+    await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
+    await expect(page).toHaveURL(/view=host&host=/);
+    await expect(page.locator(".inventory-layout")).toHaveCount(0);
+    await page.goBack();
+    await expect(page).toHaveURL(/view=hosts/);
+    await expect(page.getByLabel("Search hosts")).toHaveValue("atlas-nas");
+    await expect(page.getByRole("table").getByRole("row")).toHaveCount(2);
+    await expect(
+      page.getByRole("complementary", { name: "Host details" }),
+    ).toHaveCount(0);
   });
   test("discovery contains progress, exposes failures, and scans all enabled ranges regardless of filters", async ({
     page,
@@ -2106,7 +2146,11 @@ test.describe.serial("H.O.P.E console", () => {
       const response = await route.fetch();
       const bootstrap = await response.json();
       bootstrap.hosts = bootstrap.hosts.map(
-        (entry: { id: string; addresses: string[]; primary_ip?: string | null }) =>
+        (entry: {
+          id: string;
+          addresses: string[];
+          primary_ip?: string | null;
+        }) =>
           entry.id === host.id
             ? {
                 ...entry,
@@ -2173,7 +2217,9 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(addressSelect).toContainText(primaryAddress);
     await addressSelect.click();
     await expect(page.getByRole("option", { name: "127.0.0.1" })).toBeVisible();
-    await expect(page.getByRole("option", { name: "203.0.113.9" })).toBeVisible();
+    await expect(
+      page.getByRole("option", { name: "203.0.113.9" }),
+    ).toBeVisible();
     await page.keyboard.press("Escape");
     await dialog.getByLabel("Username", { exact: true }).fill("root");
     await dialog
@@ -2247,9 +2293,7 @@ test.describe.serial("H.O.P.E console", () => {
       route.fulfill({ json: [] }),
     );
     await page.goto(`/?view=host&host=${host.id}`);
-    await page
-      .getByRole("button", { name: "Install reporting agent" })
-      .click();
+    await page.getByRole("button", { name: "Install reporting agent" }).click();
     const dialog = page.getByRole("dialog", { name: "Add a reporting agent" });
     const sshTab = dialog.getByRole("tab", { name: "Install over SSH" });
     await expect(sshTab).toBeEnabled();
@@ -2428,6 +2472,14 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("row").filter({ hasText: "dns-container" }),
     ).toHaveCount(1);
+    const deviceColumns = await page
+      .getByRole("columnheader")
+      .allTextContents();
+    const deviceCells = await page
+      .getByRole("row")
+      .filter({ hasText: "dns-container" })
+      .getByRole("cell")
+      .allTextContents();
     await page.getByLabel("Search hosts").fill("");
     await page.getByLabel("Search hosts").fill("proxmox-fixture-node");
     await page
@@ -2448,7 +2500,29 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(proxmoxDetails.getByRole("table")).toContainText(
       "Debian GNU/Linux 13",
     );
-    await expect(proxmoxDetails.getByRole("table")).toContainText("scsi0");
+    const guestsTable = proxmoxDetails.getByRole("table");
+    await expect(guestsTable.getByRole("columnheader")).toHaveText(
+      deviceColumns,
+    );
+    const guestRow = guestsTable
+      .getByRole("row")
+      .filter({ hasText: "dns-container" });
+    await expect(guestRow.getByRole("cell")).toHaveCount(deviceCells.length);
+    // The relative last-seen time can advance between views.
+    expect(
+      (await guestRow.getByRole("cell").allTextContents()).slice(0, -1),
+    ).toEqual(deviceCells.slice(0, -1));
+    await expect(guestRow).toContainText("Running");
+    await expect(guestRow.getByRole("cell").nth(3)).toContainText("15%");
+    await expect(guestRow.getByRole("cell").nth(4)).toContainText("25%");
+    await guestsTable.getByRole("button", { name: "CPU", exact: true }).click();
+    await expect(
+      guestsTable.getByRole("columnheader", { name: "CPU", exact: true }),
+    ).toHaveAttribute("aria-sort", "ascending");
+    await page.screenshot({
+      path: "test-results/hope-guests.png",
+      fullPage: true,
+    });
     await proxmoxDetails.getByRole("button", { name: "dns-container" }).click();
     await expect(page).toHaveURL(/host=/);
     await expect(
@@ -2472,6 +2546,9 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("region", { name: "Source inventory" }),
     ).toContainText("local-lvm");
+    await expect(
+      page.getByRole("region", { name: "Source inventory" }),
+    ).toContainText("Configured disk scsi0");
     const sourceHistory = page.getByRole("region", {
       name: "Source metrics history",
     });
@@ -2502,6 +2579,18 @@ test.describe.serial("H.O.P.E console", () => {
       name: "Host details",
     });
     await mobileDetails.getByRole("tab", { name: "Guests" }).click();
+    await expect(
+      mobileDetails.getByRole("columnheader", { name: "Status" }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+    await page.screenshot({
+      path: "test-results/hope-guests-mobile.png",
+      fullPage: true,
+    });
     await mobileDetails.getByRole("button", { name: "dns-container" }).click();
     await expect(
       page.getByRole("heading", { name: "dns-container" }),

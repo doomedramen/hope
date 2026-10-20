@@ -243,7 +243,11 @@ export function HostTable({
                               : h.source?.kind === "proxmox_vm"
                                 ? "Proxmox VM"
                                 : deviceLabel(h),
-                          h.child?.image ?? h.inventory?.os ?? h.vendor ?? null,
+                          h.child?.image ??
+                            h.inventory?.os ??
+                            h.child?.guest_os?.name ??
+                            h.vendor ??
+                            null,
                         ]
                           .filter(Boolean)
                           .join(" · ") || `Discovered by ${h.discovery_method}`}
