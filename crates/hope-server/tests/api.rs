@@ -4804,7 +4804,7 @@ async fn report_order_survives_clock_corrections_replay_retention_and_restart() 
         assert_eq!(response["live_applied"], true);
         let host = state.host(&host_id).await.unwrap().unwrap();
         assert_eq!(host.metrics.unwrap().cpu_percent, Some(cpu));
-        assert_eq!(host.last_collected_at, Some(timestamp));
+        assert!((host.last_collected_at.unwrap() - timestamp).abs() < 1e-6);
         assert!(host.metrics_received_at.unwrap() >= start);
         assert_eq!(host.name, format!("sequence-{sequence}"));
     }

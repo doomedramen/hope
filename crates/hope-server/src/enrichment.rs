@@ -1,5 +1,5 @@
 use crate::state::{State, now};
-use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use hope_protocol::{EnrichmentStatus, Service};
 use std::{collections::HashSet, net::Ipv4Addr, sync::Arc, time::Duration};
 use tokio::{
@@ -40,8 +40,18 @@ impl Queue {
                 tokio::select! {
                     work = receiver.recv(), if active.len() < 8 => {
                         let Some(work) = work else { while active.next().await.is_some() {} break; };
-                        let id = work.id.clone(); let pending = active_ids.clone(); let worker = worker.clone(); let guard = work.state.track();
-                        active.push(async move { let _guard = guard; worker(work).await; pending.lock().await.remove(&id); });
+                        let id = work.id.clone(); let failure_state = work.state.clone(); let pending = active_ids.clone(); let worker = worker.clone(); let guard = work.state.track();
+                        active.push(async move {
+                            let _guard = guard;
+                            let result = std::panic::AssertUnwindSafe(async move { worker(work).await })
+                                .catch_unwind()
+                                .await;
+                            if result.is_err() {
+                                tracing::error!(host_id = %id, "device enrichment worker panicked");
+                                status(&failure_state, &id, EnrichmentStatus::Failed).await;
+                            }
+                            pending.lock().await.remove(&id);
+                        });
                     }
                     Some(()) = active.next(), if !active.is_empty() => {}
                 }
@@ -305,5 +315,81 @@ mod tests {
         .expect("all work completed");
         assert!(peak.load(Ordering::SeqCst) <= 8);
         assert_eq!(completed.load(Ordering::SeqCst), 250);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_worker_does_not_stop_the_enrichment_queue() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let queue = Queue::with_worker({
+            let calls = calls.clone();
+            let completed = completed.clone();
+            Arc::new(move |_| {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                let completed = completed.clone();
+                Box::pin(async move {
+                    if call == 0 {
+                        panic!("simulated enrichment panic");
+                    }
+                    completed.fetch_add(1, Ordering::SeqCst);
+                })
+            })
+        });
+        let directory = tempfile::tempdir().expect("temporary");
+        let state = State::open(
+            directory.path().join("test.db").to_str().expect("path"),
+            "http://localhost:8080".into(),
+            "releases".into(),
+            hope_protocol::Capabilities {
+                platform: "test".into(),
+                discovery_mode: "limited".into(),
+                arp: false,
+                icmp: false,
+                limitations: vec![],
+            },
+        )
+        .await
+        .expect("state");
+        state
+            .save_host(&crate::inventory::StoredHost::new(
+                "panicking-host".into(),
+                "fixture".into(),
+                "agent",
+            ))
+            .await
+            .expect("panicking host");
+
+        for id in ["panicking-host", "healthy-host"] {
+            queue
+                .enqueue(
+                    state.clone(),
+                    id.into(),
+                    Ipv4Addr::LOCALHOST,
+                    CancellationToken::new(),
+                )
+                .await;
+        }
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if completed.load(Ordering::SeqCst) == 1 && queue.pending.lock().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("later work completes after a worker panic");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(queue.pending.lock().await.is_empty());
+        assert!(matches!(
+            state
+                .stored_host("panicking-host")
+                .await
+                .expect("host")
+                .expect("present")
+                .enrichment_status,
+            EnrichmentStatus::Failed
+        ));
     }
 }

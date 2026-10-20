@@ -361,43 +361,6 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                 return Ok(());
             }
             _=&mut sampling => { anyhow::bail!("Collector stopped unexpectedly"); }
-            Some(((inventory,metrics,mut collectors),collected_at,child_snapshots))=samples.recv() => {
-                collectors.push(crate::updates::status(dir));
-                let changed=inventory_delivery.changed(&inventory)?;
-                let mut report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),sequence:Some(sequence.next(dir).await?),collected_at,inventory:changed.then_some(inventory),metrics,collectors };
-                crate::telemetry::bound_report(&mut report)?;
-                for snapshot in child_snapshots {
-                    let Some(batches) = child_schedule.batch(snapshot, &configuration.agent_id, collected_at) else { continue; };
-                    if batches.iter().all(|batch| hope_protocol::validation::child_batch(batch).is_ok()) {
-                        match config::write_private(&child_state_path, &serde_json::to_vec(&child_schedule)?).await {
-                            Ok(()) => {
-                                let mut queued = true;
-                                for batch in batches {
-                                    if let Err(error) = child_spool.push(batch, now()) {
-                                        eprintln!("Could not queue child report: {error:#}");
-                                        queued = false;
-                                        break;
-                                    }
-                                }
-                                if queued && let Ok(bytes) = child_spool.encode()
-                                    && let Err(error) = config::write_private(&child_queue_path, &bytes).await {
-                                    eprintln!("Could not persist child reports: {error}");
-                                }
-                            }
-                            Err(error) => {
-                                child_schedule.disabled = true;
-                                eprintln!("Child reporting disabled: could not persist its sequence: {error}");
-                            }
-                        }
-                    } else {
-                        eprintln!("Dropped invalid local child inventory batch; core reporting continues");
-                    }
-                }
-                current_reports.insert(report.report_id.clone());
-                spool.push(report,now())?;
-                current_reports.retain(|id| spool.iter().any(|report| &report.report_id == id));
-                config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
-            }
             result=async { inflight.as_mut().expect("guarded request").await }, if inflight.is_some() => {
                 inflight=None;
                 let (report,outcome)=result;
@@ -490,6 +453,43 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                 if let Some(report)=spool.latest().cloned() {
                     inflight=Some(Box::pin(delivery::send(client.clone(),configuration.server.clone(),credential.clone(),report)));
                 }
+            }
+            Some(((inventory,metrics,mut collectors),collected_at,child_snapshots))=samples.recv() => {
+                collectors.push(crate::updates::status(dir));
+                let changed=inventory_delivery.changed(&inventory)?;
+                let mut report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),sequence:Some(sequence.next(dir).await?),collected_at,inventory:changed.then_some(inventory),metrics,collectors };
+                crate::telemetry::bound_report(&mut report)?;
+                for snapshot in child_snapshots {
+                    let Some(batches) = child_schedule.batch(snapshot, &configuration.agent_id, collected_at) else { continue; };
+                    if batches.iter().all(|batch| hope_protocol::validation::child_batch(batch).is_ok()) {
+                        match config::write_private(&child_state_path, &serde_json::to_vec(&child_schedule)?).await {
+                            Ok(()) => {
+                                let mut queued = true;
+                                for batch in batches {
+                                    if let Err(error) = child_spool.push(batch, now()) {
+                                        eprintln!("Could not queue child report: {error:#}");
+                                        queued = false;
+                                        break;
+                                    }
+                                }
+                                if queued && let Ok(bytes) = child_spool.encode()
+                                    && let Err(error) = config::write_private(&child_queue_path, &bytes).await {
+                                    eprintln!("Could not persist child reports: {error}");
+                                }
+                            }
+                            Err(error) => {
+                                child_schedule.disabled = true;
+                                eprintln!("Child reporting disabled: could not persist its sequence: {error}");
+                            }
+                        }
+                    } else {
+                        eprintln!("Dropped invalid local child inventory batch; core reporting continues");
+                    }
+                }
+                current_reports.insert(report.report_id.clone());
+                spool.push(report,now())?;
+                current_reports.retain(|id| spool.iter().any(|report| &report.report_id == id));
+                config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
             }
         }
     }
@@ -772,16 +772,18 @@ mod tests {
     }
     struct OvertakingSampler {
         inner: FakeSampler,
-        second_sample: std::sync::Arc<tokio::sync::Notify>,
+        second_sample: Option<tokio::sync::oneshot::Sender<()>>,
     }
     impl Sampler for OvertakingSampler {
         fn sample(&mut self) -> Sampling<'_> {
-            let second_sample = (self.inner.count == 1).then(|| self.second_sample.clone());
+            let second_sample = (self.inner.count == 1)
+                .then(|| self.second_sample.take())
+                .flatten();
             let sample = self.inner.sample();
             Box::pin(async move {
                 let sample = sample.await;
                 if let Some(second_sample) = second_sample {
-                    second_sample.notify_one();
+                    let _ = second_sample.send(());
                 }
                 sample
             })
@@ -1186,13 +1188,16 @@ mod tests {
             .await
             .expect("listener");
         let address = listener.local_addr().expect("address");
-        let second_sample = std::sync::Arc::new(tokio::sync::Notify::new());
-        let response_gate = second_sample.clone();
-        let body = r#"{"accepted":true,"duplicate":false,"live_applied":true}"#;
+        let (second_sample, second_sample_wait) = tokio::sync::oneshot::channel();
+        let response_gate = std::sync::Arc::new(tokio::sync::Mutex::new(Some(second_sample_wait)));
+        let body = r#"{"accepted":true,"duplicate":false,"live_applied":true}"#.to_string();
         let app = Router::new().fallback(any(move || {
             let response_gate = response_gate.clone();
+            let body = body.clone();
             async move {
-                response_gate.notified().await;
+                if let Some(response_gate) = response_gate.lock().await.take() {
+                    let _ = response_gate.await;
+                }
                 (
                     StatusCode::OK,
                     [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -1207,7 +1212,7 @@ mod tests {
                 count: 0,
                 stop_after_samples: None,
             },
-            second_sample,
+            second_sample: Some(second_sample),
         };
         tokio::time::timeout(
             Duration::from_secs(10),

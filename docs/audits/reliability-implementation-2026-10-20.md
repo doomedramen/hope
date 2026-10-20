@@ -31,12 +31,14 @@ Follow-up reliability work after the baseline findings:
 
 - Linux ARP discovery now reconciles interface changes in the background, reopens sockets after reader or send failures, and exposes current socket availability through API capabilities. A unit test verifies that unchanged interfaces retain their sockets. Physical interface replacement and raw-socket recovery still need validation on a native Linux x86_64 host.
 - Scheduled scans pace probe starts at the backend boundary, so executor delays cannot bunch probes after they have been dispatched. The scanner test checks aggregate start spacing while allowing bounded parallel probes.
-- The filesystem worker-cap test now gates its worker with channels instead of relying on a short sleep. The one-off reporting race test holds its HTTP response until a second sample finishes, rather than relying on a fixed delay; other reporting deadlines allow for loaded CI and emulated builds.
+- The reporting actor now services completed HTTP and child-delivery requests before draining its sample queue. A continuous stream of ready samples could otherwise starve accepted reports because the `select!` was biased toward sample collection. The regression test holds the mock response until a second sample finishes, then verifies that one-off reporting still completes.
+- The enrichment queue catches worker panics, logs the affected host, marks enrichment failed, clears its pending marker and continues processing later devices. A regression test simulates a panic and verifies both the visible failure state and that the next item completes.
+- The filesystem worker-cap test now gates its worker with channels instead of relying on a short sleep. The clock-order integration test compares SQLite `REAL` timestamps with a microsecond tolerance, avoiding platform-dependent last-bit differences. Other reporting deadlines allow for loaded CI and emulated builds.
 
 ## Validation
 
-- Linux x86_64 container checks: 275 passed, one intentionally ignored retention load test, including the Linux ARP reconciliation test and storage-boundary compile-fail doctest; strict workspace Clippy and Rust formatting pass.
-- Native workspace tests: 274 passed and one intentionally ignored retention load test, including the storage-boundary compile-fail doctest. The Linux-only ARP test runs in the Linux container suite.
+- Linux x86_64 container checks: 276 passed, one intentionally ignored retention load test, including Linux ARP reconciliation and enrichment panic recovery tests plus the storage-boundary compile-fail doctest; strict workspace Clippy and Rust formatting pass.
+- Native workspace tests: 275 passed and one intentionally ignored retention load test, including the enrichment panic recovery and storage-boundary compile-fail tests. The Linux-only ARP test runs in the Linux container suite.
 - Web production build, TypeScript and ESLint pass.
 - Chromium/Playwright: 64 passed, including transport/recovery tests, measurement freshness checks and real-server live/source/clock history tests.
 - Release assembly harness: 20 passed.
