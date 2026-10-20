@@ -163,6 +163,8 @@ Adding a range (IPv4 CIDR, `/20` or smaller: a shorter prefix such as `/16` is r
 
 Removing a range (Networks in the sidebar, or `DELETE /api/v1/networks/{id}`) cancels its active scan, deletes its scan history and drops the membership from hosts that were in it; the hosts themselves, their agents and their history stay.
 
+Retiring a device from Settings (or `POST /api/v1/hosts/{id}/retire`) hides it from the active inventory, overview and map while keeping its identity and history. Retired devices remain available under the **Retired** inventory filter. Restore one there or use `POST /api/v1/hosts/{id}/restore`; a fresh scan, accepted agent report or newer source observation also restores it automatically. Retirement is reversible and never purges history.
+
 All ranges share one scheduler: up to 64 concurrent host probes, taken round-robin per range so a silent range does not delay a responsive one, plus an independent bounded enrichment queue (eight workers) for service and name lookup. Scans can be cancelled and show progress. A host that does not answer is **not** declared offline; discovery only records what it observed and when.
 
 Measured completion on the Linux fixtures (two `/24`s, one HTTP responder each, one run per mode in Ticket 09, five in Ticket 03): first responder in 0.77 to 0.82 s, both ranges complete in 25.397 to 25.437 s (second range routed) and 26.392 to 26.464 s (both on-link). Raw data: [discovery-routed.json](benchmarks/discovery-routed.json), [discovery-on-link.json](benchmarks/discovery-on-link.json). These numbers come from OrbStack bridges on one Mac, not a physical LAN; no timing is claimed for real networks.

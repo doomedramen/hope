@@ -352,6 +352,15 @@ impl State {
             .into_iter()
             .map(|r| StoredHost::decode(r.get("body")).map(StoredHost::into_view))
             .collect::<Result<_>>()?;
+        let retired_ids: HashSet<String> =
+            sqlx::query_scalar("SELECT device_id FROM retired_devices")
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .collect();
+        for host in &mut hosts {
+            host.retired = retired_ids.contains(&host.id);
+        }
         let networks =
             sqlx::query("SELECT id,name,cidr,enabled,interval_minutes FROM networks ORDER BY name")
                 .fetch_all(&mut *tx)
@@ -385,6 +394,11 @@ impl State {
                 .collect();
         for row in children {
             let mut source = source_device_host(&row)?;
+            let source_parent = row.try_get::<Option<String>, _>("host_id").ok().flatten();
+            source.retired = retired_ids.contains(&source.id)
+                || source_parent
+                    .as_ref()
+                    .is_some_and(|parent| retired_ids.contains(parent));
             if let Some(id) = &source.source_device_id {
                 source
                     .relationships
@@ -399,10 +413,8 @@ impl State {
                 .as_ref()
                 .and_then(|id| associations.remove(id))
                 .unwrap_or_default();
-            let linked_target = row
-                .try_get::<Option<String>, _>("host_id")
-                .ok()
-                .flatten()
+            let linked_target = source_parent
+                .clone()
                 .and_then(|target_id| hosts.iter().position(|host| host.id == target_id));
             if let Some(target_index) = linked_target {
                 let target = &mut hosts[target_index];
@@ -436,6 +448,32 @@ impl State {
         Ok(self.0.db.begin_with("BEGIN IMMEDIATE").await?)
     }
 
+    /// A fresh scan observation revives the physical device and any child identities linked to it.
+    pub(crate) async fn clear_retired_host(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &str,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM retired_devices WHERE device_id=? OR device_id IN (SELECT id FROM source_devices WHERE host_id=?)")
+            .bind(id)
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
+    /// A fresh child observation revives its source identity and its linked physical device.
+    pub(crate) async fn clear_retired_source(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &str,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM retired_devices WHERE device_id=? OR device_id=(SELECT host_id FROM source_devices WHERE id=?)")
+            .bind(id)
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
     pub async fn save_host(&self, host: &StoredHost) -> Result<()> {
         host.validate()?;
         let mut tx = self.write_transaction().await?;
@@ -444,7 +482,10 @@ impl State {
             .fetch_optional(&mut *tx)
             .await?;
         let old = old.map(|body| StoredHost::decode(&body)).transpose()?;
-        let identity_changed = old.is_none_or(|old| {
+        let observed_again = old
+            .as_ref()
+            .is_some_and(|previous| host.last_seen > previous.last_seen);
+        let identity_changed = old.as_ref().is_none_or(|old| {
             old.addresses != host.addresses
                 || old.macs != host.macs
                 || old.name != host.name
@@ -454,6 +495,9 @@ impl State {
         sqlx::query("INSERT INTO hosts(id,agent_id,name,body) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET agent_id=excluded.agent_id,name=excluded.name,body=excluded.body")
             .bind(&host.id).bind(&host.agent_id).bind(&host.name).bind(serde_json::to_string(host)?)
             .execute(&mut *tx).await?;
+        if observed_again {
+            Self::clear_retired_host(&mut tx, &host.id).await?;
+        }
         if identity_changed {
             crate::identity::reconcile(&mut tx).await?;
         }
@@ -585,6 +629,7 @@ fn source_networks(networks: &[Network], addresses: &[String]) -> Vec<String> {
 }
 
 fn merge_source_host(target: &mut Host, source: Host) {
+    target.retired |= source.retired;
     if target.name_override.is_none() {
         target.name_override = source.name_override.clone();
     }

@@ -29,6 +29,7 @@ impl StoredHost {
             self.source.is_none()
                 && self.source_device_id.is_none()
                 && self.source_observed_at.is_none()
+                && !self.retired
                 && self.child.is_none()
                 && self.lifecycle.is_none()
                 && self.associations.is_empty()

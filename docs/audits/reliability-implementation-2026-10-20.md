@@ -23,7 +23,7 @@ Existing saved agent updaters need one manual console upgrade command to adopt i
 
 Clock-independent ordering requires both the new server and agent. Once an identity sends ordered reports, older unsequenced binaries cannot advance its live state; update that agent again after a rollback to resume measurements. Legacy agents retain timestamp ordering until upgraded.
 
-The storage migration cannot infer the provenance of addresses already unioned by old versions. Those addresses are conservatively retained. Existing IDs, source histories and aliases remain reachable. The identity refactor does not add retire/forget/purge semantics.
+The storage migration cannot infer the provenance of addresses already unioned by old versions. Those addresses are conservatively retained. Existing IDs, source histories and aliases remain reachable. Migration 19 adds reversible device retirement; hard forget/purge semantics remain unimplemented.
 
 Notification delivery is at least once, so crash recovery can duplicate an accepted message. The queue is bounded at 4,096 entries. Full queues postpone condition changes; new-device announcements at capacity are omitted with a warning. These limits and cancellation semantics are documented in [operations](../operations.md#notifications).
 
@@ -40,13 +40,14 @@ Follow-up reliability work after the baseline findings:
 - Host merge now compares canonical IDs after resolving aliases. A stale client request that names two old/current IDs for the same host is rejected before any rows or aliases change. The regression test verifies the canonical host remains readable and no self-alias is created.
 - Remaining timing-based test coordination was tightened: the revocation/report race queues the revocation future on the write mutex before submitting the report, the SSH fingerprint test waits for the test server's connection-close event, and the backup-under-write test waits for five committed writer transactions before taking snapshots. These tests now synchronize on the state they exercise instead of fixed delays.
 - The explicit retention-load fixture now includes populated host telemetry, container history on 25 hosts, source inventory and source metrics, plus concurrent report, discovery-write and host/source history reads. It no longer enforces an unmeasured per-report latency target; `make linux-load-checks` emits the release-mode Linux x86_64 benchmark record.
+- Migration 19 adds reversible device retirement. Retired devices leave active inventory, overview and map views while retaining identity and history; a fresh scan, accepted agent report or newer source observation restores them. The console offers an explicit Retired filter and restore action. API and Chromium regression tests cover history preservation, automatic revival, active-view filtering and manual restore. Hard history purge remains a separate unresolved policy.
 
 ## Validation
 
-- Linux x86_64 container checks: 279 passed, one intentionally ignored retention load test, including readiness and operational-status tests, Linux ARP reconciliation, enrollment-capacity and enrichment panic recovery tests plus the storage-boundary compile-fail doctest; strict workspace Clippy and Rust formatting pass.
-- Native workspace tests: 278 passed and one intentionally ignored retention load test, including readiness and operational-status tests, enrollment-capacity, enrichment panic recovery and storage-boundary compile-fail tests. The Linux-only ARP test runs in the Linux container suite.
+- Linux x86_64 container checks: 281 passed, one intentionally ignored retention load test, including retirement, readiness and operational-status tests, Linux ARP reconciliation, enrollment-capacity and enrichment panic recovery tests plus the storage-boundary compile-fail doctest; strict workspace Clippy and Rust formatting pass. These checks ran under amd64 Docker emulation on the development Mac.
+- Native workspace tests: 280 passed and one intentionally ignored retention load test, including retirement, readiness and operational-status tests, enrollment-capacity, enrichment panic recovery and storage-boundary compile-fail tests. The Linux-only ARP test runs in the Linux container suite.
 - Web production build, TypeScript and ESLint pass.
-- Chromium/Playwright: 64 passed, including transport/recovery tests, measurement freshness checks and real-server live/source/clock history tests.
+- Chromium/Playwright: 66 passed, including retirement and restore, transport/recovery tests, measurement freshness checks and real-server live/source/clock history tests.
 - Release assembly harness: 20 passed.
 - Installer harness: 165 run; 152 passed and 13 out-of-scope macOS agent fixtures skipped. The host fixtures now stub the operating system explicitly and run on this macOS development host; 16 activation tests use real SQLite and filesystem operations with only systemd/HTTP stubbed.
 - Shell syntax, ShellCheck, generated protocol drift and eight documentation tests pass.
@@ -55,12 +56,12 @@ The Rust, installer, release, shell, protocol and documentation checks were reru
 
 The expanded retention-load fixture passed in release mode on macOS arm64: 1,154,550 populated host samples and 2,500 source samples, with concurrent report, discovery-write and host/source history-read workers. It measured 1.76 GB of database storage and about 0.9 seconds for retention on that machine. The same fixture passed through `make linux-load-checks` as Linux x86_64 under Docker's arm64-host emulation: retention took about 3 seconds; report latency was 6.5 ms median/56 ms max and paired host/source history reads were 33 ms median/113 ms max. Both sets of numbers are diagnostic only and do not satisfy the native Linux x86_64 populated-load gate.
 
-The SSH installer integration suite passed after replacing its fixed stage sleeps with state-based synchronization (25 tests).
+The SSH installer integration suite passed after replacing its fixed stage sleeps with state-based synchronization (25 tests). The latest verification also passes the production web build, TypeScript, ESLint, Prettier, eight documentation tests and generated protocol drift check.
 
 ## Remaining blockers before recommendation
 
 1. **Linux x86_64 acceptance.** Exercise actual packaged artifacts through fresh installation, upgrade, failed activation/restore, restart, interface replacement/raw-socket recovery, notification outage, database/disk pressure, guest churn and browser reconnection. Measure realistic inventory/history load and run a multi-day soak. The locally passing suites do not establish these release gates.
 
-Additional follow-ups from the baseline review remain: deliberate device retirement and purge semantics; realistic populated-load measurements on native Linux x86_64. The 250-agent ceiling now applies atomically to active identities, so revoked or uninstalled identities retain history without consuming an active slot. Discovery interface recovery is implemented, but its behavior on actual Linux x86_64 network changes remains unverified as noted above.
+Additional follow-ups from the baseline review remain: hard forget/purge semantics and realistic populated-load measurements on native Linux x86_64. The 250-agent ceiling now applies atomically to active identities, so revoked or uninstalled identities retain history without consuming an active slot. Discovery interface recovery is implemented, but its behavior on actual Linux x86_64 network changes remains unverified as noted above.
 
 The project is materially more reliable, but the unverified Linux acceptance gates still prevent a recommendation for unattended use.

@@ -1080,6 +1080,9 @@ pub struct Host {
     /// The installation was removed remotely; the identity remains for history and re-enrollment.
     #[serde(default)]
     pub agent_uninstalled: bool,
+    /// Hidden from the active fleet until a new observation or explicit restore.
+    #[serde(default)]
+    pub retired: bool,
     #[serde(default)]
     pub enrichment_status: EnrichmentStatus,
     pub discovery_method: String,
@@ -1149,6 +1152,7 @@ impl Host {
             metrics_received_at: None,
             agent_revoked: false,
             agent_uninstalled: false,
+            retired: false,
             enrichment_status: EnrichmentStatus::Pending,
             discovery_method: discovery_method.into(),
             inventory: None,

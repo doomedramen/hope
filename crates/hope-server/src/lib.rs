@@ -43,6 +43,8 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/bootstrap", get(api::bootstrap))
         .route("/system/status", get(health::system_status))
         .route("/hosts/{id}", get(api::get_host))
+        .route("/hosts/{id}/retire", post(api::retire_host))
+        .route("/hosts/{id}/restore", post(api::restore_host))
         .route("/account/password", post(auth::change_password))
         .route(
             "/notifications",

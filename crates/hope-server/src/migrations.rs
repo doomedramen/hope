@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 18;
+const LATEST: i64 = 19;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
@@ -157,6 +157,14 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
         .execute(&mut *tx)
         .await?;
         sqlx::query("PRAGMA user_version = 18")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 19 {
+        sqlx::raw_sql(include_str!("migrations/0019_retired_devices.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 19")
             .execute(&mut *tx)
             .await?;
     }
@@ -318,7 +326,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 18);
+        assert_eq!(version, 19);
         let source_cleanup_index: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='source_metrics_cleanup'",
         )
@@ -342,6 +350,7 @@ mod tests {
             "shared_source_members",
             "pending_legacy_identities",
             "agent_report_heads",
+            "retired_devices",
         ] {
             let exists: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",

@@ -15,6 +15,8 @@ import {
   GitMerge,
   MemoryStick,
   Network,
+  Eye,
+  EyeOff,
   Radio,
   Search,
   ShieldOff,
@@ -198,6 +200,21 @@ export function HostDetails({
       await post(`/hosts/${host.id}/update-agent`);
       notify(
         `Asked ${displayName} to update to ${update?.target ?? "the latest release"}.`,
+        "good",
+      );
+      refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  async function toggleRetired() {
+    const action = host.retired ? "restore" : "retire";
+    try {
+      await post(`/hosts/${host.id}/${action}`);
+      notify(
+        host.retired
+          ? `${displayName} returned to the active inventory.`
+          : `${displayName} was retired from the active inventory.`,
         "good",
       );
       refresh();
@@ -1333,6 +1350,38 @@ export function HostDetails({
               notify={notify}
               refresh={refresh}
             />
+            {host.retired ? (
+              <Alert>
+                <AlertDescription>
+                  This device is retired. Its history is kept, and a new scan,
+                  agent report, or source observation will return it to the
+                  active inventory.
+                  <div className="mt-2">
+                    <Button size="sm" variant="outline" onClick={toggleRetired}>
+                      <Eye data-icon="inline-start" />
+                      Restore device
+                    </Button>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <section>
+                <h3 className="detail-heading">
+                  <EyeOff />
+                  Inventory
+                </h3>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground">
+                    Retire a device to hide it from active views. Its history
+                    stays available, and new observations restore it.
+                  </p>
+                  <Button variant="outline" size="sm" onClick={toggleRetired}>
+                    <EyeOff data-icon="inline-start" />
+                    Retire device
+                  </Button>
+                </div>
+              </section>
+            )}
             {update && (
               <div
                 className="rounded-xl border p-3.5"

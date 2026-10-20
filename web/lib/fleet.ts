@@ -9,7 +9,8 @@ export type StateKey =
   | "observed"
   | "unobserved"
   | "stopped"
-  | "archived";
+  | "archived"
+  | "retired";
 export type HostState = { key: StateKey; label: string; tone: Tone };
 
 /** Agents report every 30 s; two missed reports mean the agent is stale. */
@@ -22,11 +23,17 @@ export function hostState(
     Partial<
       Pick<
         Host,
-        "agent_uninstalled" | "source" | "lifecycle" | "source_observed_at"
+        | "agent_uninstalled"
+        | "source"
+        | "lifecycle"
+        | "source_observed_at"
+        | "retired"
       >
     >,
   now = Date.now() / 1000,
 ): HostState {
+  if (host.retired)
+    return { key: "retired", label: "Retired", tone: "neutral" };
   if (host.agent_revoked && !host.agent_uninstalled)
     return { key: "revoked", label: "Agent revoked", tone: "neutral" };
   if (host.agent_id && !host.agent_uninstalled)
@@ -370,6 +377,7 @@ export function fleetSummary(
 export type HostFilter = "all" | "attention" | "monitored" | StateKey;
 export const HOST_FILTERS: { key: HostFilter; label: string }[] = [
   { key: "all", label: "All" },
+  { key: "retired", label: "Retired" },
   { key: "attention", label: "Needs attention" },
   { key: "reporting", label: "Reporting" },
   { key: "observed", label: "Observed" },
@@ -385,12 +393,16 @@ export const HOST_FILTER_HINTS: Partial<Record<HostFilter, string>> = {
   attention:
     "Agents not reporting, and reported resource, service or monitor problems.",
   unobserved: `Devices without an agent that have not been seen for ${OBSERVED_SECONDS / 60} minutes or more. This does not mean the device is offline; it may be asleep or away from Wi-Fi.`,
+  retired:
+    "Retired devices keep their history and return to the active fleet when seen again.",
 };
 export function matchesFilter(
   host: Host,
   filter: HostFilter,
   now = Date.now() / 1000,
 ) {
+  if (filter === "retired") return host.retired;
+  if (host.retired) return false;
   if (filter === "all") return true;
   if (filter === "monitored") return host.uptime?.enabled ?? false;
   if (filter === "attention") return hostIssues(host, now).length > 0;

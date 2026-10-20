@@ -377,11 +377,15 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   }
   const allHosts = useMemo(() => data?.hosts ?? [], [data]);
   const activeHosts = useMemo(
-    () => allHosts.filter((item) => item.lifecycle !== "archived"),
+    () =>
+      allHosts.filter((item) => item.lifecycle !== "archived" && !item.retired),
     [allHosts],
   );
-  // Archived devices are a deliberate opt-in through the Archived status chip.
-  const hosts = statusFilter === "archived" ? allHosts : activeHosts;
+  // Archived and retired devices are deliberate opt-ins through their status chips.
+  const hosts =
+    statusFilter === "archived" || statusFilter === "retired"
+      ? allHosts
+      : activeHosts;
   const activeData = useMemo(
     () => (data ? { ...data, hosts: activeHosts } : null),
     [data, activeHosts],
@@ -411,8 +415,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       matchesSearch(h, filter),
   );
   const host =
-    hosts.find((h) => h.id === selected || h.source_device_id === selected) ??
-    null;
+    allHosts.find(
+      (h) => h.id === selected || h.source_device_id === selected,
+    ) ?? null;
   useEffect(() => {
     if (!selected || !data || host || location.view !== "host") return;
     let cancelled = false;
@@ -895,7 +900,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           />
         ) : view === "agents" ? (
           <AgentsPage
-            hosts={hosts}
+            hosts={activeHosts}
             onSelect={selectHost}
             onInstall={() => setInstallOpen(true)}
           />
@@ -935,7 +940,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
               <HostDetails
                 key={host.id}
                 host={host}
-                hosts={hosts}
+                hosts={allHosts}
                 wide
                 close={closeHostPage}
                 agentRelease={data.agent_release}
@@ -1156,7 +1161,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     </div>
                   </div>
                 </div>
-                {hosts.length > 0 && (
+                {allHosts.length > 0 && (
                   <div
                     className="chip-row"
                     role="group"
@@ -1169,7 +1174,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                   >
                     {HOST_FILTERS.map((option) => {
                       const count = (
-                        option.key === "archived" ? allHosts : hosts
+                        option.key === "archived" || option.key === "retired"
+                          ? allHosts
+                          : activeHosts
                       ).filter(
                         (h) =>
                           (network === "all" ||
@@ -1360,7 +1367,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       <CommandPalette
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
-        hosts={hosts}
+        hosts={activeHosts}
         commands={commands}
         onSelectHost={selectHost}
       />

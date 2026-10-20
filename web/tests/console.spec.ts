@@ -2783,6 +2783,64 @@ test.describe.serial("H.O.P.E console", () => {
       ),
     ).toBeTruthy();
   });
+  test("retired devices leave active views and can be restored with history intact", async ({
+    page,
+    request,
+  }) => {
+    await seed(request);
+    const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+    const candidate = bootstrap.hosts.find(
+      (host: { name: string; source: unknown }) => !host.source,
+    );
+    expect(candidate).toBeTruthy();
+    const deviceName = `retirement-${randomUUID().slice(0, 8)}`;
+    const previousIdentity = {
+      name: candidate.name_override,
+      icon: candidate.icon_override,
+    };
+    try {
+      expect(
+        (
+          await request.put(`/api/v1/hosts/${candidate.id}/identity`, {
+            data: { name: deviceName, icon: null },
+          })
+        ).ok(),
+      ).toBeTruthy();
+      expect(
+        (
+          await request.post(`/api/v1/hosts/${candidate.id}/retire`, {
+            data: {},
+          })
+        ).ok(),
+      ).toBeTruthy();
+
+      await page.goto("/?view=map");
+      await expect(
+        page.locator(".map-device").filter({ hasText: deviceName }),
+      ).toHaveCount(0);
+      await page.goto("/?view=hosts");
+      await expect(page.locator(".host-table")).not.toContainText(deviceName);
+      await expect(
+        page.getByRole("button", { name: /^Retired/ }),
+      ).toContainText("1");
+      await page.getByRole("button", { name: /^Retired/ }).click();
+      const row = page.getByRole("row").filter({ hasText: deviceName });
+      await expect(row).toBeVisible();
+      await row.click();
+      await page.getByRole("tab", { name: "Settings" }).click();
+      await page.getByRole("button", { name: "Restore device" }).click();
+      await page.getByRole("button", { name: "Close host details" }).click();
+      await page.getByRole("button", { name: /^All/ }).click();
+      await expect(page.locator(".host-table")).toContainText(deviceName);
+    } finally {
+      await request.post(`/api/v1/hosts/${candidate.id}/restore`, {
+        data: {},
+      });
+      await request.put(`/api/v1/hosts/${candidate.id}/identity`, {
+        data: previousIdentity,
+      });
+    }
+  });
   test("duplicate review reconciles selected groups in one bulk request", async ({
     page,
   }) => {

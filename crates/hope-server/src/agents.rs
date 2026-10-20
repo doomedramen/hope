@@ -265,6 +265,7 @@ async fn enroll_inner(
                 .bind(&request.agent_id)
                 .execute(&mut *tx)
                 .await?;
+            State::clear_retired_host(&mut tx, &host.id).await?;
             tx.commit().await?;
             state.changed();
             return Ok(Json(EnrollmentResponse {
@@ -321,6 +322,7 @@ async fn enroll_inner(
         .await?;
     sqlx::query("INSERT INTO hosts(id,agent_id,name,body) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET agent_id=excluded.agent_id,name=excluded.name,body=excluded.body")
         .bind(&host.id).bind(&host.agent_id).bind(&host.name).bind(serde_json::to_string(&host)?).execute(&mut *tx).await?;
+    State::clear_retired_host(&mut tx, &host.id).await?;
     crate::identity::reconcile(&mut tx).await?;
     tx.commit().await?;
     state.changed();
@@ -454,6 +456,7 @@ pub async fn report(
     if duplicate {
         return Ok(Json(response));
     }
+    State::clear_retired_host(&mut tx, &host.id).await?;
     // Live figures follow every report, but history keeps one raw sample per
     // HISTORY_SAMPLE_SECONDS so a short report interval does not multiply stored rows. The
     // margin absorbs the agent's scheduling jitter.
@@ -1047,6 +1050,9 @@ pub async fn child_report(
     }
 
     crate::identity::reconcile_sources(&mut tx, &fresh_source_ids).await?;
+    for source_id in &fresh_source_ids {
+        State::clear_retired_source(&mut tx, source_id).await?;
+    }
 
     if authoritative_complete {
         if let Some(inventory_id) = &batch.inventory_id {

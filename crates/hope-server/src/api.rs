@@ -42,6 +42,42 @@ pub async fn get_host(
         state.host(&id).await?.ok_or_else(ApiError::not_found)?,
     ))
 }
+pub async fn retire_host(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Host>> {
+    set_retired(&state, &id, true).await.map(Json)
+}
+pub async fn restore_host(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Host>> {
+    set_retired(&state, &id, false).await.map(Json)
+}
+async fn set_retired(state: &State, id: &str, retired: bool) -> ApiResult<Host> {
+    let _guard = state.0.writes.lock().await;
+    let host = state.host(id).await?.ok_or_else(ApiError::not_found)?;
+    let mut identities = HashSet::from([host.id.clone()]);
+    identities.extend(host.source_device_id.iter().cloned());
+    let mut tx = state.write_transaction().await?;
+    for identity in identities {
+        if retired {
+            sqlx::query("INSERT INTO retired_devices(device_id,retired_at) VALUES(?,?) ON CONFLICT(device_id) DO UPDATE SET retired_at=excluded.retired_at")
+                .bind(identity)
+                .bind(crate::state::now())
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            sqlx::query("DELETE FROM retired_devices WHERE device_id=?")
+                .bind(identity)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    tx.commit().await?;
+    state.changed();
+    state.host(&host.id).await?.ok_or_else(ApiError::not_found)
+}
 pub async fn matching_networks(state: &State, addresses: &[String]) -> ApiResult<Vec<String>> {
     Ok(networks(state)
         .await?
@@ -448,6 +484,15 @@ pub async fn merge(
     }
     // Keep child inventory, links, and their source-specific history attached to the survivor.
     move_source_host_references(&mut tx, &source.id, &target.id).await?;
+    sqlx::query("INSERT OR IGNORE INTO retired_devices(device_id,retired_at) SELECT ?,retired_at FROM retired_devices WHERE device_id=?")
+        .bind(&target.id)
+        .bind(&source.id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM retired_devices WHERE device_id=?")
+        .bind(&source.id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("UPDATE hosts SET body=? WHERE id=?")
         .bind(serde_json::to_string(&target)?)
         .bind(&target.id)
@@ -778,6 +823,15 @@ async fn merge_source_device_inner(
         .execute(&mut **tx)
         .await?;
     sqlx::query("DELETE FROM device_associations WHERE source_device_id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT OR IGNORE INTO retired_devices(device_id,retired_at) SELECT ?,retired_at FROM retired_devices WHERE device_id=?")
+        .bind(survivor)
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM retired_devices WHERE device_id=?")
         .bind(duplicate)
         .execute(&mut **tx)
         .await?;

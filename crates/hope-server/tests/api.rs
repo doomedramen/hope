@@ -4241,6 +4241,105 @@ async fn identity_unlink_survives_reads_reports_and_explicit_reset() {
 }
 
 #[tokio::test]
+async fn retirement_preserves_history_and_fresh_observations_restore_devices() {
+    let (_dir, state, app, cookie) = setup().await;
+    let mut scanned = discovered("retired-scan", "192.168.1.20", "02:00:00:00:00:20");
+    scanned.last_seen = now();
+    state.save_host(&scanned).await.expect("scan host");
+
+    let (status, retired) = request(
+        &app,
+        "POST",
+        "/api/v1/hosts/retired-scan/retire",
+        json!({}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retired["retired"], true);
+    assert!(state.host("retired-scan").await.unwrap().unwrap().retired);
+
+    let mut scanned = state.stored_host("retired-scan").await.unwrap().unwrap();
+    scanned.last_seen += 1.0;
+    state.save_host(&scanned).await.expect("fresh scan");
+    assert!(!state.host("retired-scan").await.unwrap().unwrap().retired);
+
+    request(
+        &app,
+        "POST",
+        "/api/v1/hosts/retired-scan/retire",
+        json!({}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    let (status, restored) = request(
+        &app,
+        "POST",
+        "/api/v1/hosts/retired-scan/restore",
+        json!({}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(restored["retired"], false);
+
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let first = child_batch(&agent, 1, 1, true, now(), vec![child_device()]);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(first),
+            Some(("authorization", &bearer)),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let child_id: String = sqlx::query_scalar("SELECT id FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .expect("source identity");
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            &format!("/api/v1/hosts/{child_id}/retire"),
+            json!({}),
+            Some(("cookie", &cookie)),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(state.host(&child_id).await.unwrap().unwrap().retired);
+    let history: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM source_metrics WHERE source_device_id=?")
+            .bind(&child_id)
+            .fetch_one(&state.0.db)
+            .await
+            .expect("history remains stored");
+    assert_eq!(history, 1);
+
+    let second = child_batch(&agent, 2, 2, true, now() + 1.0, vec![child_device()]);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(second),
+            Some(("authorization", &bearer)),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(!state.host(&child_id).await.unwrap().unwrap().retired);
+}
+
+#[tokio::test]
 async fn identity_network_refresh_does_not_persist_source_projections() {
     let (_dir, state, app, cookie) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;

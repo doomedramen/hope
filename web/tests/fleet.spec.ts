@@ -68,6 +68,7 @@ function host(overrides: Partial<Host>): Host {
     last_collected_at: null,
     metrics_received_at: null,
     agent_revoked: false,
+    retired: false,
     enrichment_status: "completed",
     discovery_method: "icmp",
     inventory: null,
@@ -167,6 +168,13 @@ test("source-backed stopped and archived devices have distinct filters", () => {
   expect(hostState(archived, now).key).toBe("archived");
   expect(matchesFilter(stopped, "stopped", now)).toBeTruthy();
   expect(matchesFilter(archived, "archived", now)).toBeTruthy();
+});
+
+test("retired devices have an explicit filter and status", () => {
+  const retired = host({ retired: true });
+  expect(hostState(retired, now).key).toBe("retired");
+  expect(matchesFilter(retired, "retired", now)).toBeTruthy();
+  expect(matchesFilter(retired, "all", now)).toBeFalsy();
 });
 
 test("consumer device labels map to UniFi fingerprint icons", () => {

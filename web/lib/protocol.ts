@@ -353,7 +353,11 @@ metrics_received_at: number | null, agent_revoked: boolean,
 /**
  * The installation was removed remotely; the identity remains for history and re-enrollment.
  */
-agent_uninstalled: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>,
+agent_uninstalled: boolean,
+/**
+ * Hidden from the active fleet until a new observation or explicit restore.
+ */
+retired: boolean, enrichment_status: EnrichmentStatus, discovery_method: string, inventory: Inventory | null, metrics: Metrics | null, collectors: Array<CollectorStatus>, services: Array<Service>,
 /**
  * Manufacturer registered for the MAC address prefix (IEEE OUI).
  */
