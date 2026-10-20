@@ -11,6 +11,7 @@ use hope_server::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use std::future::Future;
 use tempfile::TempDir;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -2715,26 +2716,20 @@ async fn concurrent_enrollment_uses_token_for_only_one_identity() {
 
 #[tokio::test]
 async fn queued_report_cannot_commit_after_revocation() {
-    let (_dir, state, app, cookie) = setup().await;
+    let (_dir, state, app, _cookie) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;
     let held = state.0.writes.lock().await;
-    let revoke = {
-        let app = app.clone();
-        let agent = agent.clone();
-        tokio::spawn(async move {
-            request(
-                &app,
-                "POST",
-                &format!("/api/v1/agents/{agent}/revoke"),
-                json!({}),
-                Some(("cookie", &cookie)),
-            )
-            .await
-        })
-    };
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    // Poll revoke through its first lock attempt while the test holds the writer. This makes its
+    // place in Tokio's fair mutex queue deterministic before the report is submitted.
+    let mut revoke = Box::pin(agents::revoke_by_id(&state, &agent));
+    std::future::poll_fn(|cx| {
+        assert!(revoke.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
     let report = {
         let app = app.clone();
+        let report_agent_id = agent.clone();
         tokio::spawn(async move {
             request(
                 &app,
@@ -2743,7 +2738,7 @@ async fn queued_report_cannot_commit_after_revocation() {
                 json!(AgentReport {
                     schema_version: SCHEMA_VERSION,
                     report_id: Uuid::new_v4().to_string(),
-                    agent_id: agent,
+                    agent_id: report_agent_id,
                     sequence: None,
                     collected_at: now(),
                     inventory: None,
@@ -2755,10 +2750,17 @@ async fn queued_report_cannot_commit_after_revocation() {
             .await
         })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while state.0.report_limit.is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("report should authenticate and queue behind revocation");
     drop(held);
-    assert_eq!(revoke.await.expect("revoke").0, StatusCode::OK);
-    assert_eq!(report.await.expect("report").0, StatusCode::UNAUTHORIZED);
+    revoke.as_mut().await.expect("revoke succeeds");
+    let (report_status, _) = report.await.expect("report");
+    assert_eq!(report_status, StatusCode::UNAUTHORIZED);
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metrics")
         .fetch_one(&state.0.db)
         .await
@@ -2975,6 +2977,46 @@ async fn enrollment_requires_unique_mac_evidence_not_an_ip_match() {
     assert_eq!(hosts[0].id, source.id);
     assert_eq!(hosts[0].agent_id.as_ref(), Some(&agent));
     assert_eq!(hosts[0].addresses, vec!["192.168.1.10"]);
+}
+
+#[tokio::test]
+async fn merge_rejects_two_stale_ids_that_resolve_to_the_same_host() {
+    let (_dir, state, app, cookie) = setup().await;
+    state
+        .save_host(&discovered(
+            "canonical-host",
+            "192.168.1.10",
+            "02:00:00:00:00:01",
+        ))
+        .await
+        .expect("host");
+    sqlx::query("INSERT INTO device_id_aliases(alias_id,survivor_id) VALUES('old-host-id','canonical-host')")
+        .execute(&state.0.db)
+        .await
+        .expect("alias");
+
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/api/v1/hosts/canonical-host/merge",
+        json!({"source_id":"old-host-id"}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        state
+            .stored_host("canonical-host")
+            .await
+            .expect("lookup")
+            .is_some()
+    );
+    assert_eq!(
+        state.resolve_id("old-host-id").await.expect("alias"),
+        "canonical-host"
+    );
+    assert_eq!(state.hosts().await.expect("inventory").len(), 1);
 }
 
 #[tokio::test]

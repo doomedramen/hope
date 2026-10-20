@@ -873,8 +873,10 @@ async fn backup_during_writes_is_consistent_and_restorable() {
     let db = env.state.0.db.clone();
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = stop.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let writer = tokio::spawn(async move {
         let mut n = 0u64;
+        let mut started_tx = Some(started_tx);
         while !flag.load(std::sync::atomic::Ordering::SeqCst) {
             n += 1;
             let mut tx = db.begin().await.unwrap();
@@ -883,17 +885,21 @@ async fn backup_during_writes_is_consistent_and_restorable() {
                     .bind(key).bind(n.to_string()).execute(&mut *tx).await.unwrap();
             }
             tx.commit().await.unwrap();
+            if n == 5 {
+                let _ = started_tx.take().expect("start sender").send(());
+            }
             tokio::task::yield_now().await;
         }
         n
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    started_rx
+        .await
+        .expect("writer should start before backups");
     let mut backups = vec![];
     for i in 0..5 {
         let path = dest_dir.path().join(format!("b{i}.db"));
         backup::run(&env.db, &path).await.expect("backup");
         backups.push(path);
-        tokio::time::sleep(Duration::from_millis(30)).await;
     }
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let written = writer.await.unwrap();

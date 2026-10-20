@@ -60,10 +60,18 @@ struct Shared {
     observed: Mutex<Observed>,
     script: Mutex<Vec<Step>>,
     authorized: PublicKey,
+    closed_connections: tokio::sync::watch::Sender<usize>,
 }
 struct Conn {
     shared: Arc<Shared>,
     stdin: Vec<u8>,
+}
+impl Drop for Conn {
+    fn drop(&mut self) {
+        self.shared
+            .closed_connections
+            .send_modify(|closed| *closed += 1);
+    }
 }
 impl Handler for Conn {
     type Error = russh::Error;
@@ -240,10 +248,12 @@ async fn fixture_with(agent: Option<(&str, &str)>, ca: Option<&str>) -> Fixture 
         .to_string();
     let client_key =
         PrivateKey::random(&mut rand010::rng(), Algorithm::Ed25519).expect("client key");
+    let (closed_connections, _) = tokio::sync::watch::channel(0);
     let shared = Arc::new(Shared {
         observed: Mutex::default(),
         script: Mutex::default(),
         authorized: client_key.public_key().clone(),
+        closed_connections,
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let port = listener.local_addr().expect("address").port();
@@ -606,6 +616,7 @@ fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
 #[tokio::test]
 async fn fingerprint_discovery_is_separate_from_trust_and_sends_no_credentials() {
     let f = fixture().await;
+    let mut closed_connections = f.shared.closed_connections.subscribe();
     let (status, body) = f
         .call(
             "POST",
@@ -615,7 +626,10 @@ async fn fingerprint_discovery_is_separate_from_trust_and_sends_no_credentials()
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["fingerprint"], f.host_fingerprint);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::timeout(Duration::from_secs(2), closed_connections.changed())
+        .await
+        .expect("inspection connection should close")
+        .expect("connection watcher stays open");
     assert_eq!(f.auth_attempts(), 0);
     assert!(f.commands().is_empty());
     // A job for an address outside the selected host is rejected before connecting.
