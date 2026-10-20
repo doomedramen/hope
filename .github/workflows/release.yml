@@ -3,8 +3,6 @@
 # the protected `release` environment, which only the publish job uses (configure required reviewers
 # and restrict the environment to v* tags in the repository settings).
 #
-# Note: ubuntu-24.04-arm runners are free for public repositories only; private repositories need a
-# paid larger-runner pool, otherwise the aarch64 Linux build waits forever.
 # Actions are pinned to version tags; pin them to full commit SHAs before the first release.
 name: release
 
@@ -52,7 +50,6 @@ jobs:
       matrix:
         include:
           - { arch: x86_64, runner: ubuntu-22.04 }
-          - { arch: aarch64, runner: ubuntu-22.04-arm }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,17 +90,15 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: server-*
-          path: dist/server
-          merge-multiple: true
-      - name: Merge the per-architecture server checksum files
+          path: dist/server-builds
+          merge-multiple: false
+      - name: Verify the final server package checksums
         run: |
           # The unsigned agents too, for install-hope.sh and ct/hope.sh, which sign with each server's own key.
+          mkdir -p dist/server
           tar -C dist/agents --owner=0 --group=0 --numeric-owner --sort=name -czf dist/server/hope-agents.tar.gz .
-          cd dist/server
-          sha256sum hope-agents.tar.gz >> SHA256SUMS-server
-          sort -u -k2 SHA256SUMS-server -o SHA256SUMS-server
-          sha256sum -c SHA256SUMS-server
-      - name: Assemble, sign and verify (fails unless all four platforms are present)
+          sh scripts/assemble-server-release.sh --staging dist/server-builds --out dist/server
+      - name: Assemble, sign and verify (fails unless Linux x86_64 is present)
         env:
           SIGNING_KEY_PEM: ${{ secrets.HOPE_SIGNING_KEY }}
         run: |

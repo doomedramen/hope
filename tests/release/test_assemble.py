@@ -10,7 +10,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / 'scripts' / 'assemble-release.sh'
-PLATFORMS = ['linux-x86_64', 'linux-aarch64', 'macos-x86_64', 'macos-aarch64']
+PLATFORMS = ['linux-x86_64']
 COMMIT = 'abcdef012345'
 
 
@@ -75,21 +75,27 @@ class Assemble(unittest.TestCase):
         self.assertEqual('Test OS 1.0', manifest['artifacts'][0]['min_os'])
         self.assertEqual([p.name for p in self.out.iterdir() if p.name.startswith('.')], [])
 
-    def test_missing_platform_is_refused_unless_partial(self):
-        self.stage_all(platforms=PLATFORMS[:3])
+    def test_missing_supported_target_is_refused(self):
         refused = self.run_script()
         self.assertNotEqual(0, refused.returncode)
-        self.assertIn('macos-aarch64', refused.stderr)
-        self.assertEqual([], self.releases())
+        self.assertIn('linux-x86_64', refused.stderr)
         self.assertEqual([], self.releases())
         partial = self.run_script('--allow-partial')
-        self.assertEqual(0, partial.returncode, partial.stderr)
-        self.assertTrue(self.manifest()['partial'])
-        self.assertEqual(3, len(self.manifest()['artifacts']))
+        self.assertNotEqual(0, partial.returncode)
+        self.assertEqual([], self.releases())
+
+    def test_unsupported_architecture_artifacts_are_refused(self):
+        self.stage_all()
+        platform = 'linux-aarch64'
+        (self.stage / f'hope-agent-{platform}').write_bytes(header(platform) + b'unsupported')
+        (self.stage / f'hope-agent-{platform}.info').write_text(f'version=1.0.0\ntarget=t-{platform}\nmin_os=Test OS 1.0\ncommit={COMMIT}\n')
+        done = self.run_script()
+        self.assertNotEqual(0, done.returncode)
+        self.assertIn('only Linux x86_64 is supported', done.stderr)
 
     def test_mixed_versions_are_refused(self):
         self.stage_all()
-        (self.stage / 'hope-agent-macos-aarch64.info').write_text('version=0.9.0\nmin_os=x\n')
+        (self.stage / 'hope-agent-linux-x86_64.info').write_text('version=0.9.0\nmin_os=x\n')
         done = self.run_script()
         self.assertNotEqual(0, done.returncode)
         self.assertIn('mixed versions', done.stderr)
@@ -147,25 +153,22 @@ class Assemble(unittest.TestCase):
         self.stage_all('1.1.0-rc.1')
         self.assertEqual(0, self.run_script(version='1.1.0-rc.1').returncode)
 
-    def test_commits_must_agree_and_be_known(self):
-        self.stage_all()
-        (self.stage / 'hope-agent-macos-aarch64.info').write_text('version=1.0.0\ntarget=t\nmin_os=x\ncommit=111111111111\n')
-        done = self.run_script()
-        self.assertNotEqual(0, done.returncode)
-        self.assertIn('different commits', done.stderr)
+    def test_release_commit_must_be_known_and_valid(self):
         self.stage_all(commit='unknown')
         self.assertNotEqual(0, self.run_script().returncode)
         self.assertEqual(0, self.run_script('--allow-partial').returncode)
+        self.stage_all(commit='not-a-commit')
+        self.assertNotEqual(0, self.run_script().returncode)
+        self.assertNotEqual(0, self.run_script('--allow-partial').returncode)
 
     def test_mislabeled_binaries_are_refused(self):
         self.stage_all()
-        shutil.copy(self.stage / 'hope-agent-linux-aarch64', self.stage / 'hope-agent-linux-x86_64')  # wrong machine
+        wrong_arch = b'\x7fELF\x02\x01\x01\x00' + bytes(8) + b'\x02\x00\xb7\x00'
+        (self.stage / 'hope-agent-linux-x86_64').write_bytes(wrong_arch)
         done = self.run_script()
         self.assertNotEqual(0, done.returncode)
         self.assertIn('hope-agent-linux-x86_64 is not a linux-x86_64 executable', done.stderr)
         self.stage_all()
-        (self.stage / 'hope-agent-macos-x86_64').write_bytes(b'#!/bin/sh\necho not a binary\n')
-        self.assertNotEqual(0, self.run_script().returncode)
 
     def test_old_releases_are_pruned_but_current_and_previous_survive(self):
         for minor in range(5):

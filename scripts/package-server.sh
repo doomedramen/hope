@@ -19,8 +19,7 @@ done
 [ "$(uname -s)" = Linux ] || { echo "package-server: the server package is Linux only" >&2; exit 1; }
 case "$(uname -m)" in
     x86_64|amd64) architecture=x86_64 ;;
-    arm64|aarch64) architecture=aarch64 ;;
-    *) echo "package-server: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+    *) echo "package-server: H.O.P.E server packages require Linux x86_64 (found $(uname -m))" >&2; exit 1 ;;
 esac
 if [ "$build" = 1 ]; then
     (cd web && npm ci --no-audit --no-fund && npm run build)

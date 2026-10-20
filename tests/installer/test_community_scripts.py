@@ -33,14 +33,14 @@ class CtScript(unittest.TestCase):
 
     def test_variables_and_flow(self):
         for needle in ('APP="HOPE"', 'var_os="${var_os:-debian}"', 'var_version="${var_version:-13}"',
-                       'var_unprivileged="${var_unprivileged:-1}"', 'var_arm64="${var_arm64:-yes}"',
+                       'var_unprivileged="${var_unprivileged:-1}"',
                        'header_info "$APP"\nvariables\ncolor\ncatch_errors', 'start\nbuild_container\ndescription'):
             self.assertIn(needle, CT)
 
     def test_update_installs_the_latest_release_without_compiling(self):
         self.assertIn('check_for_gh_release "hope" "doomedramen/hope"', CT)
         self.assertIn('CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" '
-                      '"hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"', CT)
+                      '"hope-server-x86_64-linux.tar.gz"', CT)
         for command in ('systemctl stop hope', 'install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server',
                         'systemctl start hope'):
             self.assertIn(command, CT)
@@ -98,7 +98,7 @@ class CtScript(unittest.TestCase):
         self.assertIn(f'var_ram="${{var_ram:-{resources["ram"]}}}"', CT)
         self.assertIn(f'var_disk="${{var_disk:-{resources["hdd"]}}}"', CT)
         self.assertEqual(META['install_methods'][0]['script'], 'ct/hope.sh')
-        self.assertEqual(META['architectures'], ['amd64', 'arm64'])
+        self.assertEqual(META['architectures'], ['amd64'])
 
 
 class InstallScript(unittest.TestCase):
@@ -109,7 +109,7 @@ class InstallScript(unittest.TestCase):
 
     def test_uses_engine_helpers_not_hand_rolled_equivalents(self):
         self.assertIn('fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" '
-                      '"hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"', INSTALL)
+                      '"hope-server-x86_64-linux.tar.gz"', INSTALL)
         self.assertIn('random_password', INSTALL)
         for banned in ('apt-get', 'git clone', 'rustup.rs', 'nodesource', 'useradd', 'adduser', 'sudo ', '${APPLICATION}', '$APP',
                        'setup_rust', 'setup_nodejs', 'cargo ', 'npm ', 'curl '):
@@ -154,7 +154,7 @@ class InstallScript(unittest.TestCase):
         for name in ('server-build.yml', 'release.yml'):
             workflow = (ROOT / '.github' / 'workflows' / name).read_text()
             self.assertIn('-czf dist/server/hope-agents.tar.gz .', workflow, name)
-            self.assertIn('sha256sum hope-agents.tar.gz >> SHA256SUMS-server', workflow, name)
+            self.assertIn('scripts/assemble-server-release.sh --staging dist/server-builds --out dist/server', workflow, name)
             self.assertIn('dist/server/hope-agents.tar.gz dist/server/SHA256SUMS-server', workflow, name)
         workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()
         self.assertIn('uses: ./.github/workflows/build-agent.yml', workflow)

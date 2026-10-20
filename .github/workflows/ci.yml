@@ -45,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
@@ -177,7 +177,7 @@ jobs:
 
   verify-signing-flow:
     # Exercises assemble-release.sh with a throwaway key generated on the runner, from the smoke
-    # build's artifacts. Four platforms are required, so this also proves the full matrix built.
+    # build's x86_64 Linux artifact.
     if: github.event_name != 'push'
     needs: release-build-smoke
     runs-on: ubuntu-latest
@@ -209,7 +209,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }

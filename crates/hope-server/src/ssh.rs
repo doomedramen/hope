@@ -115,13 +115,13 @@ const REMOTE_CODES: &[CodeInfo] = &[
         "UNSUPPORTED_PLATFORM",
         false,
         "The host operating system is not supported.",
-        "Agents run on Linux and macOS. Choose a supported host.",
+        "Agents currently support Linux x86_64 only.",
     ),
     info(
         "UNSUPPORTED_ARCH",
         false,
         "The host CPU architecture is not supported.",
-        "Agents are packaged for x86_64 and ARM64 only.",
+        "Agents currently support Linux x86_64 only.",
     ),
     info(
         "NO_SERVICE_MANAGER",

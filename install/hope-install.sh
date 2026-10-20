@@ -17,7 +17,7 @@ msg_info "Installing Dependencies"
 $STD apt install -y caddy openssl
 msg_ok "Installed Dependencies"
 
-fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"
+fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-x86_64-linux.tar.gz"
 install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server
 fetch_and_deploy_gh_release "hope-agents" "doomedramen/hope" "prebuild" "latest" "/opt/hope-agents" "hope-agents.tar.gz"
 

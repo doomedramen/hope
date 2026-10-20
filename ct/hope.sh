@@ -14,7 +14,6 @@ var_ram="${var_ram:-512}"
 var_disk="${var_disk:-4}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 # The engine generates banners only for scripts merged into community-scripts; seed its cache so
@@ -110,7 +109,7 @@ EOF
       systemctl daemon-reload
     fi
 
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-$(arch_resolve x86_64 aarch64)-linux.tar.gz"
+    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "hope" "doomedramen/hope" "prebuild" "latest" "/opt/hope" "hope-server-x86_64-linux.tar.gz"
     install -m 755 /opt/hope/hope-server /usr/local/bin/hope-server
 
     # Re-sign the release's agents with this server's key (created here for containers installed

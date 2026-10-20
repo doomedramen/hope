@@ -41,8 +41,8 @@ STATE = '/var/lib/hope-agent'
 UPDATER_DIR = '/var/lib/hope-agent-update'
 
 machine = platform.machine()
-ARCH = {'x86_64': 'x86_64', 'AMD64': 'x86_64', 'aarch64': 'aarch64', 'arm64': 'aarch64'}.get(machine)
-TRIPLE = f'{ARCH}-unknown-linux-gnu'
+ARCH = 'x86_64' if machine.lower() in ('x86_64', 'amd64') else None
+TRIPLE = 'x86_64-unknown-linux-musl'
 
 
 class Failure(Exception):
@@ -95,7 +95,7 @@ class Gate:
 
     # ------------------------------------------------------------------ build
     def build(self):
-        log('building the server and four agent versions (cached builds are quick)')
+        log('building the server and four x86_64 Linux agent versions (cached builds are quick)')
         if os.environ.get('HOPEGATE_SKIP_BUILD') != '1':
             run(['cargo', 'build', '--locked', '-p', 'hope-server'], cwd=REPO, timeout=3000)
         metadata = json.loads(run(['cargo', 'metadata', '--format-version', '1', '--no-deps'], cwd=REPO).stdout)

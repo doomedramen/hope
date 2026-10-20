@@ -1,4 +1,4 @@
-# Reusable: build the unsigned agent for all four release targets on matching runners.
+# Reusable: build the unsigned Linux x86_64 agent on a matching runner.
 # Called by ci.yml (smoke) and release.yml (artifacts for signing). Holds no secrets and signs nothing.
 name: build-agent
 
@@ -29,10 +29,6 @@ jobs:
       matrix:
         include:
           - { target: x86_64-unknown-linux-musl, runner: ubuntu-latest, linux: true }
-          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, linux: true }
-          # macos-13 (Intel) is retired by GitHub; macos-15-intel is the remaining Intel image.
-          - { target: x86_64-apple-darwin, runner: macos-15-intel, linux: false }
-          - { target: aarch64-apple-darwin, runner: macos-14, linux: false }
     steps:
       - uses: actions/checkout@v4
         with:

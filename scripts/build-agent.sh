@@ -3,10 +3,8 @@
 #
 #   scripts/build-agent.sh <target-triple> [--out DIR]
 #
-# Supported targets (the release matrix):
-#   x86_64-unknown-linux-musl   aarch64-unknown-linux-musl     fully static; no libc or loader needed
-#   x86_64-apple-darwin         aarch64-apple-darwin           MACOSX_DEPLOYMENT_TARGET is pinned
-# The -gnu Linux triples also build (dynamic glibc; the minimum glibc is read from the binary).
+# Supported target (the release matrix):
+#   x86_64-unknown-linux-musl   fully static; no libc or loader needed
 #
 # Output in DIR (default dist/agents):
 #   hope-agent-<platform>-<arch>        the binary, named as the server and installer expect
@@ -15,10 +13,6 @@
 # A target must be built on a host that can link and ideally run it (see .github/workflows). This script
 # never signs anything; signing happens only in scripts/assemble-release.sh.
 set -eu
-
-# Pinned minimum macOS. 11.0 is the first release that runs arm64 and is the oldest the
-# aarch64 target supports; x86_64 uses the same value so both are tested at one floor.
-MACOS_MINIMUM=${HOPE_MACOS_MINIMUM:-11.0}
 
 die() { echo "build-agent: $*" >&2; exit 1; }
 
@@ -35,10 +29,7 @@ done
 [ -n "$target" ] || die 'usage: build-agent.sh <target-triple> [--out DIR]'
 
 case "$target" in
-    x86_64-unknown-linux-musl|x86_64-unknown-linux-gnu) platform=linux; arch=x86_64 ;;
-    aarch64-unknown-linux-musl|aarch64-unknown-linux-gnu) platform=linux; arch=aarch64 ;;
-    x86_64-apple-darwin) platform=macos; arch=x86_64 ;;
-    aarch64-apple-darwin) platform=macos; arch=aarch64 ;;
+    x86_64-unknown-linux-musl) platform=linux; arch=x86_64 ;;
     *) die "unsupported target $target" ;;
 esac
 
@@ -46,10 +37,7 @@ cd "$(dirname "$0")/.."
 host_os=$(uname -s)
 host_arch=$(uname -m)
 case "$host_arch" in arm64) host_arch=aarch64 ;; amd64) host_arch=x86_64 ;; esac
-case "$platform:$host_os" in
-    linux:Linux|macos:Darwin) ;;
-    *) die "$target must be built on a $platform host (this is $host_os); use scripts/build-agent-docker.sh for Linux targets on a Mac" ;;
-esac
+case "$platform:$host_os" in linux:Linux) ;; *) die "$target must be built on a Linux host (this is $host_os)" ;; esac
 if [ "$platform" = linux ] && [ "$arch" != "$host_arch" ]; then
     die "$target needs a $arch Linux host (this is $host_arch); cross-linking is deliberately not supported so the artifact can be smoke-tested"
 fi
@@ -58,17 +46,10 @@ if command -v rustup >/dev/null 2>&1; then
     rustup target list --installed | grep -qx "$target" || rustup target add "$target"
 fi
 
-case "$target" in
-    *-linux-musl)
-        underscore=$(printf '%s' "$target" | tr '-' '_')
-        if command -v musl-gcc >/dev/null 2>&1; then
-            eval "[ -n \"\${CC_$underscore:-}\" ] || export CC_$underscore=musl-gcc"
-        fi
-        ;;
-    *-apple-darwin)
-        export MACOSX_DEPLOYMENT_TARGET="$MACOS_MINIMUM"
-        ;;
-esac
+underscore=$(printf '%s' "$target" | tr '-' '_')
+if command -v musl-gcc >/dev/null 2>&1; then
+    eval "[ -n \"\${CC_$underscore:-}\" ] || export CC_$underscore=musl-gcc"
+fi
 
 cargo build --release --locked -p hope-agent --target "$target"
 built="${CARGO_TARGET_DIR:-target}/$target/release/hope-agent"
@@ -96,20 +77,9 @@ case "$platform" in
     linux)
         command -v readelf >/dev/null 2>&1 || die 'readelf (binutils) is required to inspect the ELF binary'
         needed=$(readelf -d "$built" 2>/dev/null | grep -c '(NEEDED)' || true)
-        case "$target" in
-            *-musl)
-                [ "$needed" = 0 ] || die "musl build still has $needed shared-library dependencies"
-                readelf -l "$built" | grep -q 'INTERP' && die 'musl build requests a dynamic loader'
-                # Kernel floor is Rust's documented minimum for the target, not measured here.
-                case "$arch" in x86_64) kernel=3.2 ;; aarch64) kernel=4.1 ;; esac
-                min_os="Linux kernel $kernel or later, static musl (no glibc)"
-                ;;
-            *-gnu)
-                glibc=$(objdump -T "$built" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
-                [ -n "$glibc" ] || die 'cannot determine the required glibc version'
-                min_os="glibc $glibc or later (dynamic)"
-                ;;
-        esac
+        [ "$needed" = 0 ] || die "musl build still has $needed shared-library dependencies"
+        readelf -l "$built" | grep -q 'INTERP' && die 'musl build requests a dynamic loader'
+        min_os="Linux kernel 3.2 or later, static musl (no glibc)"
         ;;
 esac
 

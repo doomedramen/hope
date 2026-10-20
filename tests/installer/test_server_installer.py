@@ -23,7 +23,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[2]
 INSTALLER = REPO / 'scripts' / 'install-hope.sh'
 ASSEMBLE = REPO / 'scripts' / 'assemble-release.sh'
-PLATFORMS = ['linux-x86_64', 'linux-aarch64', 'macos-x86_64', 'macos-aarch64']
+PLATFORMS = ['linux-x86_64']
 # Logs the signing call, then runs the real script from the package (its repository check sees the package).
 ASSEMBLE_WRAPPER = """#!/bin/sh
 printf 'assemble-release HOPE_SIGNING_KEY=%s %s\\n' "$HOPE_SIGNING_KEY" "$*" >> "$HOPE_INSTALL_ROOT/commands.log"
@@ -111,7 +111,7 @@ class ServerInstaller(unittest.TestCase):
         self.make_release()
 
     def make_release(self, corrupt=False, version='0.9.0', agents=True, agent_version=None, corrupt_agents=False, nested=False):
-        arch = {'x86_64': 'x86_64', 'amd64': 'x86_64', 'aarch64': 'aarch64', 'arm64': 'aarch64'}[os.uname().machine]
+        arch = {'x86_64': 'x86_64', 'amd64': 'x86_64'}[os.uname().machine]
         tree = self.root / 'tree'
         shutil.rmtree(tree, ignore_errors=True)
         for path in self.release.iterdir():

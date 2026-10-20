@@ -133,8 +133,7 @@ confirm() {
 arch() {
     case "$(uname -m)" in
     x86_64|amd64) echo x86_64 ;;
-    aarch64|arm64) echo aarch64 ;;
-    *) die "Unsupported architecture $(uname -m); H.O.P.E ships for x86_64 and aarch64." ;;
+    *) die "H.O.P.E server packages require Linux x86_64 (found $(uname -m))." ;;
     esac
 }
 os_id() {
@@ -255,7 +254,7 @@ build_from_source() {
         curl -fsSL --max-time 120 https://sh.rustup.rs -o "$staging/rustup.sh" || die 'Cannot download rustup.'
         sh "$staging/rustup.sh" -y --no-modify-path --profile minimal >/dev/null || die 'rustup failed.'
     fi
-    case "$(arch)" in x86_64) _node_arch=x64 ;; aarch64) _node_arch=arm64 ;; esac
+    case "$(arch)" in x86_64) _node_arch=x64 ;; esac
     _node="$_build/node-v$node_version-linux-$_node_arch"
     if [ ! -x "$_node/bin/node" ]; then
         curl -fsSL --max-time 300 -o "$staging/node.tar.xz" "https://nodejs.org/dist/v$node_version/node-v$node_version-linux-$_node_arch.tar.xz" || die 'Cannot download Node.js.'

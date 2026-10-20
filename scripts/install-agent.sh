@@ -431,8 +431,22 @@ remove_updater() {
 # =================================== phase: preflight =========================================
 phase preflight
 case "$operation" in install|upgrade|uninstall) ;; *) err USAGE 'Usage: install-agent.sh [install|upgrade|uninstall]'; exit 2;; esac
-case "$(uname -s)" in Linux) platform=linux;; Darwin) platform=macos;; *) fail UNSUPPORTED_PLATFORM 'H.O.P.E supports Linux and macOS.';; esac
-case "$(uname -m)" in x86_64|amd64) architecture=x86_64;; arm64|aarch64) architecture=aarch64;; *) fail UNSUPPORTED_ARCH 'Unsupported CPU architecture.';; esac
+case "$(uname -s)" in
+    Linux) platform=linux ;;
+    Darwin)
+        [ "$operation" = uninstall ] || fail UNSUPPORTED_PLATFORM 'H.O.P.E agents currently support Linux x86_64 only.'
+        platform=macos
+        ;;
+    *) fail UNSUPPORTED_PLATFORM 'H.O.P.E agents currently support Linux x86_64 only.' ;;
+esac
+case "$(uname -m)" in
+    x86_64|amd64) architecture=x86_64 ;;
+    arm64|aarch64)
+        [ "$operation" = uninstall ] || fail UNSUPPORTED_ARCH 'H.O.P.E agents currently support Linux x86_64 only.'
+        architecture=aarch64
+        ;;
+    *) fail UNSUPPORTED_ARCH 'H.O.P.E agents currently support Linux x86_64 only.' ;;
+esac
 case "$root" in ''|/*) ;; *) fail PATH_UNWRITABLE 'HOPE_INSTALL_ROOT must be absolute.';; esac
 
 requested=${HOPE_INSTALL_MODE:-auto}

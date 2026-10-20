@@ -169,12 +169,24 @@ class Linux(Base):
         self.ok(self.env.run())
 
     def test_unsupported_architecture(self):
-        self.env.set('fake/arch', 'riscv64')
-        self.failed(self.env.run(), 'UNSUPPORTED_ARCH')
+        for architecture in ('aarch64', 'arm64', 'riscv64'):
+            with self.subTest(architecture=architecture):
+                self.env.set('fake/arch', architecture)
+                self.failed(self.env.run(), 'UNSUPPORTED_ARCH')
+                self.untouched(self.env)
 
     def test_unsupported_platform(self):
         self.env.set('fake/os', 'FreeBSD')
         self.failed(self.env.run(), 'UNSUPPORTED_PLATFORM')
+
+    def test_macos_install_is_rejected_but_legacy_install_can_be_removed(self):
+        install_env = self.new_env('Darwin', 'arm64')
+        self.failed(install_env.run(), 'UNSUPPORTED_PLATFORM')
+        self.assertEqual({}, install_env.snapshot(install_env.root))
+        legacy_env = self.new_env('Darwin', 'arm64')
+        paths = legacy_env.preinstall()
+        self.ok(legacy_env.run('uninstall', token=None, server=None))
+        self.assertFalse(paths['binary'].exists())
 
     def test_existing_identity_for_another_server_is_rejected_before_stopping(self):
         paths = self.env.preinstall(server='https://other.test')
@@ -731,6 +743,7 @@ class Manifest(Base):
         self.failed(self.env.run('upgrade', token=None), 'DOWNGRADE_REFUSED')
 
 
+@unittest.skip('H.O.P.E currently ships agents for Linux x86_64 only.')
 class MacOS(Base):
     def test_uninstall_does_not_remove_a_service_that_failed_to_stop(self):
         self.ok(self.env.run())
@@ -1144,6 +1157,7 @@ class Updater(Base):
         self.assertFalse(paths['state'].exists())
 
 
+@unittest.skip('H.O.P.E currently ships agents for Linux x86_64 only.')
 class UpdaterMacOS(Base):
     def setUp(self):
         self.env = self.new_env('Darwin', 'arm64')

@@ -1,7 +1,6 @@
 #!/bin/sh
-# Local-development wrapper: build the agent for THIS machine and publish a PARTIAL signed release
-# into ./releases (one platform only). Real releases are built per target on CI and published with
-# scripts/assemble-release.sh from all four artifacts (see docs/operations.md).
+# Local-development wrapper: build the supported Linux x86_64 agent and publish a signed release
+# into ./releases.
 #
 #   HOPE_SIGNING_KEY=/path/outside/repo/dev-signing.pem scripts/package-agent.sh
 #
@@ -13,13 +12,11 @@ cd "$(dirname "$0")/.."
 : "${HOPE_SIGNING_KEY:?Set HOPE_SIGNING_KEY to an RSA private key file stored outside the repository}"
 case "$(uname -s)" in
     Linux) system=unknown-linux-musl ;;
-    Darwin) system=apple-darwin ;;
-    *) echo "package-agent: unsupported OS $(uname -s)" >&2; exit 1 ;;
+    *) echo "package-agent: H.O.P.E agents require Linux x86_64 (found $(uname -s))" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
     x86_64|amd64) architecture=x86_64 ;;
-    arm64|aarch64) architecture=aarch64 ;;
-    *) echo "package-agent: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+    *) echo "package-agent: H.O.P.E agents require Linux x86_64 (found $(uname -m))" >&2; exit 1 ;;
 esac
 repo=$(pwd -P)
 staging=${HOPE_STAGING_DIR:-dist/agents-dev}
@@ -34,4 +31,4 @@ case "$staging" in */..|*/../*|"$HOME"|"$repo"|/) echo "package-agent: refusing 
 rm -rf "$staging"
 scripts/build-agent.sh "$architecture-$system" --out "$staging"
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-scripts/assemble-release.sh --staging "$staging" --version "$version" --out "${HOPE_RELEASE_DIR:-releases}" --allow-partial
+scripts/assemble-release.sh --staging "$staging" --version "$version" --out "${HOPE_RELEASE_DIR:-releases}"

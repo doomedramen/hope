@@ -10,7 +10,7 @@
   "documentation": "https://github.com/doomedramen/hope/blob/main/docs/operations.md",
   "website": "https://github.com/doomedramen/hope",
   "repository": "https://github.com/doomedramen/hope",
-  "architectures": ["amd64", "arm64"],
+  "architectures": ["amd64"],
   "platforms": ["pve"],
   "logo": "https://cdn.jsdelivr.net/gh/selfhst/icons@main/webp/proxmox.webp",
   "description": "H.O.P.E is a self-hosted server and network observatory: a Rust server with a SQLite database discovers the LAN (ARP, ping and port probes), receives reports from signed Rust agents (CPU, memory with cache and ZFS ARC, load, disks and pools, I/O, bandwidth, temperatures, systemd units, network monitors) and serves a static console with a network map and per-host history. This script installs the prebuilt server and console from the project's GitHub releases; update installs the newest build.",

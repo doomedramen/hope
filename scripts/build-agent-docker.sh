@@ -2,7 +2,7 @@
 # Build a Linux agent target inside Docker (for example on a Mac), natively when the container
 # architecture matches the host and under emulation otherwise.
 #
-#   scripts/build-agent-docker.sh <x86_64|aarch64>-unknown-linux-musl [--out DIR]
+#   scripts/build-agent-docker.sh x86_64-unknown-linux-musl [--out DIR]
 #
 # Same output as scripts/build-agent.sh. The source tree is mounted read-only; a named volume per
 # The container runs as root only to install musl-tools and write the build cache; the outputs are chowned
@@ -14,8 +14,7 @@ out=dist/agents
 if [ "${2:-}" = --out ]; then out=${3:?--out needs a directory}; fi
 case "$target" in
     x86_64-unknown-linux-musl) arch=x86_64; platform=linux/amd64 ;;
-    aarch64-unknown-linux-musl) arch=aarch64; platform=linux/arm64 ;;
-    *) echo "build-agent-docker: only the Linux musl targets are supported" >&2; exit 1 ;;
+    *) echo "build-agent-docker: only x86_64-unknown-linux-musl is supported" >&2; exit 1 ;;
 esac
 repo=$(cd "$(dirname "$0")/.." && pwd -P)
 mkdir -p "$out"

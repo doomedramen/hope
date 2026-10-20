@@ -1,5 +1,7 @@
 # Validation evidence
 
+**Current release target:** Linux x86_64 for the server and agent. Earlier platform checks below are historical evidence; they do not imply current release support for ARM64 or macOS.
+
 This records observed results, not promised performance. Reference environment on 2026-10-08: Apple M4 Pro, 24 GiB host memory; OrbStack Linux ARM64 VM, 12 logical CPUs and approximately 12 GiB VM memory; Docker 29.4.0; Rust 1.96.0; Node 26.8.2/npm 11.19.1.
 
 ## Build and contract checks

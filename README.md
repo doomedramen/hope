@@ -1,6 +1,6 @@
 # H.O.P.E
 
-Home network discovery, host monitoring and a lightweight reporting agent for up to 250 hosts, with a single administrator and one self-hosted server. A Rust server (Axum, Tokio, SQLx/SQLite) scans configured IPv4 ranges, enriches what it finds, and serves a static Next.js console (host list, topology / subnet / health maps, per-host history). An optional Rust agent for Linux and macOS reports a machine's own CPU, load, memory (including cache and ZFS ARC), network, storage, disk and pool throughput, temperatures, GPU, systemd unit and reachability-monitor data to the server over HTTPS every 10 seconds by default (configurable from 5 to 60). The console updates live over server-sent events as each report arrives; stored history keeps one sample per 30 seconds. Agents installed as system services update from the console with one click, by a root-owned updater that checks every release against the key the host was installed with.
+Home network discovery, host monitoring and a lightweight reporting agent for up to 250 hosts, with a single administrator and one self-hosted Linux x86_64 server. The Linux x86_64 agent reports its machine's CPU, load, memory (including cache and ZFS ARC), network, storage, disk and pool throughput, temperatures, GPU, systemd units and reachability-monitor data to the server over HTTPS every 10 seconds by default (configurable from 5 to 60). The console updates live as reports arrive; system-service agents can be updated from the console through a root-owned updater that verifies releases against the key the host was installed with.
 
 **Status: pre-release.** The code builds and passes its automated suites, but the release is **not** complete: key environment-dependent gates are unverified (below). Do not rely on it for anything that matters, and read [docs/validation.md](docs/validation.md) before trusting any claim made here.
 
@@ -30,7 +30,7 @@ Screenshots are taken by the Playwright suite from synthetic inventory (`web/tes
 
 ## What is and is not in scope
 
-In scope: discovery of IPv4 ranges (`/20` or smaller) with fair concurrent scanning, cancellation and progress, rescanned in the background on a gentle per-range schedule (every 5 minutes by default); a common-port scan, web-interface titles and mDNS/SSDP announcements for every device; device type guessing with the reasons shown (routers, Proxmox hosts, NAS boxes, phones, printers, cameras, robot vacuums, dishwashers and more) and a manual override; a router hierarchy from the default gateway and traceroutes; notifications through ntfy (new devices, offline agents and infrastructure, full disks, degraded pools, failed services, recoveries); map modes (topology, subnets, health) with provenance for observed, inferred and manual links (physical switch connections are never invented); agents for Linux and macOS (x86_64 and ARM64, systemd and launchd); manual and SSH-assisted agent installation through one signed installer; history (raw 24 hours, five-minute aggregates through day seven); revocable per-agent credentials.
+In scope: discovery of IPv4 ranges (`/20` or smaller) with fair concurrent scanning, cancellation and progress, rescanned in the background on a gentle per-range schedule (every 5 minutes by default); a common-port scan, web-interface titles and mDNS/SSDP announcements for every device; device type guessing with the reasons shown (routers, Proxmox hosts, NAS boxes, phones, printers, cameras, robot vacuums, dishwashers and more) and a manual override; a router hierarchy from the default gateway and traceroutes; notifications through ntfy (new devices, offline agents and infrastructure, full disks, degraded pools, failed services, recoveries); map modes (topology, subnets, health) with provenance for observed, inferred and manual links (physical switch connections are never invented); Linux x86_64 server and agent builds; manual and SSH-assisted agent installation through one signed installer; history (raw 24 hours, five-minute aggregates through day seven); revocable per-agent credentials.
 
 Not in scope and not planned for this release: Windows agents, distributed discovery, switch integrations (so which switch port or access point a device uses is not inferred), notification channels other than ntfy, multiple user accounts. Agents report only their own machine, never remote networks, and an unanswered probe does not prove a host is offline.
 
@@ -42,26 +42,19 @@ Not in scope and not planned for this release: Windows agents, distributed disco
 | 2 | Map modes and console | Playwright acceptance (17 Chromium tests) for the overview, topology/subnet/health modes, drag persistence, selection, filters, command palette, themes and range removal; screenshots reviewed | Tests use synthetic inventory, not data from real discovery |
 | 3 | Agent and history | Agent fault tests, 250-host retention load test, a 30-minute [Linux x86_64 LXC measurement](docs/benchmarks/agent-linux-x86_64-lxc.json), and a 30-minute macOS arm64 measurement (see "Resource use") | Linux ARM64 and macOS x86_64 measurements; GPU-collector comparisons; the signed musl artifact was not re-measured |
 | 4 | Manual installation | Transactional installer with rollback, covered by a 77-test harness with stubbed service managers and real signatures, **and a real Linux matrix (2026-10-15)**: Debian 13 with systemd, arm64 native and amd64 emulated, system and user services, custom CA; install, reinstall, interrupted activation, upgrade, downgrade refusal, uninstall, purge | **launchd (macOS) installation, upgrade, rollback and uninstall; the default public-CA path; physical x86_64 hardware and other Linux distributions** |
-| 5 | SSH and release hardening | SSH jobs against an in-process SSH server and, since 2026-10-15, against a real OpenSSH 10.0 on Debian 13 (host-key binding, auth failures, user-service fallback, reinstall, dropped connection); a real Caddy 2.10.2 reverse proxy (SSE, Secure cookie, rate-limit key, spoofed `X-Forwarded-For`); four-target signed release build and assembly with a throwaway key; CI definitions | The CI workflows have never run on GitHub; no production signing key exists; nginx and Traefik, `sudo` that needs a password |
+| 5 | SSH and release hardening | SSH jobs against an in-process SSH server and, since 2026-10-15, against a real OpenSSH 10.0 on Debian 13 (host-key binding, auth failures, user-service fallback, reinstall, dropped connection); a real Caddy 2.10.2 reverse proxy (SSE, Secure cookie, rate-limit key, spoofed `X-Forwarded-For`); Linux x86_64 signed release build and assembly with a throwaway key; CI definitions | The CI workflows have never run on GitHub; no production signing key exists; nginx and Traefik, `sudo` that needs a password |
 
 Details, commands, dates and hashes: the "Release gate status" table in [docs/validation.md](docs/validation.md).
 
 ## Supported platforms
 
-Only what is evidenced is claimed. "Supported" in the first release will mean the installation matrix in `validation.md` is green for that cell; **today only the Linux systemd cells below are green** (the [release gate fixture](tests/gates/README.md), run once on 2026-10-15).
+The current server and agent release target is Linux x86_64. The table records current release targets; historical checks on other platforms remain in the validation report.
 
 | Component | Platform | Evidence |
 | --- | --- | --- |
-| Server | Docker image on Linux ARM64 (OrbStack VM), host networking and Desktop-mode compose files | Built, healthy, discovery fixtures run |
-| Server | macOS arm64 native (development) | Tests and manual use; discovery is limited (no ARP) |
-| Server | Linux x86_64, physical Linux host networking, Windows | **Unverified** |
-| Agent | macOS arm64 | Built, unit tests, 30-minute resource measurement (this repository's `scripts/bench-agent.sh`) |
-| Agent | Linux x86_64 (Debian 13 LXC) | Hand-installed service, 30-minute measurement |
-| Agent | Linux x86_64 (Debian 13, emulated under Rosetta) | Same installer matrix as ARM64, emulated rather than Intel hardware |
-| Agent | Linux ARM64 (Debian 13, native container) | Installed through the production installer as a system and a user systemd service; upgrade, rollback, uninstall, SSH job; see the fixture matrix |
-| Agent | macOS x86_64 | Compiles; **never executed** |
-| Agent installation | Linux, systemd, system and user mode, custom CA | Verified in the fixture matrix (Debian 13 only) |
-| Agent installation | macOS (launchd), default public CA, other distributions | **Unverified** (see stage 4) |
+| Server | Linux x86_64 | Current release target |
+| Agent | Linux x86_64 | Current release target; Debian 13 LXC measurement and systemd installer checks are documented in the fixture matrix |
+| Agent installation | Linux x86_64, systemd, system and user mode, custom CA | Verified on Debian 13; physical hardware and other distributions remain unverified |
 
 ## Install in one command
 
@@ -89,7 +82,7 @@ docker compose up -d              # compose.yaml: host networking, NET_RAW only,
 docker compose logs hope | grep 'setup token'
 ```
 
-The image is published for x86_64 and arm64 on every push to `main` (tags `main`, `sha-<commit>`) and every version tag (`<version>`, `<major>.<minor>`, `latest`), with a signed build-provenance attestation and an SBOM. Before the first version tag use `HOPE_IMAGE=ghcr.io/doomedramen/hope-server:main`; `docker compose up -d --build` builds the image from the checkout instead.
+The image is published for Linux x86_64 on every push to `main` (tags `main`, `sha-<commit>`) and every version tag (`<version>`, `<major>.<minor>`, `latest`), with a signed build-provenance attestation and an SBOM. Before the first version tag use `HOPE_IMAGE=ghcr.io/doomedramen/hope-server:main`; `docker compose up -d --build` builds the image from the checkout instead.
 
 Put an HTTPS reverse proxy in front of `HOPE_BIND` (default `127.0.0.1:8080`), open the canonical URL, and finish setup with the printed token and a password. Agents and the installer require HTTPS; a private CA is supported ([operations](docs/operations.md#custom-ca-server-agent-and-ssh-destination)). Caddy 2.10.2 has been tested in front of it (see the gate fixture); nginx and Traefik have not.
 

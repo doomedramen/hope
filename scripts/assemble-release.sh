@@ -5,7 +5,7 @@
 #   scripts/assemble-release.sh --staging DIR --version X.Y.Z [--out releases] \
 #                               [--allow-partial] [--rotate-key] [--allow-downgrade]
 #
-# Input:  DIR holds hope-agent-<platform>-<arch> and hope-agent-<platform>-<arch>.info for the four
+# Input:  DIR holds hope-agent-linux-x86_64 and hope-agent-linux-x86_64.info for the supported target
 #         release platforms (written by scripts/build-agent.sh).
 # Output: OUT/<version>-<random>/ (a complete release directory) and the symlink OUT/current pointing at
 #         it. The release holds the binaries, a per-artifact .sig, manifest.json, manifest.json.sig and
@@ -14,7 +14,7 @@
 #         server's HOPE_RELEASE_DIR (and a Docker bind mount) at OUT, never at a versioned directory.
 #
 # Safety rules enforced here:
-#   * all four platforms are required; --allow-partial (local development only) marks the manifest partial
+#   * Linux x86_64 is required; --allow-partial (local development only) marks the manifest partial
 #   * every artifact must carry the same version and git commit, and its ELF/Mach-O header must match
 #     the platform it is labeled with
 #   * the signing key must not be inside this repository (path, case-insensitive, or same file)
@@ -106,21 +106,25 @@ version_lt() {
 info_get() { sed -n "s/^$2=//p" "$1" | head -n 1; }
 
 [ -d "$staging" ] || die "staging directory $staging does not exist"
+for artifact in "$staging"/hope-agent-*; do
+    [ -e "$artifact" ] || continue
+    case "${artifact##*/}" in
+        hope-agent-linux-x86_64|hope-agent-linux-x86_64.info) ;;
+        *) die "unsupported agent target ${artifact##*/}; only Linux x86_64 is supported" ;;
+    esac
+done
 
 # ELF/Mach-O header must match the platform label: refuses a mislabeled or wrong-architecture binary.
 magic_ok() { # magic_ok FILE PLATFORM
     head=$(od -An -v -tx1 -N20 "$1" 2>/dev/null | tr -d ' \n')
     case "$2" in
         linux-x86_64) [ "$(printf '%s' "$head" | cut -c1-12)" = 7f454c460201 ] && [ "$(printf '%s' "$head" | cut -c37-40)" = 3e00 ] ;;
-        linux-aarch64) [ "$(printf '%s' "$head" | cut -c1-12)" = 7f454c460201 ] && [ "$(printf '%s' "$head" | cut -c37-40)" = b700 ] ;;
-        macos-x86_64) [ "$(printf '%s' "$head" | cut -c1-16)" = cffaedfe07000001 ] ;;
-        macos-aarch64) [ "$(printf '%s' "$head" | cut -c1-16)" = cffaedfe0c000001 ] ;;
         *) return 1 ;;
     esac
 }
 
 # ---- collect and check the staged artifacts ---------------------------------------------------------
-platforms='linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64'
+platforms='linux-x86_64'
 present=
 missing=
 for platform in $platforms; do
@@ -132,7 +136,7 @@ for platform in $platforms; do
     fi
 done
 if [ -n "$missing" ]; then
-    [ "$partial" = 1 ] || die "missing required platform(s):$missing. Build all four, or pass --allow-partial for local development only."
+    [ "$partial" = 1 ] || die "missing required platform(s):$missing. Build Linux x86_64, or pass --allow-partial for local development only."
     [ -n "$present" ] || die 'no artifacts staged'
     note "warning: PARTIAL release (missing:$missing); the manifest will say partial"
 fi
@@ -257,7 +261,7 @@ expected=0
 for platform in $present; do expected=$((expected + 1)); done
 [ "$listed" = "$expected" ] || die "manifest lists $listed artifacts, expected $expected"
 if [ "$partial" = 0 ]; then
-    [ "$listed" = 4 ] || die 'a complete release must list exactly four artifacts'
+    [ "$listed" = 1 ] || die 'a complete release must list exactly the Linux x86_64 artifact'
 fi
 for file in "$new"/*; do
     case "${file##*/}" in

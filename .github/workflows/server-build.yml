@@ -3,8 +3,8 @@ name: Server build
 # Publishes the server after CI passes for a push to main, so installs and updates download it instead
 # of compiling (compiling needs about 4 GB of RAM; the server runs in far less). The
 # community-scripts container (ct/hope.sh) and scripts/install-hope.sh both take the release GitHub
-# marks as latest and its asset hope-server-<x86_64|aarch64>-linux.tar.gz. The release also carries
-# hope-agents.tar.gz, the four unsigned agents (build-agent.yml) at the same version and commit; each
+# marks as latest and its asset hope-server-x86_64-linux.tar.gz. The release also carries
+# hope-agents.tar.gz, the x86_64 Linux unsigned agent (build-agent.yml) at the same version and commit; each
 # server signs them with its own key (install/hope-install.sh, scripts/install-hope.sh), so no
 # signing key is involved here.
 #
@@ -15,8 +15,6 @@ name: Server build
 # kept. Tags created with the workflow token start no other workflow, so release.yml (signed agent
 # releases on v* tags you push yourself) is unaffected.
 #
-# Note: ubuntu-22.04-arm, ubuntu-24.04-arm and the macOS runners are free for public repositories only.
-
 on:
   workflow_run:
     workflows: [ci]
@@ -66,7 +64,6 @@ jobs:
         include:
           # The oldest supported glibc, so the binary runs on newer distributions too.
           - { arch: x86_64, runner: ubuntu-22.04 }
-          - { arch: aarch64, runner: ubuntu-22.04-arm }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -115,8 +112,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: server-*
-          path: dist/server
-          merge-multiple: true
+          path: dist/server-builds
+          merge-multiple: false
       - uses: actions/download-artifact@v4
         with:
           pattern: agent-*
@@ -127,19 +124,16 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           version="$VERSION"
-          # Prove the four agents assemble into a release at the server's version before publishing;
+          # Prove the Linux x86_64 agent assembles into a release at the server's version before publishing;
           # the throwaway key is discarded, servers sign with their own.
           (umask 077 && openssl genrsa -out "$RUNNER_TEMP/throwaway.pem" 3072 2>/dev/null)
           HOPE_SIGNING_KEY="$RUNNER_TEMP/throwaway.pem" sh scripts/assemble-release.sh --staging dist/agents --version "$version" --out "$RUNNER_TEMP/check"
           rm -rf "$RUNNER_TEMP/throwaway.pem" "$RUNNER_TEMP/check"
+          mkdir -p dist/server
           tar -C dist/agents --owner=0 --group=0 --numeric-owner --sort=name -czf dist/server/hope-agents.tar.gz .
-          (cd dist/server && sha256sum hope-agents.tar.gz >> SHA256SUMS-server)
-      - name: Merge the per-architecture checksum files
+      - name: Verify the final server package checksums
         run: |
-          cd dist/server
-          sort -u -k2 SHA256SUMS-server -o SHA256SUMS-server
-          sha256sum -c SHA256SUMS-server
-          ls -l
+          sh scripts/assemble-server-release.sh --staging dist/server-builds --out dist/server
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -147,7 +141,7 @@ jobs:
         run: |
           gh release create "v${VERSION}" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --latest \
             --title "H.O.P.E build ${VERSION}" \
-            --notes "Automatic build of ${SOURCE_SHA::7} on main: the server and console for x86_64 and aarch64 Linux (glibc 2.35 or newer), and the unsigned agents (hope-agents.tar.gz) each server signs with its own key. Installed and updated by ct/hope.sh and scripts/install-hope.sh." \
+            --notes "Automatic x86_64 Linux build of ${SOURCE_SHA::7} on main: the server and console, and the unsigned Linux x86_64 agent (hope-agents.tar.gz) each server signs with its own key. Installed and updated by ct/hope.sh and scripts/install-hope.sh." \
             dist/server/hope-server-*-linux.tar.gz dist/server/hope-agents.tar.gz dist/server/SHA256SUMS-server
       - name: Keep only the newest five builds
         env:

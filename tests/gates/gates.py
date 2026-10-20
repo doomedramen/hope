@@ -9,6 +9,7 @@ import datetime
 import http.client
 import json
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -30,10 +31,11 @@ SCAN_CIDR = SUBNET + ".16/28"
 HOST = "hope.gate.test"
 CADDY_IMAGE = "caddy:2.10.2-alpine"
 SERVER_IMAGE = P + "server:gates"
-ARCHS = ["arm64", "amd64"]
-PLATFORM_FILE = {"arm64": "hope-agent-linux-aarch64", "amd64": "hope-agent-linux-x86_64"}
-IPS = {("t", "arm64"): 17, ("t", "amd64"): 18, ("s", "arm64"): 19, ("s", "amd64"): 20,
-       ("u", "arm64"): 21, ("u", "amd64"): 22, ("d", "arm64"): 23, ("d", "amd64"): 24, ("k", "arm64"): 25, ("k", "amd64"): 26}
+ARCHS = ["amd64"]
+PLATFORM_FILE = {"amd64": "hope-agent-linux-x86_64"}
+AMD64_EMULATED = platform.machine().lower() not in ("x86_64", "amd64")
+IPS = {("t", "amd64"): 18, ("s", "amd64"): 20, ("u", "amd64"): 22, ("d", "amd64"): 24,
+       ("k", "amd64"): 26, ("t2", "amd64"): 27}
 V0, V1 = "0.1.0", "0.1.1"
 CA_PATH = "/etc/hope-ca.pem"
 ADMIN_PASSWORD = None  # filled from secrets.json
@@ -165,25 +167,18 @@ def source_tree(version):
 
 def build_artifacts(version):
     stage = WORK / ("stage-" + version)
-    if len(list(stage.glob("*.info"))) == 4:
+    expected = {"hope-agent-linux-x86_64", "hope-agent-linux-x86_64.info"}
+    staged = {path.name for path in stage.glob("hope-agent-*")}
+    if staged == expected:
         log("artifacts for", version, "already staged")
         return stage
+    shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(exist_ok=True)
     tree = source_tree(version)
-    for triple in ("aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"):
-        log("building", triple, version)
-        r = run([str(tree / "scripts/build-agent-docker.sh"), triple, "--out", str(stage)], timeout=3600)
-        (WORK / "logs" / ("build-%s-%s.log" % (version, triple))).write_text(r.stdout + r.stderr)
-    if sys.platform != "darwin":
-        raise SystemExit("macOS artifacts need a macOS host (scripts/build-agent.sh); the release requires all four")
-    env = dict(os.environ, CARGO_TARGET_DIR=str(WORK / "mac-target"))
-    for triple in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
-        log("building", triple, version)
-        r = subprocess.run([str(tree / "scripts/build-agent.sh"), triple, "--out", str(stage)], env=env,
-                           capture_output=True, text=True, timeout=3600)
-        (WORK / "logs" / ("build-%s-%s.log" % (version, triple))).write_text(r.stdout + r.stderr)
-        if r.returncode:
-            raise SystemExit("macOS build failed:\n" + r.stderr[-1500:])
+    triple = "x86_64-unknown-linux-musl"
+    log("building", triple, version)
+    r = run([str(tree / "scripts/build-agent-docker.sh"), triple, "--out", str(stage)], timeout=3600)
+    (WORK / "logs" / ("build-%s-%s.log" % (version, triple))).write_text(r.stdout + r.stderr)
     return stage
 
 
@@ -208,12 +203,12 @@ def manifest_sha(arch):
 def build_all():
     init_work()
     make_keys()
-    for tag, df, plat in (("arm64", "target.Dockerfile", "linux/arm64"), ("amd64", "target.Dockerfile", "linux/amd64")):
+    for tag, df, plat in (("amd64", "target.Dockerfile", "linux/amd64"),):
         log("building target image", tag)
         run(["docker", "build", "--network=host", "--platform", plat, "-f", str(HERE / df), "-t",
              "%starget:%s" % (P, tag), str(HERE)], timeout=1800)
     log("building server image from Dockerfile")
-    run(["docker", "build", "--network=host", "-t", SERVER_IMAGE, str(REPO)], timeout=3600)
+    run(["docker", "build", "--network=host", "--platform", "linux/amd64", "-t", SERVER_IMAGE, str(REPO)], timeout=3600)
     run(["docker", "pull", CADDY_IMAGE], timeout=300)
     for v in (V0, V1):
         build_artifacts(v)
@@ -274,8 +269,7 @@ def down(quiet=False):
 
 
 def purge_images_and_caches():
-    run(["docker", "volume", "rm", "hope-agent-target-x86_64", "hope-agent-target-aarch64",
-         "hope-agent-cargo-x86_64", "hope-agent-cargo-aarch64"], check=False)
+    run(["docker", "volume", "rm", "hope-agent-target-x86_64", "hope-agent-cargo-x86_64"], check=False)
 
 
 def new_target(kind, arch):
@@ -303,7 +297,7 @@ def new_target(kind, arch):
     assert rc == 0, out
     if kind == "t":
         rc, info = dx(name, "echo \"$(uname -m); $(. /etc/os-release; echo $PRETTY_NAME); $(systemctl --version | head -1); $(ssh -V 2>&1); PID1=$(cat /proc/1/comm); $(systemctl is-system-running)\"")
-        record("target: systemd PID 1 + sshd", arch, "Debian 13", arch == "amd64", "systemd as PID 1, OpenSSH", "n/a", "image %starget:%s" % (P, arch),
+        record("target: systemd PID 1 + sshd", arch, "Debian 13", AMD64_EMULATED, "systemd as PID 1, OpenSSH", "n/a", "image %starget:%s" % (P, arch),
                rc == 0 and "PID1=systemd" in info and info.strip().endswith("running") and dx(name, "systemctl is-active ssh")[1].strip() == "active", info.strip())
     run(["docker", "cp", str(WORK / "ssh" / "id_ed25519"), name + ":/root/gate_key"])
     dx(name, "chmod 600 /root/gate_key; cp /root/gate_key /home/hopeplain/gate_key; chown hopeplain /home/hopeplain/gate_key")
@@ -412,28 +406,30 @@ def failed_logins(container, n, xff=None):
 def proxy_checks():
     init_work()
     login()
-    a, b = P + "t-arm64", P + "t-amd64"
+    a, b = P + "t-amd64", P + "t2-amd64"
     for arch in ARCHS:
         if run(["docker", "inspect", "-f", "{{.State.Running}}", P + "t-" + arch], check=False).stdout.strip() != "true":
             new_target("t", arch)
+        if run(["docker", "inspect", "-f", "{{.State.Running}}", P + "t2-" + arch], check=False).stdout.strip() != "true":
+            new_target("t2", arch)
     ver = "Caddy " + run(["docker", "run", "--rm", CADDY_IMAGE, "caddy", "version"]).stdout.split()[0]
     # TLS: trusted with the CA from a target, refused without it, HTTP/2 negotiated.
     rc, out = dx(a, "curl -sS -o /dev/null -w '%%{http_version} %%{http_code}' --cacert %s https://%s/healthz" % (CA_PATH, HOST))
     rc2, out2 = dx(a, "curl -sS -o /dev/null https://%s/healthz" % HOST)
-    record("proxy-tls", "arm64", "Caddy 2.10.2", False, "n/a", "https via private CA", ver,
+    record("proxy-tls", "amd64", "Caddy 2.10.2", False, "n/a", "https via private CA", ver,
            rc == 0 and out.strip() == "2 200" and rc2 != 0 and "certificate" in out2.lower(),
            "agent host trusts only the throwaway CA: verified request %s; without the CA curl fails (%s)" % (out.strip(), out2.strip()[:60]))
     # Cookie, HSTS, headers pass through unchanged.
     st, h, _ = api("POST", "/api/v1/auth/login", {"password": ADMIN_PASSWORD}, auth=False)
     sc = h.get("set-cookie", "")
-    record("proxy-cookie", "arm64", "Caddy 2.10.2", False, "n/a", "Secure cookie and headers", ver,
+    record("proxy-cookie", "amd64", "Caddy 2.10.2", False, "n/a", "Secure cookie and headers", ver,
            st == 200 and "Secure" in sc and "HttpOnly" in sc and "SameSite=Strict" in sc and "max-age=31536000" in h.get("strict-transport-security", "")
            and h.get("cache-control") == "no-store" and "frame-ancestors 'none'" in h.get("content-security-policy", ""),
            "Set-Cookie has Secure/HttpOnly/SameSite=Strict, HSTS, no-store and CSP survive the proxy")
     # Origin check: forwarded Origin unchanged, a foreign Origin is refused.
     st_bad, _, _ = api("POST", "/api/v1/enrollment-tokens", {}, headers={"Origin": "https://evil.example"})
     st_ok, _, _ = api("POST", "/api/v1/enrollment-tokens", {})
-    record("proxy-origin", "arm64", "Caddy 2.10.2", False, "n/a", "origin check", ver, st_bad == 403 and st_ok == 200,
+    record("proxy-origin", "amd64", "Caddy 2.10.2", False, "n/a", "origin check", ver, st_bad == 403 and st_ok == 200,
            "foreign Origin %s, canonical Origin %s" % (st_bad, st_ok))
     # SSE: headers arrive at once, an event arrives promptly after a state change (no buffering).
     conn = Conn("127.0.0.1", port(), context=ctx(), timeout=20)
@@ -459,7 +455,7 @@ def proxy_checks():
     th.join(8)
     lat = box["t"] - t1 if "t" in box else None
     conn.close()
-    record("proxy-sse", "arm64", "Caddy 2.10.2", False, "n/a", "server-sent events", ver,
+    record("proxy-sse", "amd64", "Caddy 2.10.2", False, "n/a", "server-sent events", ver,
            r.status == 200 and "text/event-stream" in (r.getheader("content-type") or "") and lat is not None and lat < 3,
            "stream headers after %.2fs; refresh event %.2fs after a state change through Caddy" % (t_headers, lat if lat is not None else -1))
     # Client key: A is rate limited after ten failures, B (different container) is not; spoofed XFF is ignored.
@@ -469,7 +465,7 @@ def proxy_checks():
     ok = ca[:10] == ["401"] * 10 and ca[10] == "429" and cb_first == ["401"] and cb[:9] == ["401"] * 9 and "429" in cb[9:]
     logs = run(["docker", "logs", P + "server"], check=False)
     warned = "X-Forwarded-For" in (logs.stdout + logs.stderr)
-    record("proxy-xff", "arm64+amd64", "Caddy 2.10.2", False, "n/a", "rate-limit key is the client", ver, ok and not warned,
+    record("proxy-xff", "amd64", "Caddy 2.10.2", False, "n/a", "rate-limit key is the client", ver, ok and not warned,
            "client A: %s then %s; client B unaffected (%s), with spoofed X-Forwarded-For it is still limited by its own address after ten failures (statuses %s); server logged no untrusted-XFF warning: %s" % (
                "ten 401", ca[10], cb_first[0], ",".join(cb), not warned))
     # Negative control: without HOPE_TRUSTED_PROXIES every client shares the proxy address.
@@ -481,7 +477,7 @@ def proxy_checks():
     _cookie.clear()
     time.sleep(2)
     login()
-    record("proxy-untrusted-control", "arm64+amd64", "Caddy 2.10.2", False, "n/a", "no trusted proxy configured", ver,
+    record("proxy-untrusted-control", "amd64", "Caddy 2.10.2", False, "n/a", "no trusted proxy configured", ver,
            shared == ["429"], "with HOPE_TRUSTED_PROXIES unset, client A's ten failures make client B get %s (all clients share the proxy's key); restored" % shared[0])
 
 
@@ -556,9 +552,9 @@ def snapshot_release_manifests():
 
 def matrix_arch_phase(phase, arch):
     c = P + "t-" + arch
-    emu = arch == "amd64"
+    emu = AMD64_EMULATED
     osn = "Debian 13"
-    art = lambda v: "agent v%s linux-%s musl sha256 %s" % (v, "aarch64" if arch == "arm64" else "x86_64", manifest_sha_for(v, arch)[1][:12])
+    art = lambda v: "agent v%s linux-x86_64 musl sha256 %s" % (v, manifest_sha_for(v, arch)[1][:12])
     if phase == "a":
         t0 = time.time()
         rc, out = run_console(c)
@@ -805,11 +801,11 @@ def ssh_phase():
     ids = discover(addrs)
     pw = sec("root")
     for arch in ARCHS:
-        emu = arch == "amd64"
+        emu = AMD64_EMULATED
         osn = "Debian 13"
         S, U, D = (P + k + "-" + arch for k in "sud")
         sa, ua, da = ("%s.%d" % (SUBNET, IPS[(k, arch)]) for k in "sud")
-        art = "agent v%s linux-%s musl sha256 %s" % (V1, "aarch64" if arch == "arm64" else "x86_64", manifest_sha_for(V1, arch)[1][:12])
+        art = "agent v%s linux-x86_64 musl sha256 %s" % (V1, manifest_sha_for(V1, arch)[1][:12])
         mode = lambda m: m
         # 1. changed host key: confirmed fingerprint, then the host key changes before the job.
         fp_old = fingerprint(ids[sa], sa)

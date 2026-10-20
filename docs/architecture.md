@@ -1,6 +1,6 @@
 # Architecture
 
-H.O.P.E is a single Rust server (Axum, Tokio, SQLx on SQLite) that serves a statically exported Next.js console, discovers hosts on up to a handful of IPv4 ranges, and receives reports from a small Rust agent on Linux and macOS machines. Everything below is derived from the code at the paths given; see [operations.md](operations.md) for running it and [validation.md](validation.md) for what has been verified.
+H.O.P.E is a single Rust server (Axum, Tokio, SQLx on SQLite) that serves a statically exported Next.js console, discovers hosts on up to a handful of IPv4 ranges, and receives reports from a small Rust agent. Current release support targets Linux x86_64 for both the server and agent. Everything below is derived from the code at the paths given; see [operations.md](operations.md) for running it and [validation.md](validation.md) for what has been verified.
 
 ```
  browser (static console)          agent hosts (Linux/macOS)
@@ -76,7 +76,7 @@ Container CPU and memory gauges are averaged by daemon container ID. Containers 
 
 ### Releases and manifest
 
-`scripts/build-agent.sh` builds one target (static musl on Linux; macOS with a deployment-target check). `scripts/assemble-release.sh` combines all four platforms, signs each artifact and a `manifest.json` (version, key id, per-artifact SHA-256, size, minimum OS) with an RSA key held outside the repository, verifies the result, and publishes it by atomically swapping a `current` symlink. `releases.rs` offers a platform only if the manifest is well formed, its `key_id` matches the public key, and the files exist with the listed size. `GET /agent/install` serves `scripts/install-agent.sh` with the public key embedded. CI definitions are in `.github/workflows` (never run on GitHub yet, see `validation.md`).
+`scripts/build-agent.sh` builds the static-musl Linux x86_64 target. `scripts/assemble-release.sh` validates and signs that artifact and a `manifest.json` (version, key id, per-artifact SHA-256, size, minimum OS) with an RSA key held outside the repository, verifies the result, and publishes it by atomically swapping a `current` symlink. `releases.rs` offers a platform only if the manifest is well formed, its `key_id` matches the public key, and the files exist with the listed size. `GET /agent/install` serves `scripts/install-agent.sh` with the public key embedded. CI definitions are in `.github/workflows` (see `validation.md`).
 
 ## Identity reconciliation
 
