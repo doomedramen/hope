@@ -32,7 +32,7 @@ test: check
 
 # Native checks cannot compile cfg(target_os = "linux") on macOS.
 linux-checks:
-	docker build --target checks -t hope:checks .
+	docker build --platform linux/amd64 --target checks -t hope:checks .
 protocol-check:
 	./scripts/generate-types.sh --check
 browser-checks:

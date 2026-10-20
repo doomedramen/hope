@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 17;
+const LATEST: i64 = 18;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
@@ -147,6 +147,16 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
         sqlx::query("PRAGMA user_version = 17")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 18 {
+        sqlx::raw_sql(include_str!(
+            "migrations/0018_source_metric_retention_index.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("PRAGMA user_version = 18")
             .execute(&mut *tx)
             .await?;
     }
@@ -308,7 +318,14 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 17);
+        assert_eq!(version, 18);
+        let source_cleanup_index: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='source_metrics_cleanup'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("source retention index");
+        assert_eq!(source_cleanup_index, 1);
         for table in [
             "child_batch_heads",
             "child_batches",

@@ -129,9 +129,20 @@ pub async fn system_status(Extract(state): Extract<State>) -> (StatusCode, Json<
         .bind(reference - 86400.0)
         .fetch_one(&state.0.db)
         .await?;
-        Ok::<_, sqlx::Error>((pending, oldest_notification, oldest_raw_metric))
+        let oldest_raw_source_metric: Option<f64> = sqlx::query_scalar(
+            "SELECT MIN(observed_at) FROM source_metrics WHERE resolution=30 AND observed_at<?",
+        )
+        .bind(reference - 86400.0)
+        .fetch_one(&state.0.db)
+        .await?;
+        Ok::<_, sqlx::Error>((
+            pending,
+            oldest_notification,
+            oldest_raw_metric,
+            oldest_raw_source_metric,
+        ))
     };
-    let (pending_notifications, oldest_notification, oldest_raw_metric) =
+    let (pending_notifications, oldest_notification, oldest_raw_metric, oldest_raw_source_metric) =
         match timeout(Duration::from_secs(1), measurements).await {
             Ok(Ok(measurements)) => measurements,
             _ => {
@@ -142,6 +153,8 @@ pub async fn system_status(Extract(state): Extract<State>) -> (StatusCode, Json<
             }
         };
     let retention_lag = oldest_raw_metric.map(|at| (reference - at - 86400.0).max(0.0));
+    let source_retention_lag =
+        oldest_raw_source_metric.map(|at| (reference - at - 86400.0).max(0.0));
     let notification_age = oldest_notification.map(|at| (reference - at).max(0.0));
 
     let tasks = [
@@ -183,6 +196,7 @@ pub async fn system_status(Extract(state): Extract<State>) -> (StatusCode, Json<
     }
     if notification_age.is_some_and(|age| age > 300.0)
         || retention_lag.is_some_and(|lag| lag > 3600.0)
+        || source_retention_lag.is_some_and(|lag| lag > 3600.0)
     {
         degraded = true;
     }
@@ -207,6 +221,11 @@ pub async fn system_status(Extract(state): Extract<State>) -> (StatusCode, Json<
             "metrics_retention": {
                 "oldest_unaggregated_at": oldest_raw_metric,
                 "lag_seconds": retention_lag,
+                "degraded_after_seconds": 3600,
+            },
+            "source_metrics_retention": {
+                "oldest_unaggregated_at": oldest_raw_source_metric,
+                "lag_seconds": source_retention_lag,
                 "degraded_after_seconds": 3600,
             },
         })),

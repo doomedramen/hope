@@ -268,6 +268,11 @@ async fn operational_status_is_admin_only_and_reports_worker_and_backlog_health(
         .execute(&env.state.0.db)
         .await
         .unwrap();
+    sqlx::query("INSERT INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES('source','old-sample',?,30,'{}')")
+        .bind(reference - 90_000.0)
+        .execute(&env.state.0.db)
+        .await
+        .unwrap();
 
     let response = send(
         &env.app,
@@ -290,6 +295,12 @@ async fn operational_status_is_admin_only_and_reports_worker_and_backlog_health(
             >= 400.0
     );
     assert!(status["metrics_retention"]["lag_seconds"].as_f64().unwrap() >= 3600.0);
+    assert!(
+        status["source_metrics_retention"]["lag_seconds"]
+            .as_f64()
+            .unwrap()
+            >= 3600.0
+    );
 
     env.state.0.background.failure("discovery");
     let response = send(
