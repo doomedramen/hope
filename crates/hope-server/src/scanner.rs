@@ -716,14 +716,28 @@ mod tests {
             enabled: true,
             interval_minutes: 5,
         };
-        start_scheduled(&state, &network("gentle", "192.168.1.0/28"))
+        let gentle = start_scheduled(&state, &network("gentle", "192.168.1.0/28"))
             .await
             .expect("scheduled");
-        tokio::time::sleep(Duration::from_millis(900)).await;
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if jobs(&state)
+                    .await
+                    .expect("jobs")
+                    .iter()
+                    .any(|job| job.id == gentle.id && job.status == ScanStatus::Completed)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("scheduled scan completed");
         let gentle_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
         assert!(gentle_peak <= GENTLE_PARALLEL, "peak {gentle_peak}");
         let mut times = starts.lock().expect("start lock").clone();
-        assert!(times.len() >= 2);
+        assert_eq!(times.len(), gentle.total as usize);
         times.sort_unstable();
         assert!(
             times
@@ -736,7 +750,13 @@ mod tests {
         start(&state, &network("manual", "192.168.2.0/27"))
             .await
             .expect("manual");
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        timeout(Duration::from_secs(2), async {
+            while peak.load(std::sync::atomic::Ordering::SeqCst) <= GENTLE_PARALLEL {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("manual probes exceed the gentle concurrency cap");
         assert!(peak.load(std::sync::atomic::Ordering::SeqCst) > GENTLE_PARALLEL);
     }
     #[tokio::test]
@@ -754,10 +774,28 @@ mod tests {
         )
         .await
         .expect("scan");
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        timeout(Duration::from_secs(2), async {
+            while calls.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("scan started probing before cancellation");
         cancel(&state, &job.id).await.expect("cancel");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        timeout(Duration::from_secs(2), async {
+            while state
+                .0
+                .active_tasks
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 0
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancelled probes completed");
         let count = calls.lock().await.len();
+        // Allow several scheduler ticks to catch accidental dispatch from a cancelled batch.
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(calls.lock().await.len(), count);
         assert_eq!(
