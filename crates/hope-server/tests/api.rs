@@ -3533,7 +3533,11 @@ const RELEASE_KEY_ID: &str = "be0e49f69d223eabbd7a66c2d5cb91ce7ff9d504c1032b2f48
 /// A release directory shaped like assemble-release.sh's output (the server does not check RSA).
 fn publish_release(version: &str) -> TempDir {
     let dir = tempfile::tempdir().expect("release directory");
-    let put = |name: &str, data: &[u8]| std::fs::write(dir.path().join(name), data).expect("write");
+    let id = format!("{version}-0123456789ab");
+    let directory = dir.path().join(&id);
+    std::fs::create_dir(&directory).unwrap();
+    std::os::unix::fs::symlink(&id, dir.path().join("current")).unwrap();
+    let put = |name: &str, data: &[u8]| std::fs::write(directory.join(name), data).expect("write");
     put("release-public.pem", RELEASE_PEM.as_bytes());
     put("hope-agent-linux-x86_64", b"binary");
     put("hope-agent-linux-x86_64.sig", b"sig");

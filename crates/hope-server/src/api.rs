@@ -74,10 +74,7 @@ pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstr
             capabilities
         },
         server_url: state.0.server_url.clone(),
-        agent_release: crate::releases::published_version(
-            &crate::releases::release_directory(&state.0.release_dir).await,
-        )
-        .await,
+        agent_release: crate::releases::current_version(&state.0.release_dir).await,
         report_interval_seconds: state.report_interval(),
         agent_upgrade_command: crate::agents::upgrade_command(&state),
     }))

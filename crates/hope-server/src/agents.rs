@@ -1145,8 +1145,7 @@ fn update_blocker(host: &Host, release: &str) -> Option<&'static str> {
     None
 }
 async fn offered_release(state: &State) -> ApiResult<String> {
-    let directory = crate::releases::release_directory(&state.0.release_dir).await;
-    crate::releases::published_version(&directory)
+    crate::releases::current_version(&state.0.release_dir)
         .await
         .ok_or_else(|| ApiError::bad("This server publishes no signed agent release to update to"))
 }

@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 REPO = Path(__file__).resolve().parents[2]
@@ -175,9 +176,25 @@ class Assemble(unittest.TestCase):
             version = f'1.{minor}.0'
             self.stage_all(version)
             self.assertEqual(0, self.run_script(version=version).returncode)
-        self.assertEqual(3, len(self.releases()))
+        self.assertEqual(5, len(self.releases()), 'rapid publication must preserve the installation window')
         self.assertEqual('1.4.0', self.manifest()['version'])
         self.assertEqual('1.3.0', self.manifest(self.out / 'previous')['version'])
+
+    def test_expired_releases_are_pruned_but_an_old_current_gets_a_new_retention_window(self):
+        for minor in range(5):
+            version = f'1.{minor}.0'
+            self.stage_all(version)
+            self.assertEqual(0, self.run_script(version=version).returncode)
+        old_current = os.readlink(self.out / 'current')
+        for index, name in enumerate(self.releases()):
+            timestamp = time.time() - 48 * 3600 + index
+            os.utime(self.out / name, (timestamp, timestamp))
+        self.stage_all('1.5.0')
+        done = self.run_script(version='1.5.0')
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertEqual(3, len(self.releases()))
+        self.assertEqual(old_current, os.readlink(self.out / 'previous'))
+        self.assertLess(time.time() - (self.out / old_current).stat().st_mtime, 60)
 
     def test_current_is_swapped_by_rename_never_missing(self):
         self.stage_all('1.0.0')

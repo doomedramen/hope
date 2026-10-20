@@ -49,7 +49,7 @@ VAR = re.compile(r"\bHOPE_[A-Z][A-Z_]*[A-Z]\b")
 # Environment names that are internal or test-only and deliberately not documented for operators.
 UNDOCUMENTED = {
     "HOPE_INSTALL_ROOT", "HOPE_POLL_INTERVAL",   # installer test knobs
-    "HOPE_PUBLIC_KEY", "HOPE_INSTALL_PID",       # installer placeholder / internal
+    "HOPE_PUBLIC_KEY", "HOPE_RELEASE_ID", "HOPE_INSTALL_PID",  # installer placeholders / internal
     "HOPE_ACTIVATION_ID",                        # set by the generated service definition
     "HOPE_COMMIT", "HOPE_MACOS_MINIMUM",         # build script internals
 }

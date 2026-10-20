@@ -657,10 +657,24 @@ fetch() {
         ( unset CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR; curl -q --fail --silent --show-error --location --connect-timeout 20 --max-time 120 --proto '=https' --proto-redir '=https' "$@" )
     fi
 }
+# The server binds a freshly fetched installer to its release. The root-owned saved updater
+# retains this verification key but selects the currently published release once per upgrade.
+release_id='@@HOPE_RELEASE_ID@@'
+if [ "$operation" = upgrade ]; then
+    release_id=$(fetch --max-filesize 128 "$HOPE_SERVER/agent/releases/current-id") \
+        || fail RELEASE_UNAVAILABLE 'No immutable agent release could be selected. The running agent was kept.'
+fi
+# Reject slashes, whitespace, shell syntax and unresolved template markers before constructing URLs.
+case "$release_id" in
+    ''|*[!0-9A-Za-z.-]*) fail RELEASE_UNAVAILABLE 'The server did not select a valid immutable release.' ;;
+esac
+printf '%s\n' "$release_id" | grep -Eq '^[0-9][0-9A-Za-z.-]{0,63}-[0-9a-f]{12}$' \
+    || fail RELEASE_UNAVAILABLE 'The server did not select a valid immutable release.'
+release_url=$HOPE_SERVER/agent/releases/by-id/$release_id
 artifact="hope-agent-$platform-$architecture"
 # The availability API needs a login, so confirm the public files exist before stopping anything.
 for name in manifest.json manifest.json.sig "$artifact" "$artifact.sig"; do
-    code=$(fetch --head -o /dev/null --write-out '%{http_code}' "$HOPE_SERVER/agent/releases/$name" 2>/dev/null || true)
+    code=$(fetch --head -o /dev/null --write-out '%{http_code}' "$release_url/$name" 2>/dev/null || true)
     case "$code" in
         2??) ;;
         404)
@@ -693,8 +707,8 @@ single() { # single NAME VALUE: exactly one non-empty line, else MANIFEST_INVALI
 phase stage
 echo "Downloading signed $platform/$architecture agent."
 manifest="$temporary/manifest.json"
-fetch --max-filesize 65536 -o "$manifest" "$HOPE_SERVER/agent/releases/manifest.json" || fail DOWNLOAD_FAILED 'Downloading the release manifest failed.'
-fetch --max-filesize 16384 -o "$manifest.sig" "$HOPE_SERVER/agent/releases/manifest.json.sig" || fail DOWNLOAD_FAILED 'Downloading the release manifest signature failed.'
+fetch --max-filesize 65536 -o "$manifest" "$release_url/manifest.json" || fail DOWNLOAD_FAILED 'Downloading the release manifest failed.'
+fetch --max-filesize 16384 -o "$manifest.sig" "$release_url/manifest.json.sig" || fail DOWNLOAD_FAILED 'Downloading the release manifest signature failed.'
 [ "$(wc -c < "$manifest" | tr -d ' ')" -le 65536 ] || fail MANIFEST_INVALID 'The release manifest is implausibly large.'
 openssl dgst -sha256 -verify "$temporary/release-public.pem" -signature "$manifest.sig" "$manifest" >/dev/null 2>&1 \
     || fail MANIFEST_INVALID 'Release manifest signature verification failed. Nothing was installed.'
@@ -741,8 +755,8 @@ if [ -x "$binary" ]; then
     fi
 fi
 
-fetch --max-filesize "$m_size" -o "$temporary/hope-agent" "$HOPE_SERVER/agent/releases/$artifact" || fail DOWNLOAD_FAILED 'Downloading the agent binary failed.'
-fetch --max-filesize 16384 -o "$temporary/hope-agent.sig" "$HOPE_SERVER/agent/releases/$artifact.sig" || fail DOWNLOAD_FAILED 'Downloading the agent signature failed.'
+fetch --max-filesize "$m_size" -o "$temporary/hope-agent" "$release_url/$artifact" || fail DOWNLOAD_FAILED 'Downloading the agent binary failed.'
+fetch --max-filesize 16384 -o "$temporary/hope-agent.sig" "$release_url/$artifact.sig" || fail DOWNLOAD_FAILED 'Downloading the agent signature failed.'
 [ "$(wc -c < "$temporary/hope-agent" | tr -d ' ')" = "$m_size" ] \
     || fail CHECKSUM_MISMATCH "The downloaded agent size differs from the signed manifest ($m_size bytes). Nothing was installed."
 [ "$(sha256_of "$temporary/hope-agent")" = "$m_sha" ] \

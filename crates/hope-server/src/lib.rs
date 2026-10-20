@@ -109,6 +109,8 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .nest_service(
             "/agent/releases",
             Router::new()
+                .route("/current-id", get(releases::current_id))
+                .route("/by-id/{id}/{file}", get(releases::serve_pinned))
                 .fallback(releases::serve)
                 .with_state(state.clone())
                 .layer(middleware::from_fn(releases::cache_headers)),

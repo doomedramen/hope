@@ -845,6 +845,60 @@ class MacOS(Base):
         self.assertTrue((self.env.base / 'service/launchd.active').exists())
 
 
+class ImmutableRelease(Base):
+    def test_install_stays_pinned_when_publication_changes_between_downloads(self):
+        artifact = 'hope-agent-linux-x86_64'
+        files = ['manifest.json', 'manifest.json.sig', artifact, artifact + '.sig']
+        for phase in ['before-downloads'] + ['head-' + name for name in files] + files:
+            with self.subTest(phase=phase):
+                env = self.new_env()
+                selected = env.capture_release()
+                env.installer.write_text(env.installer.read_text().replace('@@HOPE_RELEASE_ID@@', selected))
+                # The already fetched installer must still install v1 after a key rotation.
+                env.publish('v2', key='other', manifest_key='other')
+                replacement = env.capture_release()
+                if phase != 'before-downloads':
+                    env.set('release/current-id', selected)
+                    env.set('fault/publish-after-' + phase, replacement)
+                self.ok(env.run())
+                self.assertEqual('v1', self.version(env.paths('system')['binary']))
+                requests = [line for line in env.log().splitlines() if line.startswith('curl ')]
+                self.assertEqual(8, len(requests))
+                self.assertTrue(all('/by-id/' + selected + '/' in line for line in requests))
+                if phase != 'before-downloads':
+                    self.assertFalse((env.base / 'fault' / ('publish-after-' + phase)).exists())
+
+    def test_saved_updater_selects_once_then_ignores_later_publication(self):
+        self.ok(self.env.run())
+        self.env.publish('v3')
+        later = self.env.capture_release()
+        self.env.publish('v2')
+        self.env.set('fault/publish-after-current-id', later)
+        before = len(self.env.log())
+        self.ok(self.env.updater())
+        self.assertEqual('v2', self.version(self.env.paths('system')['binary']))
+        requests = [line for line in self.env.log()[before:].splitlines() if line.startswith('curl ')]
+        self.assertIn('/current-id', requests[0])
+        selected = requests[1].split('/by-id/')[1].split('/')[0]
+        self.assertNotEqual(later, selected)
+        self.assertTrue(all('/by-id/' + selected + '/' in line for line in requests[1:]))
+
+    def test_malformed_release_selector_never_touches_the_running_agent(self):
+        self.ok(self.env.run())
+        self.env.publish('v2')
+        paths = self.env.paths('system')
+        valid = '1.0.0-0123456789ab'
+        for selector in ['../' + valid, valid + '/private', valid + '\nextra', valid + ' ', valid + ';id', 'current']:
+            with self.subTest(selector=selector):
+                self.env.set('fault/selector-body', selector)
+                before = len(self.env.log())
+                self.failed(self.env.updater(), 'RELEASE_UNAVAILABLE')
+                self.assertEqual('v1', self.version(paths['binary']))
+                attempt = self.env.log()[before:]
+                self.assertNotIn('systemctl[system] stop', attempt)
+                self.assertNotIn('/by-id/', attempt)
+
+
 class Updater(Base):
     """The root-owned updater that lets the console update an installed agent without a new token."""
 

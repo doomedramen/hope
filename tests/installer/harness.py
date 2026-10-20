@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 REPO = Path(__file__).resolve().parents[2]
 INSTALLER = REPO / 'scripts' / 'install-agent.sh'
@@ -261,8 +262,9 @@ elif name == 'curl':
         sys.exit(6)
     if not url.startswith(prefix):
         sys.exit(22)
-    artifact = url[len(prefix):]
-    path = os.path.join(R, 'release', artifact)
+    relative = url[len(prefix):]
+    artifact = relative.rsplit('/', 1)[-1]
+    path = os.path.join(R, 'release', relative)
     status = read('fault/head-status', '') if head else ''
     missing = not os.path.isfile(path) or (not head and flag('curl-fail-' + artifact))
     if status or missing:
@@ -275,6 +277,14 @@ elif name == 'curl':
     if output and not head:
         import shutil
         shutil.copyfile(path, output)
+    elif not head:
+        body_path = os.path.join(R, 'fault/selector-body') if artifact == 'current-id' and flag('selector-body') else path
+        body = open(body_path).read()
+        sys.stdout.write(body)
+    switch = os.path.join(R, 'fault', 'publish-after-' + ('head-' if head else '') + artifact)
+    if os.path.isfile(switch):
+        open(os.path.join(R, 'release/current-id'), 'w').write(open(switch).read())
+        os.unlink(switch)
     sys.exit(0)
 '''
 
@@ -481,9 +491,29 @@ class Env:
         self.set('fake/uid', str(uid))
         return env
 
+    def capture_release(self):
+        """Publish a distinct immutable fixture directory, preserving all earlier releases."""
+        release_id = '1.0.0-' + uuid.uuid4().hex[:12]
+        destination = self.rel / 'by-id' / release_id
+        destination.mkdir(parents=True)
+        for source in self.rel.iterdir():
+            if source.is_file() and source.name != 'current-id':
+                shutil.copyfile(source, destination / source.name)
+        (self.rel / 'current-id').write_text(release_id + '\n')
+        return release_id
+
+    def invocation_installer(self):
+        # A manual command fetches a freshly rendered script; the updater keeps the prior copy.
+        if '@@HOPE_RELEASE_ID@@' not in self.installer.read_text():
+            return self.installer
+        release_id = self.capture_release()
+        path = self.base / 'invoked-installer.sh'
+        path.write_text(self.installer.read_text().replace('@@HOPE_RELEASE_ID@@', release_id))
+        return path
+
     def run(self, operation='install', uid=0, mode=None, token=TOKEN, server=SERVER, timeout=90, **extra):
         env = self._environment(uid, mode, token, server, extra)
-        done = subprocess.run([os.environ.get('HOPE_TEST_SHELL', 'sh'), str(self.installer), operation], env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        done = subprocess.run([os.environ.get('HOPE_TEST_SHELL', 'sh'), str(self.invocation_installer()), operation], env=env, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         result = Result(done.returncode, done.stdout, done.stderr)
         self.runs.append(result)
         return result
@@ -491,6 +521,7 @@ class Env:
     def updater(self, **extra):
         """Run the hope-agent-update the installer left behind, as root."""
         wrapper = self.root / 'usr/local/sbin/hope-agent-update'
+        self.capture_release()
         env = self._environment(0, None, None, None, extra)
         done = subprocess.run([os.environ.get('HOPE_TEST_SHELL', 'sh'), str(wrapper)], env=env, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
         result = Result(done.returncode, done.stdout, done.stderr)
@@ -501,7 +532,7 @@ class Env:
         """Run the installer, wait until a stub parks at a stall-at-<phase> fault, close the reader of the
         installer's stderr (a dropped SSH session or a closed pipe), then let it continue."""
         env = self._environment(uid, mode, token, server, extra)
-        process = subprocess.Popen([os.environ.get('HOPE_TEST_SHELL', 'sh'), str(self.installer), operation], env=env,
+        process = subprocess.Popen([os.environ.get('HOPE_TEST_SHELL', 'sh'), str(self.invocation_installer()), operation], env=env,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
         stalled = self.base / 'fake' / 'stalled'
         deadline = time.time() + 30

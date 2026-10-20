@@ -14,8 +14,11 @@ Scope: Linux x86_64 only, as confirmed by the project owner. This ledger follows
 | 6 — Notification HTTP blocks discovery | Independent condition evaluator and delivery worker; four concurrent deliveries, per-condition ordering, bounded HTTP deadline and cancellation-aware shutdown. Network I/O holds no database write lock. | A deliberately stalled endpoint allows evaluation to complete and graceful shutdown to retain both queued transitions. |
 | 8 — Live events remove source data | Agent reports publish the same canonical projection used by GET/bootstrap. The browser tracks events that arrive during a snapshot request without relying on the agent's clock. | Real report/source/snapshot/SSE API test and Chromium test checking that source details remain visible through live reports. |
 | 9 — Hanging browser requests stop refresh | API requests have a 20-second deadline covering headers and body, plus caller cancellation. `useInventory` owns SSE, snapshot recovery and coalesced refreshes. Requests queued during a fetch trigger a subsequent fetch. Source history refreshes every 30 seconds and retries after failures; host history periodically reloads even without new reports. | Transport tests for stalled connections, stalled bodies and caller cancellation; Chromium tests for snapshot recovery, authentication retry and source history refresh. |
+| 10 — Publishing races agent downloads | Fresh installers embed the selected release ID and key together. Upgrades select once per attempt while saved updaters retain their trust key. Manifest, signature and binary requests use immutable ID-addressed URLs. Publishing retains every replaced release for at least 24 hours, plus the current and recent releases. Flat trees remain readable for legacy clients but cannot offer new installations. | Real signed installer tests publish between all eight download steps and after selection, including key rotation. Server tests cover stable contents, cache policy, namespace confinement and flat-layout refusal. Assembly tests cover rapid publications and expiry after replacement. |
 
 Final verification also exposed an intermittent SQLite lock error when a host save raced SSH progress. Read/modify/write transactions now reserve SQLite's writer with `BEGIN IMMEDIATE` before reading; read-only projections retain ordinary snapshot transactions. This avoids stale-snapshot write upgrades even when an independent single-statement writer does not use the application mutex. A deterministic test holds an independent writer, verifies that a host save waits, and then confirms successful persistence after the writer commits.
+
+Existing saved agent updaters need one manual console upgrade command to adopt immutable downloads. Automatic binary upgrades deliberately preserve their installed updater code and trust key. An already downloaded initial installer remains tied to its original release, including across signing-key rotation; fetch a fresh installer after its release leaves the retention window.
 
 The storage migration cannot infer the provenance of addresses already unioned by old versions. Those addresses are conservatively retained. Existing IDs, source histories and aliases remain reachable. The identity refactor does not add retire/forget/purge semantics.
 
@@ -23,22 +26,21 @@ Notification delivery is at least once, so crash recovery can duplicate an accep
 
 ## Validation
 
-- Rust workspace: 263 passed, one intentionally ignored retention load test, including the storage-boundary compile-fail doctest.
+- Rust workspace: 267 passed, one intentionally ignored retention load test, including the storage-boundary compile-fail doctest.
 - Strict workspace Clippy and Rust formatting pass.
 - Web production build, TypeScript and ESLint pass.
 - Chromium/Playwright: 62 passed, including five new transport/recovery tests and extended real-server live/source history tests.
-- Release assembly harness: 19 passed.
-- Installer harness: 162 run; 149 passed and 13 out-of-scope macOS agent fixtures skipped. The host fixtures now stub the operating system explicitly and run on this macOS development host; 16 activation tests use real SQLite and filesystem operations with only systemd/HTTP stubbed.
+- Release assembly harness: 20 passed.
+- Installer harness: 165 run; 152 passed and 13 out-of-scope macOS agent fixtures skipped. The host fixtures now stub the operating system explicitly and run on this macOS development host; 16 activation tests use real SQLite and filesystem operations with only systemd/HTTP stubbed.
 - Shell syntax, ShellCheck, generated protocol drift and eight documentation tests pass.
 
-The Rust, installer, release, shell and documentation checks were rerun for server activation. The browser suite covers the preceding inventory/transport changes; activation changes the public health response only by adding its process ID. Linux service-manager, raw-socket and pmxcfs behavior, actual GitHub publication, populated load and multi-day soak remain unverified. Docker is installed here but its daemon is unavailable.
+The Rust, installer, release, shell, protocol and documentation checks were rerun for server activation and immutable downloads. The browser suite covers the preceding inventory/transport changes; activation changes the public health response only by adding its process ID. Linux service-manager, raw-socket and pmxcfs behavior, actual GitHub publication, populated load and multi-day soak remain unverified. Docker is installed here but its daemon is unavailable.
 
 ## Remaining blockers before recommendation
 
 1. **Clock-independent report ordering (finding 7).** Add durable ordering with explicit restart/backlog behavior, expose observed versus received freshness and test forward/backward clock corrections. The currently accepted future-timestamp freeze remains reproducible; changing live state on every receipt would regress backlog protection.
-2. **Pinned installation artifacts (finding 10).** Select an immutable release and keep manifest, signatures, installer and binary pinned across all downloads. Test publication between each download step, and retain referenced releases for a defined installation window.
-3. **Linux x86_64 acceptance.** Exercise actual packaged artifacts through fresh installation, upgrade, failed activation/restore, restart, interface replacement/raw-socket recovery, notification outage, database/disk pressure, guest churn and browser reconnection. Measure realistic inventory/history load and run a multi-day soak. The locally passing suites do not establish these release gates.
+2. **Linux x86_64 acceptance.** Exercise actual packaged artifacts through fresh installation, upgrade, failed activation/restore, restart, interface replacement/raw-socket recovery, notification outage, database/disk pressure, guest churn and browser reconnection. Measure realistic inventory/history load and run a multi-day soak. The locally passing suites do not establish these release gates.
 
 Additional follow-ups from the baseline review remain: discovery interface recovery, deliberate device retirement and agent-cap handling, monitoring-system health/readiness, queue/retention lag visibility and realistic populated-load measurements. These are not claimed as completed.
 
-The project is materially more reliable, but the remaining clock and release-selection defects, and the unverified Linux activation gate, still prevent a recommendation for unattended use.
+The project is materially more reliable, but the remaining clock defect and the unverified Linux activation gate still prevent a recommendation for unattended use.
