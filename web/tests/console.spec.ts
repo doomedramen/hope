@@ -2101,6 +2101,22 @@ test.describe.serial("H.O.P.E console", () => {
     const host = data.hosts.find(
       (entry: { agent_id: string | null }) => entry.agent_id,
     );
+    const primaryAddress = "192.168.1.5";
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const bootstrap = await response.json();
+      bootstrap.hosts = bootstrap.hosts.map(
+        (entry: { id: string; addresses: string[]; primary_ip?: string | null }) =>
+          entry.id === host.id
+            ? {
+                ...entry,
+                addresses: ["127.0.0.1", "203.0.113.9", primaryAddress],
+                primary_ip: primaryAddress,
+              }
+            : entry,
+      );
+      await route.fulfill({ response, json: bootstrap });
+    });
     let submitted: Record<string, unknown> | undefined;
     await page.route("**/api/v1/ssh/jobs", (route) =>
       route.fulfill({ json: [] }),
@@ -2119,7 +2135,7 @@ test.describe.serial("H.O.P.E console", () => {
         json: {
           id: "uninstall-job",
           host_id: host.id,
-          host: host.addresses[0],
+          host: primaryAddress,
           port: 22,
           fingerprint: "SHA256:verified-test-key",
           username: "root",
@@ -2153,6 +2169,12 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       dialog.getByRole("tab", { name: "Uninstall over SSH" }),
     ).toHaveAttribute("aria-selected", "true");
+    const addressSelect = dialog.getByRole("combobox").first();
+    await expect(addressSelect).toContainText(primaryAddress);
+    await addressSelect.click();
+    await expect(page.getByRole("option", { name: "127.0.0.1" })).toBeVisible();
+    await expect(page.getByRole("option", { name: "203.0.113.9" })).toBeVisible();
+    await page.keyboard.press("Escape");
     await dialog.getByLabel("Username", { exact: true }).fill("root");
     await dialog
       .getByLabel("Password", { exact: true })
@@ -2173,6 +2195,7 @@ test.describe.serial("H.O.P.E console", () => {
     );
     expect(submitted).toMatchObject({
       host_id: host.id,
+      address: primaryAddress,
       username: "root",
       password: "ssh-test-password",
       fingerprint: "SHA256:verified-test-key",
@@ -2187,6 +2210,60 @@ test.describe.serial("H.O.P.E console", () => {
       path: "test-results/hope-ssh-uninstall-mobile.png",
       fullPage: true,
     });
+  });
+  test("SSH installation leaves an address blank when no configured network matches", async ({
+    page,
+    request,
+  }) => {
+    const data = await (await request.get("/api/v1/bootstrap")).json();
+    const template = data.hosts[0];
+    const host = {
+      ...template,
+      id: "no-network-address-host",
+      name: "no-network-address-host",
+      name_override: null,
+      agent_id: null,
+      agent_revoked: false,
+      agent_uninstalled: false,
+      source: null,
+      source_device_id: null,
+      child: null,
+      addresses: ["127.0.0.1", "203.0.113.9"],
+      primary_ip: null,
+      network_ids: [],
+    };
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const bootstrap = await response.json();
+      bootstrap.hosts = [...bootstrap.hosts, host];
+      await route.fulfill({ response, json: bootstrap });
+    });
+    await page.route("**/api/v1/releases", (route) =>
+      route.fulfill({
+        json: { packaged_platforms: ["linux-x86_64"], version: "0.1.0" },
+      }),
+    );
+    await page.route("**/api/v1/ssh/jobs", (route) =>
+      route.fulfill({ json: [] }),
+    );
+    await page.goto(`/?view=host&host=${host.id}`);
+    await page
+      .getByRole("button", { name: "Install reporting agent" })
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Add a reporting agent" });
+    const sshTab = dialog.getByRole("tab", { name: "Install over SSH" });
+    await expect(sshTab).toBeEnabled();
+    await sshTab.click();
+    const addressSelect = dialog.getByRole("combobox").first();
+    await expect(addressSelect).toContainText("Choose an address");
+    await expect(
+      dialog.getByRole("button", { name: "Inspect host fingerprint" }),
+    ).toBeDisabled();
+    await addressSelect.click();
+    await expect(page.getByRole("option", { name: "127.0.0.1" })).toBeVisible();
+    await expect(
+      page.getByRole("option", { name: "203.0.113.9" }),
+    ).toBeVisible();
   });
   test("the administrator changes the password and other browsers are signed out", async ({
     page,

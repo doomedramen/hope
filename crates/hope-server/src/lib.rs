@@ -1,3 +1,4 @@
+pub mod addresses;
 pub mod agents;
 pub mod api;
 pub mod arp;

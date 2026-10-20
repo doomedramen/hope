@@ -328,7 +328,11 @@ interval_minutes: number, };
 export type ScanJob = { id: string, network_id: string, cidr: string, status: ScanStatus, scanned: number, total: number, discovered: number, started_at: number, finished_at: number | null, error: string | null, };
 export type Service = { port: number, name: string, observed_at: number, };
 export type UptimeSettings = { enabled: boolean, device: boolean, ports: Array<number>, };
-export type Host = { uptime: UptimeSettings, id: string, agent_id: string | null, name: string, name_override: string | null, icon_override: string | null, addresses: Array<string>, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean,
+export type Host = { uptime: UptimeSettings, id: string, agent_id: string | null, name: string, name_override: string | null, icon_override: string | null, addresses: Array<string>,
+/**
+ * First usable address inside a configured HOPE network, for safe connection defaults.
+ */
+primary_ip: string | null, macs: Array<string>, network_ids: Array<string>, last_seen: number, last_report: number | null, last_collected_at: number | null, agent_revoked: boolean,
 /**
  * The installation was removed remotely; the identity remains for history and re-enrollment.
  */

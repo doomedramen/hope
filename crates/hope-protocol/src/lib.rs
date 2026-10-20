@@ -1050,6 +1050,9 @@ pub struct Host {
     #[serde(default)]
     pub icon_override: Option<String>,
     pub addresses: Vec<String>,
+    /// First usable address inside a configured HOPE network, for safe connection defaults.
+    #[serde(default)]
+    pub primary_ip: Option<String>,
     pub macs: Vec<String>,
     pub network_ids: Vec<String>,
     pub last_seen: f64,
@@ -1121,6 +1124,7 @@ impl Host {
             name_override: None,
             icon_override: None,
             addresses: vec![],
+            primary_ip: None,
             macs: vec![],
             network_ids: vec![],
             last_seen: 0.0,

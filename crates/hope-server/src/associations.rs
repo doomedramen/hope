@@ -22,7 +22,7 @@ pub fn candidates(
         .interfaces
         .iter()
         .flat_map(|interface| &interface.addresses)
-        .filter_map(|address| address.parse::<std::net::IpAddr>().ok())
+        .filter_map(|address| crate::addresses::usable_ip(address))
         .collect();
     let child_macs: HashSet<_> = child
         .interfaces
@@ -74,7 +74,7 @@ pub fn candidates(
             .filter(|host| {
                 host.addresses
                     .iter()
-                    .any(|known| known.parse::<std::net::IpAddr>().ok().as_ref() == Some(ip))
+                    .any(|known| crate::addresses::usable_ip(known).as_ref() == Some(ip))
             })
             .count()
     };
@@ -95,7 +95,7 @@ pub fn candidates(
             .filter(|ip| {
                 host.addresses
                     .iter()
-                    .any(|known| known.parse::<std::net::IpAddr>().ok().as_ref() == Some(ip))
+                    .any(|known| crate::addresses::usable_ip(known).as_ref() == Some(ip))
             })
             .collect();
         let hostname_match = child
@@ -108,7 +108,7 @@ pub fn candidates(
         let host_networks: HashSet<_> = host
             .addresses
             .iter()
-            .filter_map(|address| address.parse::<std::net::IpAddr>().ok())
+            .filter_map(|address| crate::addresses::usable_ip(address))
             .filter_map(|ip| {
                 networks
                     .iter()

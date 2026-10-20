@@ -56,6 +56,48 @@ async fn setup_with_ca(
         .to_string();
     (dir, state, app, cookie)
 }
+
+#[tokio::test]
+async fn host_primary_ip_requires_a_usable_address_in_any_configured_cidr() {
+    let (_dir, state, _app, _) = setup().await;
+    for (id, cidr) in [("office", "192.168.40.0/24"), ("lab", "10.20.0.0/16")] {
+        sqlx::query(
+            "INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES(?,?,?,?,?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(cidr)
+        .bind(true)
+        .bind(5_i64)
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    }
+
+    let mut host = Host::new("host-managed".into(), "managed host".into(), "agent");
+    host.addresses = vec![
+        "127.0.0.1".into(),
+        "169.254.20.1".into(),
+        "192.168.41.7".into(),
+        "10.20.3.8".into(),
+        "192.168.40.9".into(),
+    ];
+    state.save_host(&host).await.unwrap();
+    let projected = state.host("host-managed").await.unwrap().unwrap();
+    assert_eq!(projected.primary_ip.as_deref(), Some("10.20.3.8"));
+    assert_eq!(projected.addresses, host.addresses);
+
+    let mut unmanaged = Host::new("host-unmanaged".into(), "unmanaged host".into(), "agent");
+    unmanaged.addresses = vec![
+        "127.0.0.1".into(),
+        "169.254.20.1".into(),
+        "192.168.41.7".into(),
+    ];
+    state.save_host(&unmanaged).await.unwrap();
+    let projected = state.host("host-unmanaged").await.unwrap().unwrap();
+    assert_eq!(projected.primary_ip, None);
+    assert_eq!(projected.addresses, unmanaged.addresses);
+}
 async fn request(
     app: &Router,
     method: &str,
@@ -1599,6 +1641,15 @@ async fn unique_interface_matches_auto_link_without_changing_discovered_host_id(
 async fn proxmox_configured_nic_mac_links_guest_to_unique_scanned_host() {
     let (_dir, state, app, cookie) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES(?,?,?,?,?)")
+        .bind("managed-network")
+        .bind("Managed network")
+        .bind("192.168.1.0/24")
+        .bind(true)
+        .bind(5_i64)
+        .execute(&state.0.db)
+        .await
+        .unwrap();
     let mut scanned = Host::new("scanned-lxc".into(), "sabnzbd".into(), "arp");
     scanned.addresses = vec!["192.168.1.41".into()];
     scanned.macs = vec!["02:00:00:00:00:41".into()];
@@ -1655,6 +1706,7 @@ async fn proxmox_configured_nic_mac_links_guest_to_unique_scanned_host() {
         combined.associations[0].status,
         AssociationStatus::Confirmed
     );
+    assert_eq!(combined.primary_ip.as_deref(), Some("192.168.1.41"));
 
     let (status, old_url) = request(
         &app,
@@ -1667,6 +1719,7 @@ async fn proxmox_configured_nic_mac_links_guest_to_unique_scanned_host() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(old_url["id"], "scanned-lxc");
     assert_eq!(old_url["source_device_id"], source_id);
+    assert_eq!(old_url["primary_ip"], "192.168.1.41");
     let (status, history) = request(
         &app,
         "GET",
@@ -2139,6 +2192,33 @@ async fn revoked_identity_requires_bound_token_and_new_secret_for_recovery() {
     let (_dir, state, app, cookie) = setup().await;
     let (agent, old, old_token) = enrolled(&state, &app).await;
     let host_id = state.hosts().await.expect("hosts")[0].id.clone();
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES(?,?,?,?,?)")
+        .bind("managed-network")
+        .bind("Managed network")
+        .bind("192.168.1.0/24")
+        .bind(true)
+        .bind(5_i64)
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    let mut host = state.host(&host_id).await.unwrap().unwrap();
+    host.addresses = vec![
+        "127.0.0.1".into(),
+        "169.254.1.2".into(),
+        "203.0.113.7".into(),
+        "192.168.1.10".into(),
+    ];
+    state.save_host(&host).await.unwrap();
+    assert_eq!(
+        state
+            .host(&host_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .primary_ip
+            .as_deref(),
+        Some("192.168.1.10")
+    );
     request(
         &app,
         "POST",
@@ -2147,6 +2227,9 @@ async fn revoked_identity_requires_bound_token_and_new_secret_for_recovery() {
         Some(("cookie", &cookie)),
     )
     .await;
+    let revoked = state.host(&host_id).await.unwrap().unwrap();
+    assert!(revoked.agent_revoked);
+    assert_eq!(revoked.primary_ip.as_deref(), Some("192.168.1.10"));
     let mut body = EnrollmentRequest {
         schema_version: SCHEMA_VERSION,
         token: old_token,
@@ -2187,6 +2270,7 @@ async fn revoked_identity_requires_bound_token_and_new_secret_for_recovery() {
     assert_eq!(hosts.len(), 1);
     assert_eq!(hosts[0].id, host_id);
     assert!(!hosts[0].agent_revoked);
+    assert_eq!(hosts[0].primary_ip.as_deref(), Some("192.168.1.10"));
     let report = AgentReport {
         schema_version: SCHEMA_VERSION,
         report_id: Uuid::new_v4().to_string(),

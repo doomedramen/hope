@@ -59,6 +59,7 @@ function host(overrides: Partial<Host>): Host {
     update_requested_at: null,
     update_target: null,
     name: "host",
+    primary_ip: null,
     addresses: ["192.168.1.2"],
     macs: [],
     network_ids: [],

@@ -339,6 +339,9 @@ impl State {
                 hosts.push(source);
             }
         }
+        for host in &mut hosts {
+            host.primary_ip = crate::addresses::primary_ip(&host.addresses, &networks);
+        }
         hosts.sort_by_key(|host| host.name.to_lowercase());
         Ok(hosts)
     }
@@ -350,9 +353,12 @@ impl State {
             .fetch_optional(&self.0.db)
             .await?;
         if let Some(body) = value {
-            return serde_json::from_str(&body)
-                .context("invalid stored host")
-                .map(Some);
+            let mut host: Host = serde_json::from_str(&body).context("invalid stored host")?;
+            let networks = crate::api::networks(self)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.1))?;
+            host.primary_ip = crate::addresses::primary_ip(&host.addresses, &networks);
+            return Ok(Some(host));
         }
         let row = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE d.id=?")
             .bind(&id).fetch_optional(&self.0.db).await?;
@@ -370,6 +376,7 @@ impl State {
             .await
             .map_err(|error| anyhow::anyhow!(error.1))?;
         source.network_ids = source_networks(&networks, &source.addresses);
+        source.primary_ip = crate::addresses::primary_ip(&source.addresses, &networks);
         source.associations = self.source_associations(&source.source_device_id).await?;
         Ok(Some(source))
     }
@@ -455,6 +462,7 @@ fn source_device_host(row: &sqlx::sqlite::SqliteRow) -> Result<Host> {
         .iter()
         .flat_map(|interface| interface.addresses.iter().cloned())
         .collect();
+    host.primary_ip = None;
     host.macs = child
         .interfaces
         .iter()

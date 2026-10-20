@@ -420,6 +420,7 @@ pub async fn merge(
         }
     }
     target.network_ids = matching_networks(&state, &target.addresses).await?;
+    target.primary_ip = crate::addresses::primary_ip(&target.addresses, &networks(&state).await?);
     let mut map: MapState = state
         .meta("map")
         .await?

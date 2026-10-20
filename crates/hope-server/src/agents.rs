@@ -169,10 +169,7 @@ pub fn inventory_addresses(inv: &Inventory) -> Vec<String> {
         .interfaces
         .iter()
         .flat_map(|i| i.addresses.clone())
-        .filter(|s| {
-            s.parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| !ip.is_loopback() && !ip.is_unspecified())
-        })
+        .filter(|address| crate::addresses::usable_ip(address).is_some())
         .collect();
     addresses.sort();
     addresses.dedup();
@@ -1285,6 +1282,7 @@ pub async fn complete_uninstall(
 /// credential replacement, while the host returns to the discovered-device fleet.
 pub async fn complete_uninstall_by_id(state: &State, id: &str) -> ApiResult<()> {
     let _guard = state.0.writes.lock().await;
+    let networks = crate::api::networks(state).await?;
     let mut tx = state.0.db.begin().await?;
     let updated = sqlx::query("UPDATE agents SET revoked=1 WHERE id=?")
         .bind(id)
@@ -1308,11 +1306,8 @@ pub async fn complete_uninstall_by_id(state: &State, id: &str) -> ApiResult<()> 
     host.update_target = None;
     host.last_seen = 0.0;
     host.discovery_method = "tcp".into();
-    host.name = host
-        .addresses
-        .first()
-        .cloned()
-        .unwrap_or_else(|| host.id.clone());
+    host.primary_ip = crate::addresses::primary_ip(&host.addresses, &networks);
+    host.name = host.primary_ip.clone().unwrap_or_else(|| host.id.clone());
     crate::classify::refresh(&mut host, &state.gateway_set());
     sqlx::query("UPDATE hosts SET name=?,body=? WHERE agent_id=?")
         .bind(&host.name)
@@ -1350,6 +1345,34 @@ pub async fn revoke_by_id(state: &State, id: &str) -> ApiResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_addresses_exclude_loopback_unspecified_and_link_local() {
+        let inventory = Inventory {
+            hostname: "host".into(),
+            os: "Linux".into(),
+            architecture: "x86_64".into(),
+            cpu_model: "CPU".into(),
+            cpu_cores: 1,
+            memory_total_bytes: 1.0,
+            interfaces: vec![hope_protocol::Interface {
+                name: "eth0".into(),
+                mac: None,
+                addresses: vec![
+                    "127.0.0.1".into(),
+                    "0.0.0.0".into(),
+                    "169.254.0.1".into(),
+                    "fe80::1".into(),
+                    "203.0.113.9".into(),
+                ],
+                gateway: None,
+            }],
+            disks: vec![],
+            gpus: vec![],
+            collectors: vec![],
+        };
+        assert_eq!(inventory_addresses(&inventory), vec!["203.0.113.9"]);
+    }
 
     fn host_at(version: &str, requested: Option<f64>) -> Host {
         let mut host = Host::new("h".into(), "h".into(), "icmp");

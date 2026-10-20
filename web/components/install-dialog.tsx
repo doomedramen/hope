@@ -334,9 +334,7 @@ export function SshInstall({
   host: Host;
   uninstall?: boolean;
 }) {
-  const [address, setAddress] = useState(
-    host.addresses.find((a) => !a.includes(":")) ?? host.addresses[0] ?? "",
-  );
+  const [address, setAddress] = useState(host.primary_ip ?? "");
   const [port, setPort] = useState("22");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -494,7 +492,7 @@ export function SshInstall({
                 }}
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue />
+                  <SelectValue placeholder="Choose an address" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
