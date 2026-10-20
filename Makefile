@@ -35,7 +35,7 @@ linux-checks:
 	docker build --platform linux/amd64 --target checks -t hope:checks .
 linux-load-checks:
 	docker build --platform linux/amd64 --target load-checks -t hope:load-checks .
-	docker run --rm --entrypoint cat hope:load-checks /build/dist/retention-benchmark.json
+	docker run --rm --platform linux/amd64 --entrypoint cat hope:load-checks /build/dist/retention-benchmark.json
 protocol-check:
 	./scripts/generate-types.sh --check
 browser-checks:
