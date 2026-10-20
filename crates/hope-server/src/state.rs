@@ -460,6 +460,19 @@ fn source_device_host(row: &sqlx::sqlite::SqliteRow) -> Result<Host> {
         .iter()
         .filter_map(|interface| interface.mac.clone())
         .collect();
+    for mac in child
+        .network_configuration
+        .iter()
+        .filter_map(|network| network.mac.clone())
+    {
+        if !host
+            .macs
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&mac))
+        {
+            host.macs.push(mac);
+        }
+    }
     host.network_ids.clear();
     host.parent_id = row.try_get("to_device_id").ok().flatten();
     host.relationships = host

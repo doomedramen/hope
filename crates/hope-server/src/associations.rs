@@ -28,6 +28,12 @@ pub fn candidates(
         .interfaces
         .iter()
         .filter_map(|interface| interface.mac.as_deref())
+        .chain(
+            child
+                .network_configuration
+                .iter()
+                .filter_map(|network| network.mac.as_deref()),
+        )
         .map(str::to_ascii_lowercase)
         .collect();
     if child_ips.is_empty() && child_macs.is_empty() {
@@ -114,8 +120,12 @@ pub fn candidates(
             .any(|network| host_networks.contains(network));
         let unique_mac = shared_macs.iter().any(|mac| mac_owners(mac) == 1);
         let unique_ip = shared_ips.iter().any(|ip| ip_owners(ip) == 1);
+        // Proxmox can report a configured guest NIC MAC without an in-guest address or
+        // interface. A unique MAC then identifies the scanned host directly; when guest IPs
+        // do provide managed-network context, still require that context to agree.
+        let network_matches = child_networks.is_empty() || compatible_network;
         let strong = !shared_macs.is_empty()
-            && compatible_network
+            && network_matches
             && unique_mac
             && (shared_ips.is_empty() || unique_ip)
             && host.last_seen >= recent_after;
@@ -173,7 +183,9 @@ pub fn candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hope_protocol::{ChildDeviceKind, DeviceLifecycle, Interface, SourceIdentity};
+    use hope_protocol::{
+        ChildDeviceKind, DeviceLifecycle, GuestNetworkConfiguration, Interface, SourceIdentity,
+    };
 
     fn child() -> ChildDeviceReport {
         ChildDeviceReport {
@@ -274,5 +286,36 @@ mod tests {
         );
         assert_eq!(found.len(), 1);
         assert!(found[0].strong);
+    }
+
+    #[test]
+    fn configured_guest_mac_without_guest_ip_can_match_uniquely_but_not_ambiguously() {
+        let mut configured = child();
+        configured.interfaces.clear();
+        configured.network_configuration = vec![GuestNetworkConfiguration {
+            name: "net0".into(),
+            bridge: Some("vmbr0".into()),
+            vlan_tag: None,
+            model: Some("virtio".into()),
+            mac: Some("02:00:00:00:00:01".into()),
+        }];
+        let unique = candidates(
+            &configured,
+            &[host("scan", "192.168.1.10", "02:00:00:00:00:01")],
+            &[],
+        );
+        assert_eq!(unique.len(), 1);
+        assert!(unique[0].strong);
+
+        let ambiguous = candidates(
+            &configured,
+            &[
+                host("scan-a", "192.168.1.10", "02:00:00:00:00:01"),
+                host("scan-b", "192.168.1.11", "02:00:00:00:00:01"),
+            ],
+            &[],
+        );
+        assert_eq!(ambiguous.len(), 2);
+        assert!(ambiguous.iter().all(|candidate| !candidate.strong));
     }
 }

@@ -1596,6 +1596,91 @@ async fn unique_interface_matches_auto_link_without_changing_discovered_host_id(
 }
 
 #[tokio::test]
+async fn proxmox_configured_nic_mac_links_guest_to_unique_scanned_host() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let mut scanned = Host::new("scanned-lxc".into(), "sabnzbd".into(), "arp");
+    scanned.addresses = vec!["192.168.1.41".into()];
+    scanned.macs = vec!["02:00:00:00:00:41".into()];
+    scanned.last_seen = now();
+    state.save_host(&scanned).await.unwrap();
+
+    let mut guest = child_device();
+    guest.identity.kind = ChildDeviceKind::ProxmoxLxc;
+    guest.identity.key = "241".into();
+    guest.identity.incarnation = "lxc-241-incarnation".into();
+    guest.name = "sabnzbd".into();
+    guest.interfaces.clear();
+    guest.network_configuration = vec![GuestNetworkConfiguration {
+        name: "net0".into(),
+        bridge: Some("vmbr0".into()),
+        vlan_tag: None,
+        model: Some("virtio".into()),
+        mac: Some("02:00:00:00:00:41".into()),
+    }];
+    let mut batch = child_batch(&agent, 1, 1, true, now(), vec![guest]);
+    batch.source = ChildSourceKind::Proxmox;
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(batch),
+        Some(("authorization", &format!("Bearer {credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let source_id: String =
+        sqlx::query_scalar("SELECT id FROM source_devices WHERE source_key='241'")
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    let hosts = state.hosts().await.unwrap();
+    assert_eq!(
+        hosts.len(),
+        2,
+        "the source guest should project into its scan host"
+    );
+    let combined = hosts.iter().find(|host| host.id == "scanned-lxc").unwrap();
+    assert_eq!(
+        combined.source_device_id.as_deref(),
+        Some(source_id.as_str())
+    );
+    assert_eq!(
+        combined.child.as_ref().unwrap().identity.kind,
+        ChildDeviceKind::ProxmoxLxc
+    );
+    assert!(combined.macs.iter().any(|mac| mac == "02:00:00:00:00:41"));
+    assert_eq!(
+        combined.associations[0].status,
+        AssociationStatus::Confirmed
+    );
+
+    let (status, old_url) = request(
+        &app,
+        "GET",
+        &format!("/api/v1/hosts/{source_id}"),
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(old_url["id"], "scanned-lxc");
+    assert_eq!(old_url["source_device_id"], source_id);
+    let (status, history) = request(
+        &app,
+        "GET",
+        "/api/v1/hosts/scanned-lxc/source-metrics?hours=168",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(history.as_array().unwrap().len(), 1);
+    assert_eq!(history[0]["source_device_id"], source_id);
+}
+
+#[tokio::test]
 async fn linked_scan_presence_prevents_source_archival_until_the_scan_goes_stale() {
     let (_dir, state, app, _) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;
