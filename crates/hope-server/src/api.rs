@@ -511,6 +511,21 @@ pub struct ReconcileResponse {
     pub merged: Vec<ReconcileResult>,
 }
 
+fn reported_macs(child: &hope_protocol::ChildDeviceReport) -> HashSet<String> {
+    child
+        .interfaces
+        .iter()
+        .filter_map(|interface| interface.mac.as_deref())
+        .chain(
+            child
+                .network_configuration
+                .iter()
+                .filter_map(|network| network.mac.as_deref()),
+        )
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 pub async fn duplicate_groups(Extract(state): Extract<State>) -> ApiResult<Json<DuplicateGroups>> {
     let rows = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.name,d.observed_at,d.body,(SELECT COUNT(*) FROM source_observations o WHERE o.source_device_id=d.id) AS source_count FROM source_devices d WHERE d.lifecycle!='archived' AND NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) AND (NOT EXISTS(SELECT 1 FROM shared_source_scopes s WHERE s.source=d.source AND s.source_scope=d.source_scope) OR EXISTS(SELECT 1 FROM shared_source_members m WHERE m.source=d.source AND m.source_scope=d.source_scope AND m.agent_id=d.parent_agent_id)) ORDER BY d.ownership_generation DESC,d.observed_at DESC LIMIT 1000")
         .fetch_all(&state.0.db).await?;
@@ -583,7 +598,7 @@ pub async fn duplicate_groups(Extract(state): Extract<State>) -> ApiResult<Json<
         });
     }
     // Legacy per-node scopes have no cluster proof. Surface only same-kind/key records with a
-    // matching interface MAC, and require an explicit human decision in the UI.
+    // matching guest-interface or configured NIC MAC, and require an explicit human decision.
     let mut by_mac = HashMap::<(String, String, String, String), Vec<usize>>::new();
     for (index, (_, source, scope, key, _, child)) in members.iter().enumerate() {
         if used.contains(&members[index].0.id)
@@ -592,12 +607,7 @@ pub async fn duplicate_groups(Extract(state): Extract<State>) -> ApiResult<Json<
             continue;
         }
         let kind = format!("{:?}", child.identity.kind);
-        for mac in child
-            .interfaces
-            .iter()
-            .filter_map(|i| i.mac.as_deref())
-            .map(str::to_ascii_lowercase)
-        {
+        for mac in reported_macs(child) {
             by_mac
                 .entry((source.clone(), kind.clone(), key.clone(), mac))
                 .or_default()

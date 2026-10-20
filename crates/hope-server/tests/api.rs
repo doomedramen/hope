@@ -955,6 +955,64 @@ async fn equal_vmids_in_different_authorized_clusters_remain_separate() {
 }
 
 #[tokio::test]
+async fn duplicate_review_uses_configured_guest_nic_macs_when_interface_macs_are_absent() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (first, _, _) = enrolled(&state, &app).await;
+    let (second, _, _) = enrolled(&state, &app).await;
+    for (id, agent, scope) in [
+        ("legacy-config-a", &first, "node-a-local"),
+        ("legacy-config-b", &second, "node-b-local"),
+    ] {
+        let mut child = child_device();
+        child.identity.kind = ChildDeviceKind::ProxmoxLxc;
+        child.identity.scope = scope.into();
+        child.identity.key = "241".into();
+        child.identity.incarnation = format!("{scope}-incarnation");
+        child.name = "dns1".into();
+        child.interfaces.clear();
+        child.network_configuration = ["eth0", "eth1"]
+            .into_iter()
+            .map(|name| GuestNetworkConfiguration {
+                name: name.into(),
+                bridge: Some("vmbr0".into()),
+                vlan_tag: None,
+                model: Some("veth".into()),
+                mac: Some("02:00:00:00:00:41".into()),
+            })
+            .collect();
+        sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,body) VALUES(?,?, 'proxmox',?,?,?,'proxmox_lxc','running','dns1',?,1,?)")
+            .bind(id)
+            .bind(agent)
+            .bind(scope)
+            .bind("241")
+            .bind(&child.identity.incarnation)
+            .bind(now())
+            .bind(serde_json::to_string(&child).unwrap())
+            .execute(&state.0.db)
+            .await
+            .unwrap();
+    }
+
+    let (status, groups) = request(
+        &app,
+        "GET",
+        "/api/v1/devices/duplicate-groups",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(groups["groups"].as_array().unwrap().len(), 1);
+    let group = &groups["groups"][0];
+    assert_eq!(group["review_only"], true);
+    assert_eq!(group["candidates"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        group["evidence"][0]["value"],
+        "proxmox / ProxmoxLxc / 241 / 02:00:00:00:00:41"
+    );
+}
+
+#[tokio::test]
 async fn joined_cluster_members_auto_reconcile_legacy_exact_rows_and_keep_history_aliases() {
     let (_dir, state, app, cookie) = setup().await;
     let (first, first_credential, _) = enrolled(&state, &app).await;
