@@ -648,11 +648,11 @@ pub async fn reconcile_duplicate_groups(
         }
         let mut merged_ids = Vec::new();
         for duplicate in group.duplicate_ids {
-            if !sqlx::query("SELECT 1 FROM source_devices WHERE id=?")
+            if sqlx::query("SELECT 1 FROM source_devices WHERE id=?")
                 .bind(&duplicate)
                 .fetch_optional(&mut *tx)
                 .await?
-                .is_some()
+                .is_none()
             {
                 return Err(ApiError::not_found());
             }
