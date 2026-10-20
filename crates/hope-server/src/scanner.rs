@@ -129,14 +129,13 @@ impl Scheduler {
             let mut tick = tokio::time::interval(Duration::from_millis(5));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let gentle_live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let mut gentle_next = Instant::now();
+            let gentle_pacer = Arc::new(Mutex::new(Instant::now()));
             loop {
                 tokio::select! {
                     batch = receiver.recv() => match batch { Some(batch) => queue.push_back(batch), None => break },
                     Some(()) = work.next(), if !work.is_empty() => {},
                     _ = tick.tick(), if !queue.is_empty() && work.len() < 64 => {
-                        let gentle_ready = gentle_live.load(std::sync::atomic::Ordering::SeqCst) < GENTLE_PARALLEL
-                            && Instant::now() >= gentle_next;
+                        let gentle_ready = gentle_live.load(std::sync::atomic::Ordering::SeqCst) < GENTLE_PARALLEL;
                         // Round-robin across batches; a paced batch waits its turn without blocking others.
                         for _ in 0..queue.len() {
                             let Some(mut batch) = queue.pop_front() else { break };
@@ -146,9 +145,9 @@ impl Scheduler {
                                 let gentle = batch.gentle.then(|| gentle_live.clone());
                                 if let Some(live) = &gentle {
                                     live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                    gentle_next = Instant::now() + GENTLE_SPACING;
                                 }
-                                let probe = run_probe(batch.state.clone(), batch.job.clone(), ip, batch.cancel.clone(), backend.clone());
+                                let pacer = batch.gentle.then(|| gentle_pacer.clone());
+                                let probe = run_probe(batch.state.clone(), batch.job.clone(), ip, batch.cancel.clone(), backend.clone(), pacer);
                                 work.push(async move {
                                     probe.await;
                                     if let Some(live) = gentle { live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
@@ -373,8 +372,17 @@ async fn run_probe(
     ip: Ipv4Addr,
     cancel: CancellationToken,
     backend: Arc<dyn Probe>,
+    gentle_pacer: Option<Arc<Mutex<Instant>>>,
 ) {
     let _task = state.track();
+    if let Some(pacer) = gentle_pacer {
+        let mut next = pacer.lock().await;
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep_until(*next) => {}
+        }
+        *next = Instant::now() + GENTLE_SPACING;
+    }
     let observation = tokio::select! {
         _ = cancel.cancelled() => return,
         result = timeout(Duration::from_secs(6), backend.probe(ip)) => result.unwrap_or_default(),
@@ -657,13 +665,13 @@ mod tests {
     struct PacedProbe {
         live: Arc<std::sync::atomic::AtomicUsize>,
         peak: Arc<std::sync::atomic::AtomicUsize>,
-        starts: Arc<Mutex<Vec<Instant>>>,
+        starts: Arc<std::sync::Mutex<Vec<Instant>>>,
     }
     impl Probe for PacedProbe {
         fn probe(&self, _: Ipv4Addr) -> BoxFuture<'_, Observation> {
             Box::pin(async move {
                 use std::sync::atomic::Ordering;
-                self.starts.lock().await.push(Instant::now());
+                self.starts.lock().expect("start lock").push(Instant::now());
                 let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
                 self.peak.fetch_max(now, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(300)).await;
@@ -675,7 +683,7 @@ mod tests {
     #[tokio::test]
     async fn scheduled_scans_are_paced_and_manual_scans_are_not() {
         let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let starts = Arc::new(Mutex::new(vec![]));
+        let starts = Arc::new(std::sync::Mutex::new(vec![]));
         let directory = tempfile::tempdir().expect("temporary");
         let scheduler = Scheduler::with_backend(
             Arc::new(PacedProbe {
@@ -714,12 +722,14 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(900)).await;
         let gentle_peak = peak.load(std::sync::atomic::Ordering::SeqCst);
         assert!(gentle_peak <= GENTLE_PARALLEL, "peak {gentle_peak}");
-        let times = starts.lock().await.clone();
+        let mut times = starts.lock().expect("start lock").clone();
         assert!(times.len() >= 2);
+        times.sort_unstable();
         assert!(
             times
                 .windows(2)
-                .all(|w| w[1].duration_since(w[0]) >= GENTLE_SPACING - Duration::from_millis(10))
+                .all(|w| w[1].duration_since(w[0]) >= GENTLE_SPACING - Duration::from_millis(10)),
+            "probe starts were not paced: {times:?}"
         );
         // A manual scan of another range is not held to the pace.
         peak.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -761,7 +771,7 @@ mod tests {
         let limiter = Arc::new(ProbeLimiter::new());
         let live = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
-        let times = Arc::new(Mutex::new(vec![]));
+        let times = Arc::new(std::sync::Mutex::new(vec![]));
         let mut work = FuturesUnordered::new();
         for _ in 0..100 {
             let limiter = limiter.clone();
@@ -770,7 +780,7 @@ mod tests {
             let times = times.clone();
             work.push(async move {
                 let _permit = limiter.acquire().await.expect("permit");
-                times.lock().await.push(Instant::now());
+                times.lock().expect("start lock").push(Instant::now());
                 let count = live.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(count, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(400)).await;
@@ -779,11 +789,14 @@ mod tests {
         }
         while work.next().await.is_some() {}
         assert!(peak.load(Ordering::SeqCst) <= 64);
-        let times = times.lock().await;
+        let mut times = times.lock().expect("start lock");
+        times.sort_unstable();
+        assert_eq!(times.len(), 100);
+        let elapsed = times.last().unwrap().duration_since(times[0]);
+        let minimum = Duration::from_millis((times.len() as u64 - 1) * 5);
         assert!(
-            times
-                .windows(2)
-                .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_millis(5))
+            elapsed + Duration::from_millis(10) >= minimum,
+            "100 probes started in {elapsed:?}; expected at least {minimum:?}"
         );
     }
     #[tokio::test]

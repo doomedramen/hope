@@ -1388,23 +1388,32 @@ mod tests {
     #[tokio::test]
     async fn hanging_filesystems_do_not_accumulate_workers() {
         use std::sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         };
         let count = Arc::new(AtomicUsize::new(0));
         let called = count.clone();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let wait = Mutex::new(wait);
+        let (started, worker_started) = std::sync::mpsc::channel();
         let mut probe = DiskProbe {
             receiver: None,
             collect: Arc::new(move || {
                 called.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(100));
+                let _ = started.send(());
+                let _ = wait.lock().expect("release lock").recv();
                 vec![]
             }),
         };
-        for _ in 0..5 {
+        assert!(probe.sample(Duration::from_millis(2)).await.is_none());
+        worker_started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("filesystem worker started");
+        for _ in 1..5 {
             assert!(probe.sample(Duration::from_millis(2)).await.is_none());
         }
         assert_eq!(count.load(Ordering::SeqCst), 1);
+        drop(release);
         assert!(probe.sample(Duration::from_secs(1)).await.is_some());
     }
     #[tokio::test]

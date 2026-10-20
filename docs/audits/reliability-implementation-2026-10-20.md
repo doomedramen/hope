@@ -27,22 +27,28 @@ The storage migration cannot infer the provenance of addresses already unioned b
 
 Notification delivery is at least once, so crash recovery can duplicate an accepted message. The queue is bounded at 4,096 entries. Full queues postpone condition changes; new-device announcements at capacity are omitted with a warning. These limits and cancellation semantics are documented in [operations](../operations.md#notifications).
 
+Follow-up reliability work after the baseline findings:
+
+- Linux ARP discovery now reconciles interface changes in the background, reopens sockets after reader or send failures, and exposes current socket availability through API capabilities. A unit test verifies that unchanged interfaces retain their sockets. Physical interface replacement and raw-socket recovery still need validation on a native Linux x86_64 host.
+- Scheduled scans pace probe starts at the backend boundary, so executor delays cannot bunch probes after they have been dispatched. The scanner test checks aggregate start spacing while allowing bounded parallel probes.
+- The filesystem worker-cap test now gates its worker with channels instead of relying on a short sleep. The one-off reporting race test holds its HTTP response until a second sample finishes, rather than relying on a fixed delay; other reporting deadlines allow for loaded CI and emulated builds.
+
 ## Validation
 
-- Rust workspace: 274 passed, one intentionally ignored retention load test, including the storage-boundary compile-fail doctest.
-- Strict workspace Clippy and Rust formatting pass.
+- Linux x86_64 container checks: 275 passed, one intentionally ignored retention load test, including the Linux ARP reconciliation test and storage-boundary compile-fail doctest; strict workspace Clippy and Rust formatting pass.
+- Native workspace tests: 274 passed and one intentionally ignored retention load test, including the storage-boundary compile-fail doctest. The Linux-only ARP test runs in the Linux container suite.
 - Web production build, TypeScript and ESLint pass.
 - Chromium/Playwright: 64 passed, including transport/recovery tests, measurement freshness checks and real-server live/source/clock history tests.
 - Release assembly harness: 20 passed.
 - Installer harness: 165 run; 152 passed and 13 out-of-scope macOS agent fixtures skipped. The host fixtures now stub the operating system explicitly and run on this macOS development host; 16 activation tests use real SQLite and filesystem operations with only systemd/HTTP stubbed.
 - Shell syntax, ShellCheck, generated protocol drift and eight documentation tests pass.
 
-The Rust, installer, release, shell, protocol and documentation checks were rerun for server activation and immutable downloads. Rust, browser, web build/type/lint, shell, protocol and documentation checks were rerun for report ordering. The Linux x86_64 gate built its target and server images under emulation, assembled signed releases, and brought up the server behind Caddy; the private-CA HTTPS setup request succeeded. The install and SSH matrix could not start because the Debian target on this Docker Desktop ARM64 host remains systemd-degraded and cannot start `sshd`. The native updater fixture also refuses this ARM64 host. Native Linux x86_64 service-manager, raw-socket and pmxcfs behavior, actual GitHub publication, populated load and multi-day soak remain unverified.
+The Rust, installer, release, shell, protocol and documentation checks were rerun for server activation and immutable downloads. Rust, browser, web build/type/lint, shell, protocol and documentation checks were rerun for report ordering. The Linux x86_64 gate built its target and server images under emulation, assembled signed releases, and brought up the server behind Caddy; the private-CA HTTPS setup request succeeded. The install and SSH matrix could not start because the Debian target on this Docker Desktop ARM64 host remains systemd-degraded and cannot start `sshd`. The native updater fixture also refuses this ARM64 host. Native Linux x86_64 service-manager, raw-socket/interface recovery and pmxcfs behavior, actual GitHub publication, populated load and multi-day soak remain unverified.
 
 ## Remaining blockers before recommendation
 
 1. **Linux x86_64 acceptance.** Exercise actual packaged artifacts through fresh installation, upgrade, failed activation/restore, restart, interface replacement/raw-socket recovery, notification outage, database/disk pressure, guest churn and browser reconnection. Measure realistic inventory/history load and run a multi-day soak. The locally passing suites do not establish these release gates.
 
-Additional follow-ups from the baseline review remain: discovery interface recovery, deliberate device retirement and agent-cap handling, monitoring-system health/readiness, queue/retention lag visibility and realistic populated-load measurements. These are not claimed as completed.
+Additional follow-ups from the baseline review remain: deliberate device retirement and agent-cap handling, monitoring-system health/readiness, queue/retention lag visibility and realistic populated-load measurements. Discovery interface recovery is implemented, but its behavior on actual Linux x86_64 network changes remains unverified as noted above.
 
 The project is materially more reliable, but the unverified Linux acceptance gates still prevent a recommendation for unattended use.

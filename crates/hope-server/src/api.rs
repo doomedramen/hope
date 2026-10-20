@@ -71,6 +71,13 @@ pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstr
         capabilities: {
             let mut capabilities = state.0.capabilities.clone();
             capabilities.arp = capabilities.arp && state.0.scheduler.arp.available();
+            const ARP_LIMITATION: &str = "Active ARP is unavailable: the server could not open a raw packet socket on any network interface, which needs the CAP_NET_RAW capability. Devices are still found by ping and TCP, but MAC addresses, manufacturers and most device types are missing. The server log says why for each interface (journalctl -u hope | grep ARP).";
+            capabilities
+                .limitations
+                .retain(|limitation| limitation != ARP_LIMITATION);
+            if state.0.capabilities.arp && !capabilities.arp {
+                capabilities.limitations.push(ARP_LIMITATION.into());
+            }
             capabilities
         },
         server_url: state.0.server_url.clone(),

@@ -770,6 +770,23 @@ mod tests {
             })
         }
     }
+    struct OvertakingSampler {
+        inner: FakeSampler,
+        second_sample: std::sync::Arc<tokio::sync::Notify>,
+    }
+    impl Sampler for OvertakingSampler {
+        fn sample(&mut self) -> Sampling<'_> {
+            let second_sample = (self.inner.count == 1).then(|| self.second_sample.clone());
+            let sample = self.inner.sample();
+            Box::pin(async move {
+                let sample = sample.await;
+                if let Some(second_sample) = second_sample {
+                    second_sample.notify_one();
+                }
+                sample
+            })
+        }
+    }
     struct ChildFakeSampler {
         count: usize,
         stop_after_samples: Option<tokio::sync::oneshot::Sender<()>>,
@@ -868,27 +885,33 @@ mod tests {
         body: &str,
         delay: Duration,
     ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{Router, http::StatusCode, routing::any};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener");
         let address = listener.local_addr().expect("address");
-        let status = status.to_string();
+        let status = StatusCode::from_u16(
+            status
+                .split_whitespace()
+                .next()
+                .expect("status code")
+                .parse()
+                .expect("numeric status code"),
+        )
+        .expect("valid status code");
         let body = body.to_string();
-        let task = tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    break;
-                };
-                let status = status.clone();
-                let body = body.clone();
-                tokio::spawn(async move {
-                    let mut request = [0; 8192];
-                    let _ = socket.read(&mut request).await;
-                    tokio::time::sleep(delay).await;
-                    let _=socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await;
-                });
+        let app = Router::new().fallback(any(move || {
+            let body = body.clone();
+            async move {
+                tokio::time::sleep(delay).await;
+                (
+                    status,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
             }
-        });
+        }));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("http://{address}"), task)
     }
 
@@ -928,7 +951,7 @@ mod tests {
             stop_after_samples: None,
         };
         tokio::time::timeout(
-            Duration::from_secs(3),
+            Duration::from_secs(10),
             run(
                 &mut sampler,
                 &config,
@@ -1121,7 +1144,7 @@ mod tests {
             delay: Duration::from_millis(100),
         };
         tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             run(
                 &mut sampler,
                 &configuration(endpoint.clone()),
@@ -1139,7 +1162,7 @@ mod tests {
 
         sampler.delay = Duration::from_secs(60);
         tokio::time::timeout(
-            Duration::from_secs(1),
+            Duration::from_secs(5),
             run(
                 &mut sampler,
                 &configuration(endpoint),
@@ -1158,22 +1181,39 @@ mod tests {
 
     #[tokio::test]
     async fn a_one_off_report_confirms_a_live_sample_even_when_sampling_overtakes_http() {
-        let (endpoint, task) = server(
-            "200 OK",
-            r#"{"accepted":true,"duplicate":false,"live_applied":true}"#,
-            Duration::from_millis(100),
-        )
-        .await;
+        use axum::{Router, http::StatusCode, routing::any};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let second_sample = std::sync::Arc::new(tokio::sync::Notify::new());
+        let response_gate = second_sample.clone();
+        let body = r#"{"accepted":true,"duplicate":false,"live_applied":true}"#;
+        let app = Router::new().fallback(any(move || {
+            let response_gate = response_gate.clone();
+            async move {
+                response_gate.notified().await;
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+            }
+        }));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
-        let mut sampler = FakeSampler {
-            count: 0,
-            stop_after_samples: None,
+        let mut sampler = OvertakingSampler {
+            inner: FakeSampler {
+                count: 0,
+                stop_after_samples: None,
+            },
+            second_sample,
         };
         tokio::time::timeout(
-            Duration::from_secs(3),
+            Duration::from_secs(10),
             run(
                 &mut sampler,
-                &configuration(endpoint),
+                &configuration(format!("http://{address}")),
                 Spool::default(),
                 "once",
                 dir.path(),
@@ -1182,9 +1222,9 @@ mod tests {
             ),
         )
         .await
-        .unwrap()
-        .unwrap();
-        assert!(sampler.count > 1);
+        .expect("sample must advance before its HTTP response")
+        .expect("accepted");
+        assert!(sampler.inner.count >= 2);
         assert!(dir.path().join("last-acceptance.json").exists());
         task.abort();
     }

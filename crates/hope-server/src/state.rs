@@ -144,7 +144,7 @@ impl State {
         path: &str,
         server_url: String,
         release_dir: String,
-        mut capabilities: Capabilities,
+        capabilities: Capabilities,
         scheduler: Option<crate::scanner::Scheduler>,
     ) -> Result<Self> {
         let options = SqliteConnectOptions::new()
@@ -164,13 +164,6 @@ impl State {
         let (events, _) = broadcast::channel(256);
         let scheduler =
             scheduler.unwrap_or_else(|| crate::scanner::Scheduler::native(capabilities.arp));
-        capabilities.arp = capabilities.arp && scheduler.arp.available();
-        if !capabilities.arp && capabilities.limitations.is_empty() {
-            capabilities.limitations.push(
-                "Active ARP is unavailable: the server could not open a raw packet socket on any network interface, which needs the CAP_NET_RAW capability. Devices are still found by ping and TCP, but MAC addresses, manufacturers and most device types are missing. The server log says why for each interface (journalctl -u hope | grep ARP)."
-                    .into(),
-            );
-        }
         let report_interval = sqlx::query_scalar::<_, String>(
             "SELECT value FROM meta WHERE key='report_interval_seconds'",
         )
