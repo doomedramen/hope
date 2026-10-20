@@ -169,6 +169,8 @@ jobs:
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal
           rustup default "$RUST_VERSION"
+      - name: Install Linux musl toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends musl-tools binutils
       - run: tests/gates/run.sh updater
 
   release-build-smoke:
