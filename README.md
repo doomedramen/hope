@@ -54,7 +54,7 @@ The current server and agent release target is Linux x86_64. The table records c
 | --- | --- | --- |
 | Server | Linux x86_64 | Current release target |
 | Agent | Linux x86_64 | Current release target; Debian 13 LXC measurement and systemd installer checks are documented in the fixture matrix |
-| Agent installation | Linux x86_64, systemd, system and user mode, custom CA | Verified on Debian 13; physical hardware and other distributions remain unverified |
+| Agent installation | Linux x86_64, systemd, system and user mode, custom CA | The 2026-10-15 Debian 13 matrix passed for v0.1.1 artifacts; x86_64 ran under emulation, and the current-source rerun remains open |
 
 ## Install in one command
 
@@ -77,12 +77,11 @@ The Proxmox pair (`ct/hope.sh`, `install/hope-install.sh`, `json/hope.json`) fol
 ```sh
 # from a checkout of this repository
 cp .env.example .env              # set HOPE_SERVER_URL to your public https:// origin
-docker compose pull               # ghcr.io/doomedramen/hope-server:latest, built by .github/workflows/docker.yml
-docker compose up -d              # compose.yaml: host networking, NET_RAW only, read-only root
+docker compose up -d --build      # host networking, NET_RAW only, read-only root
 docker compose logs hope | grep 'setup token'
 ```
 
-The image is published for Linux x86_64 on every push to `main` (tags `main`, `sha-<commit>`) and every version tag (`<version>`, `<major>.<minor>`, `latest`), with a signed build-provenance attestation and an SBOM. Before the first version tag use `HOPE_IMAGE=ghcr.io/doomedramen/hope-server:main`; `docker compose up -d --build` builds the image from the checkout instead.
+The Docker workflow is configured to publish Linux x86_64 images on pushes to `main` and version tags, with build-provenance attestations and an SBOM. It has not yet completed a successful GitHub run, so GHCR tags and attestations are not verified. After publication is verified, you can use `docker compose pull`; until then, build from the checkout as shown above.
 
 Put an HTTPS reverse proxy in front of `HOPE_BIND` (default `127.0.0.1:8080`), open the canonical URL, and finish setup with the printed token and a password. Agents and the installer require HTTPS; a private CA is supported ([operations](docs/operations.md#custom-ca-server-agent-and-ssh-destination)). Caddy 2.10.2 has been tested in front of it (see the gate fixture); nginx and Traefik have not.
 

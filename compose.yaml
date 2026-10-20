@@ -1,8 +1,8 @@
 services:
   hope:
     build: .
-    # The published Linux x86_64 image (docker.yml); `docker compose pull` fetches it, `--build` builds
-    # this checkout instead. `latest` exists from the first v* tag; `main` tracks the branch.
+    # docker.yml is configured to publish the Linux x86_64 image; until a successful run is verified,
+    # use `docker compose up --build` to build this checkout rather than relying on a registry tag.
     image: ${HOPE_IMAGE:-ghcr.io/doomedramen/hope-server:latest}
     restart: unless-stopped
     network_mode: host
