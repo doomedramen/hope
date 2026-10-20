@@ -14,7 +14,9 @@ use axum::{
 use futures::StreamExt;
 use hope_protocol::OkResponse;
 use hope_protocol::{Bootstrap, Host, MapState, Network};
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use std::collections::{HashMap, HashSet};
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
@@ -31,6 +33,34 @@ pub async fn networks(state: &State) -> ApiResult<Vec<Network>> {
             interval_minutes: r.get::<i64, _>("interval_minutes") as u32,
         })
         .collect())
+}
+pub async fn get_host(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Host>> {
+    let resolved = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
+    let associated_host: Option<String> =
+        sqlx::query_scalar("SELECT host_id FROM source_devices WHERE id=?")
+            .bind(resolved.source_device_id.as_deref().unwrap_or(&resolved.id))
+            .fetch_optional(&state.0.db)
+            .await?;
+    if let Some(host_id) = associated_host
+        && let Some(host) = state
+            .hosts()
+            .await?
+            .into_iter()
+            .find(|host| host.id == host_id)
+    {
+        return Ok(Json(host));
+    }
+    Ok(Json(
+        state
+            .hosts()
+            .await?
+            .into_iter()
+            .find(|host| host.id == resolved.id)
+            .unwrap_or(resolved),
+    ))
 }
 pub async fn matching_networks(state: &State, addresses: &[String]) -> ApiResult<Vec<String>> {
     Ok(networks(state)
@@ -410,19 +440,399 @@ pub async fn merge(
     });
     map.revision = next_revision(map.revision)?;
     let mut tx = state.0.db.begin().await?;
+    // Keep child inventory, links, and their source-specific history attached to the survivor.
+    move_source_host_references(&mut tx, &source.id, &target.id).await?;
     sqlx::query("UPDATE hosts SET body=? WHERE id=?")
         .bind(serde_json::to_string(&target)?)
         .bind(&target.id)
         .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM hosts WHERE id=?")
-        .bind(source.id)
+        .bind(&source.id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO device_id_aliases(alias_id,survivor_id) VALUES(?,?) ON CONFLICT(alias_id) DO UPDATE SET survivor_id=excluded.survivor_id")
+        .bind(&source.id).bind(&target.id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE device_id_aliases SET survivor_id=? WHERE survivor_id=?")
+        .bind(&target.id)
+        .bind(&source.id)
         .execute(&mut *tx)
         .await?;
     sqlx::query("INSERT INTO meta(key,value) VALUES('map',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(serde_json::to_string(&map)?).execute(&mut *tx).await?;
     tx.commit().await?;
     state.changed();
     Ok(Json(target))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateCandidate {
+    pub id: String,
+    pub name: String,
+    pub primary_ip: Option<String>,
+    pub device_type: Option<String>,
+    pub platform: Option<String>,
+    pub source_count: i64,
+    pub last_seen: f64,
+    pub sources: Vec<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct DuplicateEvidence {
+    pub label: String,
+    pub value: String,
+}
+#[derive(Debug, Serialize)]
+pub struct DuplicateGroup {
+    pub suggested_survivor_id: String,
+    pub review_only: bool,
+    pub candidates: Vec<DuplicateCandidate>,
+    pub evidence: Vec<DuplicateEvidence>,
+}
+#[derive(Debug, Serialize)]
+pub struct DuplicateGroups {
+    pub groups: Vec<DuplicateGroup>,
+}
+#[derive(Debug, Deserialize)]
+pub struct ReconcileDuplicates {
+    pub merges: Vec<ReconcileMerge>,
+}
+#[derive(Debug, Deserialize)]
+pub struct ReconcileMerge {
+    pub survivor_id: String,
+    pub duplicate_ids: Vec<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct ReconcileResult {
+    pub survivor_id: String,
+    pub merged_ids: Vec<String>,
+}
+#[derive(Debug, Serialize)]
+pub struct ReconcileResponse {
+    pub merged: Vec<ReconcileResult>,
+}
+
+pub async fn duplicate_groups(Extract(state): Extract<State>) -> ApiResult<Json<DuplicateGroups>> {
+    let rows = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.name,d.observed_at,d.body,(SELECT COUNT(*) FROM source_observations o WHERE o.source_device_id=d.id) AS source_count FROM source_devices d WHERE d.lifecycle!='archived' AND NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) AND (NOT EXISTS(SELECT 1 FROM shared_source_scopes s WHERE s.source=d.source AND s.source_scope=d.source_scope) OR EXISTS(SELECT 1 FROM shared_source_members m WHERE m.source=d.source AND m.source_scope=d.source_scope AND m.agent_id=d.parent_agent_id)) ORDER BY d.ownership_generation DESC,d.observed_at DESC LIMIT 1000")
+        .fetch_all(&state.0.db).await?;
+    let mut members = Vec::new();
+    for row in rows {
+        let body: String = row.get("body");
+        let child: hope_protocol::ChildDeviceReport = serde_json::from_str(&body)?;
+        members.push((
+            DuplicateCandidate {
+                id: row.get("id"),
+                name: row.get("name"),
+                primary_ip: child
+                    .interfaces
+                    .iter()
+                    .flat_map(|i| &i.addresses)
+                    .next()
+                    .cloned(),
+                device_type: Some(format!("{:?}", child.identity.kind).to_ascii_lowercase()),
+                platform: child.guest_os.as_ref().and_then(|os| os.name.clone()),
+                source_count: row.get("source_count"),
+                last_seen: row.get("observed_at"),
+                sources: vec![row.get("source")],
+            },
+            row.get::<String, _>("source"),
+            row.get::<String, _>("source_scope"),
+            row.get::<String, _>("source_key"),
+            row.get::<String, _>("incarnation"),
+            child,
+        ));
+    }
+    let shared_scopes: HashSet<(String, String)> =
+        sqlx::query("SELECT source,source_scope FROM shared_source_scopes")
+            .fetch_all(&state.0.db)
+            .await?
+            .into_iter()
+            .map(|r| (r.get("source"), r.get("source_scope")))
+            .collect();
+    let mut groups = Vec::new();
+    let mut used = HashSet::new();
+    // Exact identity duplicates under a token-bound scope are proven safe to reconcile.
+    let mut exact = HashMap::<(String, String, String, String), Vec<usize>>::new();
+    for (index, (_, source, scope, key, incarnation, _)) in members.iter().enumerate() {
+        if shared_scopes.contains(&(source.clone(), scope.clone())) {
+            exact
+                .entry((
+                    source.clone(),
+                    scope.clone(),
+                    key.clone(),
+                    incarnation.clone(),
+                ))
+                .or_default()
+                .push(index);
+        }
+    }
+    for ((source, scope, key, incarnation), indices) in exact {
+        if indices.len() < 2 {
+            continue;
+        }
+        let candidates: Vec<_> = indices.iter().map(|&i| members[i].0.clone()).collect();
+        let survivor = candidates[0].id.clone();
+        used.extend(candidates.iter().map(|c| c.id.clone()));
+        groups.push(DuplicateGroup {
+            suggested_survivor_id: survivor,
+            review_only: false,
+            candidates,
+            evidence: vec![DuplicateEvidence {
+                label: "Authorized source identity".into(),
+                value: format!("{source} / {scope} / {key} / {incarnation}"),
+            }],
+        });
+    }
+    // Legacy per-node scopes have no cluster proof. Surface only same-kind/key records with a
+    // matching interface MAC, and require an explicit human decision in the UI.
+    let mut by_mac = HashMap::<(String, String, String, String), Vec<usize>>::new();
+    for (index, (_, source, scope, key, _, child)) in members.iter().enumerate() {
+        if used.contains(&members[index].0.id)
+            || shared_scopes.contains(&(source.clone(), scope.clone()))
+        {
+            continue;
+        }
+        let kind = format!("{:?}", child.identity.kind);
+        for mac in child
+            .interfaces
+            .iter()
+            .filter_map(|i| i.mac.as_deref())
+            .map(str::to_ascii_lowercase)
+        {
+            by_mac
+                .entry((source.clone(), kind.clone(), key.clone(), mac))
+                .or_default()
+                .push(index);
+        }
+    }
+    for ((source, kind, key, mac), indices) in by_mac {
+        let scopes: HashSet<_> = indices.iter().map(|&i| members[i].2.clone()).collect();
+        let times: Vec<f64> = indices.iter().map(|&i| members[i].0.last_seen).collect();
+        let recent_together = times.iter().copied().fold(f64::INFINITY, f64::min) + 7.0 * 86400.0
+            >= times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        if indices.len() < 2 || scopes.len() < 2 || !recent_together {
+            continue;
+        }
+        let candidates: Vec<_> = indices.iter().map(|&i| members[i].0.clone()).collect();
+        let survivor = candidates[0].id.clone();
+        groups.push(DuplicateGroup {
+            suggested_survivor_id: survivor,
+            review_only: true,
+            candidates,
+            evidence: vec![DuplicateEvidence {
+                label: "Shared interface MAC; legacy scope needs review".into(),
+                value: format!("{source} / {kind} / {key} / {mac}"),
+            }],
+        });
+    }
+    groups.truncate(100);
+    Ok(Json(DuplicateGroups { groups }))
+}
+
+pub async fn reconcile_duplicate_groups(
+    Extract(state): Extract<State>,
+    Json(request): Json<ReconcileDuplicates>,
+) -> ApiResult<Json<ReconcileResponse>> {
+    let _guard = state.0.writes.lock().await;
+    let mut tx = state.0.db.begin().await?;
+    let mut merged = Vec::new();
+    for group in request.merges {
+        if group.duplicate_ids.len() > 100 || group.duplicate_ids.contains(&group.survivor_id) {
+            return Err(ApiError::bad("Invalid duplicate merge group"));
+        }
+        let survivor: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM source_devices WHERE id=?)")
+                .bind(&group.survivor_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if !survivor {
+            return Err(ApiError::not_found());
+        }
+        let mut merged_ids = Vec::new();
+        for duplicate in group.duplicate_ids {
+            if !sqlx::query("SELECT 1 FROM source_devices WHERE id=?")
+                .bind(&duplicate)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some()
+            {
+                return Err(ApiError::not_found());
+            }
+            merge_source_device(&mut tx, &group.survivor_id, &duplicate).await?;
+            merged_ids.push(duplicate);
+        }
+        merged.push(ReconcileResult {
+            survivor_id: group.survivor_id,
+            merged_ids,
+        });
+    }
+    tx.commit().await?;
+    state.changed();
+    Ok(Json(ReconcileResponse { merged }))
+}
+
+async fn merge_source_device(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    survivor: &str,
+    duplicate: &str,
+) -> ApiResult<()> {
+    merge_source_device_inner(tx, survivor, duplicate, None).await
+}
+
+pub(crate) async fn merge_legacy_source_identity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    survivor: &str,
+    duplicate: &str,
+    reporting_agent: &str,
+) -> ApiResult<()> {
+    merge_source_device_inner(tx, survivor, duplicate, Some(reporting_agent)).await
+}
+
+async fn merge_source_device_inner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    survivor: &str,
+    duplicate: &str,
+    legacy_reporter: Option<&str>,
+) -> ApiResult<()> {
+    let compatible: bool = if let Some(reporter) = legacy_reporter {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM source_devices a JOIN source_devices b ON a.id=? AND b.id=? WHERE a.source=b.source AND a.kind=b.kind AND a.source_key=b.source_key AND b.parent_agent_id=?)")
+            .bind(survivor).bind(duplicate).bind(reporter).fetch_one(&mut **tx).await?
+    } else {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM source_devices a JOIN source_devices b ON a.id=? AND b.id=? WHERE a.source=b.source AND a.kind=b.kind AND ((a.source_scope=b.source_scope AND a.source_key=b.source_key AND a.incarnation=b.incarnation AND (a.parent_agent_id=b.parent_agent_id OR (EXISTS(SELECT 1 FROM shared_source_members m WHERE m.source=a.source AND m.source_scope=a.source_scope AND m.agent_id=a.parent_agent_id) AND EXISTS(SELECT 1 FROM shared_source_members m WHERE m.source=b.source AND m.source_scope=b.source_scope AND m.agent_id=b.parent_agent_id)))) OR (a.source_scope!=b.source_scope AND a.source_key=b.source_key AND abs(a.observed_at-b.observed_at)<604800 AND NOT EXISTS(SELECT 1 FROM shared_source_scopes s WHERE s.source=a.source AND s.source_scope IN (a.source_scope,b.source_scope)))))")
+        .bind(survivor).bind(duplicate).fetch_one(&mut **tx).await?
+    };
+    if !compatible {
+        return Err(ApiError::bad(
+            "Devices do not share a proven source identity",
+        ));
+    }
+    let exact_identity: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM source_devices a JOIN source_devices b ON a.source=b.source AND a.source_scope=b.source_scope AND a.source_key=b.source_key AND a.incarnation=b.incarnation AND a.kind=b.kind WHERE a.id=? AND b.id=?)")
+        .bind(survivor).bind(duplicate).fetch_one(&mut **tx).await?;
+    if !exact_identity {
+        let bodies: Vec<String> =
+            sqlx::query_scalar("SELECT body FROM source_devices WHERE id IN (?,?)")
+                .bind(survivor)
+                .bind(duplicate)
+                .fetch_all(&mut **tx)
+                .await?;
+        let reports: Vec<hope_protocol::ChildDeviceReport> = bodies
+            .iter()
+            .map(|body| serde_json::from_str(body))
+            .collect::<Result<_, _>>()?;
+        let macs = |report: &hope_protocol::ChildDeviceReport| {
+            report
+                .interfaces
+                .iter()
+                .filter_map(|i| i.mac.as_deref())
+                .map(str::to_ascii_lowercase)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        if reports.len() != 2 || macs(&reports[0]).is_disjoint(&macs(&reports[1])) {
+            return Err(ApiError::bad(
+                "Legacy candidates need a shared interface MAC",
+            ));
+        }
+    }
+    sqlx::query("UPDATE source_device_identities SET source_device_id=? WHERE source_device_id=?")
+        .bind(survivor)
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    if exact_identity && legacy_reporter.is_none() {
+        crate::metrics::merge_source_history(tx, survivor, duplicate).await?;
+    }
+    sqlx::query("INSERT OR IGNORE INTO device_associations SELECT ?,host_id,status,reason,evidence,evidence_hash,updated_at FROM device_associations WHERE source_device_id=?").bind(survivor).bind(duplicate).execute(&mut **tx).await?;
+    sqlx::query("UPDATE source_devices SET host_id=COALESCE(host_id,(SELECT host_id FROM source_devices WHERE id=?)) WHERE id=?").bind(duplicate).bind(survivor).execute(&mut **tx).await?;
+    sqlx::query("INSERT OR IGNORE INTO device_relationships SELECT CASE WHEN from_device_id=? THEN ? ELSE from_device_id END,CASE WHEN to_device_id=? THEN ? ELSE to_device_id END,kind,detail,?,observed_at FROM device_relationships WHERE source_device_id=? AND kind!='runs_on'")
+        .bind(duplicate).bind(survivor).bind(duplicate).bind(survivor).bind(survivor).bind(duplicate).execute(&mut **tx).await?;
+    sqlx::query("INSERT OR IGNORE INTO device_relationships SELECT ?,to_device_id,'runs_on',detail,?,observed_at FROM device_relationships WHERE source_device_id=? AND kind='runs_on' AND NOT EXISTS(SELECT 1 FROM device_relationships WHERE source_device_id=? AND kind='runs_on')")
+        .bind(survivor).bind(survivor).bind(duplicate).bind(survivor).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM device_relationships WHERE source_device_id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM device_associations WHERE source_device_id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("INSERT INTO source_device_aliases(alias_id,survivor_id) VALUES(?,?) ON CONFLICT(alias_id) DO UPDATE SET survivor_id=excluded.survivor_id").bind(duplicate).bind(survivor).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO device_id_aliases(alias_id,survivor_id) VALUES(?,?) ON CONFLICT(alias_id) DO UPDATE SET survivor_id=excluded.survivor_id").bind(duplicate).bind(survivor).execute(&mut **tx).await?;
+    sqlx::query("UPDATE source_device_aliases SET survivor_id=? WHERE survivor_id=?")
+        .bind(survivor)
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE device_id_aliases SET survivor_id=? WHERE survivor_id=?")
+        .bind(survivor)
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM source_devices WHERE id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Consolidate old parent-scoped rows only after every contributing reporter has joined the
+/// token-bound scope. The exact incarnation must match, so a reused VMID remains separate.
+pub(crate) async fn reconcile_shared_identity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    source: &str,
+    scope: &str,
+    key: &str,
+    incarnation: &str,
+) -> ApiResult<()> {
+    let rows = sqlx::query("SELECT d.id FROM source_devices d JOIN shared_source_members m ON m.source=d.source AND m.source_scope=d.source_scope AND m.agent_id=d.parent_agent_id WHERE d.source=? AND d.source_scope=? AND d.source_key=? AND d.incarnation=? ORDER BY d.ownership_generation DESC,d.observed_at DESC,d.id")
+        .bind(source).bind(scope).bind(key).bind(incarnation).fetch_all(&mut **tx).await?;
+    let Some(first) = rows.first() else {
+        return Ok(());
+    };
+    let survivor: String = first.get("id");
+    for row in rows.iter().skip(1) {
+        let duplicate: String = row.get("id");
+        merge_source_device(tx, &survivor, &duplicate).await?;
+    }
+    sqlx::query("INSERT INTO source_device_identities(source,identity_owner,source_scope,source_key,incarnation,source_device_id) VALUES(?,'@shared',?,?,?,?) ON CONFLICT(source,identity_owner,source_scope,source_key,incarnation) DO UPDATE SET source_device_id=excluded.source_device_id")
+        .bind(source).bind(scope).bind(key).bind(incarnation).bind(&survivor).execute(&mut **tx).await?;
+    Ok(())
+}
+
+async fn move_source_host_references(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    source: &str,
+    target: &str,
+) -> ApiResult<()> {
+    sqlx::query("UPDATE source_devices SET host_id=? WHERE host_id=?")
+        .bind(target)
+        .bind(source)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE OR IGNORE device_associations SET host_id=? WHERE host_id=?")
+        .bind(target)
+        .bind(source)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "UPDATE OR IGNORE device_relationships SET from_device_id=? WHERE from_device_id=?",
+    )
+    .bind(target)
+    .bind(source)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("UPDATE OR IGNORE device_relationships SET to_device_id=? WHERE to_device_id=?")
+        .bind(target)
+        .bind(source)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM device_associations WHERE host_id=?")
+        .bind(source)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM device_relationships WHERE from_device_id=? OR to_device_id=?")
+        .bind(source)
+        .bind(source)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 /// Server-sent change notifications: `host` carries one host's new state, `refresh` asks the
 /// client to reload everything. A receiver that falls behind the broadcast buffer gets a

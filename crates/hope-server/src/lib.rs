@@ -36,6 +36,7 @@ use tower_http::services::ServeDir;
 pub fn router(state: State, web_dir: &str) -> Router {
     let private = Router::new()
         .route("/bootstrap", get(api::bootstrap))
+        .route("/hosts/{id}", get(api::get_host))
         .route("/account/password", post(auth::change_password))
         .route(
             "/notifications",
@@ -56,6 +57,11 @@ pub fn router(state: State, web_dir: &str) -> Router {
         .route("/scans/{id}/cancel", post(api::cancel_scan))
         .route("/map", put(api::map).patch(api::edit_map))
         .route("/hosts/{id}/merge", post(api::merge))
+        .route("/devices/duplicate-groups", get(api::duplicate_groups))
+        .route(
+            "/devices/duplicate-groups/reconcile",
+            post(api::reconcile_duplicate_groups),
+        )
         .route("/hosts/{id}/metrics", get(metrics::history))
         .route("/hosts/{id}/source-metrics", get(metrics::source_history))
         .route("/hosts/{id}/association", post(agents::update_association))

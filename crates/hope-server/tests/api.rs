@@ -145,6 +145,9 @@ fn child_batch(
         agent_id: agent_id.into(),
         source: ChildSourceKind::Docker,
         source_scope: "docker-engine-test".into(),
+        source_token: None,
+        legacy_source_scope: None,
+        legacy_identities: vec![],
         sequence,
         inventory_generation: generation,
         inventory_id: complete.then(|| Uuid::new_v4().to_string()),
@@ -171,6 +174,8 @@ fn child_device() -> ChildDeviceReport {
         restart_count: Some(0),
         parent_key: None,
         node: None,
+        ownership_generation: None,
+        legacy_incarnation: None,
         tags: vec![],
         interfaces: vec![Interface {
             name: "eth0".into(),
@@ -184,6 +189,11 @@ fn child_device() -> ChildDeviceReport {
         compose_project: Some("stack".into()),
         compose_service: Some("web".into()),
         published_ports: vec![],
+        guest_agent_status: None,
+        guest_os: None,
+        guest_filesystems: vec![],
+        network_configuration: vec![],
+        disk_configuration: vec![],
         metrics: ChildMetrics {
             cpu_percent: Some(15.0),
             cpu_capacity_cores: Some(2.0),
@@ -726,6 +736,522 @@ async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_ab
 }
 
 #[tokio::test]
+async fn shared_proxmox_identity_follows_authorized_owner_and_rejects_delayed_old_owner() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (first, first_credential, _) = enrolled(&state, &app).await;
+    let (second, second_credential, _) = enrolled(&state, &app).await;
+    let cluster_token = "a".repeat(64);
+    let mut guest = child_device();
+    guest.identity.kind = ChildDeviceKind::ProxmoxVm;
+    guest.identity.scope = "cluster-uuid".into();
+    guest.identity.key = "101".into();
+    guest.identity.incarnation = "stable-incarnation".into();
+    guest.node = Some("node-a".into());
+    guest.ownership_generation = Some(1);
+    let mut batch = child_batch(&first, 1, 1, true, now() - 30.0, vec![guest.clone()]);
+    batch.source = ChildSourceKind::Proxmox;
+    batch.source_scope = "cluster-uuid".into();
+    batch.source_token = Some(cluster_token.clone());
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(batch),
+            Some(("authorization", &format!("Bearer {first_credential}")))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let original_id: String = sqlx::query_scalar("SELECT id FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+
+    // A mismatched token cannot claim a matching VMID from another agent.
+    let mut bad = child_batch(&second, 1, 1, true, now(), vec![guest.clone()]);
+    bad.source = ChildSourceKind::Proxmox;
+    bad.source_scope = "cluster-uuid".into();
+    bad.source_token = Some("b".repeat(64));
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(bad),
+            Some(("authorization", &format!("Bearer {second_credential}")))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+
+    guest.node = Some("node-b".into());
+    guest.ownership_generation = Some(2);
+    let mut moved = child_batch(&second, 1, 1, true, now() - 20.0, vec![guest.clone()]);
+    moved.source = ChildSourceKind::Proxmox;
+    moved.source_scope = "cluster-uuid".into();
+    moved.source_token = Some(cluster_token.clone());
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(moved),
+            Some(("authorization", &format!("Bearer {second_credential}")))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let canonical_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(canonical_count, 1);
+
+    guest.node = Some("node-a".into());
+    guest.ownership_generation = Some(1);
+    let mut delayed = child_batch(&first, 2, 2, true, now() + 10.0, vec![guest]);
+    delayed.source = ChildSourceKind::Proxmox;
+    delayed.source_scope = "cluster-uuid".into();
+    delayed.source_token = Some(cluster_token);
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(delayed),
+            Some(("authorization", &format!("Bearer {first_credential}")))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (owner, generation, body): (String, i64, String) = sqlx::query_as(
+        "SELECT parent_agent_id,ownership_generation,body FROM source_devices WHERE id=?",
+    )
+    .bind(&original_id)
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(owner, second);
+    assert_eq!(generation, 2);
+    assert_eq!(
+        serde_json::from_str::<ChildDeviceReport>(&body)
+            .unwrap()
+            .node
+            .as_deref(),
+        Some("node-b")
+    );
+    let (alias_status, alias): (StatusCode, Value) = request(
+        &app,
+        "GET",
+        &format!("/api/v1/hosts/{original_id}"),
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(alias_status, StatusCode::OK);
+    assert_eq!(alias["source_device_id"], original_id);
+}
+
+#[tokio::test]
+async fn equal_vmids_in_different_authorized_clusters_remain_separate() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (first, first_credential, _) = enrolled(&state, &app).await;
+    let (second, second_credential, _) = enrolled(&state, &app).await;
+    for (agent, credential, scope, token) in [
+        (&first, &first_credential, "cluster-one", "1".repeat(64)),
+        (&second, &second_credential, "cluster-two", "2".repeat(64)),
+    ] {
+        let mut guest = child_device();
+        guest.identity.kind = ChildDeviceKind::ProxmoxVm;
+        guest.identity.key = "101".into();
+        guest.identity.scope = scope.into();
+        guest.identity.incarnation = "incarnation".into();
+        let mut batch = child_batch(agent, 1, 1, true, now(), vec![guest]);
+        batch.source = ChildSourceKind::Proxmox;
+        batch.source_scope = scope.into();
+        batch.source_token = Some(token);
+        assert_eq!(
+            request(
+                &app,
+                "POST",
+                "/api/v1/agent/children",
+                json!(batch),
+                Some(("authorization", &format!("Bearer {credential}")))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    let (status, groups) = request(
+        &app,
+        "GET",
+        "/api/v1/devices/duplicate-groups",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(groups["groups"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn joined_cluster_members_auto_reconcile_legacy_exact_rows_and_keep_history_aliases() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (first, first_credential, _) = enrolled(&state, &app).await;
+    let (second, second_credential, _) = enrolled(&state, &app).await;
+    let mut guest = child_device();
+    guest.identity.kind = ChildDeviceKind::ProxmoxVm;
+    guest.identity.scope = "shared-cluster".into();
+    guest.identity.key = "55".into();
+    guest.identity.incarnation = "persistent-incarnation".into();
+    let body = serde_json::to_string(&guest).unwrap();
+    let id_a = "legacy-row-a";
+    let id_b = "legacy-row-b";
+    let timestamp = now() - 100.0;
+    for (id, agent, generation) in [(id_a, &first, 1_i64), (id_b, &second, 2_i64)] {
+        sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,ownership_generation,body) VALUES(?,?,'proxmox','shared-cluster','55','persistent-incarnation','proxmox_vm','running','guest',?,?,?,?)")
+            .bind(id).bind(agent).bind(timestamp+generation as f64).bind(generation).bind(generation).bind(&body).execute(&state.0.db).await.unwrap();
+        sqlx::query("INSERT INTO source_device_identities(source,identity_owner,source_scope,source_key,incarnation,source_device_id) VALUES('proxmox',?,'shared-cluster','55','persistent-incarnation',?)")
+            .bind(agent).bind(id).execute(&state.0.db).await.unwrap();
+        sqlx::query("INSERT INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES(?,?,?,30,'{}')")
+            .bind(id).bind(format!("report-{id}")).bind(timestamp+generation as f64).execute(&state.0.db).await.unwrap();
+        sqlx::query("INSERT INTO source_observations(source_device_id,batch_id,observed_at,inventory_generation,body) VALUES(?,?,?,?,'{}')")
+            .bind(id).bind(format!("batch-{id}")).bind(timestamp+generation as f64).bind(generation).execute(&state.0.db).await.unwrap();
+    }
+    let token = "c".repeat(64);
+    for (agent, credential) in [(&first, &first_credential), (&second, &second_credential)] {
+        let mut join = child_batch(agent, 1, 1, false, now(), vec![]);
+        join.source = ChildSourceKind::Proxmox;
+        join.source_scope = "shared-cluster".into();
+        join.source_token = Some(token.clone());
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(join),
+            Some(("authorization", &format!("Bearer {credential}"))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    guest.ownership_generation = Some(3);
+    let mut report = child_batch(&second, 2, 2, true, now(), vec![guest]);
+    report.source = ChildSourceKind::Proxmox;
+    report.source_scope = "shared-cluster".into();
+    report.source_token = Some(token);
+    let (status, response) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(report),
+        Some(("authorization", &format!("Bearer {second_credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let canonical: String = sqlx::query_scalar("SELECT id FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(canonical, id_b);
+    let history: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM source_metrics WHERE source_device_id=?")
+            .bind(&canonical)
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(history, 3);
+    let observations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_observations")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        observations, 3,
+        "observations keep their original IDs and provenance"
+    );
+    let (alias_status, alias) = request(
+        &app,
+        "GET",
+        &format!("/api/v1/hosts/{id_a}"),
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(alias_status, StatusCode::OK);
+    assert_eq!(alias["source_device_id"], canonical);
+    for host_id in [canonical.as_str(), id_a] {
+        let (status, points) = request(
+            &app,
+            "GET",
+            &format!("/api/v1/hosts/{host_id}/source-metrics?hours=168"),
+            Value::Null,
+            Some(("cookie", &cookie)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(points.as_array().unwrap().len(), 3);
+        assert!(
+            points
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|point| point["source_device_id"] == canonical)
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_local_legacy_identity_proof_maps_old_scope_rows_across_cluster_join() {
+    let (_dir, state, app, cookie) = setup().await;
+    let (first, first_credential, _) = enrolled(&state, &app).await;
+    let (second, second_credential, _) = enrolled(&state, &app).await;
+    let mut old = child_device();
+    old.identity.kind = ChildDeviceKind::ProxmoxVm;
+    old.identity.key = "55".into();
+    old.identity.incarnation = "old-a".into();
+    old.identity.scope = "local-a".into();
+    let t = now() - 120.0;
+    for (id, agent, scope, inc) in [
+        ("old-a-id", &first, "local-a", "old-a"),
+        ("old-b-id", &second, "local-b", "old-b"),
+    ] {
+        old.identity.scope = scope.into();
+        old.identity.incarnation = inc.into();
+        sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,body) VALUES(?,?,? ,?, '55',?,'proxmox_vm','running','guest',?,1,?)")
+            .bind(id).bind(agent).bind("proxmox").bind(scope).bind(inc).bind(t).bind(serde_json::to_string(&old).unwrap()).execute(&state.0.db).await.unwrap();
+        sqlx::query("INSERT INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES(?,?,?,30,'{}')")
+            .bind(id).bind(format!("legacy-{id}")).bind(t).execute(&state.0.db).await.unwrap();
+    }
+    let token = "d".repeat(64);
+    let mut current = child_device();
+    current.identity.kind = ChildDeviceKind::ProxmoxVm;
+    current.identity.scope = "shared-cluster".into();
+    current.identity.key = "55".into();
+    current.identity.incarnation = "new-shared-inc".into();
+    current.ownership_generation = Some(1);
+    let mut a = child_batch(&first, 1, 1, true, now(), vec![current.clone()]);
+    a.source = ChildSourceKind::Proxmox;
+    a.source_scope = "shared-cluster".into();
+    a.source_token = Some(token.clone());
+    a.legacy_source_scope = Some("local-a".into());
+    a.devices[0].legacy_incarnation = Some("old-a".into());
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(a),
+        Some(("authorization", &format!("Bearer {first_credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    current.ownership_generation = Some(2);
+    let mut b = child_batch(&second, 1, 1, true, now() + 1.0, vec![current]);
+    b.source = ChildSourceKind::Proxmox;
+    b.source_scope = "shared-cluster".into();
+    b.source_token = Some(token);
+    b.legacy_source_scope = Some("local-b".into());
+    b.devices[0].legacy_incarnation = Some("old-b".into());
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(b),
+        Some(("authorization", &format!("Bearer {second_credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let canonical: String = sqlx::query_scalar("SELECT id FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(canonical, "old-a-id");
+    let aliased: String = sqlx::query_scalar(
+        "SELECT survivor_id FROM source_device_aliases WHERE alias_id='old-b-id'",
+    )
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(aliased, canonical);
+    let old_history: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM source_metrics WHERE source_device_id='old-b-id'")
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        old_history, 1,
+        "legacy incarnation history remains distinct"
+    );
+    let (status, host) = request(
+        &app,
+        "GET",
+        "/api/v1/hosts/old-b-id",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(host["source_device_id"], canonical);
+}
+
+#[tokio::test]
+async fn metadata_only_legacy_map_carries_old_remote_guest_to_current_owner() {
+    let (_dir, state, app, _cookie) = setup().await;
+    let (first, first_credential, _) = enrolled(&state, &app).await;
+    let (second, second_credential, _) = enrolled(&state, &app).await;
+    let mut old = child_device();
+    old.identity.kind = ChildDeviceKind::ProxmoxVm;
+    old.identity.scope = "node-a-local".into();
+    old.identity.key = "99".into();
+    old.identity.incarnation = "old-remote-inc".into();
+    sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,body) VALUES('remote-old',?,'proxmox','node-a-local','99','old-remote-inc','proxmox_vm','running','remote guest',?,1,?)")
+        .bind(&first).bind(now()).bind(serde_json::to_string(&old).unwrap()).execute(&state.0.db).await.unwrap();
+    let token = "e".repeat(64);
+    let mut mapping = child_batch(&first, 1, 1, false, now(), vec![]);
+    mapping.source = ChildSourceKind::Proxmox;
+    mapping.source_scope = "joined-cluster".into();
+    mapping.source_token = Some(token.clone());
+    mapping.legacy_source_scope = Some("node-a-local".into());
+    mapping.legacy_identities = vec![LegacySourceIdentity {
+        kind: ChildDeviceKind::ProxmoxVm,
+        key: "99".into(),
+        incarnation: "old-remote-inc".into(),
+        canonical_incarnation: "shared-remote-inc".into(),
+    }];
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(mapping),
+        Some(("authorization", &format!("Bearer {first_credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut remote = child_device();
+    remote.identity.kind = ChildDeviceKind::ProxmoxVm;
+    remote.identity.scope = "joined-cluster".into();
+    remote.identity.key = "99".into();
+    remote.identity.incarnation = "shared-remote-inc".into();
+    remote.ownership_generation = Some(2);
+    remote.node = Some("node-b".into());
+    let mut current = child_batch(&second, 1, 1, true, now() + 1.0, vec![remote]);
+    current.source = ChildSourceKind::Proxmox;
+    current.source_scope = "joined-cluster".into();
+    current.source_token = Some(token);
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(current),
+        Some(("authorization", &format!("Bearer {second_credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let id:String=sqlx::query_scalar("SELECT source_device_id FROM source_device_identities WHERE identity_owner='@shared' AND source_key='99'").fetch_one(&state.0.db).await.unwrap();
+    assert_eq!(id, "remote-old");
+    let owner: String =
+        sqlx::query_scalar("SELECT parent_agent_id FROM source_devices WHERE id='remote-old'")
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(owner, second);
+}
+
+#[tokio::test]
+async fn legacy_identity_metadata_alone_cannot_merge_reused_guest_with_new_mac() {
+    let (_dir, state, app, _cookie) = setup().await;
+    let (first, first_credential, _) = enrolled(&state, &app).await;
+    let (second, second_credential, _) = enrolled(&state, &app).await;
+    let mut old = child_device();
+    old.identity.kind = ChildDeviceKind::ProxmoxVm;
+    old.identity.scope = "node-a-local".into();
+    old.identity.key = "109".into();
+    old.identity.incarnation = "old-remote-inc".into();
+    sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,body) VALUES('remote-old',?,'proxmox','node-a-local','109','old-remote-inc','proxmox_vm','running','remote guest',?,1,?)")
+        .bind(&first).bind(now()).bind(serde_json::to_string(&old).unwrap()).execute(&state.0.db).await.unwrap();
+    let mut mapping = child_batch(&first, 1, 1, false, now(), vec![]);
+    mapping.source = ChildSourceKind::Proxmox;
+    mapping.source_scope = "joined-cluster".into();
+    mapping.source_token = Some("f".repeat(64));
+    mapping.legacy_source_scope = Some("node-a-local".into());
+    mapping.legacy_identities = vec![LegacySourceIdentity {
+        kind: ChildDeviceKind::ProxmoxVm,
+        key: "109".into(),
+        incarnation: "old-remote-inc".into(),
+        canonical_incarnation: "new-shared-inc".into(),
+    }];
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(mapping),
+        Some(("authorization", &format!("Bearer {first_credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let mut recreated = child_device();
+    recreated.identity.kind = ChildDeviceKind::ProxmoxVm;
+    recreated.identity.scope = "joined-cluster".into();
+    recreated.identity.key = "109".into();
+    recreated.identity.incarnation = "new-shared-inc".into();
+    recreated.interfaces[0].mac = Some("02:00:00:00:00:99".into());
+    recreated.ownership_generation = Some(1);
+    let mut report = child_batch(&second, 1, 1, true, now() + 1.0, vec![recreated]);
+    report.source = ChildSourceKind::Proxmox;
+    report.source_scope = "joined-cluster".into();
+    report.source_token = Some("f".repeat(64));
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(report),
+        Some(("authorization", &format!("Bearer {second_credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 2,
+        "a new MAC must leave the prior incarnation separate"
+    );
+    let aliases: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM source_device_aliases WHERE alias_id='remote-old'",
+    )
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(aliases, 0, "metadata alone cannot create a merge alias");
+}
+
+#[tokio::test]
 async fn proxmox_lxc_child_batches_are_projected_as_hosts() {
     let (_dir, state, app, _) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;
@@ -1010,7 +1536,7 @@ async fn source_matches_can_be_rejected_confirmed_and_unlinked_without_losing_so
 
 #[tokio::test]
 async fn unique_interface_matches_auto_link_without_changing_discovered_host_id() {
-    let (_dir, state, app, _) = setup().await;
+    let (_dir, state, app, cookie) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;
     sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('lan','LAN','192.168.1.0/24',1,5)")
         .execute(&state.0.db)
@@ -1055,6 +1581,18 @@ async fn unique_interface_matches_auto_link_without_changing_discovered_host_id(
         combined.associations[0].status,
         AssociationStatus::Confirmed
     );
+    let source_id = combined.source_device_id.clone().unwrap();
+    let (history_status, history) = request(
+        &app,
+        "GET",
+        "/api/v1/hosts/scanned-device/source-metrics?hours=168",
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(history_status, StatusCode::OK);
+    assert_eq!(history.as_array().unwrap().len(), 1);
+    assert_eq!(history[0]["source_device_id"], source_id);
 }
 
 #[tokio::test]

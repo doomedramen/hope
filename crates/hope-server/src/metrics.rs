@@ -247,8 +247,33 @@ struct SourceMetricStatistics {
     latest_at: f64,
     latest_rx_bytes: Option<f64>,
     latest_tx_bytes: Option<f64>,
+    latest_disk_read_bytes: Option<f64>,
+    latest_disk_write_bytes: Option<f64>,
+    latest_uptime_seconds: Option<f64>,
 }
 impl SourceMetricStatistics {
+    fn merge(&mut self, other: Self) {
+        for (key, (sum, count)) in other.values {
+            let entry = self.values.entry(key).or_default();
+            entry.0 += sum;
+            entry.1 += count;
+        }
+        self.cpu_mixed |= other.cpu_mixed
+            || matches!((self.cpu_measurement, other.cpu_measurement), (Some(a), Some(b)) if a != b);
+        self.memory_mixed |= other.memory_mixed
+            || matches!((self.memory_measurement, other.memory_measurement), (Some(a), Some(b)) if a != b);
+        self.cpu_measurement = self.cpu_measurement.or(other.cpu_measurement);
+        self.memory_measurement = self.memory_measurement.or(other.memory_measurement);
+        if other.latest_at > self.latest_at {
+            self.latest_at = other.latest_at;
+            self.latest_rx_bytes = other.latest_rx_bytes;
+            self.latest_tx_bytes = other.latest_tx_bytes;
+            self.latest_disk_read_bytes = other.latest_disk_read_bytes;
+            self.latest_disk_write_bytes = other.latest_disk_write_bytes;
+            self.latest_uptime_seconds = other.latest_uptime_seconds;
+        }
+    }
+
     fn observe(&mut self, metrics: &ChildMetrics, at: f64) {
         macro_rules! sample {
             ($field:ident) => {
@@ -265,6 +290,8 @@ impl SourceMetricStatistics {
         sample!(memory_total_bytes);
         sample!(disk_used_bytes);
         sample!(disk_total_bytes);
+        sample!(disk_read_bytes_per_second);
+        sample!(disk_write_bytes_per_second);
         sample!(network_rx_bytes_per_second);
         sample!(network_tx_bytes_per_second);
         if let Some(measurement) = metrics.cpu_measurement {
@@ -291,6 +318,9 @@ impl SourceMetricStatistics {
             self.latest_at = at;
             self.latest_rx_bytes = metrics.network_rx_bytes;
             self.latest_tx_bytes = metrics.network_tx_bytes;
+            self.latest_disk_read_bytes = metrics.disk_read_bytes;
+            self.latest_disk_write_bytes = metrics.disk_write_bytes;
+            self.latest_uptime_seconds = metrics.uptime_seconds;
         }
     }
 
@@ -314,10 +344,72 @@ impl SourceMetricStatistics {
             disk_total_bytes: average("disk_total_bytes"),
             network_rx_bytes_per_second: average("network_rx_bytes_per_second"),
             network_tx_bytes_per_second: average("network_tx_bytes_per_second"),
+            disk_read_bytes: self.latest_disk_read_bytes,
+            disk_write_bytes: self.latest_disk_write_bytes,
+            disk_read_bytes_per_second: average("disk_read_bytes_per_second"),
+            disk_write_bytes_per_second: average("disk_write_bytes_per_second"),
+            uptime_seconds: self.latest_uptime_seconds,
             network_rx_bytes: self.latest_rx_bytes,
             network_tx_bytes: self.latest_tx_bytes,
         }
     }
+}
+
+/// Consolidate duplicate identities only after the caller has established they describe the
+/// same guest incarnation. Merge retained sample counts, not averages of unequal-size buckets.
+pub(crate) async fn merge_source_history(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    survivor: &str,
+    duplicate: &str,
+) -> anyhow::Result<()> {
+    if survivor == duplicate {
+        anyhow::bail!("cannot consolidate source history into itself");
+    }
+    // Raw report IDs are batch IDs and retain provenance through child_batches. Legacy
+    // aggregates without statistics stay separate so their unknown weights are not invented.
+    sqlx::query("INSERT OR IGNORE INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) SELECT ?,CASE WHEN resolution=30 THEN report_id ELSE 'merged-' || ? || ':' || report_id END,observed_at,resolution,body FROM source_metrics m WHERE source_device_id=? AND (resolution=30 OR NOT EXISTS(SELECT 1 FROM source_metric_rollups r WHERE r.source_device_id=m.source_device_id AND r.bucket=CAST(m.observed_at/300 AS INTEGER)))")
+        .bind(survivor).bind(duplicate).bind(duplicate).execute(&mut **tx).await?;
+    let rows =
+        sqlx::query("SELECT bucket,statistics FROM source_metric_rollups WHERE source_device_id=?")
+            .bind(duplicate)
+            .fetch_all(&mut **tx)
+            .await?;
+    for row in rows {
+        let bucket: i64 = row.get("bucket");
+        let previous: Option<String> = sqlx::query_scalar(
+            "SELECT statistics FROM source_metric_rollups WHERE source_device_id=? AND bucket=?",
+        )
+        .bind(survivor)
+        .bind(bucket)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if previous.is_none() {
+            // Unknown legacy weights cannot be combined with the new statistics.
+            sqlx::query("UPDATE source_metrics SET report_id='legacy-' || report_id WHERE source_device_id=? AND report_id=? AND resolution=300")
+                .bind(survivor).bind(format!("source-rollup-{bucket}"))
+                .execute(&mut **tx).await?;
+        }
+        let mut statistics = previous
+            .as_deref()
+            .map(serde_json::from_str::<SourceMetricStatistics>)
+            .transpose()?
+            .unwrap_or_default();
+        statistics.merge(serde_json::from_str(row.get("statistics"))?);
+        sqlx::query("INSERT INTO source_metric_rollups(source_device_id,bucket,statistics) VALUES(?,?,?) ON CONFLICT(source_device_id,bucket) DO UPDATE SET statistics=excluded.statistics")
+            .bind(survivor).bind(bucket).bind(serde_json::to_string(&statistics)?).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES(?,?,?,300,?) ON CONFLICT(source_device_id,report_id) DO UPDATE SET body=excluded.body")
+            .bind(survivor).bind(format!("source-rollup-{bucket}")).bind(bucket as f64 * 300.0)
+            .bind(serde_json::to_string(&statistics.metrics())?).execute(&mut **tx).await?;
+    }
+    sqlx::query("DELETE FROM source_metrics WHERE source_device_id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM source_metric_rollups WHERE source_device_id=?")
+        .bind(duplicate)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 fn gpu_key(id: Option<&str>, vendor: &str, name: &str) -> String {
     id.map(|id| format!("gpu-id:{id}"))
@@ -432,17 +524,43 @@ pub async fn source_history(
     Query(window): Query<Window>,
 ) -> ApiResult<Json<Vec<SourceMetricPoint>>> {
     let host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
-    if host.source.is_none() {
+    let mut source_ids = match host.source_device_id {
+        Some(id) => vec![id],
+        None => sqlx::query_scalar::<_, String>(
+            "SELECT d.id FROM source_devices d WHERE d.host_id=? AND NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) ORDER BY d.lifecycle='archived',d.observed_at DESC",
+        ).bind(&host.id).fetch_all(&state.0.db).await?,
+    };
+    if source_ids.is_empty() {
         return Ok(Json(vec![]));
     }
+    let aliases: Vec<String> = {
+        let placeholders = vec!["?"; source_ids.len()].join(",");
+        let query = format!(
+            "SELECT alias_id FROM source_device_aliases WHERE survivor_id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_scalar::<_, String>(&query);
+        for id in &source_ids {
+            query = query.bind(id);
+        }
+        query.fetch_all(&state.0.db).await?
+    };
+    source_ids.extend(aliases);
     let hours = window.hours.unwrap_or(24).clamp(1, 168);
     let since = now() - hours as f64 * 3600.0;
-    let rows = sqlx::query("SELECT observed_at,resolution,body FROM source_metrics WHERE source_device_id=? AND observed_at>=? ORDER BY observed_at DESC LIMIT 10000")
-        .bind(id).bind(since).fetch_all(&state.0.db).await?;
+    let placeholders = vec!["?"; source_ids.len()].join(",");
+    let query = format!(
+        "SELECT source_device_id,observed_at,resolution,body FROM source_metrics WHERE source_device_id IN ({placeholders}) AND (observed_at>=? OR (resolution>30 AND observed_at+resolution>?)) ORDER BY observed_at DESC LIMIT 10000"
+    );
+    let mut query = sqlx::query(&query);
+    for id in &source_ids {
+        query = query.bind(id);
+    }
+    let rows = query.bind(since).bind(since).fetch_all(&state.0.db).await?;
     let mut points = rows
         .into_iter()
         .map(|row| {
             Ok(SourceMetricPoint {
+                source_device_id: Some(row.get("source_device_id")),
                 collected_at: row.get("observed_at"),
                 resolution_seconds: row.get::<i64, _>("resolution") as u32,
                 metrics: serde_json::from_str(row.get("body"))?,
@@ -653,6 +771,65 @@ async fn retain_source_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_rollups_preserve_counter_resets_and_latest_uptime_with_delayed_samples() {
+        let sample = |uptime, counter, rate| ChildMetrics {
+            uptime_seconds: Some(uptime),
+            disk_read_bytes: Some(counter),
+            disk_write_bytes: Some(counter * 2.0),
+            disk_read_bytes_per_second: rate,
+            disk_write_bytes_per_second: rate.map(|value| value * 2.0),
+            ..Default::default()
+        };
+        let mut statistics = SourceMetricStatistics::default();
+        statistics.observe(&sample(10_000.0, 50_000.0, Some(100.0)), 100.0);
+        statistics.observe(&sample(10.0, 10.0, None), 130.0);
+        // The aggregate is persisted between retention passes. A late pre-reboot sample
+        // must contribute its rates without resurrecting the old boot or larger counters.
+        let mut statistics: SourceMetricStatistics =
+            serde_json::from_str(&serde_json::to_string(&statistics).unwrap()).unwrap();
+        statistics.observe(&sample(10_010.0, 51_000.0, Some(200.0)), 110.0);
+        let metrics = statistics.metrics();
+        assert_eq!(metrics.uptime_seconds, Some(10.0));
+        assert_eq!(metrics.disk_read_bytes, Some(10.0));
+        assert_eq!(metrics.disk_write_bytes, Some(20.0));
+        assert_eq!(metrics.disk_read_bytes_per_second, Some(150.0));
+        assert_eq!(metrics.disk_write_bytes_per_second, Some(300.0));
+    }
+
+    #[test]
+    fn source_rollups_read_pre_disk_telemetry_statistics() {
+        let statistics: SourceMetricStatistics = serde_json::from_value(serde_json::json!({
+            "values": {}, "cpu_measurement": null, "cpu_mixed": false,
+            "memory_measurement": null, "memory_mixed": false,
+            "latest_at": 100.0, "latest_rx_bytes": 10.0, "latest_tx_bytes": 20.0
+        }))
+        .unwrap();
+        assert_eq!(statistics.metrics().network_rx_bytes, Some(10.0));
+        assert_eq!(statistics.metrics().disk_read_bytes, None);
+        assert_eq!(statistics.metrics().uptime_seconds, None);
+    }
+
+    #[test]
+    fn consolidated_source_rollups_weight_samples_and_preserve_latest_reset() {
+        let sample = |cpu, uptime| ChildMetrics {
+            cpu_percent: Some(cpu),
+            cpu_measurement: Some(CpuMeasurement::HypervisorGuest),
+            uptime_seconds: Some(uptime),
+            disk_read_bytes: Some(uptime * 10.0),
+            ..Default::default()
+        };
+        let mut first = SourceMetricStatistics::default();
+        first.observe(&sample(10.0, 1000.0), 100.0);
+        let mut second = SourceMetricStatistics::default();
+        second.observe(&sample(30.0, 1010.0), 110.0);
+        second.observe(&sample(50.0, 10.0), 130.0);
+        first.merge(second);
+        assert_eq!(first.metrics().cpu_percent, Some(30.0));
+        assert_eq!(first.metrics().uptime_seconds, Some(10.0));
+        assert_eq!(first.metrics().disk_read_bytes, Some(100.0));
+    }
+
     #[test]
     fn uptime_preserves_the_latest_boot_instead_of_averaging_across_a_reboot() {
         let sample = |seconds, id: &str| Metrics {

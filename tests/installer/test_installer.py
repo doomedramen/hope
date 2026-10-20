@@ -62,6 +62,8 @@ class Linux(Base):
         self.assertIn('User=root', unit)
         self.assertIn('collect-proxmox', unit)
         self.assertIn('ReadWritePaths=/run/hope-agent /etc/hope-agent', unit)
+        self.assertIn('/etc/pve/priv/hope-agent /etc/pve/priv/lock', unit)
+        self.assertIn('TimeoutStartSec=28s', unit)
         self.assertIn('RuntimeDirectory=hope-agent', unit)
         self.assertEqual((self.env.root / 'etc/hope-agent').stat().st_mode & 0o777, 0o750)
         self.assertIn('OnUnitActiveSec=30s', timer.read_text())

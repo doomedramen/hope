@@ -2570,6 +2570,21 @@ kbd.key {
   border: 1px solid var(--border);
   border-radius: 12px;
 }
+.source-metric-history {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.source-history-controls {
+  min-width: 0;
+}
+.source-history-select {
+  width: min(100%, 260px);
+  min-width: 0;
+}
+.source-history-table {
+  min-width: 560px;
+}
 .container-info-section h2 {
   display: flex;
   align-items: center;

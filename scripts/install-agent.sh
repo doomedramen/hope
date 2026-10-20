@@ -136,6 +136,9 @@ install_proxmox_collector() {
     mkdir_public "$(dirname "$proxmox_service")" || return 1
     mkdir_public "$root/etc/hope-agent" || return 1
     chmod 750 "$root/etc/hope-agent" || return 1
+    if [ -d /etc/pve/priv ]; then
+        mkdir -p /etc/pve/priv/hope-agent /etc/pve/priv/lock || return 1
+    fi
     cp "$temporary/proxmox.service.new" "$proxmox_service.new" && chmod 644 "$proxmox_service.new" \
         && mv -f "$proxmox_service.new" "$proxmox_service" || return 1
     cp "$temporary/proxmox.timer.new" "$proxmox_timer.new" && chmod 644 "$proxmox_timer.new" \
@@ -854,6 +857,7 @@ After=local-fs.target
 ConditionPathExists=$(command -v pvesh)
 [Service]
 Type=oneshot
+TimeoutStartSec=28s
 User=root
 Group=root
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -866,7 +870,7 @@ PrivateTmp=true
 RuntimeDirectory=hope-agent
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
-ReadWritePaths=/run/hope-agent /etc/hope-agent
+ReadWritePaths=/run/hope-agent /etc/hope-agent /etc/pve/priv/hope-agent /etc/pve/priv/lock
 EOF
         cat > "$temporary/proxmox.timer.new" <<'EOF'
 [Unit]

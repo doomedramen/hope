@@ -89,6 +89,7 @@ import {
   type Tone,
 } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
+
 import { searchIcons, type IconOption } from "@/lib/icon-matching";
 import { hostDisplayName } from "@/lib/devices";
 
@@ -151,7 +152,9 @@ export function HostDetails({
   const hasProxmoxGuests = proxmoxGuests.length > 0;
   const isProxmoxHost =
     host.device?.label.toLowerCase().includes("proxmox") === true ||
-    host.collectors.some((collector) => collector.name === "proxmox_children") ||
+    host.collectors.some(
+      (collector) => collector.name === "proxmox_children",
+    ) ||
     hasProxmoxGuests;
   const [activeTab, setActiveTab] = useState("summary");
   const update = updatePlan(host, agentRelease);
@@ -160,8 +163,10 @@ export function HostDetails({
   const displayName = hostDisplayName(host);
   const issues = hostIssues(host);
   const sourceParentId = host.source_device_id
-    ? host.relationships.find((relationship) =>
-        relationship.kind === "runs_on" && relationship.from_device_id === host.source_device_id,
+    ? host.relationships.find(
+        (relationship) =>
+          relationship.kind === "runs_on" &&
+          relationship.from_device_id === host.source_device_id,
       )?.to_device_id
     : null;
   const sourceParent = sourceParentId
@@ -230,13 +235,22 @@ export function HostDetails({
       setError((e as Error).message);
     }
   }
-  async function updateAssociation(action: "confirm" | "reject" | "unlink", hostId: string) {
+  async function updateAssociation(
+    action: "confirm" | "reject" | "unlink",
+    hostId: string,
+  ) {
     if (!host.source_device_id) return;
     try {
-      await post(`/hosts/${host.source_device_id}/association`, { action, host_id: hostId });
+      await post(`/hosts/${host.source_device_id}/association`, {
+        action,
+        host_id: hostId,
+      });
       notify(
-        action === "confirm" ? "Linked source inventory to the discovered device." :
-          action === "reject" ? "Dismissed this device match." : "Removed the device link.",
+        action === "confirm"
+          ? "Linked source inventory to the discovered device."
+          : action === "reject"
+            ? "Dismissed this device match."
+            : "Removed the device link.",
         "good",
       );
       refresh();
@@ -416,13 +430,32 @@ export function HostDetails({
                     host.child.metrics.memory_measurement ===
                     "docker_working_set"
                       ? "Memory working set · source"
-                      : "Memory · source"
+                      : host.child.metrics.memory_measurement ===
+                          "hypervisor_guest"
+                        ? "Hypervisor memory · source"
+                        : host.child.metrics.memory_measurement ===
+                            "guest_operating_system"
+                          ? "Guest OS memory · source"
+                          : "Memory · source"
                   }
-                  value={memoryUsage(host)}
+                  value={
+                    host.child.metrics.memory_used_bytes != null &&
+                    host.child.metrics.memory_total_bytes != null &&
+                    host.child.metrics.memory_total_bytes > 0
+                      ? (host.child.metrics.memory_used_bytes /
+                          host.child.metrics.memory_total_bytes) *
+                        100
+                      : null
+                  }
                 />
                 {host.source?.kind !== "docker_container" && (
                   <ReadingMeter
-                    label="Allocated storage · source"
+                    label={
+                      host.source?.kind === "proxmox_vm" ||
+                      host.source?.kind === "proxmox_lxc"
+                        ? "Hypervisor storage usage · source"
+                        : "Allocated storage · source"
+                    }
                     value={
                       host.child.metrics.disk_used_bytes != null &&
                       host.child.metrics.disk_total_bytes != null &&
@@ -451,6 +484,134 @@ export function HostDetails({
                 <dl className="detail-list">
                   <dt>State</dt>
                   <dd>{host.child.status ?? host.child.lifecycle}</dd>
+                  {host.child.identity.kind.startsWith("proxmox") && (
+                    <>
+                      <dt>Guest OS memory</dt>
+                      <dd>
+                        {host.child.metrics.memory_measurement ===
+                          "guest_operating_system" &&
+                        host.child.metrics.memory_used_bytes != null
+                          ? `${bytes(host.child.metrics.memory_used_bytes)} / ${bytes(host.child.metrics.memory_total_bytes)}`
+                          : "—"}
+                      </dd>
+                      <dt>Hypervisor memory</dt>
+                      <dd>
+                        {host.child.metrics.memory_measurement ===
+                          "hypervisor_guest" &&
+                        host.child.metrics.memory_used_bytes != null
+                          ? `${bytes(host.child.metrics.memory_used_bytes)} / ${bytes(host.child.metrics.memory_total_bytes)}`
+                          : "—"}
+                      </dd>
+                      <dt>Disk I/O</dt>
+                      <dd>
+                        Read{" "}
+                        {rate(
+                          host.child?.metrics.disk_read_bytes_per_second,
+                        )}{" "}
+                        ({bytes(host.child?.metrics.disk_read_bytes)}) ·
+                        Write{" "}
+                        {rate(
+                          host.child?.metrics
+                            .disk_write_bytes_per_second,
+                        )}{" "}
+                        ({bytes(host.child?.metrics.disk_write_bytes)})
+                      </dd>
+                      <dt>Network I/O</dt>
+                      <dd>
+                        Received{" "}
+                        {rate(host.child.metrics.network_rx_bytes_per_second)} (
+                        {bytes(host.child.metrics.network_rx_bytes)}) · Sent{" "}
+                        {rate(host.child.metrics.network_tx_bytes_per_second)} (
+                        {bytes(host.child.metrics.network_tx_bytes)})
+                      </dd>
+                      <dt>Uptime</dt>
+                      <dd>
+                        {host.child?.metrics.uptime_seconds == null
+                          ? "—"
+                          : uptimeDuration(
+                              host.child?.metrics.uptime_seconds,
+                            )}
+                      </dd>
+                      <dt>Guest agent</dt>
+                      <dd>
+                        {host.child?.guest_agent_status?.replaceAll(
+                          "_",
+                          " ",
+                        ) ?? "—"}
+                      </dd>
+                      {host.child?.guest_os && (
+                        <>
+                          <dt>Guest operating system</dt>
+                          <dd>
+                            {[
+                              host.child?.guest_os?.name,
+                              host.child?.guest_os?.hostname,
+                              host.child?.guest_os?.kernel_release,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ") ||
+                              "—"}
+                          </dd>
+                          <dt>Guest OS data observed</dt>
+                          <dd>
+                            <Age
+                              value={host.child?.guest_os?.observed_at}
+                              lower
+                            />
+                          </dd>
+                        </>
+                      )}
+                      {(host.child?.guest_filesystems ?? []).map(
+                        (filesystem) => (
+                          <Fragment key={filesystem.mountpoint}>
+                            <dt>Filesystem {filesystem.mountpoint}</dt>
+                            <dd>
+                              {filesystem.filesystem_type ?? "Filesystem"} · {bytes(filesystem.used_bytes)}{" "}
+                              used of {bytes(filesystem.total_bytes)} · observed{" "}
+                              <Age value={filesystem.observed_at} lower />
+                            </dd>
+                          </Fragment>
+                        ),
+                      )}
+                      {(host.child?.network_configuration ?? []).map(
+                        (network) => (
+                          <Fragment key={`config-network-${network.name}`}>
+                            <dt>Proxmox NIC {network.name}</dt>
+                            <dd>
+                              {[
+                                network.bridge ? `Bridge ${network.bridge}` : null,
+                                network.vlan_tag != null
+                                  ? `VLAN ${network.vlan_tag}`
+                                  : null,
+                                network.model,
+                                network.mac,
+                              ]
+                                .filter(Boolean)
+                                .join(" · ") || "No configuration reported"}
+                            </dd>
+                          </Fragment>
+                        ),
+                      )}
+                      {(host.child?.disk_configuration ?? []).map(
+                        (disk) => (
+                          <Fragment key={`config-disk-${disk.name}`}>
+                            <dt>Configured disk {disk.name}</dt>
+                            <dd>
+                              {[
+                                disk.size_bytes != null
+                                  ? bytes(disk.size_bytes)
+                                  : null,
+                                disk.storage,
+                                disk.volume,
+                              ]
+                                .filter(Boolean)
+                                .join(" · ") || "No configuration reported"}
+                            </dd>
+                          </Fragment>
+                        ),
+                      )}
+                    </>
+                  )}
                   {host.child.health && (
                     <>
                       <dt>Health</dt>
@@ -520,12 +681,16 @@ export function HostDetails({
                       </dd>
                     </>
                   )}
-                  {host.child.interfaces.map((iface) => (
+                  {(host.child?.interfaces ?? []).map((iface) => (
                     <Fragment key={iface.name}>
                       <dt>{iface.name}</dt>
                       <dd>
                         {[iface.mac, ...iface.addresses]
                           .filter(Boolean)
+                          .concat(
+                            [
+                                                          ].filter(Boolean),
+                          )
                           .join(" · ") || "No address reported"}
                       </dd>
                     </Fragment>
@@ -535,34 +700,104 @@ export function HostDetails({
                       <dt>Runs on</dt>
                       <dd>
                         {sourceParent ? (
-                          <button type="button" className="underline underline-offset-2" onClick={() => onOpenHost(sourceParent)}>
+                          <button
+                            type="button"
+                            className="underline underline-offset-2"
+                            onClick={() => onOpenHost(sourceParent)}
+                          >
                             {sourceParent.name}
                           </button>
-                        ) : sourceParentId}
+                        ) : (
+                          sourceParentId
+                        )}
                       </dd>
                     </>
                   ) : host.parent_id ? (
                     <>
                       <dt>Runs on</dt>
-                      <dd>{hosts.find((item) => item.id === host.parent_id)?.name ?? host.parent_id}</dd>
+                      <dd>
+                        {hosts.find((item) => item.id === host.parent_id)
+                          ?.name ?? host.parent_id}
+                      </dd>
                     </>
                   ) : null}
                 </dl>
               </section>
             )}
-            {host.relationships.some((relationship) => relationship.kind === "exposes_service") && (
+            <section aria-label="Observed sources">
+              <h3 className="detail-heading">
+                <Radio /> Observed sources
+              </h3>
+              <dl className="detail-list">
+                <dt>Network discovery</dt>
+                <dd>
+                  {host.discovery_method.replaceAll("_", " ")} · last seen{" "}
+                  <Age value={host.last_seen} lower />
+                </dd>
+                {host.ports_scanned_at != null && (
+                  <>
+                    <dt>Port scan</dt>
+                    <dd>
+                      Last completed <Age value={host.ports_scanned_at} lower />
+                    </dd>
+                  </>
+                )}
+                {agentInstalled && (
+                  <>
+                    <dt>Direct agent</dt>
+                    <dd>
+                      {host.agent_version
+                        ? `Version ${host.agent_version}`
+                        : "Installed"}{" "}
+                      · last report <Age value={host.last_report} lower />
+                    </dd>
+                  </>
+                )}
+                {host.child && (
+                  <>
+                    <dt>
+                      {host.source?.kind === "docker_container"
+                        ? "Docker Engine"
+                        : "Proxmox"}
+                    </dt>
+                    <dd>
+                      {host.child.identity.kind.replaceAll("_", " ")} · observed{" "}
+                      <Age value={host.source_observed_at} lower />
+                    </dd>
+                  </>
+                )}
+              </dl>
+            </section>
+            {host.relationships.some(
+              (relationship) => relationship.kind === "exposes_service",
+            ) && (
               <section aria-label="Published services">
-                <h3 className="detail-heading"><Waypoints /> Published services</h3>
+                <h3 className="detail-heading">
+                  <Waypoints /> Published services
+                </h3>
                 <div className="flex flex-col gap-2">
                   {host.relationships
-                    .filter((relationship) => relationship.kind === "exposes_service")
+                    .filter(
+                      (relationship) => relationship.kind === "exposes_service",
+                    )
                     .map((relationship) => {
-                      const parent = hosts.find((item) => item.id === relationship.to_device_id);
+                      const parent = hosts.find(
+                        (item) => item.id === relationship.to_device_id,
+                      );
                       return (
-                        <div key={`${relationship.from_device_id}:${relationship.detail}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3">
-                          <span className="mono text-sm">{relationship.detail}</span>
+                        <div
+                          key={`${relationship.from_device_id}:${relationship.detail}`}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3"
+                        >
+                          <span className="mono text-sm">
+                            {relationship.detail}
+                          </span>
                           {parent && (
-                            <button type="button" className="underline underline-offset-2" onClick={() => onOpenHost(parent)}>
+                            <button
+                              type="button"
+                              className="underline underline-offset-2"
+                              onClick={() => onOpenHost(parent)}
+                            >
                               On {parent.name}
                             </button>
                           )}
@@ -574,28 +809,72 @@ export function HostDetails({
             )}
             {host.child && host.associations.length > 0 && (
               <section aria-label="Device matches">
-                <h3 className="detail-heading"><Waypoints /> Device matches</h3>
+                <h3 className="detail-heading">
+                  <Waypoints /> Device matches
+                </h3>
                 <div className="flex flex-col gap-2">
                   {host.associations.map((association) => (
-                    <div key={association.host_id} className="rounded-lg border p-3">
+                    <div
+                      key={association.host_id}
+                      className="rounded-lg border p-3"
+                    >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
-                          <p className="text-sm font-medium">{association.host_name}</p>
-                          <p className="text-xs text-muted-foreground">{association.status.replaceAll("_", " ")} · {association.reason}</p>
+                          <p className="text-sm font-medium">
+                            {association.host_name}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {association.status.replaceAll("_", " ")} ·{" "}
+                            {association.reason}
+                          </p>
                           {association.evidence.length > 0 && (
-                            <p className="mt-1 text-xs text-muted-foreground">{association.evidence.join(" · ")}</p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {association.evidence.join(" · ")}
+                            </p>
                           )}
                         </div>
                         <div className="flex gap-2">
                           {association.status === "suggested" && (
                             <>
-                              <Button size="sm" onClick={() => void updateAssociation("confirm", association.host_id)}>Confirm</Button>
-                              <Button size="sm" variant="outline" onClick={() => void updateAssociation("reject", association.host_id)}>Reject</Button>
+                              <Button
+                                size="sm"
+                                onClick={() =>
+                                  void updateAssociation(
+                                    "confirm",
+                                    association.host_id,
+                                  )
+                                }
+                              >
+                                Confirm
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                  void updateAssociation(
+                                    "reject",
+                                    association.host_id,
+                                  )
+                                }
+                              >
+                                Reject
+                              </Button>
                             </>
                           )}
                           {association.status !== "suggested" && (
-                            <Button size="sm" variant="outline" onClick={() => void updateAssociation("unlink", association.host_id)}>
-                              {association.status === "confirmed" ? "Unlink" : "Restore suggestion"}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() =>
+                                void updateAssociation(
+                                  "unlink",
+                                  association.host_id,
+                                )
+                              }
+                            >
+                              {association.status === "confirmed"
+                                ? "Unlink"
+                                : "Restore suggestion"}
                             </Button>
                           )}
                         </div>
@@ -605,7 +884,12 @@ export function HostDetails({
                 </div>
               </section>
             )}
-            {host.child && <SourceMetricHistory hostId={host.source_device_id ?? host.id} />}
+            {host.child && (
+              <SourceMetricHistory
+                key={host.source_device_id ?? host.id}
+                hostId={host.source_device_id ?? host.id}
+              />
+            )}
             <DeviceSection
               host={host}
               hosts={hosts}
@@ -884,8 +1168,7 @@ export function HostDetails({
                 </h3>
                 {proxmoxGuests.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
-                    No VMs or LXCs are currently reported for this Proxmox
-                    node.
+                    No VMs or LXCs are currently reported for this Proxmox node.
                   </p>
                 ) : (
                   <Table className="container-table">
@@ -895,7 +1178,12 @@ export function HostDetails({
                         <TableHead>Type</TableHead>
                         <TableHead>State</TableHead>
                         <TableHead>CPU</TableHead>
-                        <TableHead>Memory</TableHead>
+                        <TableHead>Hypervisor memory</TableHead>
+                        <TableHead>Hypervisor storage</TableHead>
+                        <TableHead>Configured disks</TableHead>
+                        <TableHead>Disk I/O</TableHead>
+                        <TableHead>Guest OS</TableHead>
+                        <TableHead>Uptime</TableHead>
                         <TableHead>VMID</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -933,9 +1221,42 @@ export function HostDetails({
                               {percentage(child?.metrics.cpu_percent ?? null)}
                             </TableCell>
                             <TableCell>
-                              {child?.metrics.memory_used_bytes == null
+                              {child?.metrics.memory_measurement ===
+                                "hypervisor_guest" &&
+                              child.metrics.memory_used_bytes != null
+                                ? `${bytes(child.metrics.memory_used_bytes)} / ${bytes(child.metrics.memory_total_bytes)}`
+                                : child?.memory_bytes != null
+                                  ? `${bytes(child.memory_bytes)} allocated`
+                                  : "—"}
+                            </TableCell>
+                            <TableCell>
+                              {child?.metrics.disk_used_bytes == null
                                 ? "—"
-                                : `${bytes(child.metrics.memory_used_bytes)} / ${bytes(child.metrics.memory_total_bytes)}`}
+                                : `${bytes(child.metrics.disk_used_bytes)} used / ${bytes(child.metrics.disk_total_bytes)}`}
+                            </TableCell>
+                            <TableCell>
+                              {guest.child?.disk_configuration.length
+                                ? guest.child.disk_configuration
+                                    .map((disk) => `${disk.name}: ${disk.size_bytes == null ? "—" : bytes(disk.size_bytes)}`)
+                                    .join(" · ")
+                                : "—"}
+                            </TableCell>
+                            <TableCell>
+                              {child
+                                ? `↓ ${rate(guest.child?.metrics.disk_read_bytes_per_second)} · ↑ ${rate(guest.child?.metrics.disk_write_bytes_per_second)}`
+                                : "—"}
+                            </TableCell>
+                            <TableCell>
+                              {guest.child?.guest_os?.name ??
+                                "—"}
+                            </TableCell>
+                            <TableCell>
+                              {guest.child?.metrics.uptime_seconds ==
+                              null
+                                ? "—"
+                                : uptimeDuration(
+                                    guest.child?.metrics.uptime_seconds,
+                                  )}
                             </TableCell>
                             <TableCell className="mono">
                               {child?.identity.key ?? "—"}

@@ -45,6 +45,7 @@ import {
 import { InstallDialog } from "@/components/install-dialog";
 import { HostDetails } from "@/components/host-details";
 import { HostTable } from "@/components/host-table";
+import { DuplicateReviewDialog } from "@/components/duplicate-review-dialog";
 import { Overview } from "@/components/overview";
 import { NetworkDialog } from "@/components/network-dialog";
 import {
@@ -462,20 +463,33 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     setError("");
     for (const edit of pending) await saveMap(edit);
   }
-  const hosts = useMemo(() => data?.hosts ?? [], [data]);
+  const allHosts = useMemo(() => data?.hosts ?? [], [data]);
+  const activeHosts = useMemo(
+    () => allHosts.filter((item) => item.lifecycle !== "archived"),
+    [allHosts],
+  );
+  // Archived devices are a deliberate opt-in through the Archived status chip.
+  const hosts = statusFilter === "archived" ? allHosts : activeHosts;
+  const activeData = useMemo(
+    () => (data ? { ...data, hosts: activeHosts } : null),
+    [data, activeHosts],
+  );
   const networks = useMemo(() => data?.networks ?? [], [data]);
   const parentChoices = useMemo(() => {
     const ids = new Set(hosts.map((item) => item.parent_id).filter(Boolean));
     return hosts.filter((item) => ids.has(item.id));
   }, [hosts]);
   const matchesSource = (item: Host) => {
-    const source = item.source?.kind ??
+    const source =
+      item.source?.kind ??
       (item.agent_id && !item.agent_uninstalled ? "agent" : "discovered");
     return sourceFilter === "all" || source === sourceFilter;
   };
   const matchesParent = (item: Host) =>
     parentFilter === "all" ||
-    (parentFilter === "none" ? !item.parent_id : item.parent_id === parentFilter);
+    (parentFilter === "none"
+      ? !item.parent_id
+      : item.parent_id === parentFilter);
   const visible = hosts.filter(
     (h) =>
       (network === "all" || h.network_ids.includes(network ?? "")) &&
@@ -484,7 +498,32 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       matchesFilter(h, statusFilter) &&
       matchesSearch(h, filter),
   );
-  const host = hosts.find((h) => h.id === selected || h.source_device_id === selected) ?? null;
+  const host =
+    hosts.find((h) => h.id === selected || h.source_device_id === selected) ??
+    null;
+  useEffect(() => {
+    if (!selected || !data || host || location.view !== "host") return;
+    let cancelled = false;
+    void api<Host>(`/hosts/${encodeURIComponent(selected)}`)
+      .then((resolved) => {
+        if (cancelled) return;
+        setData((previous) =>
+          previous
+            ? {
+                ...previous,
+                hosts: previous.hosts.some((item) => item.id === resolved.id)
+                  ? previous.hosts
+                  : [...previous.hosts, resolved],
+              }
+            : previous,
+        );
+        if (resolved.id !== selected) go({ view: "host", host: resolved.id });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, host, location.view, data, go]);
   const scans =
     data?.scans.filter(
       (job, i, all) =>
@@ -1031,7 +1070,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           </div>
         ) : view === "overview" ? (
           <Overview
-            data={data}
+            data={activeData!}
             onSelect={selectHost}
             onDiscover={() => discover()}
             onAddNetwork={() => setNetworkOpen(true)}
@@ -1126,24 +1165,43 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     )}
                   </div>
                   <div className="inventory-filters flex flex-wrap items-center gap-2">
-                    <Select value={sourceFilter} onValueChange={(v) => v && setSourceFilter(v)}>
+                    <DuplicateReviewDialog onMerged={() => void refresh()} />
+                    <Select
+                      value={sourceFilter}
+                      onValueChange={(v) => v && setSourceFilter(v)}
+                    >
                       <SelectTrigger aria-label="Filter by source type">
                         <SelectValue>
-                          {SOURCE_FILTERS.find(([value]) => value === sourceFilter)?.[1]}
+                          {
+                            SOURCE_FILTERS.find(
+                              ([value]) => value === sourceFilter,
+                            )?.[1]
+                          }
                         </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
                         <SelectGroup>
                           {SOURCE_FILTERS.map(([value, label]) => (
-                            <SelectItem value={value} key={value}>{label}</SelectItem>
+                            <SelectItem value={value} key={value}>
+                              {label}
+                            </SelectItem>
                           ))}
                         </SelectGroup>
                       </SelectContent>
                     </Select>
-                    <Select value={parentFilter} onValueChange={(v) => v && setParentFilter(v)}>
+                    <Select
+                      value={parentFilter}
+                      onValueChange={(v) => v && setParentFilter(v)}
+                    >
                       <SelectTrigger aria-label="Filter by parent">
                         <SelectValue>
-                          {parentFilter === "all" ? "All parents" : parentFilter === "none" ? "No parent" : parentChoices.find((item) => item.id === parentFilter)?.name ?? "Parent"}
+                          {parentFilter === "all"
+                            ? "All parents"
+                            : parentFilter === "none"
+                              ? "No parent"
+                              : (parentChoices.find(
+                                  (item) => item.id === parentFilter,
+                                )?.name ?? "Parent")}
                         </SelectValue>
                       </SelectTrigger>
                       <SelectContent>
@@ -1151,7 +1209,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                           <SelectItem value="all">All parents</SelectItem>
                           <SelectItem value="none">No parent</SelectItem>
                           {parentChoices.map((item) => (
-                            <SelectItem value={item.id} key={item.id}>{item.name}</SelectItem>
+                            <SelectItem value={item.id} key={item.id}>
+                              {item.name}
+                            </SelectItem>
                           ))}
                         </SelectGroup>
                       </SelectContent>
@@ -1208,7 +1268,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     }
                   >
                     {HOST_FILTERS.map((option) => {
-                      const count = hosts.filter(
+                      const count = (
+                        option.key === "archived" ? allHosts : hosts
+                      ).filter(
                         (h) =>
                           (network === "all" ||
                             h.network_ids.includes(network ?? "")) &&

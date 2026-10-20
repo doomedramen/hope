@@ -576,6 +576,13 @@ pub struct ChildMetrics {
     pub memory_measurement: Option<MemoryMeasurement>,
     pub disk_used_bytes: Option<f64>,
     pub disk_total_bytes: Option<f64>,
+    /// Cumulative hypervisor-observed guest disk I/O counters.
+    pub disk_read_bytes: Option<f64>,
+    pub disk_write_bytes: Option<f64>,
+    pub disk_read_bytes_per_second: Option<f64>,
+    pub disk_write_bytes_per_second: Option<f64>,
+    /// Hypervisor-observed guest uptime, in seconds.
+    pub uptime_seconds: Option<f64>,
     pub network_rx_bytes_per_second: Option<f64>,
     pub network_tx_bytes_per_second: Option<f64>,
     /// Raw counters allow rate baselines to recover after a parent-agent restart.
@@ -586,6 +593,13 @@ pub struct ChildMetrics {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ChildDeviceReport {
     pub identity: SourceIdentity,
+    /// Monotonic cluster-shared ownership epoch used to reject delayed reports after migration.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub ownership_generation: Option<u64>,
+    /// Previous per-node Proxmox incarnation supplied only for same-parent upgrade migration.
+    #[serde(default)]
+    pub legacy_incarnation: Option<String>,
     pub name: String,
     pub lifecycle: DeviceLifecycle,
     #[serde(default)]
@@ -614,18 +628,86 @@ pub struct ChildDeviceReport {
     pub compose_service: Option<String>,
     #[serde(default)]
     pub published_ports: Vec<ContainerPort>,
+    /// Guest OS facts read through a responding, enabled QEMU guest agent.
+    #[serde(default)]
+    pub guest_agent_status: Option<GuestAgentStatus>,
+    #[serde(default)]
+    pub guest_os: Option<GuestOsMetadata>,
+    /// Guest filesystem usage; absent when the guest agent did not return filesystem data.
+    #[serde(default)]
+    pub guest_filesystems: Vec<GuestFilesystem>,
+    #[serde(default)]
+    pub network_configuration: Vec<GuestNetworkConfiguration>,
+    #[serde(default)]
+    pub disk_configuration: Vec<GuestDiskConfiguration>,
     #[serde(default)]
     pub metrics: ChildMetrics,
 }
 
-/// One atomic source inventory. Incomplete batches update seen children but never imply deletion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestAgentStatus {
+    Available,
+    Disabled,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GuestOsMetadata {
+    pub hostname: Option<String>,
+    pub name: Option<String>,
+    pub kernel_release: Option<String>,
+    /// Unix timestamp when these facts were observed inside the guest.
+    #[ts(type = "number")]
+    pub observed_at: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GuestFilesystem {
+    pub mountpoint: String,
+    pub filesystem_type: Option<String>,
+    pub total_bytes: f64,
+    pub used_bytes: f64,
+    /// Unix timestamp when this filesystem was observed inside the guest.
+    #[ts(type = "number")]
+    pub observed_at: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GuestNetworkConfiguration {
+    pub name: String,
+    pub bridge: Option<String>,
+    pub vlan_tag: Option<u16>,
+    pub model: Option<String>,
+    pub mac: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct GuestDiskConfiguration {
+    pub name: String,
+    pub storage: Option<String>,
+    pub volume: Option<String>,
+    pub size_bytes: Option<f64>,
+}
+
+/// One atomic source inventory. Incomplete batches update seen children but never imply deletion.
+#[derive(Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ChildReportBatch {
     pub schema_version: u32,
     pub batch_id: String,
     pub agent_id: String,
     pub source: ChildSourceKind,
     pub source_scope: String,
+    /// Secret cluster membership proof. Never render or return this field from server APIs.
+    #[serde(default)]
+    #[ts(type = "string | null")]
+    pub source_token: Option<String>,
+    /// Previous per-node scope for same-parent upgrade migration.
+    #[serde(default)]
+    pub legacy_source_scope: Option<String>,
+    /// Evidence-only aliases from this same authenticated parent’s old per-node inventory.
+    #[serde(default)]
+    pub legacy_identities: Vec<LegacySourceIdentity>,
     #[ts(type = "number")]
     pub sequence: u64,
     #[ts(type = "number")]
@@ -642,6 +724,40 @@ pub struct ChildReportBatch {
     pub devices: Vec<ChildDeviceReport>,
 }
 
+impl std::fmt::Debug for ChildReportBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChildReportBatch")
+            .field("schema_version", &self.schema_version)
+            .field("batch_id", &self.batch_id)
+            .field("agent_id", &self.agent_id)
+            .field("source", &self.source)
+            .field("source_scope", &self.source_scope)
+            .field(
+                "source_token",
+                &self.source_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("legacy_source_scope", &self.legacy_source_scope)
+            .field("legacy_identities", &self.legacy_identities)
+            .field("sequence", &self.sequence)
+            .field("inventory_generation", &self.inventory_generation)
+            .field("inventory_id", &self.inventory_id)
+            .field("chunk_index", &self.chunk_index)
+            .field("chunk_count", &self.chunk_count)
+            .field("complete", &self.complete)
+            .field("observed_at", &self.observed_at)
+            .field("devices", &self.devices)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct LegacySourceIdentity {
+    pub kind: ChildDeviceKind,
+    pub key: String,
+    pub incarnation: String,
+    pub canonical_incarnation: String,
+}
+
 fn one_chunk() -> u32 {
     1
 }
@@ -656,6 +772,9 @@ pub struct ChildReportResponse {
 /// merged into direct guest-agent history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct SourceMetricPoint {
+    /// Identifies a retained source series after duplicate reconciliation; series remain separate.
+    #[serde(default)]
+    pub source_device_id: Option<String>,
     #[ts(type = "number")]
     pub collected_at: f64,
     pub resolution_seconds: u32,
@@ -1191,8 +1310,14 @@ pub fn typescript() -> String {
         CpuMeasurement::decl(),
         SourceIdentity::decl(),
         ChildMetrics::decl(),
+        GuestAgentStatus::decl(),
+        GuestOsMetadata::decl(),
+        GuestFilesystem::decl(),
+        GuestNetworkConfiguration::decl(),
+        GuestDiskConfiguration::decl(),
         ChildDeviceReport::decl(),
         ChildReportBatch::decl(),
+        LegacySourceIdentity::decl(),
         ChildReportResponse::decl(),
         SourceMetricPoint::decl(),
         RelationshipKind::decl(),
@@ -1238,6 +1363,32 @@ pub fn typescript() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_source_tokens_are_redacted_from_batch_debug_output() {
+        let batch = ChildReportBatch {
+            schema_version: 1,
+            batch_id: "batch".into(),
+            agent_id: "agent".into(),
+            source: ChildSourceKind::Proxmox,
+            source_scope: "scope".into(),
+            source_token: Some("a".repeat(64)),
+            legacy_source_scope: None,
+            legacy_identities: vec![],
+            sequence: 1,
+            inventory_generation: 1,
+            inventory_id: None,
+            chunk_index: 0,
+            chunk_count: 1,
+            complete: true,
+            observed_at: 1.0,
+            devices: vec![],
+        };
+        let debug = format!("{batch:?}");
+        assert!(!debug.contains(&"a".repeat(64)));
+        assert!(debug.contains("[redacted]"));
+    }
+
     #[test]
     fn uptime_is_optional_for_old_agents_and_rejects_invalid_boot_observations() {
         let old: Metrics = serde_json::from_str(

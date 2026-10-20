@@ -190,6 +190,8 @@ mod tests {
             restart_count: None,
             parent_key: None,
             node: None,
+            ownership_generation: None,
+            legacy_incarnation: None,
             tags: vec![],
             interfaces: vec![Interface {
                 name: "net0".into(),
@@ -203,6 +205,11 @@ mod tests {
             compose_project: None,
             compose_service: None,
             published_ports: vec![],
+            guest_agent_status: None,
+            guest_os: None,
+            guest_filesystems: vec![],
+            network_configuration: vec![],
+            disk_configuration: vec![],
             metrics: Default::default(),
         }
     }

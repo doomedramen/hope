@@ -280,6 +280,39 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
               incarnation: "lxc-incarnation",
             },
             name: "dns-container",
+            guest_agent_status: "available",
+            guest_os: {
+              hostname: "dns-container",
+              name: "Debian GNU/Linux 13",
+              kernel_release: "6.14.0-fixture",
+              observed_at: Date.now() / 1000,
+            },
+            guest_filesystems: [
+              {
+                mountpoint: "/",
+                filesystem_type: "ext4",
+                total_bytes: 16e9,
+                used_bytes: 5e9,
+                observed_at: Date.now() / 1000,
+              },
+            ],
+            network_configuration: [
+              {
+                name: "net0",
+                bridge: "vmbr0",
+                vlan_tag: 42,
+                model: "virtio",
+                mac: "02:00:00:00:00:42",
+              },
+            ],
+            disk_configuration: [
+              {
+                name: "scsi0",
+                storage: "local-lvm",
+                volume: "vm-202-disk-0",
+                size_bytes: 32e9,
+              },
+            ],
             lifecycle: "running",
             status: "running",
             health: null,
@@ -307,6 +340,11 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
               network_tx_bytes_per_second: null,
               network_rx_bytes: null,
               network_tx_bytes: null,
+              disk_read_bytes: 1024 * 1024,
+              disk_write_bytes: 512 * 1024,
+              disk_read_bytes_per_second: 2048,
+              disk_write_bytes_per_second: 1024,
+              uptime_seconds: 86400,
             },
           },
         ],
@@ -2224,6 +2262,44 @@ test.describe.serial("H.O.P.E console", () => {
     request,
   }) => {
     await seed(request, true);
+    await page.route(
+      "**/api/v1/hosts/*/source-metrics?hours=24",
+      async (route) => {
+        const sourceId = decodeURIComponent(
+          new URL(route.request().url()).pathname.split("/").at(-2)!,
+        );
+        await route.fulfill({
+          json: [
+            {
+              source_device_id: sourceId,
+              collected_at: 1_700_000_000,
+              resolution_seconds: 30,
+              metrics: {
+                cpu_percent: 15,
+                memory_used_bytes: 512 * 1024 * 1024,
+                memory_total_bytes: 2 * 1024 * 1024 * 1024,
+                memory_measurement: "hypervisor_guest",
+                network_rx_bytes_per_second: 10,
+                network_tx_bytes_per_second: 5,
+              },
+            },
+            {
+              source_device_id: "historical-source-1234",
+              collected_at: 1_699_999_000,
+              resolution_seconds: 30,
+              metrics: {
+                cpu_percent: 44,
+                memory_used_bytes: 1024,
+                memory_total_bytes: 2048,
+                memory_measurement: "hypervisor_guest",
+                network_rx_bytes_per_second: 2,
+                network_tx_bytes_per_second: 1,
+              },
+            },
+          ],
+        });
+      },
+    );
     await page.goto("/?view=hosts");
     await page.getByLabel("Search hosts").fill("proxmox-fixture-node");
     await page
@@ -2241,17 +2317,238 @@ test.describe.serial("H.O.P.E console", () => {
       "dns-container",
     );
     await expect(proxmoxDetails.getByRole("table")).toContainText("LXC");
+    await expect(proxmoxDetails.getByRole("table")).toContainText(
+      "Debian GNU/Linux 13",
+    );
+    await expect(proxmoxDetails.getByRole("table")).toContainText("scsi0");
     await proxmoxDetails.getByRole("button", { name: "dns-container" }).click();
     await expect(page).toHaveURL(/host=/);
     await expect(
       page.getByRole("heading", { name: "dns-container" }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Source inventory" }),
+    ).toContainText("Guest OS data observed");
+    await expect(
+      page.getByRole("region", { name: "Source inventory" }),
+    ).toContainText("4.7 GiB used of 14.9 GiB");
+    await expect(
+      page.getByRole("region", { name: "Source inventory" }),
+    ).toContainText("VLAN 42");
+    await expect(
+      page.getByRole("region", { name: "Source inventory" }),
+    ).toContainText("local-lvm");
+    const sourceHistory = page.getByRole("region", {
+      name: "Source metrics history",
+    });
+    await expect(sourceHistory.getByRole("table").getByRole("row")).toHaveCount(
+      2,
+    );
+    await sourceHistory.getByLabel("Historical source").click();
+    await page.getByRole("option", { name: /^Merged source/ }).click();
+    await expect(sourceHistory.getByRole("table")).toContainText("44.0%");
+    await expect(sourceHistory.getByRole("table").getByRole("row")).toHaveCount(
+      2,
+    );
     await expect(proxmoxDetails).toContainText("Runs on");
     await proxmoxDetails
       .getByRole("button", { name: "proxmox-fixture-node" })
       .click();
     await expect(
       page.getByRole("heading", { name: "proxmox-fixture-node" }),
+    ).toBeVisible();
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto("/?view=hosts");
+    await page.getByLabel("Search hosts").fill("proxmox-fixture-node");
+    await page
+      .getByRole("row")
+      .filter({ hasText: "proxmox-fixture-node" })
+      .click();
+    const mobileDetails = page.getByRole("complementary", {
+      name: "Host details",
+    });
+    await mobileDetails.getByRole("tab", { name: "Guests" }).click();
+    await mobileDetails.getByRole("button", { name: "dns-container" }).click();
+    await expect(
+      page.getByRole("heading", { name: "dns-container" }),
+    ).toBeVisible();
+    const overflow = await page.evaluate(() => ({
+      width: window.innerWidth,
+      document: document.documentElement.scrollWidth,
+      nodes: [...document.querySelectorAll("body *")]
+        .map((element) => ({
+          tag: element.tagName,
+          className:
+            typeof element.className === "string" ? element.className : "",
+          right: Math.round(element.getBoundingClientRect().right),
+          width: Math.round(element.getBoundingClientRect().width),
+        }))
+        .filter((item) => item.right > window.innerWidth + 1)
+        .slice(0, 8),
+    }));
+    expect(
+      overflow.document <= overflow.width,
+      JSON.stringify(overflow),
+    ).toBeTruthy();
+  });
+  test("archived source devices stay out of normal counts and maps until explicitly filtered", async ({
+    page,
+    request,
+  }) => {
+    await seed(request, true);
+    const seededBootstrap = await (
+      await request.get("/api/v1/bootstrap")
+    ).json();
+    const expectedActiveCount = seededBootstrap.hosts.filter(
+      (host: { lifecycle: string | null }) => host.lifecycle !== "archived",
+    ).length;
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const guest = body.hosts.find(
+        (host: { name: string }) => host.name === "dns-container",
+      );
+      body.hosts.push({
+        ...guest,
+        id: `archived-${guest.id}`,
+        name: "archived-fixture-only",
+        lifecycle: "archived",
+      });
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto("/");
+    await expect(page.getByTestId("tile-hosts")).toContainText(
+      `/ ${expectedActiveCount}`,
+    );
+    await expect(
+      page.getByRole("region", { name: "Busiest CPUs" }),
+    ).not.toContainText("archived-fixture-only");
+    await page.goto("/?view=map");
+    await expect(
+      page.locator(".map-device").filter({ hasText: "archived-fixture-only" }),
+    ).toHaveCount(0);
+    await page.goto("/?view=hosts");
+    await expect(page.locator(".host-table")).not.toContainText(
+      "archived-fixture-only",
+    );
+    await expect(page.getByRole("button", { name: /^Archived/ })).toContainText(
+      "1",
+    );
+    await page.getByRole("button", { name: /^Archived/ }).click();
+    await expect(page.locator(".host-table")).toContainText(
+      "archived-fixture-only",
+    );
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page
+      .getByRole("row")
+      .filter({ hasText: "archived-fixture-only" })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: "archived-fixture-only" }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBeTruthy();
+  });
+  test("duplicate review reconciles selected groups in one bulk request", async ({
+    page,
+  }) => {
+    let reconciled: unknown;
+    let groups = [
+      {
+        suggested_survivor_id: "canonical-device",
+        candidates: [
+          {
+            id: "canonical-device",
+            name: "Known server",
+            primary_ip: "192.0.2.10",
+            device_type: "server",
+            platform: "Linux",
+            source_count: 2,
+            last_seen: Date.now() / 1000,
+            sources: ["agent", "scan"],
+          },
+          {
+            id: "duplicate-device",
+            name: "Known server copy",
+            primary_ip: "192.0.2.11",
+            device_type: "server",
+            platform: "Linux",
+            source_count: 1,
+            last_seen: Date.now() / 1000,
+            sources: ["scan"],
+          },
+        ],
+        evidence: [
+          { label: "Hardware identity", value: "same agent identity" },
+        ],
+      },
+    ];
+    await page.route("**/api/v1/devices/duplicate-groups", async (route) =>
+      route.fulfill({ json: { groups } }),
+    );
+    await page.route(
+      "**/api/v1/devices/duplicate-groups/reconcile",
+      async (route) => {
+        reconciled = route.request().postDataJSON();
+        groups = [];
+        await route.fulfill({
+          json: {
+            merged: [
+              {
+                survivor_id: "canonical-device",
+                merged_ids: ["duplicate-device"],
+              },
+            ],
+          },
+        });
+      },
+    );
+    await page.goto("/?view=hosts");
+    const dialog = page.getByRole("dialog", {
+      name: "Review duplicate devices",
+    });
+    await page.getByRole("button", { name: "Review duplicates" }).click();
+    await expect(dialog).toContainText("same agent identity");
+    await dialog.getByRole("button", { name: "Reconcile 1 groups" }).click();
+    await expect
+      .poll(() => reconciled)
+      .toEqual({
+        merges: [
+          {
+            survivor_id: "canonical-device",
+            duplicate_ids: ["duplicate-device"],
+          },
+        ],
+      });
+    await expect(dialog).toContainText("No duplicate groups need review.");
+  });
+  test("an old merged-device URL opens its canonical survivor", async ({
+    page,
+    request,
+  }) => {
+    await seed(request);
+    const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+    const survivor = bootstrap.hosts.find(
+      (host: { name: string }) => host.name === "atlas-nas",
+    );
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.hosts = body.hosts.filter(
+        (host: { id: string }) => host.id !== survivor.id,
+      );
+      await route.fulfill({ response, json: body });
+    });
+    await page.route("**/api/v1/hosts/legacy-alias", async (route) =>
+      route.fulfill({ json: survivor }),
+    );
+    await page.goto("/?view=host&host=legacy-alias");
+    await expect(page).toHaveURL(new RegExp(`host=${survivor.id}`));
+    await expect(
+      page.getByRole("heading", { name: "atlas-nas" }),
     ).toBeVisible();
   });
 });

@@ -197,19 +197,73 @@ export type DeviceLifecycle = "running" | "stopped" | "stale" | "archived";
 export type MemoryMeasurement = "docker_working_set" | "hypervisor_guest" | "guest_operating_system";
 export type CpuMeasurement = "docker_engine" | "hypervisor_guest" | "guest_operating_system";
 export type SourceIdentity = { kind: ChildDeviceKind, scope: string, key: string, incarnation: string, };
-export type ChildMetrics = { cpu_percent: number | null, cpu_capacity_cores: number | null, cpu_measurement: CpuMeasurement | null, memory_used_bytes: number | null, memory_total_bytes: number | null, memory_measurement: MemoryMeasurement | null, disk_used_bytes: number | null, disk_total_bytes: number | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null,
+export type ChildMetrics = { cpu_percent: number | null, cpu_capacity_cores: number | null, cpu_measurement: CpuMeasurement | null, memory_used_bytes: number | null, memory_total_bytes: number | null, memory_measurement: MemoryMeasurement | null, disk_used_bytes: number | null, disk_total_bytes: number | null,
+/**
+ * Cumulative hypervisor-observed guest disk I/O counters.
+ */
+disk_read_bytes: number | null, disk_write_bytes: number | null, disk_read_bytes_per_second: number | null, disk_write_bytes_per_second: number | null,
+/**
+ * Hypervisor-observed guest uptime, in seconds.
+ */
+uptime_seconds: number | null, network_rx_bytes_per_second: number | null, network_tx_bytes_per_second: number | null,
 /**
  * Raw counters allow rate baselines to recover after a parent-agent restart.
  */
 network_rx_bytes: number | null, network_tx_bytes: number | null, };
-export type ChildDeviceReport = { identity: SourceIdentity, name: string, lifecycle: DeviceLifecycle, status: string | null, health: string | null, restart_count: number | null, parent_key: string | null, node: string | null, tags: Array<string>, interfaces: Array<Interface>, cpu_cores: number | null, memory_bytes: number | null, image: string | null, compose_project: string | null, compose_service: string | null, published_ports: Array<ContainerPort>, metrics: ChildMetrics, };
-export type ChildReportBatch = { schema_version: number, batch_id: string, agent_id: string, source: ChildSourceKind, source_scope: string, sequence: number, inventory_generation: number,
+export type GuestAgentStatus = "available" | "disabled" | "unavailable";
+export type GuestOsMetadata = { hostname: string | null, name: string | null, kernel_release: string | null,
+/**
+ * Unix timestamp when these facts were observed inside the guest.
+ */
+observed_at: number, };
+export type GuestFilesystem = { mountpoint: string, filesystem_type: string | null, total_bytes: number, used_bytes: number,
+/**
+ * Unix timestamp when this filesystem was observed inside the guest.
+ */
+observed_at: number, };
+export type GuestNetworkConfiguration = { name: string, bridge: string | null, vlan_tag: number | null, model: string | null, mac: string | null, };
+export type GuestDiskConfiguration = { name: string, storage: string | null, volume: string | null, size_bytes: number | null, };
+export type ChildDeviceReport = { identity: SourceIdentity,
+/**
+ * Monotonic cluster-shared ownership epoch used to reject delayed reports after migration.
+ */
+ownership_generation: number | null,
+/**
+ * Previous per-node Proxmox incarnation supplied only for same-parent upgrade migration.
+ */
+legacy_incarnation: string | null, name: string, lifecycle: DeviceLifecycle, status: string | null, health: string | null, restart_count: number | null, parent_key: string | null, node: string | null, tags: Array<string>, interfaces: Array<Interface>, cpu_cores: number | null, memory_bytes: number | null, image: string | null, compose_project: string | null, compose_service: string | null, published_ports: Array<ContainerPort>,
+/**
+ * Guest OS facts read through a responding, enabled QEMU guest agent.
+ */
+guest_agent_status: GuestAgentStatus | null, guest_os: GuestOsMetadata | null,
+/**
+ * Guest filesystem usage; absent when the guest agent did not return filesystem data.
+ */
+guest_filesystems: Array<GuestFilesystem>, network_configuration: Array<GuestNetworkConfiguration>, disk_configuration: Array<GuestDiskConfiguration>, metrics: ChildMetrics, };
+export type ChildReportBatch = { schema_version: number, batch_id: string, agent_id: string, source: ChildSourceKind, source_scope: string,
+/**
+ * Secret cluster membership proof. Never render or return this field from server APIs.
+ */
+source_token: string | null,
+/**
+ * Previous per-node scope for same-parent upgrade migration.
+ */
+legacy_source_scope: string | null,
+/**
+ * Evidence-only aliases from this same authenticated parent’s old per-node inventory.
+ */
+legacy_identities: Array<LegacySourceIdentity>, sequence: number, inventory_generation: number,
 /**
  * Identifies all bounded batches that make up one inventory generation.
  */
 inventory_id: string | null, chunk_index: number, chunk_count: number, complete: boolean, observed_at: number, devices: Array<ChildDeviceReport>, };
+export type LegacySourceIdentity = { kind: ChildDeviceKind, key: string, incarnation: string, canonical_incarnation: string, };
 export type ChildReportResponse = { accepted: boolean, duplicate: boolean, };
-export type SourceMetricPoint = { collected_at: number, resolution_seconds: number, metrics: ChildMetrics, };
+export type SourceMetricPoint = {
+/**
+ * Identifies a retained source series after duplicate reconciliation; series remain separate.
+ */
+source_device_id: string | null, collected_at: number, resolution_seconds: number, metrics: ChildMetrics, };
 export type RelationshipKind = "runs_on" | "connected_to" | "exposes_service";
 export type DeviceRelationship = { from_device_id: string, to_device_id: string, kind: RelationshipKind, detail: string | null, };
 export type AssociationStatus = "suggested" | "confirmed" | "rejected";

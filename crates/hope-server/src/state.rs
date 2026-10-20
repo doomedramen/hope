@@ -315,7 +315,7 @@ impl State {
                 .or_default()
                 .push(source_association(&row)?);
         }
-        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id AND r.kind='runs_on'")
+        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id)")
             .fetch_all(&self.0.db).await?;
         let mut service_relationships = source_service_relationships(&self.0.db, None).await?;
         for row in children {
@@ -343,8 +343,10 @@ impl State {
         Ok(hosts)
     }
     pub async fn host(&self, id: &str) -> Result<Option<Host>> {
+        let id: String = sqlx::query_scalar("SELECT survivor_id FROM device_id_aliases WHERE alias_id=? UNION ALL SELECT survivor_id FROM source_device_aliases WHERE alias_id=? LIMIT 1")
+            .bind(id).bind(id).fetch_optional(&self.0.db).await?.unwrap_or_else(|| id.to_string());
         let value: Option<String> = sqlx::query_scalar("SELECT body FROM hosts WHERE id=?")
-            .bind(id)
+            .bind(&id)
             .fetch_optional(&self.0.db)
             .await?;
         if let Some(body) = value {
@@ -352,16 +354,16 @@ impl State {
                 .context("invalid stored host")
                 .map(Some);
         }
-        let row = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,r.to_device_id FROM source_devices d LEFT JOIN device_relationships r ON r.source_device_id=d.id AND r.kind='runs_on' WHERE d.id=?")
-            .bind(id).fetch_optional(&self.0.db).await?;
+        let row = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE d.id=?")
+            .bind(&id).fetch_optional(&self.0.db).await?;
         let Some(row) = row else {
             return Ok(None);
         };
         let mut source = source_device_host(&row)?;
         source.relationships.extend(
-            source_service_relationships(&self.0.db, Some(id))
+            source_service_relationships(&self.0.db, Some(&id))
                 .await?
-                .remove(id)
+                .remove(&id)
                 .unwrap_or_default(),
         );
         let networks = crate::api::networks(self)

@@ -34,6 +34,7 @@ export type HistoryWindow = "1" | "6" | "24" | "168";
 
 export function SourceMetricHistory({ hostId }: { hostId: string }) {
   const [points, setPoints] = useState<SourceMetricPoint[] | null>(null);
+  const [selectedSource, setSelectedSource] = useState(hostId);
   const [error, setError] = useState("");
   useEffect(() => {
     let alive = true;
@@ -51,31 +52,129 @@ export function SourceMetricHistory({ hostId }: { hostId: string }) {
       alive = false;
     };
   }, [hostId]);
-  const recent = points?.slice(-20).reverse() ?? [];
+  const sourceIds = [
+    ...new Set((points ?? []).map((point) => point.source_device_id ?? hostId)),
+  ];
+  const effectiveSource = sourceIds.includes(selectedSource)
+    ? selectedSource
+    : (sourceIds[0] ?? hostId);
+  const recent =
+    points
+      ?.filter(
+        (point) => (point.source_device_id ?? hostId) === effectiveSource,
+      )
+      .slice(-20)
+      .reverse() ?? [];
   return (
-    <section className="container-info-section" aria-label="Source metrics history">
+    <section
+      className="container-info-section source-metric-history"
+      aria-label="Source metrics history"
+    >
       <h2>Source metrics history · last 24 hours</h2>
+      {sourceIds.length > 1 && (
+        <div className="source-history-controls mb-3 flex flex-wrap items-center gap-2">
+          <label className="text-sm" htmlFor="source-history-selector">
+            Historical source
+          </label>
+          <Select
+            value={effectiveSource}
+            onValueChange={(value) => value && setSelectedSource(value)}
+          >
+            <SelectTrigger
+              className="source-history-select"
+              id="source-history-selector"
+              aria-label="Historical source"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {sourceIds.map((id) => (
+                  <SelectItem key={id} value={id}>
+                    {id === hostId
+                      ? `Current source · ${id.slice(0, 8)}`
+                      : `Merged source · ${id.slice(0, 8)}`}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
       {error ? (
-        <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       ) : points == null ? (
         <Skeleton className="h-24 w-full" />
       ) : recent.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No source samples in this window.</p>
+        <p className="text-sm text-muted-foreground">
+          No source samples in this window.
+        </p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead><tr><th>Observed</th><th>CPU</th><th>Memory</th><th>Network RX</th><th>Network TX</th></tr></thead>
-            <tbody>{recent.map((point) => {
-              const metric = point.metrics;
-              const memoryLabel = metric.memory_measurement === "docker_working_set" ? "Working set" : metric.memory_measurement === "hypervisor_guest" ? "Hypervisor" : metric.memory_measurement === "guest_operating_system" ? "Guest OS" : "Source";
-              return <tr key={`${point.collected_at}:${point.resolution_seconds}`}>
-                <td><time dateTime={new Date(point.collected_at * 1000).toISOString()}>{new Date(point.collected_at * 1000).toLocaleString()}</time></td>
-                <td>{percentage(metric.cpu_percent)}</td>
-                <td>{metric.memory_used_bytes == null ? "—" : `${bytes(metric.memory_used_bytes)}${metric.memory_total_bytes == null ? "" : ` / ${bytes(metric.memory_total_bytes)}`} · ${memoryLabel}`}</td>
-                <td>{metric.network_rx_bytes_per_second == null ? "—" : `${bytes(metric.network_rx_bytes_per_second)}/s`}</td>
-                <td>{metric.network_tx_bytes_per_second == null ? "—" : `${bytes(metric.network_tx_bytes_per_second)}/s`}</td>
-              </tr>;
-            })}</tbody>
+          <table className="source-history-table w-full text-left text-sm">
+            <thead>
+              <tr>
+                {sourceIds.length > 1 && <th>Source</th>}
+                <th>Observed</th>
+                <th>CPU</th>
+                <th>Memory</th>
+                <th>Network RX</th>
+                <th>Network TX</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recent.map((point) => {
+                const metric = point.metrics;
+                const memoryLabel =
+                  metric.memory_measurement === "docker_working_set"
+                    ? "Working set"
+                    : metric.memory_measurement === "hypervisor_guest"
+                      ? "Hypervisor"
+                      : metric.memory_measurement === "guest_operating_system"
+                        ? "Guest OS"
+                        : "Source";
+                return (
+                  <tr
+                    key={`${point.source_device_id ?? hostId}:${point.collected_at}:${point.resolution_seconds}`}
+                  >
+                    {sourceIds.length > 1 && (
+                      <td>
+                        {point.source_device_id === hostId
+                          ? "Current source"
+                          : `Historical source ${point.source_device_id?.slice(0, 8) ?? hostId.slice(0, 8)}`}
+                      </td>
+                    )}
+                    <td>
+                      <time
+                        dateTime={new Date(
+                          point.collected_at * 1000,
+                        ).toISOString()}
+                      >
+                        {new Date(point.collected_at * 1000).toLocaleString()}
+                      </time>
+                    </td>
+                    <td>{percentage(metric.cpu_percent)}</td>
+                    <td>
+                      {metric.memory_used_bytes == null
+                        ? "—"
+                        : `${bytes(metric.memory_used_bytes)}${metric.memory_total_bytes == null ? "" : ` / ${bytes(metric.memory_total_bytes)}`} · ${memoryLabel}`}
+                    </td>
+                    <td>
+                      {metric.network_rx_bytes_per_second == null
+                        ? "—"
+                        : `${bytes(metric.network_rx_bytes_per_second)}/s`}
+                    </td>
+                    <td>
+                      {metric.network_tx_bytes_per_second == null
+                        ? "—"
+                        : `${bytes(metric.network_tx_bytes_per_second)}/s`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
           </table>
         </div>
       )}

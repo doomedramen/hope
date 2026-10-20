@@ -95,6 +95,15 @@ pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
         || uuid::Uuid::parse_str(&value.batch_id).is_err()
         || value.source_scope.is_empty()
         || !text(&value.source_scope, 128)
+        || value.source_token.as_ref().is_some_and(|token| {
+            token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        || value
+            .legacy_source_scope
+            .as_ref()
+            .is_some_and(|scope| scope.is_empty() || !text(scope, 128))
+        || value.legacy_identities.len() > 500
+        || (value.legacy_source_scope.is_none() && !value.legacy_identities.is_empty())
         || value.sequence == 0
         || value.sequence > i64::MAX as u64
         || value.inventory_generation == 0
@@ -114,6 +123,26 @@ pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
     }
     let mut identities = std::collections::HashSet::new();
     let mut source_keys = std::collections::HashSet::new();
+    let mut legacy_keys = std::collections::HashSet::new();
+    for legacy in &value.legacy_identities {
+        if !matches!(
+            legacy.kind,
+            ChildDeviceKind::ProxmoxVm | ChildDeviceKind::ProxmoxLxc
+        ) || legacy.key.is_empty()
+            || !text(&legacy.key, 256)
+            || legacy.incarnation.is_empty()
+            || !text(&legacy.incarnation, 128)
+            || legacy.canonical_incarnation.is_empty()
+            || !text(&legacy.canonical_incarnation, 128)
+            || !legacy_keys.insert((
+                legacy.kind,
+                legacy.key.as_str(),
+                legacy.incarnation.as_str(),
+            ))
+        {
+            return Err("Invalid legacy child identity mapping");
+        }
+    }
     for device in &value.devices {
         let identity = &device.identity;
         let kind_matches_source = matches!(
@@ -135,13 +164,21 @@ pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
             || !text(&identity.key, 256)
             || identity.incarnation.is_empty()
             || !text(&identity.incarnation, 128)
+            || device
+                .ownership_generation
+                .is_some_and(|generation| generation > i64::MAX as u64)
+            || device
+                .legacy_incarnation
+                .as_ref()
+                .is_some_and(|incarnation| incarnation.is_empty() || !text(incarnation, 128))
+            || (device.legacy_incarnation.is_some() && value.legacy_source_scope.is_none())
             || !identities.insert(key)
             || !source_keys.insert((identity.kind, identity.key.as_str()))
             || device.name.is_empty()
             || !text(&device.name, 256)
             || !matches!(
                 device.lifecycle,
-                DeviceLifecycle::Running | DeviceLifecycle::Stopped
+                DeviceLifecycle::Running | DeviceLifecycle::Stopped | DeviceLifecycle::Stale
             )
             || device
                 .status
@@ -182,6 +219,64 @@ pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
                             })
                     })
             })
+            || device.guest_os.as_ref().is_some_and(|os| {
+                [
+                    os.hostname.as_deref(),
+                    os.name.as_deref(),
+                    os.kernel_release.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|value| !text(value, 255))
+                    || !number(os.observed_at, 4_102_444_800.0)
+            })
+            || device.guest_filesystems.len() > 128
+            || device.guest_filesystems.iter().any(|filesystem| {
+                !text(&filesystem.mountpoint, 4096)
+                    || filesystem.mountpoint.is_empty()
+                    || filesystem
+                        .filesystem_type
+                        .as_deref()
+                        .is_some_and(|value| !text(value, 128))
+                    || !number(filesystem.total_bytes, 1e18)
+                    || !number(filesystem.used_bytes, filesystem.total_bytes)
+                    || !number(filesystem.observed_at, 4_102_444_800.0)
+            })
+            || device.network_configuration.len() > 32
+            || device.network_configuration.iter().any(|network| {
+                !text(&network.name, 128)
+                    || network.name.is_empty()
+                    || network
+                        .bridge
+                        .as_deref()
+                        .is_some_and(|value| !text(value, 128))
+                    || network
+                        .model
+                        .as_deref()
+                        .is_some_and(|value| !text(value, 64))
+                    || network.mac.as_deref().is_some_and(|mac| {
+                        mac.len() != 17
+                            || mac.split(':').count() != 6
+                            || mac.split(':').any(|part| {
+                                part.len() != 2
+                                    || !part.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                    })
+            })
+            || device.disk_configuration.len() > 64
+            || device.disk_configuration.iter().any(|disk| {
+                !text(&disk.name, 128)
+                    || disk.name.is_empty()
+                    || disk
+                        .storage
+                        .as_deref()
+                        .is_some_and(|value| !text(value, 128))
+                    || disk
+                        .volume
+                        .as_deref()
+                        .is_some_and(|value| !text(value, 255))
+                    || disk.size_bytes.is_some_and(|value| !number(value, 1e18))
+            })
             || !optional(device.cpu_cores, 65_536.0)
             || !optional(device.memory_bytes, 1e18)
             || device
@@ -210,6 +305,11 @@ pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
             || !optional(device.metrics.memory_total_bytes, 1e18)
             || !optional(device.metrics.disk_used_bytes, 1e18)
             || !optional(device.metrics.disk_total_bytes, 1e18)
+            || !optional(device.metrics.disk_read_bytes, 1e20)
+            || !optional(device.metrics.disk_write_bytes, 1e20)
+            || !optional(device.metrics.disk_read_bytes_per_second, 1e15)
+            || !optional(device.metrics.disk_write_bytes_per_second, 1e15)
+            || !optional(device.metrics.uptime_seconds, 1e12)
             || !optional(device.metrics.network_rx_bytes_per_second, 1e15)
             || !optional(device.metrics.network_tx_bytes_per_second, 1e15)
             || !optional(device.metrics.network_rx_bytes, 1e20)

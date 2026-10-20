@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 9;
+const LATEST: i64 = 14;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin().await?;
@@ -64,6 +64,48 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
         sqlx::query("PRAGMA user_version = 9")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 10 {
+        sqlx::raw_sql(include_str!("migrations/0010_source_device_aliases.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 10")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 11 {
+        sqlx::raw_sql(include_str!("migrations/0011_shared_source_scopes.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 11")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 12 {
+        sqlx::raw_sql(include_str!("migrations/0012_source_device_identities.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 12")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 13 {
+        sqlx::raw_sql(include_str!("migrations/0013_shared_source_members.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 13")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 14 {
+        sqlx::raw_sql(include_str!(
+            "migrations/0014_pending_legacy_identities.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("PRAGMA user_version = 14")
             .execute(&mut *tx)
             .await?;
     }
@@ -184,7 +226,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 9);
+        assert_eq!(version, 14);
         for table in [
             "child_batch_heads",
             "child_batches",
@@ -194,6 +236,12 @@ mod tests {
             "source_metric_rollups",
             "device_associations",
             "device_relationships",
+            "source_device_aliases",
+            "device_id_aliases",
+            "shared_source_scopes",
+            "source_device_identities",
+            "shared_source_members",
+            "pending_legacy_identities",
         ] {
             let exists: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",

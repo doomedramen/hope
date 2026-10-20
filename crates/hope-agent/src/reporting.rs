@@ -153,6 +153,7 @@ impl ChildSchedule {
         agent_id: &str,
         at: f64,
     ) -> Option<Vec<ChildReportBatch>> {
+        let source_observed_at = snapshot.observed_at;
         if self.disabled {
             return None;
         }
@@ -181,13 +182,16 @@ impl ChildSchedule {
             agent_id: agent_id.into(),
             source: snapshot.source,
             source_scope: snapshot.source_scope,
+            source_token: snapshot.source_token.clone(),
+            legacy_source_scope: snapshot.legacy_source_scope.clone(),
+            legacy_identities: snapshot.legacy_identities.clone(),
             sequence: first_sequence,
             inventory_generation: next.generation,
             inventory_id: inventory_id.clone(),
             chunk_index: 0,
             chunk_count: 512,
             complete,
-            observed_at: at,
+            observed_at: source_observed_at,
             devices: Vec::new(),
         };
         // Use the protocol's strict body limit when splitting. Reserving the maximum chunk-count
@@ -488,6 +492,10 @@ mod tests {
         let snapshot = || collect::ChildSnapshot {
             source: ChildSourceKind::Docker,
             source_scope: "engine-id".into(),
+            source_token: None,
+            legacy_source_scope: None,
+            legacy_identities: vec![],
+            observed_at: 100.0,
             devices: vec![],
             inventory_complete: true,
         };
@@ -534,6 +542,10 @@ mod tests {
         let snapshot = |inventory_complete| collect::ChildSnapshot {
             source: ChildSourceKind::Docker,
             source_scope: "engine-id".into(),
+            source_token: None,
+            legacy_source_scope: None,
+            legacy_identities: vec![],
+            observed_at: 100.0,
             devices: vec![],
             inventory_complete,
         };
@@ -566,12 +578,20 @@ mod tests {
         let docker = collect::ChildSnapshot {
             source: ChildSourceKind::Docker,
             source_scope: "engine".into(),
+            source_token: None,
+            legacy_source_scope: None,
+            legacy_identities: vec![],
+            observed_at: 100.0,
             devices: vec![],
             inventory_complete: true,
         };
         let proxmox = collect::ChildSnapshot {
             source: ChildSourceKind::Proxmox,
             source_scope: Uuid::new_v4().to_string(),
+            source_token: Some("a".repeat(64)),
+            legacy_source_scope: None,
+            legacy_identities: vec![],
+            observed_at: 100.0,
             devices: vec![],
             inventory_complete: true,
         };
@@ -622,6 +642,8 @@ mod tests {
                     key: format!("container-{index}"),
                     incarnation: "first".into(),
                 },
+                ownership_generation: None,
+                legacy_incarnation: None,
                 name: "n".repeat(256),
                 lifecycle: DeviceLifecycle::Running,
                 status: None,
@@ -637,6 +659,11 @@ mod tests {
                 compose_project: None,
                 compose_service: None,
                 published_ports: vec![],
+                guest_agent_status: None,
+                guest_os: None,
+                guest_filesystems: vec![],
+                network_configuration: vec![],
+                disk_configuration: vec![],
                 metrics: ChildMetrics::default(),
             })
             .collect();
@@ -650,6 +677,10 @@ mod tests {
                     collect::ChildSnapshot {
                         source: ChildSourceKind::Docker,
                         source_scope: source_scope.clone(),
+                        source_token: None,
+                        legacy_source_scope: None,
+                        legacy_identities: vec![],
+                        observed_at: 100.0 + f64::from(report) * 30.0,
                         devices: devices.clone(),
                         inventory_complete: true,
                     },
@@ -755,6 +786,10 @@ mod tests {
             vec![collect::ChildSnapshot {
                 source: ChildSourceKind::Docker,
                 source_scope: "docker-engine".into(),
+                source_token: None,
+                legacy_source_scope: None,
+                legacy_identities: vec![],
+                observed_at: now(),
                 devices: vec![],
                 inventory_complete: true,
             }]

@@ -481,6 +481,24 @@ pub async fn report(
 /// Stores a bounded, sequenced child inventory independently of the parent heartbeat. Only a
 /// complete authoritative generation advances absence tracking; partial inventories cannot age
 /// children toward archival.
+fn same_interface_mac(
+    left: &hope_protocol::ChildDeviceReport,
+    right: &hope_protocol::ChildDeviceReport,
+) -> bool {
+    let left: HashSet<String> = left
+        .interfaces
+        .iter()
+        .filter_map(|i| i.mac.as_deref())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    right
+        .interfaces
+        .iter()
+        .filter_map(|i| i.mac.as_deref())
+        .map(str::to_ascii_lowercase)
+        .any(|mac| left.contains(&mac))
+}
+
 pub async fn child_report(
     Extract(state): Extract<State>,
     Extension(client): Extension<ClientKey>,
@@ -514,6 +532,15 @@ pub async fn child_report(
     limited(state.0.report_limit.check(&batch.agent_id, now()))?;
     state.0.report_limit.hit(&batch.agent_id, now());
     hope_protocol::validation::child_batch(&batch).map_err(ApiError::bad)?;
+    if batch.legacy_identities.len() > 500
+        || batch.legacy_identities.iter().any(|item| {
+            item.key.is_empty()
+                || item.incarnation.is_empty()
+                || item.canonical_incarnation.is_empty()
+        })
+    {
+        return Err(ApiError::bad("Invalid legacy child identity map"));
+    }
     if batch.observed_at > now() + 300.0 || batch.observed_at < now() - 86400.0 {
         return Err(ApiError::bad("Invalid child inventory timestamp"));
     }
@@ -539,6 +566,38 @@ pub async fn child_report(
         ChildSourceKind::Proxmox => "proxmox",
     };
     let mut tx = state.0.db.begin().await?;
+    let shared_scope = if let Some(token) = batch.source_token.as_deref() {
+        if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ApiError::bad("Invalid shared source token"));
+        }
+        let token_hash = hash(token);
+        let bound: Option<String> = sqlx::query_scalar(
+            "SELECT token_hash FROM shared_source_scopes WHERE source=? AND source_scope=?",
+        )
+        .bind(source)
+        .bind(&batch.source_scope)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match bound {
+            Some(expected) if expected != token_hash => {
+                return Err(ApiError::bad(
+                    "Shared source token does not match this cluster",
+                ));
+            }
+            Some(_) => true,
+            None => {
+                sqlx::query("INSERT INTO shared_source_scopes(source,source_scope,token_hash,created_at) VALUES(?,?,?,?)")
+                    .bind(source).bind(&batch.source_scope).bind(token_hash).bind(now()).execute(&mut *tx).await?;
+                true
+            }
+        }
+    } else {
+        false
+    };
+    if shared_scope {
+        sqlx::query("INSERT OR IGNORE INTO shared_source_members(source,source_scope,agent_id,joined_at) VALUES(?,?,?,?)")
+            .bind(source).bind(&batch.source_scope).bind(&batch.agent_id).bind(now()).execute(&mut *tx).await?;
+    }
     let replay: Option<(String, String, i64)> = sqlx::query_as(
         "SELECT parent_agent_id,source_scope,sequence FROM child_batches WHERE batch_id=?",
     )
@@ -578,6 +637,27 @@ pub async fn child_report(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    if shared_scope && let Some(old_scope) = batch.legacy_source_scope.as_deref() {
+        for legacy in &batch.legacy_identities {
+            let kind = match legacy.kind {
+                hope_protocol::ChildDeviceKind::DockerContainer => "docker_container",
+                hope_protocol::ChildDeviceKind::ProxmoxVm => "proxmox_vm",
+                hope_protocol::ChildDeviceKind::ProxmoxLxc => "proxmox_lxc",
+            };
+            let old_id: Option<String> = sqlx::query_scalar("SELECT id FROM source_devices WHERE parent_agent_id=? AND source=? AND source_scope=? AND source_key=? AND incarnation=? AND kind=?")
+                    .bind(&batch.agent_id).bind(source).bind(old_scope).bind(&legacy.key).bind(&legacy.incarnation).bind(kind)
+                    .fetch_optional(&mut *tx).await?;
+            let Some(old_id) = old_id else {
+                continue;
+            };
+            // Keep metadata-only migration evidence pending until a current observation of
+            // the canonical identity proves that the interface still matches. Old local
+            // maps can survive VMID reuse, so a tuple alone must never move history.
+            sqlx::query("INSERT OR IGNORE INTO pending_legacy_identities(source,parent_agent_id,legacy_source_device_id,source_scope,source_key,canonical_incarnation) VALUES(?,?,?,?,?,?)")
+                    .bind(source).bind(&batch.agent_id).bind(old_id).bind(&batch.source_scope).bind(&legacy.key).bind(&legacy.canonical_incarnation)
+                    .execute(&mut *tx).await?;
+        }
+    }
     sqlx::query("INSERT INTO child_batches(batch_id,parent_agent_id,source,source_scope,sequence,inventory_generation,inventory_id,chunk_index,chunk_count,observed_at,complete,received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&batch.batch_id).bind(&batch.agent_id).bind(source).bind(&batch.source_scope)
         .bind(batch.sequence as i64).bind(batch.inventory_generation as i64)
@@ -614,32 +694,156 @@ pub async fn child_report(
         })
         .collect();
     let mut source_ids = std::collections::HashMap::new();
+    let mut fresh_source_ids = HashSet::new();
     for device in &batch.devices {
         let identity = &device.identity;
-        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM source_devices WHERE parent_agent_id=? AND source=? AND source_scope=? AND source_key=? AND incarnation=?")
-            .bind(&batch.agent_id).bind(source).bind(&batch.source_scope).bind(&identity.key).bind(&identity.incarnation)
-            .fetch_optional(&mut *tx).await?;
-        let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let body = serde_json::to_string(device)?;
+        if shared_scope {
+            crate::api::reconcile_shared_identity(
+                &mut tx,
+                source,
+                &batch.source_scope,
+                &identity.key,
+                &identity.incarnation,
+            )
+            .await?;
+        }
+        // A scope is only authoritative inside its authenticated reporter until cluster
+        // membership has been authorized. This still reconciles node moves reported by one
+        // controller while preventing another enrolled agent from claiming the same VMID.
+        let identity_owner = if shared_scope {
+            "@shared"
+        } else {
+            batch.agent_id.as_str()
+        };
+        let mapped_id: Option<String> = sqlx::query_scalar("SELECT source_device_id FROM source_device_identities WHERE source=? AND identity_owner=? AND source_scope=? AND source_key=? AND incarnation=?")
+            .bind(source).bind(identity_owner).bind(&batch.source_scope).bind(&identity.key).bind(&identity.incarnation).fetch_optional(&mut *tx).await?;
         let kind = match identity.kind {
             hope_protocol::ChildDeviceKind::DockerContainer => "docker_container",
             hope_protocol::ChildDeviceKind::ProxmoxVm => "proxmox_vm",
             hope_protocol::ChildDeviceKind::ProxmoxLxc => "proxmox_lxc",
         };
-        if sqlx::query("UPDATE source_devices SET kind=?,lifecycle=?,name=?,observed_at=?,inventory_generation=?,missing_complete_count=0,missing_since=NULL,missing_inventory_generation=0,body=? WHERE id=?")
+        let mut pending_legacy_id = None;
+        if shared_scope {
+            let pending = sqlx::query("SELECT legacy_source_device_id,parent_agent_id FROM pending_legacy_identities WHERE source=? AND source_scope=? AND source_key=? AND canonical_incarnation=?")
+                .bind(source).bind(&batch.source_scope).bind(&identity.key).bind(&identity.incarnation)
+                .fetch_all(&mut *tx).await?;
+            for row in pending {
+                let old_id: String = row.get("legacy_source_device_id");
+                let old_parent: String = row.get("parent_agent_id");
+                let old: Option<(String, f64)> = sqlx::query_as("SELECT body,observed_at FROM source_devices WHERE id=? AND parent_agent_id=? AND source=? AND kind=?")
+                    .bind(&old_id).bind(&old_parent).bind(source).bind(kind).fetch_optional(&mut *tx).await?;
+                let Some((old_body, old_seen)) = old else {
+                    sqlx::query("DELETE FROM pending_legacy_identities WHERE source=? AND parent_agent_id=? AND legacy_source_device_id=? AND source_scope=? AND source_key=? AND canonical_incarnation=?")
+                        .bind(source).bind(&old_parent).bind(&old_id).bind(&batch.source_scope).bind(&identity.key).bind(&identity.incarnation).execute(&mut *tx).await?;
+                    continue;
+                };
+                let old: hope_protocol::ChildDeviceReport = serde_json::from_str(&old_body)?;
+                if batch.observed_at < old_seen
+                    || batch.observed_at - old_seen > 30.0 * 86400.0
+                    || !same_interface_mac(device, &old)
+                {
+                    continue;
+                }
+                if let Some(canonical) = mapped_id.as_deref() {
+                    if canonical != old_id {
+                        crate::api::merge_legacy_source_identity(
+                            &mut tx,
+                            canonical,
+                            &old_id,
+                            &old_parent,
+                        )
+                        .await?;
+                    }
+                } else if let Some(survivor) = pending_legacy_id.as_deref() {
+                    if survivor != old_id {
+                        crate::api::merge_legacy_source_identity(
+                            &mut tx,
+                            survivor,
+                            &old_id,
+                            &old_parent,
+                        )
+                        .await?;
+                    }
+                } else {
+                    pending_legacy_id.get_or_insert(old_id.clone());
+                }
+                sqlx::query("DELETE FROM pending_legacy_identities WHERE source=? AND parent_agent_id=? AND legacy_source_device_id=? AND source_scope=? AND source_key=? AND canonical_incarnation=?")
+                    .bind(source).bind(&old_parent).bind(&old_id).bind(&batch.source_scope).bind(&identity.key).bind(&identity.incarnation).execute(&mut *tx).await?;
+            }
+        }
+        let legacy_row: Option<(String, String, f64)> = if shared_scope {
+            match (batch.legacy_source_scope.as_deref(),device.legacy_incarnation.as_deref()) {
+                (Some(old_scope),Some(old_incarnation)) => sqlx::query_as("SELECT id,body,observed_at FROM source_devices WHERE parent_agent_id=? AND source=? AND source_scope=? AND source_key=? AND incarnation=? AND kind=?")
+                    .bind(&batch.agent_id).bind(source).bind(old_scope).bind(&identity.key).bind(old_incarnation).bind(kind)
+                    .fetch_optional(&mut *tx).await?,
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let legacy_id = if pending_legacy_id.is_some() {
+            pending_legacy_id
+        } else if let Some((old_id, old_body, old_seen)) = &legacy_row {
+            let old: hope_protocol::ChildDeviceReport = serde_json::from_str(old_body)?;
+            if batch.observed_at - *old_seen <= 30.0 * 86400.0 && same_interface_mac(device, &old) {
+                Some(old_id.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let (Some(canonical), Some(old)) = (mapped_id.as_deref(), legacy_id.as_deref())
+            && canonical != old
+        {
+            crate::api::merge_legacy_source_identity(&mut tx, canonical, old, &batch.agent_id)
+                .await?;
+        }
+        let existing: Option<(String, f64, i64, String)> = if let Some(mapped_id) = mapped_id {
+            sqlx::query_as("SELECT id,observed_at,ownership_generation,parent_agent_id FROM source_devices WHERE id=?")
+                .bind(mapped_id).fetch_optional(&mut *tx).await?
+        } else if let Some(old_id) = legacy_id {
+            sqlx::query_as("SELECT id,observed_at,ownership_generation,parent_agent_id FROM source_devices WHERE id=?")
+                .bind(old_id).fetch_optional(&mut *tx).await?
+        } else {
+            sqlx::query_as("SELECT id,observed_at,ownership_generation,parent_agent_id FROM source_devices WHERE parent_agent_id=? AND source=? AND source_scope=? AND source_key=? AND incarnation=?")
+                .bind(&batch.agent_id).bind(source).bind(&batch.source_scope).bind(&identity.key).bind(&identity.incarnation).fetch_optional(&mut *tx).await?
+        };
+        let id = existing
+            .as_ref()
+            .map(|(id, _, _, _)| id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let owner_generation = device.ownership_generation.unwrap_or(0);
+        let is_newer =
+            existing
+                .as_ref()
+                .is_none_or(|(_, observed_at, prior_generation, prior_parent)| {
+                    owner_generation > *prior_generation as u64
+                        || (owner_generation == *prior_generation as u64
+                            && prior_parent == &batch.agent_id
+                            && batch.observed_at >= *observed_at)
+                });
+        if is_newer {
+            fresh_source_ids.insert(id.clone());
+        }
+        let body = serde_json::to_string(device)?;
+        if is_newer && sqlx::query("UPDATE source_devices SET parent_agent_id=?,kind=?,lifecycle=?,name=?,observed_at=?,inventory_generation=?,ownership_generation=?,missing_complete_count=0,missing_since=NULL,missing_inventory_generation=0,body=? WHERE id=?")
+            .bind(&batch.agent_id)
             .bind(kind)
             .bind(format!("{:?}", device.lifecycle).to_ascii_lowercase())
-            .bind(&device.name).bind(batch.observed_at).bind(batch.inventory_generation as i64)
+            .bind(&device.name).bind(batch.observed_at).bind(batch.inventory_generation as i64).bind(owner_generation as i64)
             .bind(&body).bind(&id).execute(&mut *tx).await?.rows_affected() == 0
         {
-            sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,body) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+            sqlx::query("INSERT INTO source_devices(id,parent_agent_id,source,source_scope,source_key,incarnation,kind,lifecycle,name,observed_at,inventory_generation,ownership_generation,body) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
                 .bind(&id).bind(&batch.agent_id).bind(source).bind(&batch.source_scope)
                 .bind(&identity.key).bind(&identity.incarnation)
                 .bind(kind)
                 .bind(format!("{:?}", device.lifecycle).to_ascii_lowercase())
-                .bind(&device.name).bind(batch.observed_at).bind(batch.inventory_generation as i64)
+                .bind(&device.name).bind(batch.observed_at).bind(batch.inventory_generation as i64).bind(owner_generation as i64)
                 .bind(&body).execute(&mut *tx).await?;
         }
+        sqlx::query("INSERT INTO source_device_identities(source,identity_owner,source_scope,source_key,incarnation,source_device_id) VALUES(?,?,?,?,?,?) ON CONFLICT(source,identity_owner,source_scope,source_key,incarnation) DO UPDATE SET source_device_id=excluded.source_device_id")
+            .bind(source).bind(identity_owner).bind(&batch.source_scope).bind(&identity.key).bind(&identity.incarnation).bind(&id).execute(&mut *tx).await?;
         sqlx::query("INSERT OR IGNORE INTO source_observations(source_device_id,batch_id,observed_at,inventory_generation,body) VALUES(?,?,?,?,?)")
             .bind(&id).bind(&batch.batch_id).bind(batch.observed_at).bind(batch.inventory_generation as i64)
             .bind(&body).execute(&mut *tx).await?;
@@ -651,6 +855,9 @@ pub async fn child_report(
 
     for device in &batch.devices {
         let id = &source_ids[device.identity.key.as_str()];
+        if !fresh_source_ids.contains(id) {
+            continue;
+        }
         let parent = device
             .parent_key
             .as_deref()
@@ -719,6 +926,9 @@ pub async fn child_report(
     }
     for device in &batch.devices {
         let id = &source_ids[device.identity.key.as_str()];
+        if !fresh_source_ids.contains(id) {
+            continue;
+        }
         let candidates = crate::associations::candidates(device, &scan_hosts, &networks);
         let existing_confirmed = confirmed_by_source.get(id).cloned();
         let mut candidate_hosts = Vec::with_capacity(candidates.len());

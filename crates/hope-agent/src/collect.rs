@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 #[cfg(target_os = "linux")]
 use std::{ffi::CString, mem::MaybeUninit};
@@ -395,6 +395,8 @@ fn docker_child(container: &Container, scope: &str) -> ChildDeviceReport {
                 .map(|created| format!("{created:.0}"))
                 .unwrap_or_else(|| container.id.clone()),
         },
+        ownership_generation: None,
+        legacy_incarnation: None,
         name: container.name.clone(),
         lifecycle: if container.state == "running" {
             DeviceLifecycle::Running
@@ -414,6 +416,11 @@ fn docker_child(container: &Container, scope: &str) -> ChildDeviceReport {
         compose_project: container.compose_project.clone(),
         compose_service: container.compose_service.clone(),
         published_ports: container.published_ports.clone(),
+        guest_agent_status: None,
+        guest_os: None,
+        guest_filesystems: vec![],
+        network_configuration: vec![],
+        disk_configuration: vec![],
         metrics: ChildMetrics {
             cpu_percent: container.cpu_percent,
             cpu_capacity_cores: container.cpu_capacity_cores,
@@ -432,6 +439,10 @@ fn docker_child(container: &Container, scope: &str) -> ChildDeviceReport {
 pub struct ChildSnapshot {
     pub source: hope_protocol::ChildSourceKind,
     pub source_scope: String,
+    pub source_token: Option<String>,
+    pub legacy_source_scope: Option<String>,
+    pub legacy_identities: Vec<hope_protocol::LegacySourceIdentity>,
+    pub observed_at: f64,
     pub devices: Vec<ChildDeviceReport>,
     pub inventory_complete: bool,
 }
@@ -985,6 +996,13 @@ impl Collector {
             snapshots.push(ChildSnapshot {
                 source: hope_protocol::ChildSourceKind::Docker,
                 source_scope,
+                source_token: None,
+                legacy_source_scope: None,
+                legacy_identities: vec![],
+                observed_at: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64(),
                 devices: self.child_devices.clone(),
                 inventory_complete: self.child_inventory_complete,
             });
