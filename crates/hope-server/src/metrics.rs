@@ -523,7 +523,13 @@ pub async fn source_history(
     Path(id): Path<String>,
     Query(window): Query<Window>,
 ) -> ApiResult<Json<Vec<SourceMetricPoint>>> {
-    let host = state.host(&id).await?.ok_or_else(ApiError::not_found)?;
+    let host = state
+        .hosts()
+        .await?
+        .into_iter()
+        .find(|host| host.id == id || host.source_device_id.as_deref() == Some(id.as_str()))
+        .or(state.host(&id).await?)
+        .ok_or_else(ApiError::not_found)?;
     let mut source_ids = match host.source_device_id {
         Some(id) => vec![id],
         None => sqlx::query_scalar::<_, String>(

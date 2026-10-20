@@ -58,7 +58,13 @@ pub async fn get_host(
             .hosts()
             .await?
             .into_iter()
-            .find(|host| host.id == resolved.id)
+            .find(|host| {
+                host.id == resolved.id
+                    || resolved
+                        .source_device_id
+                        .as_ref()
+                        .is_some_and(|source_id| host.source_device_id.as_ref() == Some(source_id))
+            })
             .unwrap_or(resolved),
     ))
 }

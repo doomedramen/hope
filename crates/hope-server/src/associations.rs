@@ -42,6 +42,7 @@ pub fn candidates(
 
     let networks: Vec<_> = networks
         .iter()
+        .filter(|network| network.enabled)
         .filter_map(|network| {
             network
                 .cidr

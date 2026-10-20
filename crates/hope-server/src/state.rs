@@ -315,6 +315,14 @@ impl State {
                 .or_default()
                 .push(source_association(&row)?);
         }
+        let confirmed_host_owners: HashMap<String, String> = sqlx::query(
+            "SELECT host_id,source_device_id FROM device_associations WHERE status='confirmed'",
+        )
+        .fetch_all(&self.0.db)
+        .await?
+        .into_iter()
+        .map(|row| (row.get("host_id"), row.get("source_device_id")))
+        .collect();
         let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id)")
             .fetch_all(&self.0.db).await?;
         let mut service_relationships = source_service_relationships(&self.0.db, None).await?;
@@ -331,9 +339,42 @@ impl State {
                 .as_ref()
                 .and_then(|id| associations.remove(id))
                 .unwrap_or_default();
-            if let Some(target_id) = row.try_get::<Option<String>, _>("host_id").ok().flatten()
-                && let Some(target) = hosts.iter_mut().find(|host| host.id == target_id)
-            {
+            let linked_target = row
+                .try_get::<Option<String>, _>("host_id")
+                .ok()
+                .flatten()
+                .and_then(|target_id| hosts.iter().position(|host| host.id == target_id));
+            let fallback_target = if linked_target.is_none() {
+                projected_unique_scan_match(&source, &hosts, &networks, &confirmed_host_owners)
+            } else {
+                None
+            };
+            let target_index = linked_target.or_else(|| {
+                fallback_target.as_ref().and_then(|candidate| {
+                    hosts.iter().position(|host| host.id == candidate.host_id)
+                })
+            });
+            if let Some(candidate) = fallback_target {
+                if let Some(association) = source
+                    .associations
+                    .iter_mut()
+                    .find(|association| association.host_id == candidate.host_id)
+                {
+                    association.status = AssociationStatus::Confirmed;
+                    association.reason = candidate.reason;
+                    association.evidence = candidate.evidence;
+                } else {
+                    source.associations.push(DeviceAssociation {
+                        host_id: candidate.host_id,
+                        host_name: candidate.host_name,
+                        status: AssociationStatus::Confirmed,
+                        reason: candidate.reason,
+                        evidence: candidate.evidence,
+                    });
+                }
+            }
+            if let Some(target_index) = target_index {
+                let target = &mut hosts[target_index];
                 merge_source_host(target, source);
             } else {
                 hosts.push(source);
@@ -398,6 +439,41 @@ impl State {
             .execute(&self.0.db).await?;
         Ok(())
     }
+}
+
+/// A source report may predate the scan row that identifies the same guest. Re-evaluate a
+/// unique, strong interface match while projecting inventory so a stopped collector cannot
+/// leave two rows visible indefinitely. This is read-only projection; only fresh source reports
+/// persist associations. Explicit rejections and already-claimed scan hosts always win.
+fn projected_unique_scan_match(
+    source: &Host,
+    hosts: &[Host],
+    networks: &[Network],
+    confirmed_host_owners: &HashMap<String, String>,
+) -> Option<crate::associations::Candidate> {
+    let source_id = source.source_device_id.as_deref()?;
+    let child = source.child.as_ref()?;
+    let candidates = crate::associations::candidates(child, hosts, networks);
+    let candidate = candidates.into_iter().find(|candidate| candidate.strong)?;
+    if source.associations.iter().any(|association| {
+        association.host_id == candidate.host_id
+            && association.status == AssociationStatus::Rejected
+    }) {
+        return None;
+    }
+    let host = hosts.iter().find(|host| host.id == candidate.host_id)?;
+    if host.agent_id.is_some()
+        || host
+            .source_device_id
+            .as_deref()
+            .is_some_and(|owner| owner != source_id)
+        || confirmed_host_owners
+            .get(&candidate.host_id)
+            .is_some_and(|owner| owner != source_id)
+    {
+        return None;
+    }
+    Some(candidate)
 }
 
 async fn source_service_relationships(
