@@ -214,23 +214,22 @@ pub async fn collect() -> Result<()> {
         })?;
         bail!("could not determine the local Proxmox node name");
     };
-    let qemu = pvesh(&[
+    // These are independent, node-local bulk listings. Run them concurrently so their two
+    // bounded pvesh deadlines do not stack on top of the cluster resources request and the
+    // collector's bounded enrichment work.
+    let qemu_path = format!("/nodes/{local_node}/qemu");
+    let lxc_path = format!("/nodes/{local_node}/lxc");
+    let qemu_args = [
         "get",
-        &format!("/nodes/{local_node}/qemu"),
+        qemu_path.as_str(),
         // Proxmox's VM index can include full active-guest status in the same bulk request.
         "--full",
         "1",
         "--output-format",
         "json",
-    ])
-    .await;
-    let lxc = pvesh(&[
-        "get",
-        &format!("/nodes/{local_node}/lxc"),
-        "--output-format",
-        "json",
-    ])
-    .await;
+    ];
+    let lxc_args = ["get", lxc_path.as_str(), "--output-format", "json"];
+    let (qemu, lxc) = tokio::join!(pvesh(&qemu_args), pvesh(&lxc_args));
     let qemu = match qemu {
         Ok(value) => value,
         Err(error) => {
@@ -1638,7 +1637,9 @@ async fn pvesh_timeout(args: &[&str], deadline: Duration) -> Result<Value> {
     command
         .args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        // Keep pvesh's own actionable errors in the collector service journal. The argument
+        // set is fixed by this module and contains no credentials.
+        .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);

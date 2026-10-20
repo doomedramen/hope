@@ -885,7 +885,9 @@ After=local-fs.target
 ConditionPathExists=$(command -v pvesh)
 [Service]
 Type=oneshot
-TimeoutStartSec=28s
+# Leave headroom for bounded pvesh reads and guest enrichment while keeping a hard
+# upper bound on this root-owned oneshot.
+TimeoutStartSec=45s
 User=root
 Group=root
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
