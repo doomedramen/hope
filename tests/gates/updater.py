@@ -354,8 +354,15 @@ class Gate:
                 release_id = previous_result.get('release_id')
                 expect(release_id is not None, 'the updater result did not report the installed immutable release ID')
                 self.must(f'echo {release_id} > {STATE}/update-queue/request', user='hope-agent')
-                wait_for('the updater to answer', lambda: int(self.result_file().get('at', '0')) > previous, 60)
-                expect(self.result_file().get('status') == 'current', f'update-result says {self.result_file()}')
+                current = wait_for(
+                    'the updater to report the current immutable release',
+                    lambda: (result := self.result_file()).get('at', '0').isdigit()
+                    and int(result['at']) > previous
+                    and result.get('status') == 'current'
+                    and result.get('release_id') == release_id,
+                    60,
+                )
+                expect(current, f'update-result says {self.result_file()}')
                 expect(self.main_pid() == pid, 'the agent service was restarted although nothing was newer')
                 expect(self.installed_sha() == sha, 'the installed binary changed')
                 expect(self.dx(f'test -e {STATE}/update-queue/request').returncode != 0, 'the request file was not removed')
