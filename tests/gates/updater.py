@@ -349,8 +349,11 @@ class Gate:
         with self.cell('a request from the agent account for a current release changes nothing') as go:
             if go:
                 pid, sha = self.main_pid(), self.installed_sha()
-                previous = int(self.result_file().get('at', '0'))
-                self.must(f'echo requested > {STATE}/update-queue/request', user='hope-agent')
+                previous_result = self.result_file()
+                previous = int(previous_result.get('at', '0'))
+                release_id = previous_result.get('release_id')
+                expect(release_id is not None, 'the updater result did not report the installed immutable release ID')
+                self.must(f'echo {release_id} > {STATE}/update-queue/request', user='hope-agent')
                 wait_for('the updater to answer', lambda: int(self.result_file().get('at', '0')) > previous, 60)
                 expect(self.result_file().get('status') == 'current', f'update-result says {self.result_file()}')
                 expect(self.main_pid() == pid, 'the agent service was restarted although nothing was newer')
