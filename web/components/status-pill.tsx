@@ -12,6 +12,8 @@ export function StatusPill({
     | "agent_uninstalled"
     | "last_report"
     | "last_seen"
+    | "source"
+    | "lifecycle"
   >;
   className?: string;
 }) {

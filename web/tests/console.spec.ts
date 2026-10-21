@@ -339,6 +339,17 @@ function extended(sample: number) {
 }
 
 async function seed(request: APIRequestContext, includeProxmox = false) {
+  // The request fixture does not inherit the browser's authenticated storage
+  // state. Sign it in before using the protected inventory and enrollment APIs.
+  const auth = (await (await request.get("/api/v1/auth/status")).json()) as {
+    setup_required: boolean;
+  };
+  const session = auth.setup_required
+    ? await request.post("/api/v1/auth/setup", {
+        data: { setup_token: "hope-playwright-setup-token", password },
+      })
+    : await request.post("/api/v1/auth/login", { data: { password } });
+  expect(session.ok(), await session.text()).toBeTruthy();
   await request.post("/api/v1/networks", {
     data: { name: "Home network", cidr: "192.168.1.0/24", enabled: false },
   });
@@ -522,8 +533,8 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
               memory_used_bytes: 512 * 1024 * 1024,
               memory_total_bytes: 2 * 1024 * 1024 * 1024,
               memory_measurement: "hypervisor_guest",
-              disk_used_bytes: null,
-              disk_total_bytes: null,
+              disk_used_bytes: 4.7 * 1024 ** 3,
+              disk_total_bytes: 14.9 * 1024 ** 3,
               network_rx_bytes_per_second: null,
               network_tx_bytes_per_second: null,
               network_rx_bytes: null,
@@ -2803,7 +2814,9 @@ test.describe.serial("H.O.P.E console", () => {
     request,
   }) => {
     await seed(request, true);
+    await page.context().addCookies((await request.storageState()).cookies);
     await page.clock.install();
+    const collectedAt = Date.now() / 1000;
     let historicalCpu = 44;
     await page.route(
       "**/api/v1/hosts/*/source-metrics?hours=24",
@@ -2815,7 +2828,7 @@ test.describe.serial("H.O.P.E console", () => {
           json: [
             {
               source_device_id: sourceId,
-              collected_at: 1_700_000_000,
+              collected_at: collectedAt - 60,
               resolution_seconds: 30,
               metrics: {
                 cpu_percent: 15,
@@ -2828,7 +2841,7 @@ test.describe.serial("H.O.P.E console", () => {
             },
             {
               source_device_id: "historical-source-1234",
-              collected_at: 1_699_999_000,
+              collected_at: collectedAt - 120,
               resolution_seconds: 30,
               metrics: {
                 cpu_percent: historicalCpu,
@@ -2863,9 +2876,17 @@ test.describe.serial("H.O.P.E console", () => {
         addresses: ["192.168.1.41"],
         macs: ["02:fe:00:00:00:02"],
       };
+      const archivedRemoteGuest = {
+        ...sourceGuest!,
+        id: "archived-remote-dns2",
+        name: "dns2",
+        lifecycle: "archived" as const,
+        child: { ...sourceGuest!.child!, node: "catacomb" },
+      };
       bootstrap.hosts = [
         ...bootstrap.hosts.filter((host) => host.id !== sourceGuest!.id),
         mergedGuest,
+        archivedRemoteGuest,
       ];
       await route.fulfill({ response, json: bootstrap });
     });
@@ -2919,6 +2940,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(proxmoxDetails.getByRole("table")).toContainText(
       "Debian GNU/Linux 13",
     );
+    await expect(proxmoxDetails.getByRole("table")).not.toContainText("dns2");
     const guestsTable = proxmoxDetails.getByRole("table");
     await expect(guestsTable.getByRole("columnheader")).toHaveText(
       deviceColumns,
@@ -2934,6 +2956,8 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(guestRow).toContainText("Running");
     await expect(guestRow.getByRole("cell").nth(3)).toContainText("15%");
     await expect(guestRow.getByRole("cell").nth(4)).toContainText("25%");
+    await expect(guestRow.getByRole("cell").nth(5)).toContainText("32%");
+    await expect(guestRow.getByRole("cell").nth(5)).toContainText("source");
     await guestsTable.getByRole("button", { name: "CPU", exact: true }).click();
     await expect(
       guestsTable.getByRole("columnheader", { name: "CPU", exact: true }),
@@ -2947,6 +2971,24 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("heading", { name: "dns-container" }),
     ).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Metrics" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await page.getByRole("tab", { name: "Metrics" }).click();
+    await expect(
+      page.getByTestId("chart-Proxmox hypervisor CPU"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("chart-Proxmox hypervisor memory"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("chart-Proxmox hypervisor network"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("chart-Proxmox hypervisor disk I/O"),
+    ).toBeVisible();
+    await page.getByRole("tab", { name: "Summary" }).click();
     await expect(
       page.getByRole("region", { name: "Source inventory" }),
     ).toContainText("Guest OS data observed");
@@ -2968,6 +3010,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("region", { name: "Source inventory" }),
     ).toContainText("Configured disk scsi0");
+    await page.getByRole("tab", { name: "Metrics" }).click();
     const sourceHistory = page.getByRole("region", {
       name: "Source metrics history",
     });
@@ -2975,7 +3018,9 @@ test.describe.serial("H.O.P.E console", () => {
       2,
     );
     await sourceHistory.getByLabel("Historical source").click();
-    await page.getByRole("option", { name: /^Merged source/ }).click();
+    await page
+      .getByRole("option", { name: /^Merged source · historic/ })
+      .click();
     await expect(sourceHistory.getByRole("table")).toContainText("44.0%");
     historicalCpu = 55;
     await page.clock.runFor(31000);
@@ -2983,6 +3028,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(sourceHistory.getByRole("table").getByRole("row")).toHaveCount(
       2,
     );
+    await page.getByRole("tab", { name: "Summary" }).click();
     await expect(proxmoxDetails).toContainText("Runs on");
     await proxmoxDetails
       .getByRole("button", { name: "proxmox-fixture-node" })

@@ -143,12 +143,22 @@ export function HostDetails({
   const agentInstalled = Boolean(host.agent_id && !host.agent_uninstalled);
   const containers = metrics?.containers ?? [];
   const hasContainers = containers.length > 0;
+  const localProxmoxNodeNames = new Set(
+    [host.inventory?.hostname, host.name]
+      .filter((name): name is string => Boolean(name))
+      .map((name) => name.trim().toLocaleLowerCase()),
+  );
   const proxmoxGuests = hosts
     .filter(
       (item) =>
         item.parent_id === host.id &&
+        item.lifecycle !== "archived" &&
         (item.source?.kind === "proxmox_vm" ||
-          item.source?.kind === "proxmox_lxc"),
+          item.source?.kind === "proxmox_lxc") &&
+        (!item.child?.node ||
+          localProxmoxNodeNames.has(
+            item.child.node.trim().toLocaleLowerCase(),
+          )),
     )
     .sort((a, b) => a.name.localeCompare(b.name));
   const hasProxmoxGuests = proxmoxGuests.length > 0;
@@ -158,7 +168,9 @@ export function HostDetails({
       (collector) => collector.name === "proxmox_children",
     ) ||
     hasProxmoxGuests;
-  const [activeTab, setActiveTab] = useState("summary");
+  const [activeTab, setActiveTab] = useState(() =>
+    host.metrics || host.child ? "metrics" : "summary",
+  );
   const update = updatePlan(host, agentRelease);
   const [copied, setCopied] = useState(false);
   const state = hostState(host);
@@ -384,7 +396,7 @@ export function HostDetails({
         >
           <TabsList aria-label="Host sections" className="host-tab-list">
             <TabsTrigger value="summary">Summary</TabsTrigger>
-            {host.agent_id && (
+            {(host.agent_id || host.child) && (
               <TabsTrigger value="metrics">Metrics</TabsTrigger>
             )}
             {agentInstalled && hasContainers && (
@@ -446,7 +458,14 @@ export function HostDetails({
                 className="host-readings"
               >
                 <ReadingMeter
-                  label="CPU · source"
+                  label={
+                    host.child.metrics.cpu_measurement === "hypervisor_guest"
+                      ? "Hypervisor CPU · source"
+                      : host.child.metrics.cpu_measurement ===
+                          "guest_operating_system"
+                        ? "Guest OS CPU · source"
+                        : "CPU · source"
+                  }
                   value={host.child.metrics.cpu_percent}
                 />
                 <ReadingMeter
@@ -507,7 +526,12 @@ export function HostDetails({
                 </h3>
                 <dl className="detail-list">
                   <dt>State</dt>
-                  <dd>{host.child.status ?? host.child.lifecycle}</dd>
+                  <dd>
+                    {host.child.status ??
+                      (host.child.lifecycle === "archived"
+                        ? "No longer reported"
+                        : host.child.lifecycle)}
+                  </dd>
                   {host.child.identity.kind.startsWith("proxmox") && (
                     <>
                       <dt>Guest OS memory</dt>
@@ -895,12 +919,6 @@ export function HostDetails({
                 </div>
               </section>
             )}
-            {host.child && (
-              <SourceMetricHistory
-                key={host.source_device_id ?? host.id}
-                hostId={host.source_device_id ?? host.id}
-              />
-            )}
             <DeviceSection
               host={host}
               hosts={hosts}
@@ -1086,6 +1104,19 @@ export function HostDetails({
                   windowEnd={history.windowEnd}
                 />
               </section>
+            )}
+            {host.child && (
+              <SourceMetricHistory
+                key={host.source_device_id ?? host.id}
+                hostId={host.id}
+                primarySourceId={host.source_device_id}
+                sourceLabel={
+                  host.child.identity.kind === "proxmox_vm" ||
+                  host.child.identity.kind === "proxmox_lxc"
+                    ? "Proxmox hypervisor"
+                    : "Docker Engine"
+                }
+              />
             )}
           </TabsContent>
           {hasContainers && (

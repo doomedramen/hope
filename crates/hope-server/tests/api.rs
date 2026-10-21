@@ -870,6 +870,11 @@ async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_ab
         state.host(&child_id).await.unwrap().unwrap().lifecycle,
         Some(DeviceLifecycle::Archived)
     );
+    assert_eq!(
+        state.hosts().await.unwrap().len(),
+        1,
+        "confirmed deleted source devices stay out of the found-device list"
+    );
     let observations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM source_observations")
         .fetch_one(&state.0.db)
         .await
@@ -880,6 +885,16 @@ async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_ab
         .unwrap();
     assert_eq!(observations, 1);
     assert_eq!(metrics, 1);
+    let (history_status, history) = request(
+        &app,
+        "GET",
+        &format!("/api/v1/hosts/{child_id}/source-metrics?hours=168"),
+        Value::Null,
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(history_status, StatusCode::OK);
+    assert_eq!(history.as_array().unwrap().len(), 1);
     let batches: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM child_batches")
         .fetch_one(&state.0.db)
         .await

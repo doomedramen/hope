@@ -238,7 +238,16 @@ pub async fn collect() -> Result<()> {
         "--output-format",
         "json",
     ];
-    let lxc_args = ["get", lxc_path.as_str(), "--output-format", "json"];
+    let lxc_args = [
+        "get",
+        lxc_path.as_str(),
+        // Match the QEMU bulk listing: the full node-local rows include current guest
+        // telemetry on Proxmox versions that omit it from the abbreviated index.
+        "--full",
+        "1",
+        "--output-format",
+        "json",
+    ];
     let (qemu, lxc) = tokio::join!(pvesh(&qemu_args), pvesh(&lxc_args));
     let qemu = match qemu {
         Ok(value) => value,
@@ -315,17 +324,7 @@ pub async fn collect() -> Result<()> {
                 continue;
             }
             let mut resource = item.clone();
-            if let Some(object) = resource.as_object_mut() {
-                object.insert("type".into(), Value::String(kind.into()));
-                object.insert("node".into(), Value::String(local_node.clone()));
-                for field in ["maxcpu", "maxmem", "maxdisk", "tags"] {
-                    if !object.contains_key(field)
-                        && let Some(value) = member.get(field)
-                    {
-                        object.insert(field.into(), value.clone());
-                    }
-                }
-            }
+            fill_missing_resource_fields(&mut resource, member, kind, &local_node);
             let Some(device) = resource_device(&resource, &cluster_id) else {
                 complete = false;
                 continue;
@@ -400,6 +399,7 @@ pub async fn collect() -> Result<()> {
     let (legacy_source_scope, legacy_identities, proxmox_guest_presence) = update_guest_identities(
         &mut devices,
         &cluster_id,
+        &local_node,
         complete,
         observed_at,
         &global_present,
@@ -417,6 +417,38 @@ pub async fn collect() -> Result<()> {
     })
 }
 
+fn fill_missing_resource_fields(resource: &mut Value, member: &Value, kind: &str, node: &str) {
+    let Some(object) = resource.as_object_mut() else {
+        return;
+    };
+    object.insert("type".into(), Value::String(kind.into()));
+    object.insert("node".into(), Value::String(node.into()));
+    // Prefer the detailed local row, but use cluster-wide values when that endpoint
+    // omitted a measurement. Preserve explicit numeric zeroes as real measurements.
+    for field in [
+        "maxcpu",
+        "maxmem",
+        "maxdisk",
+        "tags",
+        "cpu",
+        "mem",
+        "disk",
+        "diskread",
+        "diskwrite",
+        "disk_read",
+        "disk_write",
+        "uptime",
+        "netin",
+        "netout",
+    ] {
+        if object.get(field).is_none_or(Value::is_null)
+            && let Some(value) = member.get(field).filter(|value| !value.is_null())
+        {
+            object.insert(field.into(), value.clone());
+        }
+    }
+}
+
 fn local_node_name() -> Option<String> {
     // Proxmox's pmxcfs exposes the configured node name here. Fall back to the OS hostname for
     // test fixtures and systems where the cluster filesystem has not mounted yet.
@@ -430,9 +462,16 @@ fn local_node_name() -> Option<String> {
         })
 }
 
-#[cfg(test)]
 fn is_local_guest(device: &ChildDeviceReport, local_node: &str) -> bool {
     device.node.as_deref() == Some(local_node)
+}
+
+fn local_guest_presence(devices: &[ChildDeviceReport], local_node: &str) -> HashSet<String> {
+    devices
+        .iter()
+        .filter(|device| is_local_guest(device, local_node))
+        .map(|device| format!("{:?}:{}", device.identity.kind, device.identity.key))
+        .collect()
 }
 
 fn local_owner_config_exists(device: &ChildDeviceReport) -> bool {
@@ -454,6 +493,7 @@ fn local_owner_config_exists(device: &ChildDeviceReport) -> bool {
 fn update_guest_identities(
     devices: &mut Vec<ChildDeviceReport>,
     source_scope: &str,
+    local_node: &str,
     complete: bool,
     now: f64,
     global_present: &HashSet<String>,
@@ -497,6 +537,10 @@ fn update_guest_identities(
     ) {
         write_shared(GUEST_IDENTITIES, &identities)?;
     }
+    // Shared cluster membership protects VMID incarnation tracking across migrations, but a
+    // parent report's presence is node-local. Sending the cluster-wide set here keeps old
+    // foreign-node children alive under every reporting agent indefinitely.
+    let local_present = local_guest_presence(devices, local_node);
     let legacy_identities = local_legacy
         .as_ref()
         .filter(|_| legacy_scope.is_some())
@@ -524,7 +568,7 @@ fn update_guest_identities(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let mut proxmox_guest_presence = global_present
+    let mut proxmox_guest_presence = local_present
         .iter()
         .filter_map(|key| {
             let (kind, key) = key.split_once(':')?;
@@ -1804,6 +1848,67 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_guest_telemetry_stays_unknown_and_real_zeroes_stay_zero() {
+        let cluster = Uuid::new_v4().to_string();
+        let unavailable = resource_device(
+            &serde_json::json!({"type":"lxc","vmid":301,"node":"pve-a","status":"running","maxcpu":2,"maxmem":2048}),
+            &cluster,
+        )
+        .unwrap();
+        assert_eq!(unavailable.metrics.cpu_percent, None);
+        assert_eq!(unavailable.metrics.memory_used_bytes, None);
+        assert_eq!(unavailable.metrics.memory_total_bytes, Some(2048.0));
+        assert_eq!(
+            unavailable.metrics.cpu_measurement,
+            Some(CpuMeasurement::HypervisorGuest)
+        );
+        assert_eq!(
+            unavailable.metrics.memory_measurement,
+            Some(MemoryMeasurement::HypervisorGuest)
+        );
+
+        let idle = resource_device(
+            &serde_json::json!({"type":"lxc","vmid":302,"node":"pve-a","status":"running","cpu":0.0,"maxcpu":2,"mem":0,"maxmem":2048}),
+            &cluster,
+        )
+        .unwrap();
+        assert_eq!(idle.metrics.cpu_percent, Some(0.0));
+        assert_eq!(idle.metrics.memory_used_bytes, Some(0.0));
+        assert_eq!(idle.metrics.memory_total_bytes, Some(2048.0));
+    }
+
+    #[test]
+    fn sparse_local_lxc_row_uses_cluster_telemetry_without_overwriting_zeroes() {
+        let mut local = serde_json::json!({
+            "vmid": 303,
+            "status": "running",
+            "cpu": 0.0,
+            "mem": null,
+            "netin": 0.0
+        });
+        let cluster = serde_json::json!({
+            "cpu": 0.75,
+            "mem": 512,
+            "maxmem": 2048,
+            "netin": 900,
+            "netout": 1200,
+            "disk": 0,
+            "maxdisk": 4096
+        });
+
+        fill_missing_resource_fields(&mut local, &cluster, "lxc", "pve-a");
+        let device = resource_device(&local, &Uuid::new_v4().to_string()).unwrap();
+
+        assert_eq!(device.metrics.cpu_percent, Some(0.0));
+        assert_eq!(device.metrics.memory_used_bytes, Some(512.0));
+        assert_eq!(device.metrics.memory_total_bytes, Some(2048.0));
+        assert_eq!(device.metrics.network_rx_bytes, Some(0.0));
+        assert_eq!(device.metrics.network_tx_bytes, Some(1200.0));
+        assert_eq!(device.metrics.disk_used_bytes, Some(0.0));
+        assert_eq!(device.metrics.disk_total_bytes, Some(4096.0));
+    }
+
+    #[test]
     fn cluster_inventory_is_scoped_to_the_local_node() {
         let scope = Uuid::new_v4().to_string();
         let local = resource_device(
@@ -1818,6 +1923,8 @@ mod tests {
         .unwrap();
         assert!(is_local_guest(&local, "catacomb3"));
         assert!(!is_local_guest(&remote, "catacomb3"));
+        let present = local_guest_presence(&[local, remote], "catacomb3");
+        assert_eq!(present, HashSet::from(["ProxmoxLxc:101".to_owned()]));
     }
 
     #[test]

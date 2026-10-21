@@ -387,8 +387,8 @@ impl State {
                 .or_default()
                 .push(source_association(&row)?);
         }
-        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) AND (? IS NULL OR d.id=? OR d.host_id=? OR d.host_id=(SELECT host_id FROM source_devices WHERE id=?))")
-            .bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *tx).await?;
+        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) AND (? IS NOT NULL OR d.lifecycle!='archived') AND (? IS NULL OR d.id=? OR d.host_id=? OR d.host_id=(SELECT host_id FROM source_devices WHERE id=?))")
+            .bind(id).bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *tx).await?;
         let mut service_relationships = source_service_relationships(&mut tx, id).await?;
         let mut settings: HashMap<String, String> =
             sqlx::query_as("SELECT source_device_id,body FROM source_device_settings WHERE ? IS NULL OR source_device_id=? OR source_device_id IN (SELECT id FROM source_devices WHERE host_id=? OR host_id=(SELECT host_id FROM source_devices WHERE id=?))")

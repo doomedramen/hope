@@ -42,7 +42,11 @@ export function hostState(
       : { key: "stale", label: "Agent stale", tone: "critical" };
   if (host.source) {
     if (host.lifecycle === "archived")
-      return { key: "archived", label: "Archived", tone: "neutral" };
+      return {
+        key: "unobserved",
+        label: "No longer reported",
+        tone: "neutral",
+      };
     if (host.lifecycle === "stopped")
       return { key: "stopped", label: "Stopped", tone: "neutral" };
     if (
@@ -110,6 +114,18 @@ export function worstDisk(host: Host): { disk: Disk; percent: number } | null {
       worst = { disk, percent };
   }
   return worst;
+}
+
+/** Filesystem fullness when available, otherwise explicitly source-reported guest allocation. */
+export function diskUsagePercent(host: Host): number | null {
+  const filesystem = worstDisk(host);
+  if (filesystem) return filesystem.percent;
+  const child = host.child?.metrics;
+  return child?.disk_used_bytes != null &&
+    child.disk_total_bytes != null &&
+    child.disk_total_bytes > 0
+    ? (child.disk_used_bytes / child.disk_total_bytes) * 100
+    : null;
 }
 
 export function cpuPercent(host: Host): number | null {
@@ -455,8 +471,7 @@ export function compareHosts(
       return (a, b) => number(memoryUsage(b)) - number(memoryUsage(a));
     case "disk":
       return (a, b) =>
-        number(worstDisk(b)?.percent ?? null) -
-        number(worstDisk(a)?.percent ?? null);
+        number(diskUsagePercent(b)) - number(diskUsagePercent(a));
     case "seen":
       return (a, b) =>
         Math.max(b.last_report ?? 0, b.last_seen) -

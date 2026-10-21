@@ -2,10 +2,13 @@ import { test, expect } from "@playwright/test";
 import {
   agentUpdate,
   compareHosts,
+  cpuPercent,
+  diskUsagePercent,
   fleetSummary,
   fleetUpdates,
   hostIssues,
   hostState,
+  memoryUsage,
   matchesFilter,
   matchesSearch,
   updatePlan,
@@ -157,7 +160,7 @@ test("host state distinguishes reporting, stale, revoked, observed and unobserve
   ).toBe("neutral");
 });
 
-test("source-backed stopped and archived devices have distinct filters", () => {
+test("source-backed stopped guests stay distinct from confirmed-deleted guests", () => {
   const stopped = host({
     source: {
       kind: "proxmox_lxc",
@@ -169,9 +172,14 @@ test("source-backed stopped and archived devices have distinct filters", () => {
   });
   const archived = host({ ...stopped, id: "archived", lifecycle: "archived" });
   expect(hostState(stopped, now).key).toBe("stopped");
-  expect(hostState(archived, now).key).toBe("archived");
+  expect(hostState(archived, now)).toEqual({
+    key: "unobserved",
+    label: "No longer reported",
+    tone: "neutral",
+  });
   expect(matchesFilter(stopped, "stopped", now)).toBeTruthy();
-  expect(matchesFilter(archived, "archived", now)).toBeTruthy();
+  expect(matchesFilter(archived, "archived", now)).toBeFalsy();
+  expect(matchesFilter(archived, "unobserved", now)).toBeTruthy();
 });
 
 test("retired devices have an explicit filter and status", () => {
@@ -281,6 +289,101 @@ test("fullest filesystem keeps the root disk when the latest sample omits it", (
   );
   expect(result?.disk.mount).toBe("/");
   expect(result?.percent).toBeCloseTo(55.43, 1);
+});
+
+test("source guest storage is available when no filesystem inventory exists", () => {
+  const guest = host({
+    source: {
+      kind: "proxmox_lxc",
+      scope: "cluster",
+      key: "202",
+      incarnation: "incarnation",
+    },
+    child: {
+      metrics: {
+        disk_used_bytes: 40,
+        disk_total_bytes: 100,
+      },
+    } as NonNullable<Host["child"]>,
+  });
+  expect(worstDisk(guest)).toBeNull();
+  expect(diskUsagePercent(guest)).toBe(40);
+  expect(
+    diskUsagePercent(
+      host({
+        source: guest.source,
+        child: {
+          metrics: { disk_used_bytes: 0, disk_total_bytes: 100 },
+        } as NonNullable<Host["child"]>,
+      }),
+    ),
+  ).toBe(0);
+  expect(
+    diskUsagePercent(
+      host({
+        source: guest.source,
+        child: {
+          metrics: { disk_used_bytes: null, disk_total_bytes: 100 },
+        } as NonNullable<Host["child"]>,
+      }),
+    ),
+  ).toBeNull();
+});
+
+test("source guest map metrics keep unknown separate from an actual zero", () => {
+  const source = {
+    kind: "proxmox_lxc" as const,
+    scope: "cluster",
+    key: "203",
+    incarnation: "incarnation",
+  };
+  const unavailable = host({
+    source,
+    child: {
+      metrics: {
+        cpu_percent: null,
+        memory_used_bytes: null,
+        memory_total_bytes: 100,
+      },
+    } as NonNullable<Host["child"]>,
+  });
+  expect(cpuPercent(unavailable)).toBeNull();
+  expect(memoryUsage(unavailable)).toBeNull();
+
+  const idle = host({
+    source,
+    child: {
+      metrics: {
+        cpu_percent: 0,
+        memory_used_bytes: 0,
+        memory_total_bytes: 100,
+      },
+    } as NonNullable<Host["child"]>,
+  });
+  expect(cpuPercent(idle)).toBe(0);
+  expect(memoryUsage(idle)).toBe(0);
+});
+
+test("confirmed-deleted source guests are not presented as archived devices", () => {
+  expect(
+    hostState(
+      host({
+        source: {
+          kind: "proxmox_lxc",
+          scope: "cluster-1",
+          key: "202",
+          incarnation: "first",
+        },
+        lifecycle: "archived",
+        source_observed_at: now - 600,
+      }),
+      now,
+    ),
+  ).toEqual({
+    key: "unobserved",
+    label: "No longer reported",
+    tone: "neutral",
+  });
 });
 
 test("pools, sensors, failed units and down monitors raise issues only while reporting", () => {

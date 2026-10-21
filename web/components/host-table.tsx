@@ -22,6 +22,7 @@ import {
   hostIssues,
   memoryUsage,
   worstDisk,
+  diskUsagePercent,
   type SortKey,
 } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
@@ -199,6 +200,7 @@ export function HostTable({
           const cpu = cpuPercent(h);
           const memory = memoryUsage(h);
           const disk = worstDisk(h);
+          const sourceDisk = disk == null ? diskUsagePercent(h) : null;
           return (
             <TableRow
               key={h.id}
@@ -290,14 +292,17 @@ export function HostTable({
               <TableCell>
                 <div className="metric-cell">
                   <span>
-                    {percent0(disk?.percent)}
+                    {percent0(disk?.percent ?? sourceDisk)}
                     {disk && (
                       <span className="ml-1 text-muted-foreground">
                         {disk.disk.mount}
                       </span>
                     )}
+                    {!disk && sourceDisk != null && (
+                      <span className="ml-1 text-muted-foreground">source</span>
+                    )}
                   </span>
-                  <Meter value={disk?.percent} thin />
+                  <Meter value={disk?.percent ?? sourceDisk} thin />
                 </div>
               </TableCell>
               <TableCell>

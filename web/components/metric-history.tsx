@@ -32,20 +32,32 @@ import type { MetricPoint, Metrics, SourceMetricPoint } from "@/lib/protocol";
 
 export type HistoryWindow = "1" | "6" | "24" | "168";
 
-export function SourceMetricHistory({ hostId }: { hostId: string }) {
+export function SourceMetricHistory({
+  hostId,
+  primarySourceId,
+  sourceLabel,
+}: {
+  hostId: string;
+  primarySourceId: string | null;
+  sourceLabel: string;
+}) {
+  const [hours, setHours] = useState<HistoryWindow>("24");
+  const now = useNow(30);
   const [result, setResult] = useState<{
     hostId: string;
     points: SourceMetricPoint[] | null;
     error: string;
   } | null>(null);
-  const [selectedSource, setSelectedSource] = useState(hostId);
+  const [selectedSource, setSelectedSource] = useState(
+    primarySourceId ?? hostId,
+  );
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const refresh = async () => {
       try {
         const points = await api<SourceMetricPoint[]>(
-          `/hosts/${hostId}/source-metrics?hours=24`,
+          `/hosts/${hostId}/source-metrics?hours=${hours}`,
           { signal: controller.signal },
         );
         if (!controller.signal.aborted)
@@ -66,7 +78,7 @@ export function SourceMetricHistory({ hostId }: { hostId: string }) {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [hostId]);
+  }, [hostId, hours]);
   const points = result?.hostId === hostId ? result.points : null;
   const error = result?.hostId === hostId ? result.error : "";
   const sourceIds = [
@@ -74,7 +86,9 @@ export function SourceMetricHistory({ hostId }: { hostId: string }) {
   ];
   const effectiveSource = sourceIds.includes(selectedSource)
     ? selectedSource
-    : (sourceIds[0] ?? hostId);
+    : primarySourceId && sourceIds.includes(primarySourceId)
+      ? primarySourceId
+      : (sourceIds[0] ?? hostId);
   const recent =
     points
       ?.filter(
@@ -82,12 +96,38 @@ export function SourceMetricHistory({ hostId }: { hostId: string }) {
       )
       .slice(-20)
       .reverse() ?? [];
+  const start = now - Number(hours) * 3600;
+  const selectedPoints =
+    points
+      ?.filter(
+        (point) => (point.source_device_id ?? hostId) === effectiveSource,
+      )
+      .filter(
+        (point) =>
+          point.collected_at + point.resolution_seconds > start &&
+          point.collected_at <= now,
+      )
+      .sort((a, b) => a.collected_at - b.collected_at) ?? [];
+  const sourceSeries = (
+    select: (
+      metrics: SourceMetricPoint["metrics"],
+    ) => Record<string, number | null>,
+  ) => sourceHistorySeries(selectedPoints, start, now, select);
+  const timeLabel = (value: number) =>
+    new Date(value).toLocaleString([], {
+      ...(Number(hours) > 24 ? { month: "short", day: "numeric" } : {}),
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   return (
     <section
       className="container-info-section source-metric-history"
       aria-label="Source metrics history"
     >
-      <h2>Source metrics history · last 24 hours</h2>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2>{sourceLabel} history</h2>
+        <HistoryRange value={hours} onChange={setHours} />
+      </div>
       {sourceIds.length > 1 && (
         <div className="source-history-controls mb-3 flex flex-wrap items-center gap-2">
           <label className="text-sm" htmlFor="source-history-selector">
@@ -108,7 +148,7 @@ export function SourceMetricHistory({ hostId }: { hostId: string }) {
               <SelectGroup>
                 {sourceIds.map((id) => (
                   <SelectItem key={id} value={id}>
-                    {id === hostId
+                    {id === primarySourceId
                       ? `Current source · ${id.slice(0, 8)}`
                       : `Merged source · ${id.slice(0, 8)}`}
                   </SelectItem>
@@ -129,74 +169,210 @@ export function SourceMetricHistory({ hostId }: { hostId: string }) {
           No source samples in this window.
         </p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="source-history-table w-full text-left text-sm">
-            <thead>
-              <tr>
-                {sourceIds.length > 1 && <th>Source</th>}
-                <th>Observed</th>
-                <th>CPU</th>
-                <th>Memory</th>
-                <th>Network RX</th>
-                <th>Network TX</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.map((point) => {
-                const metric = point.metrics;
-                const memoryLabel =
-                  metric.memory_measurement === "docker_working_set"
-                    ? "Working set"
-                    : metric.memory_measurement === "hypervisor_guest"
-                      ? "Hypervisor"
-                      : metric.memory_measurement === "guest_operating_system"
-                        ? "Guest OS"
-                        : "Source";
-                return (
-                  <tr
-                    key={`${point.source_device_id ?? hostId}:${point.collected_at}:${point.resolution_seconds}`}
-                  >
-                    {sourceIds.length > 1 && (
+        <>
+          <div className="charts flex flex-col gap-5">
+            <ChartBlock
+              title={`${sourceLabel} CPU`}
+              unit="%"
+              series={[{ key: "cpu", label: "CPU", color: SLOTS[0] }]}
+              data={sourceSeries((metric) => ({ cpu: metric.cpu_percent }))}
+              format={percent}
+              height="h-32"
+              start={start * 1000}
+              end={now * 1000}
+              timeLabel={timeLabel}
+            />
+            <ChartBlock
+              title={`${sourceLabel} memory`}
+              unit="GiB"
+              kind="line"
+              series={[
+                { key: "used", label: "Used", color: SLOTS[0] },
+                { key: "total", label: "Total", color: SLOTS[1] },
+              ]}
+              data={sourceSeries((metric) => ({
+                used:
+                  metric.memory_used_bytes == null
+                    ? null
+                    : metric.memory_used_bytes / GIB,
+                total:
+                  metric.memory_total_bytes == null
+                    ? null
+                    : metric.memory_total_bytes / GIB,
+              }))}
+              format={gib}
+              height="h-32"
+              start={start * 1000}
+              end={now * 1000}
+              timeLabel={timeLabel}
+            />
+            <ChartBlock
+              title={`${sourceLabel} network`}
+              unit="bytes per second"
+              series={[
+                { key: "rx", label: "Receive", color: SLOTS[0] },
+                { key: "tx", label: "Transmit", color: SLOTS[1] },
+              ]}
+              data={sourceSeries((metric) => ({
+                rx: metric.network_rx_bytes_per_second,
+                tx: metric.network_tx_bytes_per_second,
+              }))}
+              format={ratePerSecond}
+              height="h-32"
+              start={start * 1000}
+              end={now * 1000}
+              timeLabel={timeLabel}
+            />
+            <ChartBlock
+              title={`${sourceLabel} disk I/O`}
+              unit="bytes per second"
+              series={[
+                { key: "read", label: "Read", color: SLOTS[0] },
+                { key: "write", label: "Write", color: SLOTS[1] },
+              ]}
+              data={sourceSeries((metric) => ({
+                read: metric.disk_read_bytes_per_second,
+                write: metric.disk_write_bytes_per_second,
+              }))}
+              format={ratePerSecond}
+              height="h-32"
+              start={start * 1000}
+              end={now * 1000}
+              timeLabel={timeLabel}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Values come from {sourceLabel}; unavailable readings remain gaps.
+            CPU and memory are not inferred from network or disk activity.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="source-history-table w-full text-left text-sm">
+              <thead>
+                <tr>
+                  {sourceIds.length > 1 && <th>Source</th>}
+                  <th>Observed</th>
+                  <th>CPU · {sourceLabel}</th>
+                  <th>Memory · {sourceLabel}</th>
+                  <th>Network RX</th>
+                  <th>Network TX</th>
+                  <th>Disk I/O</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recent.map((point) => {
+                  const metric = point.metrics;
+                  const memoryLabel =
+                    metric.memory_measurement === "docker_working_set"
+                      ? "Working set"
+                      : metric.memory_measurement === "hypervisor_guest"
+                        ? "Hypervisor"
+                        : metric.memory_measurement === "guest_operating_system"
+                          ? "Guest OS"
+                          : "Source";
+                  return (
+                    <tr
+                      key={`${point.source_device_id ?? hostId}:${point.collected_at}:${point.resolution_seconds}`}
+                    >
+                      {sourceIds.length > 1 && (
+                        <td>
+                          {point.source_device_id === primarySourceId
+                            ? "Current source"
+                            : `Historical source ${point.source_device_id?.slice(0, 8) ?? hostId.slice(0, 8)}`}
+                        </td>
+                      )}
                       <td>
-                        {point.source_device_id === hostId
-                          ? "Current source"
-                          : `Historical source ${point.source_device_id?.slice(0, 8) ?? hostId.slice(0, 8)}`}
+                        <time
+                          dateTime={new Date(
+                            point.collected_at * 1000,
+                          ).toISOString()}
+                        >
+                          {new Date(point.collected_at * 1000).toLocaleString()}
+                        </time>
                       </td>
-                    )}
-                    <td>
-                      <time
-                        dateTime={new Date(
-                          point.collected_at * 1000,
-                        ).toISOString()}
-                      >
-                        {new Date(point.collected_at * 1000).toLocaleString()}
-                      </time>
-                    </td>
-                    <td>{percentage(metric.cpu_percent)}</td>
-                    <td>
-                      {metric.memory_used_bytes == null
-                        ? "—"
-                        : `${bytes(metric.memory_used_bytes)}${metric.memory_total_bytes == null ? "" : ` / ${bytes(metric.memory_total_bytes)}`} · ${memoryLabel}`}
-                    </td>
-                    <td>
-                      {metric.network_rx_bytes_per_second == null
-                        ? "—"
-                        : `${bytes(metric.network_rx_bytes_per_second)}/s`}
-                    </td>
-                    <td>
-                      {metric.network_tx_bytes_per_second == null
-                        ? "—"
-                        : `${bytes(metric.network_tx_bytes_per_second)}/s`}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                      <td>{percentage(metric.cpu_percent)}</td>
+                      <td>
+                        {metric.memory_used_bytes == null
+                          ? "—"
+                          : `${bytes(metric.memory_used_bytes)}${metric.memory_total_bytes == null ? "" : ` / ${bytes(metric.memory_total_bytes)}`} · ${memoryLabel}`}
+                      </td>
+                      <td>
+                        {metric.network_rx_bytes_per_second == null
+                          ? "—"
+                          : `${bytes(metric.network_rx_bytes_per_second)}/s`}
+                      </td>
+                      <td>
+                        {metric.network_tx_bytes_per_second == null
+                          ? "—"
+                          : `${bytes(metric.network_tx_bytes_per_second)}/s`}
+                      </td>
+                      <td>
+                        Read{" "}
+                        {metric.disk_read_bytes_per_second == null
+                          ? "—"
+                          : `${bytes(metric.disk_read_bytes_per_second)}/s`}{" "}
+                        · Write{" "}
+                        {metric.disk_write_bytes_per_second == null
+                          ? "—"
+                          : `${bytes(metric.disk_write_bytes_per_second)}/s`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </section>
   );
+}
+
+function sourceHistorySeries(
+  points: SourceMetricPoint[],
+  start: number,
+  end: number,
+  select: (
+    metrics: SourceMetricPoint["metrics"],
+  ) => Record<string, number | null>,
+) {
+  const samples = points
+    .filter(
+      (point) =>
+        point.collected_at + point.resolution_seconds > start &&
+        point.collected_at <= end,
+    )
+    .map((point) => ({
+      ...point,
+      collected_at: Math.max(start, point.collected_at),
+    }))
+    .sort((a, b) => a.collected_at - b.collected_at);
+  const keys = new Set(
+    samples.flatMap((point) => Object.keys(select(point.metrics))),
+  );
+  const empty = (time: number) => ({
+    time: time * 1000,
+    ...Object.fromEntries([...keys].map((key) => [key, null])),
+  });
+  const result: Record<string, number | null>[] = [empty(start)];
+  samples.forEach((point, index) => {
+    const previous = samples[index - 1];
+    if (
+      previous &&
+      point.collected_at - previous.collected_at >
+        Math.max(point.resolution_seconds, previous.resolution_seconds) * 2.5
+    ) {
+      result.push(
+        empty(previous.collected_at + previous.resolution_seconds),
+        empty(point.collected_at - 1),
+      );
+    }
+    result.push({ time: point.collected_at * 1000, ...select(point.metrics) });
+  });
+  const last = samples.at(-1);
+  if (last && end - last.collected_at > last.resolution_seconds * 2.5)
+    result.push(empty(last.collected_at + last.resolution_seconds));
+  result.push(empty(end));
+  return result;
 }
 
 /** Seconds per point the server averages each window into; 0 keeps raw samples. */
