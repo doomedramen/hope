@@ -145,6 +145,11 @@ class InstallScript(unittest.TestCase):
             self.assertIn('-czf dist/server/hope-agents.tar.gz .', workflow, name)
             self.assertIn('scripts/assemble-server-release.sh --staging dist/server-builds --out dist/server', workflow, name)
             self.assertIn('dist/server/hope-agents.tar.gz dist/server/SHA256SUMS-server', workflow, name)
+            self.assertRegex(
+                workflow,
+                r'uses: actions/download-artifact@[^\n]+\n        with:\n          name: server-x86_64\n          path: dist/server-builds/server-x86_64',
+                name,
+            )
         workflow = (ROOT / '.github' / 'workflows' / 'server-build.yml').read_text()
         self.assertIn('uses: ./.github/workflows/build-agent.yml', workflow)
         self.assertIn('needs: [version, build, agents]', workflow)

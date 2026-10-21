@@ -91,9 +91,8 @@ jobs:
           merge-multiple: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: server-*
-          path: dist/server-builds
-          merge-multiple: false
+          name: server-x86_64
+          path: dist/server-builds/server-x86_64
       - name: Verify the final server package checksums
         run: |
           # The unsigned agents too, for install-hope.sh and ct/hope.sh, which sign with each server's own key.
