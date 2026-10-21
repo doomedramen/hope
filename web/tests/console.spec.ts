@@ -3382,7 +3382,13 @@ test.describe.serial("H.O.P.E console", () => {
     await stale.report(99, 4096 * gib);
     await page.route("**/api/v1/bootstrap", async (route) => {
       const response = await route.fetch();
-      const body: Bootstrap = await response.json();
+      // Copy the payload out of the fetched response before fulfilling the route.
+      // Reusing the APIResponse in `fulfill({ response, json })` can race with
+      // Playwright disposing that response while the dashboard request is in flight.
+      const status = response.status();
+      const body: Bootstrap = JSON.parse(
+        (await response.body()).toString("utf8"),
+      );
       const host = body.hosts.find((h) => h.agent_id === stale.agent)!;
       host.last_report = Date.now() / 1000 - 300;
       host.metrics_received_at = host.last_report;
@@ -3390,7 +3396,7 @@ test.describe.serial("H.O.P.E console", () => {
         (host) => host.agent_id === heartbeat.agent,
       )!;
       heartbeating.metrics_received_at = Date.now() / 1000 - 300;
-      await route.fulfill({ response, json: body });
+      await route.fulfill({ status, json: body });
     });
     await page.goto("/");
     await expect(page.getByTestId("network-map")).toHaveCount(0);
