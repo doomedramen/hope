@@ -918,29 +918,52 @@ export function HostDetails({
                 Network
               </h3>
               {inventory && (
-                <dl className="detail-list">
-                  <dt>MAC</dt>
-                  <dd className="mono">
-                    {host.macs.join(", ") || "Unavailable"}
-                  </dd>
-                  <dt>Discovered by</dt>
-                  <dd>{host.discovery_method}</dd>
-                </dl>
-              )}
-              {inventory?.interfaces.map((i) => (
-                <div key={i.name} className="interface-row">
-                  <strong className="mono">
-                    {i.name}
-                    {i.mac && (
-                      <span className="ml-2 font-normal text-muted-foreground">
-                        {i.mac}
+                <>
+                  <dl className="detail-list">
+                    <dt>Discovered by</dt>
+                    <dd>{host.discovery_method}</dd>
+                  </dl>
+                  <details className="network-inventory">
+                    <summary className="network-inventory-summary">
+                      <span className="font-medium">Network inventory</span>
+                      <span className="mono network-inventory-primary">
+                        Primary MAC{" "}
+                        {inventory.interfaces.find((i) => i.mac)?.mac ??
+                          host.macs[0] ??
+                          "Unavailable"}
                       </span>
-                    )}
-                  </strong>
-                  <span>{i.addresses.join(", ") || "No address"}</span>
-                  {i.gateway && <span>Gateway {i.gateway}</span>}
-                </div>
-              ))}
+                      <span className="text-muted-foreground">
+                        {host.macs.length} MAC addresses ·{" "}
+                        {inventory.interfaces.length} interfaces
+                      </span>
+                    </summary>
+                    <div className="network-inventory-content">
+                      <dl className="detail-list">
+                        <dt>MAC addresses</dt>
+                        <dd className="mono">
+                          {host.macs.join(", ") || "Unavailable"}
+                        </dd>
+                      </dl>
+                      {inventory.interfaces.map((i) => (
+                        <div key={i.name} className="interface-row">
+                          <strong className="mono">
+                            {i.name}
+                            {i.mac && (
+                              <span className="ml-2 font-normal text-muted-foreground">
+                                {i.mac}
+                              </span>
+                            )}
+                          </strong>
+                          <span>
+                            {i.addresses.join(", ") || "No address reported"}
+                          </span>
+                          {i.gateway && <span>Gateway {i.gateway}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                </>
+              )}
               {(metrics?.network_interfaces.length ?? 0) > 0 && (
                 <details className="text-xs">
                   <summary className="cursor-pointer text-muted-foreground">

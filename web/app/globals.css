@@ -1595,6 +1595,31 @@ kbd.key {
 .detail-list dd {
   overflow-wrap: anywhere;
 }
+.network-inventory {
+  min-width: 0;
+}
+.network-inventory-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
+  padding: 9px 0;
+  cursor: pointer;
+  font-size: 12px;
+}
+.network-inventory-summary:focus-visible {
+  border-radius: 5px;
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.network-inventory-primary {
+  overflow-wrap: anywhere;
+}
+.network-inventory-content {
+  min-width: 0;
+  padding-left: 16px;
+}
 .device-reasons {
   display: flex;
   flex-direction: column;

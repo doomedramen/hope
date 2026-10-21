@@ -2848,6 +2848,86 @@ test.describe.serial("H.O.P.E console", () => {
     await other.dispose();
     password = changed;
   });
+  test("network inventory is compact by default and keyboard-toggleable on mobile", async ({
+    page,
+    request,
+  }) => {
+    await seed(request);
+    await page.context().addCookies((await request.storageState()).cookies);
+    const hostName = "atlas-nas";
+    const interfaces = [
+      {
+        name: "eth0",
+        mac: "02:00:00:00:10:01",
+        addresses: ["192.168.1.81"],
+        gateway: "192.168.1.1",
+      },
+      {
+        name: "eth1",
+        mac: "02:00:00:00:10:02",
+        addresses: ["192.168.30.81", "fd00::81"],
+        gateway: "192.168.30.1",
+      },
+      {
+        name: "br-guest",
+        mac: "02:00:00:00:10:03",
+        addresses: [],
+        gateway: null,
+      },
+    ];
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const bootstrap = await response.json();
+      const hosts = bootstrap.hosts.filter(
+        (item: { name: string }) => item.name === hostName,
+      );
+      expect(hosts.length).toBeGreaterThan(0);
+      for (const host of hosts) {
+        host.inventory = { ...host.inventory, interfaces };
+        host.macs = interfaces.map((item) => item.mac);
+      }
+      await route.fulfill({ response, json: bootstrap });
+    });
+
+    await page.setViewportSize({ width: 360, height: 800 });
+    await page.goto("/?view=hosts");
+    await page
+      .getByRole("button", { name: hostName, exact: true })
+      .first()
+      .click();
+    const details = page.getByRole("complementary", { name: "Host details" });
+    await details.getByRole("tab", { name: "Info", exact: true }).click();
+    const networkInventory = details.locator("details.network-inventory");
+    const summary = networkInventory.locator("summary");
+    await expect(summary).toContainText("Primary MAC 02:00:00:00:10:01");
+    await expect(summary).toContainText("3 MAC addresses · 3 interfaces");
+    await expect(networkInventory).toHaveJSProperty("open", false);
+    const interfaceRows = networkInventory.locator(
+      ".network-inventory-content .interface-row",
+    );
+    await expect(interfaceRows).toHaveCount(3);
+    await expect(interfaceRows.nth(0)).toBeHidden();
+
+    await summary.focus();
+    await expect(summary).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(networkInventory).toHaveJSProperty("open", true);
+    await expect(interfaceRows.nth(0)).toContainText("eth0");
+    await expect(interfaceRows.nth(1)).toContainText("eth1");
+    await expect(interfaceRows.nth(2)).toContainText("br-guest");
+    await expect(networkInventory).toContainText("fd00::81");
+    await expect(networkInventory).toContainText("Gateway 192.168.30.1");
+    await expect(networkInventory).toContainText("No address reported");
+    await expect
+      .poll(() =>
+        page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      )
+      .toBeTruthy();
+
+    await page.keyboard.press("Space");
+    await expect(networkInventory).toHaveJSProperty("open", false);
+    await expect(interfaceRows.nth(2)).toBeHidden();
+  });
   test("Proxmox host details list guests and link to guest pages", async ({
     page,
     request,
