@@ -46,7 +46,7 @@ Follow-up reliability work after the baseline findings:
 
 ## Validation
 
-- Linux x86_64 container checks: 281 passed, one intentionally ignored retention load test, including retirement, readiness and operational-status tests, Linux ARP reconciliation, enrollment-capacity and enrichment panic recovery tests plus the storage-boundary compile-fail doctest; strict workspace Clippy and Rust formatting pass. These checks ran under amd64 Docker emulation on the development Mac.
+- Linux x86_64 container checks: 295 passed, one intentionally ignored retention load test, including retirement, readiness and operational-status tests, Linux ARP reconciliation, enrollment-capacity and enrichment panic recovery tests plus the storage-boundary compile-fail doctest; strict workspace Clippy and Rust formatting pass. The 21 October rerun includes the latest Intel GPU collector follow-up and ran under amd64 Docker emulation on the development Mac.
 - Native workspace tests: 280 passed and one intentionally ignored retention load test, including retirement, readiness and operational-status tests, enrollment-capacity, enrichment panic recovery and storage-boundary compile-fail tests. The Linux-only ARP test runs in the Linux container suite.
 - Web production build, TypeScript and ESLint pass.
 - Chromium/Playwright: 66 passed, including retirement and restore, transport/recovery tests, measurement freshness checks and real-server live/source/clock history tests.
@@ -67,6 +67,8 @@ Automatic signed Linux x86_64 agent updates are now enabled by default, with an 
 Review of the rollout path found that host outcomes and rollout metadata were persisted separately. A server stop between those writes could leave an updated canary recorded as unfinished, or leave an automatic request without its canary marker. Commit `96ef379` makes report outcomes, queued requests and rollout metadata transactional, and recovers an in-flight canary after restart. The added API test reopens the database, verifies recovery does not queue a second canary, and checks paced advancement after success. The `hope-server` test suite (80 unit, 70 API, 21 hardening, 6 release and 25 SSH installer tests, plus shutdown and the compile-fail doctest) and strict Clippy pass locally; Rust 1.96 also passes the new integration test and strict server Clippy.
 
 The real server-install/systemd gate was skipped by that push-triggered CI run. `.github/workflows/ci.yml` now schedules the server package and rollback gate on pushes as well as pull requests and manual runs. The updated local commit has not yet completed that GitHub gate. Physical Linux interface recovery, native populated-load measurement, and a multi-day soak remain open.
+
+Review of the new Intel GPU collector found the Linux `nvidia-smi` probe was started on every sample, including systems with no NVIDIA GPU. It now runs only when GPU inventory contains an NVIDIA device; a regression test verifies the command future is not polled otherwise. Intel counter math and synthetic i915/Xe layouts pass unit tests, but no Intel GPU hardware run has been recorded, so real-device utilization, VRAM and temperature behavior remains unverified.
 
 ## Remaining blockers before recommendation
 

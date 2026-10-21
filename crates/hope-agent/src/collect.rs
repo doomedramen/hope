@@ -1221,19 +1221,18 @@ async fn gpu_metrics(
     gpus: &mut Vec<Gpu>,
     intel_engine_state: &mut HashMap<String, IntelGpuEngineState>,
 ) {
-    if let Some(output) = command(
-        "nvidia-smi",
-        &[
-            "--query-gpu=uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
-            "--format=csv,noheader,nounits",
-        ],
-        2,
+    update_nvidia_gpu_metrics(
+        gpus,
+        command(
+            "nvidia-smi",
+            &[
+                "--query-gpu=uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            2,
+        ),
     )
-    .await
-    {
-        gpus.retain(|g| g.vendor != "NVIDIA");
-        gpus.extend(parse_nvidia(&output));
-    }
+    .await;
     for gpu in gpus.iter_mut().filter(|g| g.vendor == "AMD") {
         let Some(card) = gpu.name.split('(').nth(1).and_then(|s| s.strip_suffix(')')) else {
             continue;
@@ -1279,6 +1278,19 @@ async fn gpu_metrics(
             .or(read_number(&device_dir.join("mem_info_vram_total").to_string_lossy()).await);
 
         gpu.temperature_celsius = read_intel_gpu_temperature(&device_dir).await;
+    }
+}
+
+async fn update_nvidia_gpu_metrics(
+    gpus: &mut Vec<Gpu>,
+    query: impl std::future::Future<Output = Option<String>>,
+) {
+    if !gpus.iter().any(|gpu| gpu.vendor == "NVIDIA") {
+        return;
+    }
+    if let Some(output) = query.await {
+        gpus.retain(|gpu| gpu.vendor != "NVIDIA");
+        gpus.extend(parse_nvidia(&output));
     }
 }
 
@@ -1668,6 +1680,28 @@ mod tests {
         assert!(gpus[1].utilization_percent.is_none());
         assert!(gpus[1].memory_used_bytes.is_none());
     }
+
+    #[tokio::test]
+    async fn nvidia_probe_is_not_polled_without_an_nvidia_device() {
+        let mut gpus = vec![Gpu {
+            id: Some("intel:test".into()),
+            name: "Intel GPU".into(),
+            vendor: "Intel".into(),
+            utilization_percent: None,
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            temperature_celsius: None,
+        }];
+
+        let query = std::future::poll_fn(|_| {
+            panic!("nvidia-smi should not be polled without NVIDIA inventory")
+        });
+        update_nvidia_gpu_metrics(&mut gpus, query).await;
+
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].vendor, "Intel");
+    }
+
     #[test]
     fn intel_gpu_engine_metrics_preserve_zero_and_handle_resets() {
         let temp = tempfile::tempdir().unwrap();
