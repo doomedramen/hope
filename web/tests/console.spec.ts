@@ -3579,7 +3579,10 @@ test.describe.serial("H.O.P.E console", () => {
     ]);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.clock.runFor(1000);
+    await page.getByLabel("Search hosts").fill("map-health-live");
+    await expect(page.locator(".map-device")).toHaveCount(1);
     await expectMapFits(page);
+    await expect(node).toBeInViewport();
     await expect(page.locator(".react-flow__minimap")).toBeHidden();
     expect(
       await page.evaluate(
