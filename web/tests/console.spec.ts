@@ -3380,24 +3380,21 @@ test.describe.serial("H.O.P.E console", () => {
     await large.report(10, 512 * gib);
     await small.report(10, 192 * gib);
     await stale.report(99, 4096 * gib);
-    await page.route("**/api/v1/bootstrap", async (route) => {
-      const response = await route.fetch();
-      // Copy the payload out of the fetched response before fulfilling the route.
-      // Reusing the APIResponse in `fulfill({ response, json })` can race with
-      // Playwright disposing that response while the dashboard request is in flight.
-      const status = response.status();
-      const body: Bootstrap = JSON.parse(
-        (await response.body()).toString("utf8"),
-      );
-      const host = body.hosts.find((h) => h.agent_id === stale.agent)!;
-      host.last_report = Date.now() / 1000 - 300;
-      host.metrics_received_at = host.last_report;
-      const heartbeating = body.hosts.find(
-        (host) => host.agent_id === heartbeat.agent,
-      )!;
-      heartbeating.metrics_received_at = Date.now() / 1000 - 300;
-      await route.fulfill({ status, json: body });
-    });
+    // Prepare the response before interception. A live `route.fetch()` response
+    // can be disposed while the browser's bootstrap request is still in flight.
+    const bootstrap: Bootstrap = await (
+      await request.get("/api/v1/bootstrap")
+    ).json();
+    const host = bootstrap.hosts.find((h) => h.agent_id === stale.agent)!;
+    host.last_report = Date.now() / 1000 - 300;
+    host.metrics_received_at = host.last_report;
+    const heartbeating = bootstrap.hosts.find(
+      (host) => host.agent_id === heartbeat.agent,
+    )!;
+    heartbeating.metrics_received_at = Date.now() / 1000 - 300;
+    await page.route("**/api/v1/bootstrap", (route) =>
+      route.fulfill({ json: bootstrap }),
+    );
     await page.goto("/");
     await expect(page.getByTestId("network-map")).toHaveCount(0);
     const memory = page.getByRole("region", { name: "Most memory used by" });
