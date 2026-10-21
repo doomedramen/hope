@@ -2392,6 +2392,146 @@ async fn stale_source_reconciles_on_later_scan_without_another_child_report() {
 }
 
 #[tokio::test]
+async fn unique_managed_network_ip_match_links_guest_to_one_scan_row_without_arp_mac() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('lan-30','LAN 30','192.168.30.0/24',1,5)")
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+
+    let mut scanned = StoredHost::new("scanned-prowlarr".into(), "prowlarr".into(), "tcp");
+    scanned.addresses = vec!["192.168.30.230".into()];
+    scanned.macs.clear(); // Active ARP was unavailable on this network scan.
+    scanned.last_seen = now();
+    state.save_host(&scanned).await.unwrap();
+
+    let mut guest = child_device();
+    guest.identity.kind = ChildDeviceKind::ProxmoxLxc;
+    guest.identity.scope = "pve-cluster".into();
+    guest.identity.key = "130".into();
+    guest.identity.incarnation = "lxc-130-first".into();
+    guest.name = "prowlarr".into();
+    guest.interfaces = vec![Interface {
+        name: "eth0".into(),
+        mac: Some("bc:24:11:30:14:24".into()),
+        addresses: vec!["192.168.30.230".into()],
+        gateway: None,
+    }];
+    let mut batch = child_batch(&agent, 1, 1, true, now(), vec![guest]);
+    batch.source = ChildSourceKind::Proxmox;
+    batch.source_scope = "pve-cluster".into();
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(batch),
+        Some(("authorization", &format!("Bearer {credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let source_id: String =
+        sqlx::query_scalar("SELECT id FROM source_devices WHERE source_key='130'")
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    let linked: Option<String> =
+        sqlx::query_scalar("SELECT host_id FROM source_devices WHERE id=?")
+            .bind(&source_id)
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(linked.as_deref(), Some("scanned-prowlarr"));
+
+    let hosts = state.hosts().await.unwrap();
+    assert_eq!(hosts.len(), 2, "the guest is projected onto one scan row");
+    let canonical = hosts
+        .iter()
+        .find(|host| host.id == "scanned-prowlarr")
+        .unwrap();
+    assert_eq!(
+        canonical.source_device_id.as_deref(),
+        Some(source_id.as_str())
+    );
+    assert_eq!(canonical.child.as_ref().unwrap().identity.key, "130");
+    assert_eq!(canonical.primary_ip.as_deref(), Some("192.168.30.230"));
+    assert_eq!(canonical.associations.len(), 1);
+    assert_eq!(
+        canonical.associations[0].status,
+        AssociationStatus::Confirmed
+    );
+    assert_eq!(
+        canonical.associations[0].reason,
+        "Unique address match in a managed network"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_managed_network_ip_candidates_remain_suggestions() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    sqlx::query("INSERT INTO networks(id,name,cidr,enabled,interval_minutes) VALUES('lan-30','LAN 30','192.168.30.0/24',1,5)")
+        .execute(&state.0.db)
+        .await
+        .unwrap();
+    for id in ["scanned-prowlarr-a", "scanned-prowlarr-b"] {
+        let mut scanned = StoredHost::new(id.into(), "prowlarr".into(), "tcp");
+        scanned.addresses = vec!["192.168.30.230".into()];
+        scanned.macs.clear();
+        scanned.last_seen = now();
+        state.save_host(&scanned).await.unwrap();
+    }
+
+    let mut guest = child_device();
+    guest.identity.kind = ChildDeviceKind::ProxmoxLxc;
+    guest.identity.scope = "pve-cluster".into();
+    guest.identity.key = "130".into();
+    guest.identity.incarnation = "lxc-130-first".into();
+    guest.name = "prowlarr".into();
+    guest.interfaces = vec![Interface {
+        name: "eth0".into(),
+        mac: Some("bc:24:11:30:14:24".into()),
+        addresses: vec!["192.168.30.230".into()],
+        gateway: None,
+    }];
+    let mut batch = child_batch(&agent, 1, 1, true, now(), vec![guest]);
+    batch.source = ChildSourceKind::Proxmox;
+    batch.source_scope = "pve-cluster".into();
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(batch),
+        Some(("authorization", &format!("Bearer {credential}"))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let source_id: String =
+        sqlx::query_scalar("SELECT id FROM source_devices WHERE source_key='130'")
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    let linked: Option<String> =
+        sqlx::query_scalar("SELECT host_id FROM source_devices WHERE id=?")
+            .bind(&source_id)
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(linked, None, "ambiguous scan candidates do not merge");
+    let associations = sqlx::query_as::<_, (String, String)>(
+        "SELECT host_id,status FROM device_associations WHERE source_device_id=? ORDER BY host_id",
+    )
+    .bind(&source_id)
+    .fetch_all(&state.0.db)
+    .await
+    .unwrap();
+    assert_eq!(associations.len(), 2);
+    assert!(associations.iter().all(|(_, status)| status == "suggested"));
+}
+
+#[tokio::test]
 async fn stale_source_projection_keeps_ambiguous_mac_candidates_separate() {
     let (_dir, state, app, _) = setup().await;
     let (agent, credential, _) = enrolled(&state, &app).await;

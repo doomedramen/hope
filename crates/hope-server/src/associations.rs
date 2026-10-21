@@ -11,8 +11,9 @@ pub struct Candidate {
     pub evidence: Vec<String>,
 }
 
-/// Match source interfaces to scan hosts. Only a unique MAC+address match within a known HOPE
-/// network is strong enough to confirm automatically; every other overlap is review-only.
+/// Match source interfaces to scan hosts. Unique MAC+address matches can be confirmed anywhere
+/// both sides have compatible context; when ARP did not provide a scan-side MAC, a unique fresh
+/// address match on a managed network is also sufficient. Other overlaps need review.
 pub fn candidates(
     child: &ChildDeviceReport,
     hosts: &[Host],
@@ -59,6 +60,7 @@ pub fn candidates(
                 .find_map(|(id, cidr)| cidr.contains(ip).then_some(*id))
         })
         .collect();
+    let recent_after = crate::state::now() - 7.0 * 86400.0;
     let mac_owners = |mac: &str| {
         hosts
             .iter()
@@ -73,13 +75,14 @@ pub fn candidates(
         hosts
             .iter()
             .filter(|host| {
-                host.addresses
-                    .iter()
-                    .any(|known| crate::addresses::usable_ip(known).as_ref() == Some(ip))
+                host.last_seen >= recent_after
+                    && host
+                        .addresses
+                        .iter()
+                        .any(|known| crate::addresses::usable_ip(known).as_ref() == Some(ip))
             })
             .count()
     };
-    let recent_after = crate::state::now() - 7.0 * 86400.0;
     let mut result = Vec::new();
     for host in hosts {
         let shared_macs: Vec<_> = child_macs
@@ -120,16 +123,27 @@ pub fn candidates(
             .iter()
             .any(|network| host_networks.contains(network));
         let unique_mac = shared_macs.iter().any(|mac| mac_owners(mac) == 1);
-        let unique_ip = shared_ips.iter().any(|ip| ip_owners(ip) == 1);
+        // Every shared address must resolve to just this current host. One clear address must
+        // not hide a second ambiguous address on another interface.
+        let unique_ip = !shared_ips.is_empty() && shared_ips.iter().all(|ip| ip_owners(ip) == 1);
+        let mac_context_consistent =
+            child_macs.is_empty() || host.macs.is_empty() || !shared_macs.is_empty();
         // Proxmox can report a configured guest NIC MAC without an in-guest address or
         // interface. A unique MAC then identifies the scanned host directly; when guest IPs
         // do provide managed-network context, still require that context to agree.
         let network_matches = child_networks.is_empty() || compatible_network;
-        let strong = !shared_macs.is_empty()
+        let strong_mac = !shared_macs.is_empty()
             && network_matches
             && unique_mac
             && (shared_ips.is_empty() || unique_ip)
             && host.last_seen >= recent_after;
+        let strong_ip = shared_macs.is_empty()
+            && unique_ip
+            && !child_networks.is_empty()
+            && compatible_network
+            && mac_context_consistent
+            && host.last_seen >= recent_after;
+        let strong = strong_mac || strong_ip;
         let mut evidence = Vec::new();
         if !shared_macs.is_empty() {
             evidence.push(format!("MAC {}", shared_macs.join(", ")));
@@ -163,7 +177,11 @@ pub fn candidates(
             host_name: host.name.clone(),
             strong,
             reason: if strong {
-                "Unique interface, address, and managed-network match".into()
+                if strong_ip {
+                    "Unique address match in a managed network".into()
+                } else {
+                    "Unique interface, address, and managed-network match".into()
+                }
             } else {
                 "Interface evidence needs review".into()
             },
@@ -274,6 +292,94 @@ mod tests {
         );
         assert_eq!(ip_only.len(), 1);
         assert!(!ip_only[0].strong);
+    }
+
+    #[test]
+    fn unique_ip_only_match_on_a_managed_network_auto_confirms_without_scan_mac() {
+        let mut scanned = host("scan", "192.168.1.10", "");
+        scanned.macs.clear();
+        let found = candidates(&child(), &[scanned], &[network()]);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].strong);
+        assert_eq!(found[0].reason, "Unique address match in a managed network");
+        assert!(
+            found[0]
+                .evidence
+                .iter()
+                .any(|item| item == "same managed network lan")
+        );
+
+        let mut stale = host("stale-scan", "192.168.1.10", "");
+        stale.macs.clear();
+        stale.last_seen -= 8.0 * 86400.0;
+        let stale = candidates(&child(), &[stale], &[network()]);
+        assert_eq!(stale.len(), 1);
+        assert!(
+            !stale[0].strong,
+            "stale scan rows are not current candidates"
+        );
+
+        let mut no_mac = host("scan", "192.168.1.10", "");
+        no_mac.macs.clear();
+        let unknown_network = candidates(&child(), &[no_mac], &[]);
+        assert_eq!(unknown_network.len(), 1);
+        assert!(
+            !unknown_network[0].strong,
+            "unknown network context needs review"
+        );
+    }
+
+    #[test]
+    fn duplicate_and_ambiguous_multi_interface_ip_matches_need_review() {
+        let mut first = host("scan-a", "192.168.1.10", "");
+        first.macs.clear();
+        let mut second = host("scan-b", "192.168.1.10", "");
+        second.macs.clear();
+        let duplicate = candidates(&child(), &[first, second], &[network()]);
+        assert_eq!(duplicate.len(), 2);
+        assert!(duplicate.iter().all(|candidate| !candidate.strong));
+
+        let mut multihomed = child();
+        multihomed.interfaces = vec![
+            Interface {
+                name: "eth0".into(),
+                mac: None,
+                addresses: vec!["192.168.1.10".into()],
+                gateway: None,
+            },
+            Interface {
+                name: "eth1".into(),
+                mac: None,
+                addresses: vec!["192.168.1.11".into()],
+                gateway: None,
+            },
+        ];
+        let mut first = host("scan-a", "192.168.1.10", "");
+        first.macs.clear();
+        let mut second = host("scan-b", "192.168.1.11", "");
+        second.macs.clear();
+        let ambiguous = candidates(&multihomed, &[first, second], &[network()]);
+        assert_eq!(ambiguous.len(), 2);
+        assert!(ambiguous.iter().all(|candidate| !candidate.strong));
+
+        let mut conflicting = child();
+        conflicting.interfaces[0].addresses = vec!["10.2.3.4".into()];
+        let found = candidates(
+            &conflicting,
+            &[host("scan", "192.168.1.10", "02:00:00:00:00:01")],
+            &[
+                network(),
+                Network {
+                    id: "other".into(),
+                    name: "Other".into(),
+                    cidr: "10.2.3.0/24".into(),
+                    enabled: true,
+                    interval_minutes: 5,
+                },
+            ],
+        );
+        assert_eq!(found.len(), 1);
+        assert!(!found[0].strong, "conflicting network contexts need review");
     }
 
     #[test]
