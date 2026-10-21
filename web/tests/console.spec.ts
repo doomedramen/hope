@@ -2988,13 +2988,55 @@ test.describe.serial("H.O.P.E console", () => {
         sourceGuest,
         `Bootstrap hosts: ${bootstrap.hosts.map((host) => `${host.id}:${host.name}:${host.source?.kind ?? "core"}`).join(", ")}`,
       ).toBeTruthy();
-      const mergedGuest = {
-        ...sourceGuest!,
-        id: "scanned-dns-container",
-        discovery_method: "arp",
-        addresses: ["192.168.1.41"],
-        macs: ["02:fe:00:00:00:02"],
-      };
+      const proxmoxParent = bootstrap.hosts.find(
+        (host) => host.name === "proxmox-fixture-node",
+      );
+      expect(proxmoxParent).toBeTruthy();
+      const matchedGuests = Array.from({ length: 13 }, (_, index) => {
+        const sourceDeviceId = `matched-source-${index}`;
+        const key = index === 0 ? "202" : `matched-${index}`;
+        return {
+          ...sourceGuest!,
+          id: `scanned-guest-${index}`,
+          name: index === 0 ? "dns-container" : `matched-guest-${index}`,
+          discovery_method: "arp",
+          addresses: [`192.168.1.${41 + index}`],
+          macs: [`02:fe:00:00:00:${(2 + index).toString(16).padStart(2, "0")}`],
+          source_device_id: sourceDeviceId,
+          source: { ...sourceGuest!.source!, key },
+          child: {
+            ...sourceGuest!.child!,
+            identity: { ...sourceGuest!.child!.identity, key },
+          },
+          // The scan-derived host can retain an inferred network parent. The
+          // authenticated source runs_on edge still identifies its hypervisor.
+          parent_id: "inferred-network-gateway",
+          relationships: [
+            {
+              from_device_id: sourceDeviceId,
+              to_device_id: proxmoxParent!.id,
+              kind: "runs_on" as const,
+              detail: null,
+            },
+          ],
+        };
+      });
+      const unmatchedGuests = Array.from({ length: 5 }, (_, index) => {
+        const sourceDeviceId = `unmatched-source-${index}`;
+        const key = `unmatched-${index}`;
+        return {
+          ...sourceGuest!,
+          id: sourceDeviceId,
+          name: `unmatched-guest-${index}`,
+          source_device_id: sourceDeviceId,
+          source: { ...sourceGuest!.source!, key },
+          child: {
+            ...sourceGuest!.child!,
+            identity: { ...sourceGuest!.child!.identity, key },
+          },
+          parent_id: proxmoxParent!.id,
+        };
+      });
       const archivedRemoteGuest = {
         ...sourceGuest!,
         id: "archived-remote-dns2",
@@ -3004,7 +3046,8 @@ test.describe.serial("H.O.P.E console", () => {
       };
       bootstrap.hosts = [
         ...bootstrap.hosts.filter((host) => host.id !== sourceGuest!.id),
-        mergedGuest,
+        ...matchedGuests,
+        ...unmatchedGuests,
         archivedRemoteGuest,
       ];
       await route.fulfill({ response, json: bootstrap });
@@ -3015,18 +3058,39 @@ test.describe.serial("H.O.P.E console", () => {
     await page.goto("/?view=hosts");
     const bootstrap = (await (await bootstrapResponse).json()) as Bootstrap;
     const guestHosts = bootstrap.hosts.filter(
+      (host) =>
+        host.source?.kind === "proxmox_lxc" &&
+        host.lifecycle !== "archived" &&
+        (host.parent_id ===
+          bootstrap.hosts.find((item) => item.name === "proxmox-fixture-node")
+            ?.id ||
+          host.relationships.some(
+            (relationship) =>
+              relationship.kind === "runs_on" &&
+              relationship.from_device_id === host.source_device_id &&
+              relationship.to_device_id ===
+                bootstrap.hosts.find(
+                  (item) => item.name === "proxmox-fixture-node",
+                )?.id,
+          )),
+    );
+    expect(guestHosts).toHaveLength(18);
+    expect(new Set(guestHosts.map((host) => host.id)).size).toBe(18);
+    expect(new Set(guestHosts.map((host) => host.source_device_id)).size).toBe(
+      18,
+    );
+    const mergedGuest = guestHosts.find(
       (host) => host.name === "dns-container",
     );
-    expect(guestHosts).toHaveLength(1);
-    expect(guestHosts[0].id).toBe("scanned-dns-container");
-    expect(guestHosts[0].source?.kind).toBe("proxmox_lxc");
-    expect(guestHosts[0].source_device_id).toBeTruthy();
-    expect(guestHosts[0].child?.identity.key).toBe("202");
-    expect(guestHosts[0].child?.metrics.memory_measurement).toBe(
+    expect(mergedGuest?.id).toBe("scanned-guest-0");
+    expect(mergedGuest?.source?.kind).toBe("proxmox_lxc");
+    expect(mergedGuest?.source_device_id).toBe("matched-source-0");
+    expect(mergedGuest?.child?.identity.key).toBe("202");
+    expect(mergedGuest?.child?.metrics.memory_measurement).toBe(
       "hypervisor_guest",
     );
-    expect(guestHosts[0].child?.metrics.disk_read_bytes_per_second).toBe(2048);
-    expect(guestHosts[0].macs).toContain("02:fe:00:00:00:02");
+    expect(mergedGuest?.child?.metrics.disk_read_bytes_per_second).toBe(2048);
+    expect(mergedGuest?.macs).toContain("02:fe:00:00:00:02");
     await page.getByLabel("Search hosts").fill("dns-container");
     await expect(
       page.getByRole("row").filter({ hasText: "dns-container" }),
@@ -3052,6 +3116,9 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       proxmoxDetails.getByRole("heading", { name: "Proxmox guests" }),
     ).toBeVisible();
+    await expect(
+      proxmoxDetails.locator('section[aria-label="Proxmox guests"] tbody tr'),
+    ).toHaveCount(18);
     await expect(proxmoxDetails.getByRole("table")).toContainText(
       "dns-container",
     );
