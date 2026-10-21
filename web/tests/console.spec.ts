@@ -7,7 +7,7 @@ import {
 } from "@playwright/test";
 import { randomUUID, randomBytes } from "node:crypto";
 import type { Bootstrap } from "@/lib/protocol";
-const password = "hope-browser-test-password";
+let password = "hope-browser-test-password";
 let adminState: Awaited<ReturnType<BrowserContext["storageState"]>> | undefined;
 const test = base.extend({
   storageState: async ({ browserName }, provide) => {
@@ -725,6 +725,7 @@ test.describe.serial("H.O.P.E console", () => {
         .locator(".node-health"),
     ).toContainText("RAM —");
     await page.locator(".map-device").filter({ hasText: "atlas-nas" }).click();
+    await page.getByRole("tab", { name: "Info" }).click();
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
     ).toContainText("AMD Ryzen");
@@ -744,6 +745,7 @@ test.describe.serial("H.O.P.E console", () => {
     ).toHaveCount(0);
     await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
     await expect(page.getByRole("table")).toHaveCount(0);
+    await page.getByRole("tab", { name: "Info" }).click();
     const hostDetails = page.getByRole("complementary", {
       name: "Host details",
     });
@@ -864,12 +866,9 @@ test.describe.serial("H.O.P.E console", () => {
     ).toBeFocused();
     await expect(page.getByTestId("network-map")).toHaveCount(0);
     await expect(
-      details.getByRole("tab", { name: "Summary", exact: true }),
+      details.getByRole("tab", { name: "Metrics", exact: true }),
     ).toHaveAttribute("aria-selected", "true");
-    await expect(
-      details.getByRole("region", { name: "Current readings" }),
-    ).toContainText("20%");
-    await expect(details.getByTestId("chart-CPU")).toHaveCount(0);
+    await expect(details.getByTestId("chart-CPU")).toBeVisible();
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -1056,6 +1055,17 @@ test.describe.serial("H.O.P.E console", () => {
     page,
     request,
   }) => {
+    const auth = (await (await request.get("/api/v1/auth/status")).json()) as {
+      setup_required: boolean;
+    };
+    if (auth.setup_required) await seed(request);
+    else {
+      const session = await request.post("/api/v1/auth/login", {
+        data: { password },
+      });
+      expect(session.ok(), await session.text()).toBeTruthy();
+    }
+    await page.context().addCookies((await request.storageState()).cookies);
     const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
     const host = bootstrap.hosts.find(
       (item: { name: string }) => item.name === "atlas-nas",
@@ -1085,6 +1095,7 @@ test.describe.serial("H.O.P.E console", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`/?view=host&host=${host.id}`);
     const details = page.getByRole("complementary", { name: "Host details" });
+    await details.getByRole("tab", { name: "Info" }).click();
     await expect(details).toContainText("Kernel uptime");
     await expect(details).toContainText("1d 0h · at last sample");
     await expect(details).toContainText(
@@ -1105,6 +1116,7 @@ test.describe.serial("H.O.P.E console", () => {
       .screenshot({ path: "test-results/host-uptime-mobile.png" });
     legacy = true;
     await page.reload();
+    await details.getByRole("tab", { name: "Info" }).click();
     await expect(details).toContainText("System uptime");
     await expect(
       details
@@ -1401,12 +1413,9 @@ test.describe.serial("H.O.P.E console", () => {
     await page.goto("/?view=hosts");
     await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
     const details = page.getByRole("complementary", { name: "Host details" });
-    // Current values live on the charts, not in a separate facts list.
     await expect(
-      details.getByRole("region", { name: "Current readings" }),
-    ).toContainText("20%");
-    await expect(details.getByTestId("chart-CPU")).toHaveCount(0);
-    await details.getByRole("tab", { name: "Metrics", exact: true }).click();
+      details.getByRole("tab", { name: "Metrics", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
     await expect(details.getByTestId("chart-CPU")).toContainText("20%");
     await expect(details.getByTestId("chart-Load average")).toContainText(
       "1 min1.60",
@@ -1520,6 +1529,7 @@ test.describe.serial("H.O.P.E console", () => {
     );
     await page.goto(`/?view=host&host=${host.id}`);
     const details = page.getByRole("complementary", { name: "Host details" });
+    await details.getByRole("tab", { name: "Info" }).click();
     await expect(details).toContainText("200 service units failed");
     await details.getByRole("tab", { name: "Services", exact: true }).click();
     const units = details.getByTestId("service-units");
@@ -1632,6 +1642,7 @@ test.describe.serial("H.O.P.E console", () => {
     if ((await atlasRow.getAttribute("data-state")) !== "selected") {
       await atlasRow.click();
     }
+    await page.getByRole("tab", { name: "Info" }).click();
     const device = page.getByTestId("device");
     // Its name says what it is.
     await expect(device).toContainText("NAS");
@@ -1649,6 +1660,7 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByRole("row").filter({ hasText: "atlas-nas" }),
     ).toContainText("Server");
     await atlasRow.click();
+    await page.getByRole("tab", { name: "Info" }).click();
     await page.screenshot({ path: "test-results/hope-device.png" });
     await page.getByRole("combobox", { name: "Device type" }).click();
     await page
@@ -1738,7 +1750,26 @@ test.describe.serial("H.O.P.E console", () => {
   });
   test("console stays readable across sizes and supports keyboard navigation", async ({
     page,
+    request,
   }) => {
+    const auth = (await (await request.get("/api/v1/auth/status")).json()) as {
+      setup_required: boolean;
+    };
+    if (auth.setup_required) await seed(request);
+    else {
+      const session = await request.post("/api/v1/auth/login", {
+        data: { password },
+      });
+      expect(session.ok(), await session.text()).toBeTruthy();
+      const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+      if (
+        !bootstrap.hosts.some(
+          (host: { name: string }) => host.name === "atlas-nas",
+        )
+      )
+        await seed(request);
+    }
+    await page.context().addCookies((await request.storageState()).cookies);
     await page.goto("/?view=hosts");
     await expect(
       page.getByRole("navigation", { name: "Main navigation" }),
@@ -1776,14 +1807,10 @@ test.describe.serial("H.O.P.E console", () => {
           .getByRole("button", { name: "atlas-nas", exact: true })
           .click();
       }
-      const readings = page.locator(".reading-meter-card");
-      for (const reading of await readings.all()) {
-        expect(
-          await reading.evaluate(
-            (element) => element.scrollWidth <= element.clientWidth,
-          ),
-        ).toBeTruthy();
-      }
+      await expect(
+        page.getByRole("tab", { name: "Metrics", exact: true }),
+      ).toHaveAttribute("aria-selected", "true");
+      await expect(page.locator(".reading-meter-card")).toHaveCount(0);
       await page.screenshot({
         path: `test-results/hope-polish-${width}.png`,
         fullPage: true,
@@ -1929,20 +1956,15 @@ test.describe.serial("H.O.P.E console", () => {
     });
     expect(child.ok(), await child.text()).toBeTruthy();
     await row.getByText("live-node", { exact: true }).click();
+    await page.getByRole("tab", { name: "Info" }).click();
     const sourceInventory = page.getByRole("region", {
       name: "Source inventory",
       exact: true,
     });
     await expect(sourceInventory).toBeVisible();
     await report(65);
-    await expect(
-      page.getByRole("region", { name: "Current readings", exact: true }),
-    ).toContainText("65%", { timeout: 5000 });
     await expect(sourceInventory).toBeVisible();
     await report(64);
-    await expect(
-      page.getByRole("region", { name: "Current readings", exact: true }),
-    ).toContainText("64%", { timeout: 5000 });
     // History stores one sample per 30 seconds, so these reports seconds apart
     // reach the chart only as live points.
     await page.getByRole("tab", { name: "Metrics", exact: true }).click();
@@ -1954,6 +1976,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(cpu).toContainText("81%", { timeout: 5000 });
     // Averaged windows show the live points after their last bucket too.
     await page
+      .getByRole("region", { name: "Source metrics history" })
       .getByRole("group", { name: "History window" })
       .getByText("24h", { exact: true })
       .click();
@@ -2689,6 +2712,20 @@ test.describe.serial("H.O.P.E console", () => {
     page,
     request,
   }) => {
+    const auth = (await (await request.get("/api/v1/auth/status")).json()) as {
+      setup_required: boolean;
+    };
+    if (auth.setup_required) await seed(request);
+    else {
+      const session = await request.post("/api/v1/auth/login", {
+        data: { password },
+      });
+      expect(session.ok(), await session.text()).toBeTruthy();
+      const bootstrap = await (await request.get("/api/v1/bootstrap")).json();
+      if (!Array.isArray(bootstrap.hosts) || bootstrap.hosts.length === 0)
+        await seed(request);
+    }
+    await page.context().addCookies((await request.storageState()).cookies);
     const data = await (await request.get("/api/v1/bootstrap")).json();
     const template = data.hosts[0];
     const host = {
@@ -2721,6 +2758,7 @@ test.describe.serial("H.O.P.E console", () => {
       route.fulfill({ json: [] }),
     );
     await page.goto(`/?view=host&host=${host.id}`);
+    await page.getByRole("tab", { name: "Info", exact: true }).click();
     await page.getByRole("button", { name: "Install reporting agent" }).click();
     const dialog = page.getByRole("dialog", { name: "Add a reporting agent" });
     const sshTab = dialog.getByRole("tab", { name: "Install over SSH" });
@@ -2808,6 +2846,7 @@ test.describe.serial("H.O.P.E console", () => {
         ).status(),
       ).toBe(status);
     await other.dispose();
+    password = changed;
   });
   test("Proxmox host details list guests and link to guest pages", async ({
     page,
@@ -2971,6 +3010,11 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("heading", { name: "dns-container" }),
     ).toBeVisible();
+    const guestTabs = await page
+      .getByRole("complementary", { name: "Host details" })
+      .getByRole("tab")
+      .allTextContents();
+    expect(guestTabs.slice(0, 2)).toEqual(["Metrics", "Info"]);
     await expect(page.getByRole("tab", { name: "Metrics" })).toHaveAttribute(
       "aria-selected",
       "true",
@@ -2988,7 +3032,11 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByTestId("chart-Proxmox hypervisor disk I/O"),
     ).toBeVisible();
-    await page.getByRole("tab", { name: "Summary" }).click();
+    await page.getByRole("tab", { name: "Info" }).click();
+    await expect(page.locator(".reading-meter-card")).toHaveCount(0);
+    await expect(
+      page.getByRole("region", { name: "Current readings" }),
+    ).toHaveCount(0);
     await expect(
       page.getByRole("region", { name: "Source inventory" }),
     ).toContainText("Guest OS data observed");
@@ -3028,7 +3076,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(sourceHistory.getByRole("table").getByRole("row")).toHaveCount(
       2,
     );
-    await page.getByRole("tab", { name: "Summary" }).click();
+    await page.getByRole("tab", { name: "Info" }).click();
     await expect(proxmoxDetails).toContainText("Runs on");
     await proxmoxDetails
       .getByRole("button", { name: "proxmox-fixture-node" })
@@ -3156,7 +3204,7 @@ test.describe.serial("H.O.P.E console", () => {
     });
   });
 
-  test("archived source devices stay out of normal counts and maps until explicitly filtered", async ({
+  test("archived source guests stay out of counts, maps and the found-device list", async ({
     page,
     request,
   }) => {
@@ -3181,6 +3229,7 @@ test.describe.serial("H.O.P.E console", () => {
       });
       await route.fulfill({ response, json: body });
     });
+    await page.context().addCookies((await request.storageState()).cookies);
     await page.goto("/");
     await expect(page.getByTestId("tile-hosts")).toContainText(
       `/ ${expectedActiveCount}`,
@@ -3196,26 +3245,9 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(page.locator(".host-table")).not.toContainText(
       "archived-fixture-only",
     );
-    await expect(page.getByRole("button", { name: /^Archived/ })).toContainText(
-      "1",
+    await expect(page.getByRole("button", { name: /^Archived/ })).toHaveCount(
+      0,
     );
-    await page.getByRole("button", { name: /^Archived/ }).click();
-    await expect(page.locator(".host-table")).toContainText(
-      "archived-fixture-only",
-    );
-    await page.setViewportSize({ width: 375, height: 812 });
-    await page
-      .getByRole("row")
-      .filter({ hasText: "archived-fixture-only" })
-      .click();
-    await expect(
-      page.getByRole("heading", { name: "archived-fixture-only" }),
-    ).toBeVisible();
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= window.innerWidth,
-      ),
-    ).toBeTruthy();
   });
   test("retired devices leave active views and can be restored with history intact", async ({
     page,
@@ -3421,6 +3453,16 @@ test.describe.serial("H.O.P.E console", () => {
     page,
     request,
   }) => {
+    const auth = (await (await request.get("/api/v1/auth/status")).json()) as {
+      setup_required: boolean;
+    };
+    if (auth.setup_required) await seed(request);
+    else {
+      const session = await request.post("/api/v1/auth/login", {
+        data: { password },
+      });
+      expect(session.ok(), await session.text()).toBeTruthy();
+    }
     const token = await (
       await request.post("/api/v1/enrollment-tokens", { data: {} })
     ).json();
@@ -3475,19 +3517,33 @@ test.describe.serial("H.O.P.E console", () => {
       await request.get("/api/v1/bootstrap")
     ).json();
     const host = bootstrap.hosts.find((host) => host.agent_id === agent)!;
+    await page.context().addCookies((await request.storageState()).cookies);
     await page.goto(`/?view=host&host=${host.id}`);
     const details = page.getByRole("complementary", { name: "Host details" });
-    const readings = details.getByRole("region", { name: "Current readings" });
-    await expect(readings).toContainText("10%");
+    const cpu = details.getByTestId("chart-CPU");
+    await expect(cpu).toContainText("10%");
+    await page.getByRole("tab", { name: "Info", exact: true }).click();
     await expect(details).toContainText("ahead of server receipt");
     expect((await report(2, start, 99)).live_applied).toBe(true);
-    await expect(readings).toContainText("99%");
+    const historyResponse = await request.get(
+      `/api/v1/hosts/${host.id}/metrics?hours=1`,
+    );
+    expect(historyResponse.ok(), await historyResponse.text()).toBeTruthy();
+    const history = (await historyResponse.json()) as {
+      metrics: { cpu_percent: number | null };
+    }[];
+    expect(history.some((point) => point.metrics.cpu_percent === 99)).toBe(
+      true,
+    );
+    await page.getByRole("tab", { name: "Metrics", exact: true }).click();
+    await page.reload();
+    await expect(cpu).toContainText("99%");
     await expect(details).not.toContainText("ahead of server receipt");
     await expect(details).toContainText("measurements received");
     expect((await report(1, start + 240, 10)).live_applied).toBe(false);
-    await expect(readings).toContainText("99%");
+    await expect(cpu).toContainText("99%");
     await page.reload();
-    await expect(readings).toContainText("99%");
+    await expect(cpu).toContainText("99%");
   });
   test("topology handles a full inventory, cycles and unknown parents without inventing edges", async ({
     page,

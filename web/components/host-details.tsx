@@ -66,30 +66,14 @@ import {
   useHistory,
   type HistoryWindow,
 } from "@/components/metric-history";
-import {
-  bytes,
-  percent0,
-  percentage,
-  post,
-  put,
-  rate,
-  uptimeDuration,
-} from "@/lib/api";
+import { bytes, percentage, post, put, rate, uptimeDuration } from "@/lib/api";
 import {
   DEVICE_KINDS,
   confidenceLabel,
   deviceLabel,
   kindLabel,
 } from "@/lib/devices";
-import {
-  cpuPercent,
-  memoryUsage,
-  worstDisk,
-  hostIssues,
-  hostState,
-  updatePlan,
-  type Tone,
-} from "@/lib/fleet";
+import { hostIssues, hostState, updatePlan, type Tone } from "@/lib/fleet";
 import type { Host } from "@/lib/protocol";
 
 import { searchIcons, type IconOption } from "@/lib/icon-matching";
@@ -169,7 +153,7 @@ export function HostDetails({
     ) ||
     hasProxmoxGuests;
   const [activeTab, setActiveTab] = useState(() =>
-    host.metrics || host.child ? "metrics" : "summary",
+    host.metrics || host.child ? "metrics" : "info",
   );
   const update = updatePlan(host, agentRelease);
   const [copied, setCopied] = useState(false);
@@ -195,7 +179,7 @@ export function HostDetails({
   const selectedTab =
     (!hasContainers && activeTab === "containers") ||
     (!isProxmoxHost && activeTab === "guests")
-      ? "summary"
+      ? "info"
       : activeTab;
   async function revoke() {
     try {
@@ -391,14 +375,14 @@ export function HostDetails({
         )}
         <Tabs
           value={selectedTab}
-          onValueChange={(value) => setActiveTab(value ?? "summary")}
+          onValueChange={(value) => setActiveTab(value ?? "info")}
           className="host-tabs"
         >
           <TabsList aria-label="Host sections" className="host-tab-list">
-            <TabsTrigger value="summary">Summary</TabsTrigger>
             {(host.agent_id || host.child) && (
               <TabsTrigger value="metrics">Metrics</TabsTrigger>
             )}
+            <TabsTrigger value="info">Info</TabsTrigger>
             {agentInstalled && hasContainers && (
               <TabsTrigger value="containers">Containers</TabsTrigger>
             )}
@@ -406,7 +390,7 @@ export function HostDetails({
             <TabsTrigger value="services">Services</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
-          <TabsContent value="summary" className="host-tab-content">
+          <TabsContent value="info" className="host-tab-content">
             {issues.length > 0 && (
               <div className="flex flex-col gap-1.5">
                 {issues.map((issue) => (
@@ -436,88 +420,6 @@ export function HostDetails({
                   Install reporting agent
                 </Button>
               </div>
-            )}
-            {agentInstalled && (
-              <section aria-label="Current readings" className="host-readings">
-                <ReadingMeter label="CPU" value={cpuPercent(host)} />
-                <ReadingMeter label="Memory" value={memoryUsage(host)} />
-                <ReadingMeter
-                  label="Fullest filesystem"
-                  value={worstDisk(host)?.percent ?? null}
-                  detail={worstDisk(host)?.disk.mount}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Latest reported values
-                  {state.key !== "reporting" ? " · Agent is not reporting" : ""}
-                </p>
-              </section>
-            )}
-            {host.child && (
-              <section
-                aria-label="Source-provided readings"
-                className="host-readings"
-              >
-                <ReadingMeter
-                  label={
-                    host.child.metrics.cpu_measurement === "hypervisor_guest"
-                      ? "Hypervisor CPU · source"
-                      : host.child.metrics.cpu_measurement ===
-                          "guest_operating_system"
-                        ? "Guest OS CPU · source"
-                        : "CPU · source"
-                  }
-                  value={host.child.metrics.cpu_percent}
-                />
-                <ReadingMeter
-                  label={
-                    host.child.metrics.memory_measurement ===
-                    "docker_working_set"
-                      ? "Memory working set · source"
-                      : host.child.metrics.memory_measurement ===
-                          "hypervisor_guest"
-                        ? "Hypervisor memory · source"
-                        : host.child.metrics.memory_measurement ===
-                            "guest_operating_system"
-                          ? "Guest OS memory · source"
-                          : "Memory · source"
-                  }
-                  value={
-                    host.child.metrics.memory_used_bytes != null &&
-                    host.child.metrics.memory_total_bytes != null &&
-                    host.child.metrics.memory_total_bytes > 0
-                      ? (host.child.metrics.memory_used_bytes /
-                          host.child.metrics.memory_total_bytes) *
-                        100
-                      : null
-                  }
-                />
-                {host.source?.kind !== "docker_container" && (
-                  <ReadingMeter
-                    label={
-                      host.source?.kind === "proxmox_vm" ||
-                      host.source?.kind === "proxmox_lxc"
-                        ? "Hypervisor storage usage · source"
-                        : "Allocated storage · source"
-                    }
-                    value={
-                      host.child.metrics.disk_used_bytes != null &&
-                      host.child.metrics.disk_total_bytes != null &&
-                      host.child.metrics.disk_total_bytes > 0
-                        ? (host.child.metrics.disk_used_bytes /
-                            host.child.metrics.disk_total_bytes) *
-                          100
-                        : null
-                    }
-                  />
-                )}
-                <p className="text-xs text-muted-foreground">
-                  Collected by{" "}
-                  {host.source?.kind === "docker_container"
-                    ? "Docker Engine"
-                    : "Proxmox"}{" "}
-                  · observed <Age value={host.source_observed_at} lower />
-                </p>
-              </section>
             )}
             {host.child && (
               <section aria-label="Source inventory">
@@ -2023,48 +1925,5 @@ function DeviceSection({
         </SelectContent>
       </Select>
     </section>
-  );
-}
-
-function ReadingMeter({
-  label,
-  value,
-  detail,
-}: {
-  label: string;
-  value: number | null;
-  detail?: string;
-}) {
-  const bounded = value == null ? null : Math.min(100, Math.max(0, value));
-  const tone =
-    bounded == null
-      ? "unknown"
-      : bounded >= 90
-        ? "critical"
-        : bounded >= 75
-          ? "warning"
-          : "good";
-  return (
-    <div className="reading-meter-card">
-      <div className="reading-meter-heading">
-        <span>{label}</span>
-        <strong>{percent0(value)}</strong>
-      </div>
-      <div
-        className="reading-meter-track"
-        role="progressbar"
-        aria-label={`${label} usage`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={bounded ?? undefined}
-        aria-valuetext={
-          value == null ? "Unavailable" : `${Math.round(value)} percent`
-        }
-        data-tone={tone}
-      >
-        {bounded != null && <span style={{ width: `${bounded}%` }} />}
-      </div>
-      <span className="reading-meter-detail">{detail || "Current usage"}</span>
-    </div>
   );
 }
