@@ -569,24 +569,20 @@ pub async fn report(
     } else {
         false
     };
-    tx.commit().await?;
     if rollout_success {
-        let canary = state
-            .meta("auto_update_canary_agent")
+        let canary = meta_in_transaction(&mut tx, "auto_update_canary_agent")
             .await?
             .unwrap_or_default();
         if canary == report.agent_id {
-            state.set_meta("auto_update_canary_passed", "true").await?;
-            state
-                .set_meta("auto_update_last_queued_at", &now().to_string())
+            set_meta_in_transaction(&mut tx, "auto_update_canary_passed", "true").await?;
+            set_meta_in_transaction(&mut tx, "auto_update_last_queued_at", &now().to_string())
                 .await?;
         }
     }
     if let Some(release_id) = rollout_failure {
-        state
-            .set_meta("auto_update_blocked_release_id", &release_id)
-            .await?;
+        set_meta_in_transaction(&mut tx, "auto_update_blocked_release_id", &release_id).await?;
     }
+    tx.commit().await?;
     if let Err(error) = schedule_auto_update(&state, now()).await {
         eprintln!("Automatic agent update scheduling failed: {}", error.1);
     }
@@ -690,44 +686,49 @@ fn auto_eligible(host: &Host, release: &str, release_id: &str) -> bool {
 /// Schedule at most one automatic update at a time. A single canary must report success before
 /// the fleet advances; subsequent requests are separated by fifteen minutes.
 async fn schedule_auto_update(state: &State, at: f64) -> ApiResult<()> {
-    if !state.auto_updates_enabled().await? {
-        return Ok(());
-    }
     let Some((release_id, release)) =
         crate::releases::current_linux_x86_64(&state.0.release_dir).await
     else {
         return Ok(());
     };
-    if state
-        .meta("auto_update_blocked_release_id")
+    let mut tx = state.write_transaction().await?;
+    if meta_in_transaction(&mut tx, "agent_auto_updates_enabled")
+        .await?
+        .is_some_and(|enabled| enabled != "true")
+    {
+        return Ok(());
+    }
+    if meta_in_transaction(&mut tx, "auto_update_blocked_release_id")
         .await?
         .as_deref()
         == Some(&release_id)
     {
         return Ok(());
     }
-    if state.meta("auto_update_release_id").await?.as_deref() != Some(&release_id) {
-        state
-            .set_meta("auto_update_release_id", &release_id)
-            .await?;
-        state.set_meta("auto_update_canary_agent", "").await?;
-        state.set_meta("auto_update_canary_passed", "false").await?;
-        state.set_meta("auto_update_blocked_release_id", "").await?;
-        state.set_meta("auto_update_last_queued_at", "0").await?;
-    }
-    let hosts = state.stored_hosts().await?;
-    if let Some(mut expired) = hosts
-        .iter()
-        .find(|host| {
-            host.update_request_source.as_deref() == Some("automatic")
-                && host.update_target_release_id.as_deref() == Some(&release_id)
-                && host
-                    .update_requested_at
-                    .is_some_and(|requested| at - requested >= UPDATE_REQUEST_SECONDS)
-        })
-        .cloned()
+    if meta_in_transaction(&mut tx, "auto_update_release_id")
+        .await?
+        .as_deref()
+        != Some(&release_id)
     {
-        expired.auto_update_failed_release_id = Some(release_id.clone());
+        set_meta_in_transaction(&mut tx, "auto_update_release_id", &release_id).await?;
+        set_meta_in_transaction(&mut tx, "auto_update_canary_agent", "").await?;
+        set_meta_in_transaction(&mut tx, "auto_update_canary_passed", "false").await?;
+        set_meta_in_transaction(&mut tx, "auto_update_blocked_release_id", "").await?;
+        set_meta_in_transaction(&mut tx, "auto_update_last_queued_at", "0").await?;
+    }
+    let mut hosts = stored_hosts_in_transaction(&mut tx).await?;
+    if let Some(index) = hosts.iter().position(|host| {
+        host.update_request_source.as_deref() == Some("automatic")
+            && host
+                .update_requested_at
+                .is_some_and(|requested| at - requested >= UPDATE_REQUEST_SECONDS)
+    }) {
+        let expired = &mut hosts[index];
+        let expired_release = expired
+            .update_target_release_id
+            .clone()
+            .unwrap_or_else(|| release_id.clone());
+        expired.auto_update_failed_release_id = Some(expired_release.clone());
         expired.update_requested_at = None;
         expired.update_target = None;
         expired.update_target_release_id = None;
@@ -735,65 +736,168 @@ async fn schedule_auto_update(state: &State, at: f64) -> ApiResult<()> {
         sqlx::query("UPDATE hosts SET body=? WHERE id=?")
             .bind(serde_json::to_string(&expired)?)
             .bind(&expired.id)
-            .execute(&state.0.db)
+            .execute(&mut *tx)
             .await?;
-        state
-            .set_meta("auto_update_blocked_release_id", &release_id)
-            .await?;
-        state.publish_host(&expired.id).await;
-        return Ok(());
+        if expired_release == release_id {
+            set_meta_in_transaction(&mut tx, "auto_update_blocked_release_id", &release_id).await?;
+            let expired_id = expired.id.clone();
+            tx.commit().await?;
+            state.publish_host(&expired_id).await;
+            return Ok(());
+        }
     }
-    if state.meta("auto_update_canary_passed").await?.as_deref() != Some("true") {
-        let canary = state
-            .meta("auto_update_canary_agent")
+    let canary_passed = meta_in_transaction(&mut tx, "auto_update_canary_passed")
+        .await?
+        .as_deref()
+        == Some("true");
+    if !canary_passed {
+        let mut canary = meta_in_transaction(&mut tx, "auto_update_canary_agent")
             .await?
             .unwrap_or_default();
-        if canary.is_empty() {
-            let mut hosts = hosts;
-            hosts.sort_by(|a, b| a.id.cmp(&b.id));
-            if let Some(host) = hosts.into_iter().find(|host| {
-                auto_eligible(host, &release, &release_id) && pending_update(host, at).is_none()
-            }) {
-                let mut host = host;
-                mark_update_requested(state, &mut host, &release_id, &release, "automatic").await?;
-                state
-                    .set_meta(
-                        "auto_update_canary_agent",
-                        host.agent_id.as_deref().unwrap_or(&host.id),
-                    )
+
+        // The request and canary marker used to be written separately. If the server stopped
+        // between those writes, recover the already-persisted request instead of selecting a
+        // second host and updating both at once.
+        if let Some(in_flight) = hosts.iter().find(|host| {
+            host.update_request_source.as_deref() == Some("automatic")
+                && pending_update(host, at).is_some()
+        }) {
+            if canary.is_empty()
+                && in_flight.update_target_release_id.as_deref() == Some(&release_id)
+            {
+                canary = in_flight
+                    .agent_id
+                    .clone()
+                    .unwrap_or_else(|| in_flight.id.clone());
+                set_meta_in_transaction(&mut tx, "auto_update_canary_agent", &canary).await?;
+            }
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        if !canary.is_empty()
+            && let Some(host) = hosts
+                .iter()
+                .find(|host| host.agent_id.as_deref().unwrap_or(&host.id) == canary)
+        {
+            if host
+                .agent_version
+                .as_deref()
+                .is_some_and(|have| !version_newer(&release, have))
+            {
+                // Repair older partial state where the agent reported success before the
+                // rollout marker was persisted.
+                set_meta_in_transaction(&mut tx, "auto_update_canary_passed", "true").await?;
+                set_meta_in_transaction(&mut tx, "auto_update_last_queued_at", &at.to_string())
                     .await?;
-                state
-                    .set_meta("auto_update_last_queued_at", &at.to_string())
-                    .await?;
+                tx.commit().await?;
+                return Ok(());
+            }
+            if !auto_eligible(host, &release, &release_id) {
+                canary.clear();
+                set_meta_in_transaction(&mut tx, "auto_update_canary_agent", "").await?;
             }
         }
+
+        hosts.sort_by(|a, b| a.id.cmp(&b.id));
+        let candidate = if canary.is_empty() {
+            hosts.iter().find(|host| {
+                auto_eligible(host, &release, &release_id) && pending_update(host, at).is_none()
+            })
+        } else {
+            hosts.iter().find(|host| {
+                host.agent_id.as_deref().unwrap_or(&host.id) == canary
+                    && auto_eligible(host, &release, &release_id)
+                    && pending_update(host, at).is_none()
+            })
+        };
+        if let Some(mut host) = candidate.cloned() {
+            set_update_request(&mut host, &release_id, &release, "automatic", at);
+            sqlx::query("UPDATE hosts SET body=? WHERE id=?")
+                .bind(serde_json::to_string(&host)?)
+                .bind(&host.id)
+                .execute(&mut *tx)
+                .await?;
+            let agent_id = host.agent_id.clone().unwrap_or_else(|| host.id.clone());
+            set_meta_in_transaction(&mut tx, "auto_update_canary_agent", &agent_id).await?;
+            set_meta_in_transaction(&mut tx, "auto_update_last_queued_at", &at.to_string()).await?;
+            let host_id = host.id.clone();
+            tx.commit().await?;
+            state.publish_host(&host_id).await;
+            return Ok(());
+        }
+        tx.commit().await?;
         return Ok(());
     }
-    let last: f64 = state
-        .meta("auto_update_last_queued_at")
+    let last: f64 = meta_in_transaction(&mut tx, "auto_update_last_queued_at")
         .await?
         .and_then(|value| value.parse().ok())
         .unwrap_or(0.0);
     if at - last < 900.0 {
+        tx.commit().await?;
         return Ok(());
     }
-    let mut hosts = hosts;
-    hosts.sort_by(|a, b| a.id.cmp(&b.id));
     if hosts.iter().any(|host| {
         host.update_request_source.as_deref() == Some("automatic")
             && pending_update(host, at).is_some()
     }) {
+        tx.commit().await?;
         return Ok(());
     }
+    hosts.sort_by(|a, b| a.id.cmp(&b.id));
     if let Some(mut host) = hosts.into_iter().find(|host| {
         auto_eligible(host, &release, &release_id) && pending_update(host, at).is_none()
     }) {
-        mark_update_requested(state, &mut host, &release_id, &release, "automatic").await?;
-        state
-            .set_meta("auto_update_last_queued_at", &at.to_string())
+        set_update_request(&mut host, &release_id, &release, "automatic", at);
+        sqlx::query("UPDATE hosts SET body=? WHERE id=?")
+            .bind(serde_json::to_string(&host)?)
+            .bind(&host.id)
+            .execute(&mut *tx)
             .await?;
+        set_meta_in_transaction(&mut tx, "auto_update_last_queued_at", &at.to_string()).await?;
+        let host_id = host.id.clone();
+        tx.commit().await?;
+        state.publish_host(&host_id).await;
+    } else {
+        tx.commit().await?;
     }
     Ok(())
+}
+
+async fn meta_in_transaction(
+    tx: &mut Transaction<'_, Sqlite>,
+    key: &str,
+) -> ApiResult<Option<String>> {
+    Ok(sqlx::query_scalar("SELECT value FROM meta WHERE key=?")
+        .bind(key)
+        .fetch_optional(&mut **tx)
+        .await?)
+}
+
+async fn set_meta_in_transaction(
+    tx: &mut Transaction<'_, Sqlite>,
+    key: &str,
+    value: &str,
+) -> ApiResult<()> {
+    sqlx::query("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .bind(key)
+        .bind(value)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn stored_hosts_in_transaction(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> ApiResult<Vec<StoredHost>> {
+    let bodies: Vec<String> =
+        sqlx::query_scalar("SELECT body FROM hosts ORDER BY name COLLATE NOCASE")
+            .fetch_all(&mut **tx)
+            .await?;
+    bodies
+        .iter()
+        .map(|body| StoredHost::decode(body).map_err(ApiError::from))
+        .collect()
 }
 async fn offered_release(state: &State) -> ApiResult<(String, String)> {
     crate::releases::current_linux_x86_64(&state.0.release_dir)
@@ -811,10 +915,7 @@ async fn mark_update_requested(
     release: &str,
     source: &str,
 ) -> ApiResult<()> {
-    host.update_requested_at = Some(now());
-    host.update_target = Some(release.to_string());
-    host.update_target_release_id = Some(release_id.to_string());
-    host.update_request_source = Some(source.to_string());
+    set_update_request(host, release_id, release, source, now());
     sqlx::query("UPDATE hosts SET body=? WHERE id=?")
         .bind(serde_json::to_string(&*host)?)
         .bind(&host.id)
@@ -822,6 +923,18 @@ async fn mark_update_requested(
         .await?;
     state.publish_host(&host.id).await;
     Ok(())
+}
+fn set_update_request(
+    host: &mut StoredHost,
+    release_id: &str,
+    release: &str,
+    source: &str,
+    at: f64,
+) {
+    host.update_requested_at = Some(at);
+    host.update_target = Some(release.to_string());
+    host.update_target_release_id = Some(release_id.to_string());
+    host.update_request_source = Some(source.to_string());
 }
 /// Ask one host's agent to update to the release this server offers. The agent learns of it in
 /// its next report response and passes it to its local updater, which checks the signature itself.

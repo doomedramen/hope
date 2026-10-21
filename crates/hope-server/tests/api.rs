@@ -4172,6 +4172,104 @@ async fn an_update_request_reaches_the_agent_in_its_next_report_response_and_cle
     let (status, _) = request(&app, "POST", &url, json!({}), admin).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn automatic_rollout_recovers_a_canary_after_restart_and_advances_on_success() {
+    let release = publish_release("0.1.60");
+    let (dir, state, app, _) =
+        setup_with(release.path().to_str().expect("release path").into()).await;
+    let (canary, canary_credential, _) = enrolled(&state, &app).await;
+    let (next, next_credential, _) = enrolled(&state, &app).await;
+    let canary_bearer = format!("Bearer {canary_credential}");
+    let next_bearer = format!("Bearer {next_credential}");
+
+    assert_eq!(
+        report_as(&app, &canary_bearer, &canary, "0.1.57").await["update_to"],
+        "0.1.60"
+    );
+    assert_eq!(
+        state
+            .meta("auto_update_canary_agent")
+            .await
+            .expect("canary marker"),
+        Some(canary.clone())
+    );
+
+    // Model a stop after the host request is durable but before its canary marker is written.
+    // The next process must adopt that request instead of selecting a second canary.
+    state
+        .set_meta("auto_update_canary_agent", "")
+        .await
+        .expect("clear canary marker");
+    let database = dir.path().join("test.db").to_string_lossy().into_owned();
+    let release_dir = release.path().to_string_lossy().into_owned();
+    let capabilities = state.0.capabilities.clone();
+    drop(app);
+    drop(state);
+
+    let restarted = State::open(
+        &database,
+        "http://localhost:8080".into(),
+        release_dir,
+        capabilities,
+    )
+    .await
+    .expect("reopened server state");
+    let app = router(restarted.clone(), "web/out");
+    report_as(&app, &next_bearer, &next, "0.1.57").await;
+    let hosts = restarted.stored_hosts().await.expect("stored hosts");
+    let canary_host = hosts
+        .iter()
+        .find(|host| host.agent_id.as_deref() == Some(&canary))
+        .expect("canary host");
+    let next_host = hosts
+        .iter()
+        .find(|host| host.agent_id.as_deref() == Some(&next))
+        .expect("next host");
+    assert_eq!(canary_host.update_target.as_deref(), Some("0.1.60"));
+    assert_eq!(next_host.update_target, None);
+    assert_eq!(
+        restarted
+            .meta("auto_update_canary_agent")
+            .await
+            .expect("recovered canary"),
+        Some(canary.clone())
+    );
+
+    report_as(&app, &canary_bearer, &canary, "0.1.60").await;
+    assert_eq!(
+        restarted
+            .meta("auto_update_canary_passed")
+            .await
+            .expect("canary result")
+            .as_deref(),
+        Some("true")
+    );
+    let canary_host = restarted
+        .stored_hosts()
+        .await
+        .expect("stored hosts")
+        .into_iter()
+        .find(|host| host.agent_id.as_deref() == Some(&canary))
+        .expect("canary host");
+    assert_eq!(canary_host.update_target, None);
+
+    // Advance the persisted pacing window without sleeping in the test.
+    restarted
+        .set_meta("auto_update_last_queued_at", &(now() - 901.0).to_string())
+        .await
+        .expect("advance rollout clock");
+    report_as(&app, &next_bearer, &next, "0.1.57").await;
+    let next_host = restarted
+        .stored_hosts()
+        .await
+        .expect("stored hosts")
+        .into_iter()
+        .find(|host| host.agent_id.as_deref() == Some(&next))
+        .expect("next host");
+    assert_eq!(next_host.update_target.as_deref(), Some("0.1.60"));
+}
+
 #[tokio::test]
 async fn update_all_asks_only_agents_that_run_an_older_release() {
     let release = publish_release("0.1.60");
