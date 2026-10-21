@@ -30,7 +30,7 @@ jobs:
         include:
           - { target: x86_64-unknown-linux-musl, runner: ubuntu-latest, linux: true }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
@@ -45,7 +45,7 @@ jobs:
         env:
           HOPE_BUILD_VERSION: ${{ inputs.version }}
         run: sh scripts/build-agent.sh "${{ matrix.target }}" --out dist/agents
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent-${{ matrix.target }}
           path: dist/agents/
