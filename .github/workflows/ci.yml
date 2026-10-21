@@ -133,7 +133,6 @@ jobs:
   server-package:
     # Builds the actual server release package and exercises its download, checksum, layout,
     # systemd activation, repeat install and rollback paths inside a disposable runner container.
-    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

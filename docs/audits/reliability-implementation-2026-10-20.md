@@ -60,6 +60,14 @@ The expanded retention-load fixture passed in release mode on macOS arm64: 1,154
 
 The SSH installer integration suite passed after replacing its fixed stage sleeps with state-based synchronization (25 tests). The latest verification also passes the production web build, TypeScript, ESLint, Prettier, eight documentation tests and generated protocol drift check.
 
+## Update — 21 October 2026
+
+Automatic signed Linux x86_64 agent updates are now enabled by default, with an administrator pause control, per-host exclusions, a canary, fifteen-minute pacing, and release-level pause after a failed or timed-out update. The real systemd updater gate covers initial installation, a signed update, a no-op, key rejection, rollback after a failed first report, retry suppression and uninstall. GitHub CI passed that gate at `5e01b03` ([run 39606168454](https://github.com/doomedramen/hope/actions/runs/39606168454)); this run predates the local commits described below.
+
+Review of the rollout path found that host outcomes and rollout metadata were persisted separately. A server stop between those writes could leave an updated canary recorded as unfinished, or leave an automatic request without its canary marker. Commit `96ef379` makes report outcomes, queued requests and rollout metadata transactional, and recovers an in-flight canary after restart. The added API test reopens the database, verifies recovery does not queue a second canary, and checks paced advancement after success. The `hope-server` test suite (80 unit, 70 API, 21 hardening, 6 release and 25 SSH installer tests, plus shutdown and the compile-fail doctest) and strict Clippy pass locally; Rust 1.96 also passes the new integration test and strict server Clippy.
+
+The real server-install/systemd gate was skipped by that push-triggered CI run. `.github/workflows/ci.yml` now schedules the server package and rollback gate on pushes as well as pull requests and manual runs. The updated local commit has not yet completed that GitHub gate. Physical Linux interface recovery, native populated-load measurement, and a multi-day soak remain open.
+
 ## Remaining blockers before recommendation
 
 1. **Linux x86_64 acceptance.** Exercise actual packaged artifacts through fresh installation, upgrade, failed activation/restore, restart, interface replacement/raw-socket recovery, notification outage, database/disk pressure, guest churn and browser reconnection. Measure realistic inventory/history load and run a multi-day soak. The locally passing suites do not establish these release gates.
