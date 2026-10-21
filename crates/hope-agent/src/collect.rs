@@ -466,6 +466,7 @@ pub struct Collector {
     previous_network: HashMap<String, (u64, u64, String)>,
     previous_disk: Option<(u64, u64)>,
     gpus: Vec<Gpu>,
+    gpu_engine_state: HashMap<String, IntelGpuEngineState>,
     gpu_at: Instant,
     first: bool,
     settings: extras::Settings,
@@ -650,6 +651,7 @@ impl Collector {
             previous_network: HashMap::new(),
             previous_disk: None,
             gpus: vec![],
+            gpu_engine_state: HashMap::new(),
             gpu_at: Instant::now() - Duration::from_secs(3601),
             first: true,
         }
@@ -794,7 +796,7 @@ impl Collector {
         let mut gpus = self.gpus.clone();
         if cfg!(target_os = "linux") {
             let started = Instant::now();
-            gpu_metrics(&mut gpus).await;
+            gpu_metrics(&mut gpus, &mut self.gpu_engine_state).await;
             self.cost("gpu_metrics", started);
         }
         let gpu_metrics_available = gpus.iter().any(|g| g.utilization_percent.is_some());
@@ -1209,7 +1211,16 @@ async fn gpu_inventory() -> Vec<Gpu> {
     gpus.sort_by(|a, b| (&a.id, &a.name).cmp(&(&b.id, &b.name)));
     gpus
 }
-async fn gpu_metrics(gpus: &mut Vec<Gpu>) {
+#[derive(Default)]
+struct IntelGpuEngineState {
+    last_sample: Option<Instant>,
+    counters: HashMap<String, u64>,
+}
+
+async fn gpu_metrics(
+    gpus: &mut Vec<Gpu>,
+    intel_engine_state: &mut HashMap<String, IntelGpuEngineState>,
+) {
     if let Some(output) = command(
         "nvidia-smi",
         &[
@@ -1240,6 +1251,224 @@ async fn gpu_metrics(gpus: &mut Vec<Gpu>) {
                     .map(|v| v / 1000.0);
         }
     }
+    for gpu in gpus.iter_mut().filter(|g| g.vendor == "Intel") {
+        let Some(card) = gpu.name.split('(').nth(1).and_then(|s| s.strip_suffix(')')) else {
+            continue;
+        };
+        let card_dir = std::path::PathBuf::from("/sys/class/drm").join(card);
+        let device_dir = card_dir.join("device");
+        let id = gpu
+            .id
+            .clone()
+            .unwrap_or_else(|| card_dir.to_string_lossy().into_owned());
+        let mut counters = discover_intel_engine_counters(&card_dir, &device_dir).await;
+        counters.truncate(64);
+        let now = Instant::now();
+        let state = intel_engine_state.entry(id).or_default();
+        gpu.utilization_percent = intel_gpu_utilization(state, &counters, now);
+
+        // Discrete Intel GPUs expose dedicated memory on newer xe and some
+        // i915 drivers. Integrated GPUs intentionally remain unavailable here:
+        // their shared system RAM is not equivalent to dedicated VRAM usage.
+        let vram = device_dir.join("tile0/vram0");
+        gpu.memory_used_bytes = read_number(&vram.join("used_bytes").to_string_lossy())
+            .await
+            .or(read_number(&device_dir.join("mem_info_vram_used").to_string_lossy()).await);
+        gpu.memory_total_bytes = read_number(&vram.join("total_bytes").to_string_lossy())
+            .await
+            .or(read_number(&device_dir.join("mem_info_vram_total").to_string_lossy()).await);
+
+        gpu.temperature_celsius = read_intel_gpu_temperature(&device_dir).await;
+    }
+}
+
+async fn discover_intel_engine_counters(
+    card_dir: &std::path::Path,
+    device_dir: &std::path::Path,
+) -> Vec<(String, std::path::PathBuf)> {
+    let mut counters = Vec::new();
+    for root in [card_dir.join("engine"), device_dir.join("engine")] {
+        discover_engine_root(&root, &mut counters).await;
+    }
+    if let Ok(mut tiles) = tokio::fs::read_dir(device_dir).await {
+        let mut seen = 0;
+        while let Ok(Some(tile)) = tiles.next_entry().await {
+            if !tile.file_name().to_string_lossy().starts_with("tile") || seen >= 16 {
+                continue;
+            }
+            seen += 1;
+            if let Ok(mut gts) = tokio::fs::read_dir(tile.path()).await {
+                let mut gt_seen = 0;
+                while let Ok(Some(gt)) = gts.next_entry().await {
+                    if !gt.file_name().to_string_lossy().starts_with("gt") || gt_seen >= 16 {
+                        continue;
+                    }
+                    gt_seen += 1;
+                    discover_engine_root(&gt.path().join("engines"), &mut counters).await;
+                }
+            }
+        }
+    }
+    counters.sort_by(|a, b| a.0.cmp(&b.0));
+    counters.dedup_by(|a, b| a.0 == b.0);
+    counters.truncate(64);
+    counters
+}
+
+async fn discover_engine_root(
+    root: &std::path::Path,
+    counters: &mut Vec<(String, std::path::PathBuf)>,
+) {
+    let Ok(mut engines) = tokio::fs::read_dir(root).await else {
+        return;
+    };
+    let mut count = 0;
+    while counters.len() < 64
+        && let Ok(Some(engine)) = engines.next_entry().await
+    {
+        if count >= 64 {
+            break;
+        }
+        count += 1;
+        let path = engine.path();
+        if let Some(counter) = engine_counter_path(&path).await {
+            let key = path.to_string_lossy().into_owned();
+            counters.push((key, counter));
+            continue;
+        }
+        if let Ok(mut instances) = tokio::fs::read_dir(&path).await {
+            let mut instance_count = 0;
+            while counters.len() < 64
+                && let Ok(Some(instance)) = instances.next_entry().await
+            {
+                if instance_count >= 32 {
+                    break;
+                }
+                instance_count += 1;
+                if let Some(counter) = engine_counter_path(&instance.path()).await {
+                    let key = instance.path().to_string_lossy().into_owned();
+                    counters.push((key, counter));
+                }
+            }
+        }
+    }
+}
+
+async fn engine_counter_path(engine_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    for name in ["busy_ns", "busy"] {
+        let path = engine_dir.join(name);
+        if tokio::fs::metadata(&path).await.is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn intel_engine_class(name: &str) -> &'static str {
+    let name = name
+        .split('/')
+        .rev()
+        .find(|component| {
+            let component = component.to_ascii_lowercase();
+            [
+                "render", "rcs", "compute", "ccs", "copy", "bcs", "video", "vcs", "vecs",
+            ]
+            .iter()
+            .any(|prefix| component.starts_with(prefix))
+        })
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    if name.starts_with("render") || name.starts_with("rcs") {
+        "render"
+    } else if name.starts_with("compute") || name.starts_with("ccs") {
+        "compute"
+    } else if name.starts_with("copy") || name.starts_with("bcs") {
+        "copy"
+    } else if name.starts_with("video-enhance") || name.starts_with("vecs") {
+        "video-enhance"
+    } else if name.starts_with("video") || name.starts_with("vcs") {
+        "video"
+    } else {
+        "other"
+    }
+}
+
+fn intel_gpu_utilization(
+    state: &mut IntelGpuEngineState,
+    counters: &[(String, std::path::PathBuf)],
+    now: Instant,
+) -> Option<f64> {
+    let mut current = Vec::with_capacity(counters.len());
+    for (name, path) in counters {
+        if let Some(value) = read_number_sync(path) {
+            current.push((name.as_str(), value));
+        }
+    }
+    let elapsed = state
+        .last_sample
+        .map(|last| now.saturating_duration_since(last));
+    let mut readings = Vec::new();
+    if let Some(elapsed) = elapsed.filter(|elapsed| !elapsed.is_zero()) {
+        let wall_ns = elapsed.as_nanos() as f64;
+        for (name, value) in &current {
+            if let Some(previous) = state.counters.get(*name) {
+                // Counter decreases indicate a driver reset or device
+                // reinitialisation. Seed the new value below, then resume
+                // reporting after the next sample instead of calling reset a
+                // measured zero-utilization interval.
+                if value < previous {
+                    continue;
+                }
+                let delta = (*value - *previous) as f64;
+                readings.push((
+                    intel_engine_class(name),
+                    (delta / wall_ns * 100.0).clamp(0.0, 100.0),
+                ));
+            }
+        }
+    }
+    state.counters = current
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+    state.last_sample = Some(now);
+    if readings.is_empty() {
+        None
+    } else {
+        let primary = readings
+            .iter()
+            .filter(|(class, _)| matches!(*class, "render" | "compute"))
+            .map(|(_, value)| *value)
+            .reduce(f64::max)
+            .or_else(|| readings.iter().map(|(_, value)| *value).reduce(f64::max));
+        primary.filter(|value| value.is_finite())
+    }
+}
+
+fn read_number_sync(path: &std::path::Path) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+async fn read_intel_gpu_temperature(device_dir: &std::path::Path) -> Option<f64> {
+    let mut hwmon_paths = Vec::new();
+    let mut hwmon = tokio::fs::read_dir(device_dir.join("hwmon")).await.ok()?;
+    while let Ok(Some(entry)) = hwmon.next_entry().await {
+        if hwmon_paths.len() >= 16 {
+            break;
+        }
+        hwmon_paths.push(entry.path());
+    }
+    hwmon_paths.sort();
+    for channel in 1..=21 {
+        for path in &hwmon_paths {
+            if let Some(value) =
+                read_number(&path.join(format!("temp{channel}_input")).to_string_lossy()).await
+            {
+                return Some(value / 1000.0);
+            }
+        }
+    }
+    None
 }
 fn parse_nvidia(output: &str) -> Vec<Gpu> {
     output
@@ -1438,6 +1667,99 @@ mod tests {
         assert_ne!(gpus[0].id, gpus[1].id);
         assert!(gpus[1].utilization_percent.is_none());
         assert!(gpus[1].memory_used_bytes.is_none());
+    }
+    #[test]
+    fn intel_gpu_engine_metrics_preserve_zero_and_handle_resets() {
+        let temp = tempfile::tempdir().unwrap();
+        let counter = temp.path().join("render/0/busy_ns");
+        std::fs::create_dir_all(counter.parent().unwrap()).unwrap();
+        std::fs::write(&counter, "1000000000").unwrap();
+        let counters = vec![(
+            counter.parent().unwrap().to_string_lossy().to_string(),
+            counter.clone(),
+        )];
+        let start = Instant::now();
+        let mut state = IntelGpuEngineState::default();
+
+        // The initial counter value only seeds a baseline. Missing history
+        // must stay unavailable rather than being presented as 0%.
+        assert_eq!(intel_gpu_utilization(&mut state, &counters, start), None);
+
+        // No counter movement after one second is an actual measured zero.
+        assert_eq!(
+            intel_gpu_utilization(&mut state, &counters, start + Duration::from_secs(1)),
+            Some(0.0)
+        );
+
+        std::fs::write(&counter, "1250000000").unwrap();
+        assert_eq!(
+            intel_gpu_utilization(&mut state, &counters, start + Duration::from_secs(2)),
+            Some(25.0)
+        );
+
+        // A reset invalidates only this interval and becomes a new baseline.
+        std::fs::write(&counter, "10").unwrap();
+        assert_eq!(
+            intel_gpu_utilization(&mut state, &counters, start + Duration::from_secs(3)),
+            None
+        );
+        std::fs::write(&counter, "500000010").unwrap();
+        assert_eq!(
+            intel_gpu_utilization(&mut state, &counters, start + Duration::from_secs(4)),
+            Some(50.0)
+        );
+    }
+
+    #[test]
+    fn intel_gpu_engine_class_prefers_render_or_compute_and_caps_at_full_utilization() {
+        let temp = tempfile::tempdir().unwrap();
+        let render = temp.path().join("render/busy_ns");
+        let copy = temp.path().join("bcs0/busy_ns");
+        std::fs::create_dir_all(render.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::write(&render, "0").unwrap();
+        std::fs::write(&copy, "0").unwrap();
+        let counters = vec![
+            (
+                render.parent().unwrap().to_string_lossy().to_string(),
+                render.clone(),
+            ),
+            (
+                copy.parent().unwrap().to_string_lossy().to_string(),
+                copy.clone(),
+            ),
+        ];
+        let start = Instant::now();
+        let mut state = IntelGpuEngineState::default();
+        assert_eq!(intel_gpu_utilization(&mut state, &counters, start), None);
+
+        std::fs::write(&render, "200000000").unwrap();
+        std::fs::write(&copy, "900000000").unwrap();
+        // Render is the primary class even when a media/copy engine is busier.
+        assert_eq!(
+            intel_gpu_utilization(&mut state, &counters, start + Duration::from_secs(1)),
+            Some(20.0)
+        );
+        assert_eq!(intel_engine_class("/sys/drm/RENDER/0"), "render");
+        assert_eq!(intel_engine_class("/sys/drm/vecs0"), "video-enhance");
+    }
+
+    #[tokio::test]
+    async fn intel_gpu_engine_discovery_handles_flat_and_xe_layouts() {
+        let temp = tempfile::tempdir().unwrap();
+        let card = temp.path().join("card0");
+        let device = card.join("device");
+        let flat = card.join("engine/rcs0/busy");
+        let xe = device.join("tile0/gt0/engines/COMPUTE/0/busy_ns");
+        std::fs::create_dir_all(flat.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(xe.parent().unwrap()).unwrap();
+        std::fs::write(&flat, "0").unwrap();
+        std::fs::write(&xe, "0").unwrap();
+
+        let counters = discover_intel_engine_counters(&card, &device).await;
+        assert_eq!(counters.len(), 2);
+        assert!(counters.iter().any(|(_, path)| path == &flat));
+        assert!(counters.iter().any(|(_, path)| path == &xe));
     }
     #[test]
     fn counter_reset_is_unavailable() {
