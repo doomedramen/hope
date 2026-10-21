@@ -416,6 +416,13 @@ EOF
         launchctl bootstrap system "$updater_plist" || return 1
     fi
 }
+updater_setup_failed() {
+    # The agent reports updater availability from this queue directory. Do not leave it behind
+    # when the root-owned watcher could not be installed or activated, or the server will offer
+    # console updates that have nowhere to go.
+    rm -rf "$state/update-queue"
+    note 'warning=UPDATER_NOT_INSTALLED The agent was kept, but automatic updates are unavailable; run the upgrade command on this host to repair them.'
+}
 remove_updater() {
     updater_paths
     if [ "$no_manager" = 0 ]; then
@@ -734,7 +741,7 @@ if [ "${HOPE_ONLY_NEWER:-}" = 1 ]; then
         echo "hope-agent $installed_version is current; the server offers $m_version."
         if is_system && [ "${HOPE_UPDATER:-}" != 1 ]; then
             lock_installation
-            install_updater || note 'warning=UPDATER_NOT_INSTALLED The current agent was kept, but updater repair failed.'
+            install_updater || updater_setup_failed
         fi
         note "result=current $installed_version"
         phase complete
@@ -1037,7 +1044,7 @@ rm -rf "$txn"
 phase complete
 if [ "$operation" = upgrade ]; then note "result=updated $m_version"; else note "result=installed $m_version"; fi
 if is_system && [ "${HOPE_UPDATER:-}" != 1 ]; then
-    install_updater || note 'warning=UPDATER_NOT_INSTALLED The agent is installed and reporting, but updates from the console need a new installation command.'
+    install_updater || updater_setup_failed
 fi
 if ! is_system; then
     if is_linux; then echo 'To report after logout, ask an administrator to enable lingering for your account (loginctl enable-linger).'

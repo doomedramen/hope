@@ -122,8 +122,17 @@ fn queue_ready(dir: &Path) -> bool {
 
 /// What to tell the server about updates on this host. `available` means an updater is installed
 /// (so a request can lead somewhere), not that the last update worked; the detail says that.
-pub fn status(dir: &Path) -> CollectorStatus {
-    let (available, detail) = describe(dir);
+pub async fn status(dir: &Path) -> CollectorStatus {
+    let queue_present = queue_ready(dir);
+    #[cfg(target_os = "linux")]
+    let service_ready = queue_present && systemd_path_ready().await;
+    #[cfg(not(target_os = "linux"))]
+    let service_ready = queue_present;
+    status_with_readiness(dir, queue_present, service_ready)
+}
+
+fn status_with_readiness(dir: &Path, queue_present: bool, service_ready: bool) -> CollectorStatus {
+    let (available, detail) = describe(dir, queue_present, service_ready);
     CollectorStatus {
         name: COLLECTOR.into(),
         available,
@@ -131,11 +140,17 @@ pub fn status(dir: &Path) -> CollectorStatus {
     }
 }
 
-fn describe(dir: &Path) -> (bool, String) {
-    if !queue_ready(dir) {
+fn describe(dir: &Path, queue_present: bool, service_ready: bool) -> (bool, String) {
+    if !queue_present {
         return (
             false,
             "No updater is installed here, so updates cannot start from H.O.P.E. Run the upgrade command on this host once to enable them.".into(),
+        );
+    }
+    if !service_ready {
+        return (
+            false,
+            "The updater service is not enabled and active. Run the upgrade command on this host to repair it.".into(),
         );
     }
     let Some(result) = read_result(dir) else {
@@ -169,6 +184,41 @@ fn describe(dir: &Path) -> (bool, String) {
         }
         _ => (true, "Updater ready".into()),
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn systemd_path_ready() -> bool {
+    use tokio::process::Command;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        Command::new("systemctl")
+            .args([
+                "show",
+                "--no-pager",
+                "--property=LoadState,ActiveState,UnitFileState",
+                "hope-agent-update.path",
+            ])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let Ok(Ok(output)) = result else {
+        return false;
+    };
+    output.status.success() && systemd_path_state_ready(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn systemd_path_state_ready(output: &str) -> bool {
+    let property = |name: &str| {
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+    };
+    property("LoadState") == Some("loaded")
+        && property("ActiveState") == Some("active")
+        && property("UnitFileState") == Some("enabled")
 }
 
 fn read_result(dir: &Path) -> Option<String> {
@@ -335,12 +385,17 @@ mod tests {
     #[test]
     fn status_says_what_the_updater_last_did() {
         let bare = tempfile::tempdir().expect("state directory");
-        let missing = status(bare.path());
+        let missing = status_with_readiness(bare.path(), false, false);
         assert!(!missing.available);
         assert!(missing.detail.expect("detail").contains("upgrade command"));
 
         let dir = installed();
-        assert_eq!(status(dir.path()).detail.as_deref(), Some("Updater ready"));
+        assert_eq!(
+            status_with_readiness(dir.path(), true, true)
+                .detail
+                .as_deref(),
+            Some("Updater ready")
+        );
         for (written, available, detail) in [
             (
                 "status=updated\nversion=0.1.60\nat=1",
@@ -367,13 +422,35 @@ mod tests {
             ("garbage", true, "Updater ready"),
         ] {
             std::fs::write(dir.path().join(RESULT), written).expect("result");
-            let got = status(dir.path());
+            let got = status_with_readiness(dir.path(), true, true);
             assert_eq!(
                 (got.available, got.detail.as_deref()),
                 (available, Some(detail)),
                 "{written:?}"
             );
             assert_eq!(got.name, COLLECTOR);
+        }
+    }
+
+    #[test]
+    fn updater_is_unavailable_when_its_systemd_path_is_not_enabled_and_active() {
+        let dir = installed();
+        let got = status_with_readiness(dir.path(), true, false);
+        assert!(!got.available);
+        assert!(got.detail.unwrap().contains("not enabled and active"));
+    }
+
+    #[test]
+    fn systemd_path_readiness_requires_loaded_active_and_enabled() {
+        assert!(systemd_path_state_ready(
+            "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
+        ));
+        for output in [
+            "LoadState=not-found\nActiveState=inactive\nUnitFileState=disabled\n",
+            "LoadState=loaded\nActiveState=inactive\nUnitFileState=enabled\n",
+            "LoadState=loaded\nActiveState=active\nUnitFileState=disabled\n",
+        ] {
+            assert!(!systemd_path_state_ready(output), "{output}");
         }
     }
 
@@ -385,14 +462,24 @@ mod tests {
             "status=failed\ncode=X\n".repeat(200),
         )
         .expect("big");
-        assert_eq!(status(dir.path()).detail.as_deref(), Some("Updater ready"));
+        assert_eq!(
+            status_with_readiness(dir.path(), true, true)
+                .detail
+                .as_deref(),
+            Some("Updater ready")
+        );
         std::fs::remove_file(dir.path().join(RESULT)).expect("remove");
         #[cfg(unix)]
         {
             let target = dir.path().join("elsewhere");
             std::fs::write(&target, "status=failed\ncode=X\n").expect("target");
             std::os::unix::fs::symlink(&target, dir.path().join(RESULT)).expect("link");
-            assert_eq!(status(dir.path()).detail.as_deref(), Some("Updater ready"));
+            assert_eq!(
+                status_with_readiness(dir.path(), true, true)
+                    .detail
+                    .as_deref(),
+                Some("Updater ready")
+            );
         }
     }
 }

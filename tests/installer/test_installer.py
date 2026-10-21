@@ -1188,6 +1188,15 @@ class Updater(Base):
         self.assertIn('warning=UPDATER_NOT_INSTALLED', result.err)
         self.assertTrue(self.env.paths('system')['binary'].exists())
         self.assertIn('accepted report', result.out)
+        # Agent telemetry infers updater availability from this queue. If unit activation failed,
+        # leaving it behind would make the server offer an update that systemd cannot start.
+        self.assertFalse((self.env.paths('system')['state'] / 'update-queue').exists())
+
+        # A later successful installer run repairs updater availability.
+        (self.env.base / 'fault/updater-units-fail').unlink()
+        repaired = self.env.run()
+        self.ok(repaired)
+        self.assertTrue((self.env.paths('system')['state'] / 'update-queue').is_dir())
 
     def test_an_update_by_the_updater_leaves_the_updater_alone(self):
         self.installed()

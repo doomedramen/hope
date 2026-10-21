@@ -456,7 +456,7 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                 }
             }
             Some(((inventory,metrics,mut collectors),collected_at,child_snapshots))=samples.recv() => {
-                collectors.push(crate::updates::status(dir));
+                collectors.push(crate::updates::status(dir).await);
                 let changed=inventory_delivery.changed(&inventory)?;
                 let mut report=AgentReport { schema_version:SCHEMA_VERSION,report_id:Uuid::new_v4().to_string(),agent_id:configuration.agent_id.clone(),sequence:Some(sequence.next(dir).await?),collected_at,inventory:changed.then_some(inventory),metrics,collectors };
                 crate::telemetry::bound_report(&mut report)?;
