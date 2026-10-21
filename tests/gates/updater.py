@@ -375,7 +375,7 @@ class Gate:
                 pid, sha = self.main_pid(), self.installed_sha()
                 previous = int(self.result_file().get('at', '0'))
                 self.request_all()
-                result = wait_for(
+                rejected = wait_for(
                     'the updater to reject the untrusted signing key',
                     lambda: (result := self.result_file()).get('at', '0').isdigit()
                     and int(result['at']) > previous
@@ -383,6 +383,8 @@ class Gate:
                     and result.get('code') == 'MANIFEST_INVALID',
                     120,
                 )
+                expect(rejected, 'the updater did not report a terminal rejection')
+                result = self.result_file()
                 expect(result.get('status') == 'failed' and result.get('code') == 'MANIFEST_INVALID', f'update-result says {result}')
                 expect(self.installed_version() == V2 and self.installed_sha() == sha, 'the installed agent changed')
                 expect(self.main_pid() == pid and self.must('systemctl is-active hope-agent') == 'active', 'the agent service was disturbed')
@@ -402,7 +404,7 @@ class Gate:
                 waits = self.updater_journal().count('phase=wait-report')
                 self.request_all()
                 wait_for('the updater to wait for the new agent', lambda: self.updater_journal().count('phase=wait-report') > waits, 180, 1)
-                result = wait_for(
+                rolled_back = wait_for(
                     'the updater to give up and roll back',
                     lambda: (result := self.result_file()).get('at', '0').isdigit()
                     and int(result['at']) > previous
@@ -411,6 +413,8 @@ class Gate:
                     300,
                     3,
                 )
+                expect(rolled_back, 'the updater did not report a terminal rollback failure')
+                result = self.result_file()
                 expect(result.get('status') == 'failed' and result.get('code') == 'FIRST_REPORT_TIMEOUT', f'update-result says {result}')
                 journal = self.updater_journal()
                 expect('phase=rollback' in journal, 'the updater journal shows no rollback')
