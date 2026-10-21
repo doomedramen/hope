@@ -357,6 +357,74 @@ async function seed(request: APIRequestContext, includeProxmox = false) {
   }
 }
 
+async function designAgent(
+  request: APIRequestContext,
+  name: string,
+  total = 4000,
+) {
+  const enrollment = await (
+    await request.post("/api/v1/enrollment-tokens", { data: {} })
+  ).json();
+  const agent = randomUUID();
+  const inventory = {
+    hostname: name,
+    os: "Linux",
+    architecture: "x86_64",
+    cpu_model: "Fixture CPU",
+    cpu_cores: 4,
+    memory_total_bytes: total,
+    interfaces: [],
+    disks: [],
+    gpus: [],
+    collectors: [],
+  };
+  const response = await request.post("/api/v1/agent/enroll", {
+    data: {
+      schema_version: 1,
+      token: enrollment.token,
+      agent_id: agent,
+      credential: randomBytes(32).toString("hex"),
+      inventory,
+    },
+  });
+  expect(response.ok(), await response.text()).toBeTruthy();
+  const credential = (await response.json()).credential;
+  let sequence = 0;
+  return {
+    agent,
+    async report(cpu: number, memory: number, disk = 40) {
+      const response = await request.post("/api/v1/agent/report", {
+        headers: { Authorization: `Bearer ${credential}` },
+        data: {
+          schema_version: 1,
+          report_id: randomUUID(),
+          agent_id: agent,
+          sequence: ++sequence,
+          collected_at: Date.now() / 1000,
+          inventory: null,
+          collectors: [],
+          metrics: {
+            cpu_percent: cpu,
+            memory_used_bytes: memory,
+            memory_total_bytes: total,
+            disks: [
+              {
+                name: "fixture",
+                mount: "/data",
+                filesystem: "ext4",
+                total_bytes: 1000,
+                available_bytes: (100 - disk) * 10,
+              },
+            ],
+            gpus: [],
+          },
+        },
+      });
+      expect(response.ok(), await response.text()).toBeTruthy();
+    },
+  };
+}
+
 test.describe.serial("H.O.P.E console", () => {
   test("protected first-run setup and empty state", async ({ page }) => {
     await page.goto("/");
@@ -449,7 +517,9 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.locator(".map-device").filter({ hasText: "atlas-nas" }),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Health", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Show metrics", exact: true })
+      .click();
     await expect(page.locator(".node-health").first()).toBeVisible();
     await expect
       .poll(() =>
@@ -559,7 +629,7 @@ test.describe.serial("H.O.P.E console", () => {
       path: "test-results/hope-subnets.png",
       fullPage: true,
     });
-    await page.getByRole("button", { name: "Health", exact: true }).click();
+    await page.getByRole("button", { name: "Topology", exact: true }).click();
     await expectMapFits(page);
     await page.screenshot({
       path: "test-results/hope-health.png",
@@ -650,14 +720,18 @@ test.describe.serial("H.O.P.E console", () => {
     // Positions are relative to the host's subnet container; both land on empty grid cells.
     for (const [mode, x, y] of [
       ["topology", 276, 310],
-      ["health", 20, 446],
+      ["subnets", 20, 446],
     ] as const) {
       expect(
         (
           await request.patch("/api/v1/map", {
             data: {
               operation: "set_position",
-              position: { id: `${mode}:${host.id}`, x, y },
+              position: {
+                id: `${mode === "topology" ? "topology:v2" : mode}:${host.id}`,
+                x,
+                y,
+              },
             },
           })
         ).ok(),
@@ -703,15 +777,24 @@ test.describe.serial("H.O.P.E console", () => {
       .poll(async () => {
         const state = await (await request.get("/api/v1/bootstrap")).json();
         const x = state.map.positions.find(
-          (p: { id: string }) => p.id === `topology:${host.id}`,
+          (p: { id: string }) => p.id === `topology:v2:${host.id}`,
         )?.x;
         return typeof x === "number" && x !== 276;
       })
       .toBeTruthy();
     const saved = (
       await (await request.get("/api/v1/bootstrap")).json()
-    ).map.positions.find((p: { id: string }) => p.id === `topology:${host.id}`);
-    await page.getByRole("button", { name: "Health", exact: true }).click();
+    ).map.positions.find(
+      (p: { id: string }) => p.id === `topology:v2:${host.id}`,
+    );
+    await page
+      .getByRole("button", { name: "Show metrics", exact: true })
+      .click();
+    await expect(node).toHaveAttribute(
+      "style",
+      new RegExp(`translate\\(${saved.x}px, ${saved.y}px\\)`),
+    );
+    await page.getByRole("button", { name: "Subnets", exact: true }).click();
     await expect(node).toHaveAttribute("style", /translate\(20px, 446px\)/);
     await page.getByRole("button", { name: "Topology", exact: true }).click();
     await expect
@@ -994,7 +1077,7 @@ test.describe.serial("H.O.P.E console", () => {
     await page
       .getByRole("option", { name: "Home network", exact: true })
       .click();
-    for (const mode of ["Topology", "Subnets", "Health"]) {
+    for (const mode of ["Topology", "Subnets"]) {
       await page.getByRole("button", { name: mode, exact: true }).click();
       await expect(
         page.locator(".map-device").filter({ hasText: "atlas-nas" }),
@@ -1862,7 +1945,7 @@ test.describe.serial("H.O.P.E console", () => {
     await details.getByRole("tab", { name: "Settings", exact: true }).click();
     await expect(details.getByTestId("agent-update")).toHaveCount(0);
   });
-  test("the map draws routers above the ranges they serve", async ({
+  test("the map draws inferred routing above its observed hosts", async ({
     page,
   }) => {
     let router = "";
@@ -1873,6 +1956,10 @@ test.describe.serial("H.O.P.E console", () => {
         (h: { name: string }) => h.name === "atlas-nas",
       );
       router = atlas.id;
+      // This assertion covers automatic arrangement, independent of saved drag positions.
+      body.map.positions = [
+        { id: `topology:${atlas.id}`, x: 100000, y: -100000 },
+      ];
       const home = body.networks.find(
         (n: { name: string }) => n.name === "Home network",
       );
@@ -1884,17 +1971,18 @@ test.describe.serial("H.O.P.E console", () => {
     await page.goto("/?view=map");
     await expect(page.getByTestId("network-map")).toBeVisible();
     await expect(
-      page.locator(`.react-flow__edge[data-id^="feeds-${router}-"]`),
-    ).toHaveCount(1);
+      page.locator(`.react-flow__edge[data-id^="topology-${router}-"]`),
+    ).not.toHaveCount(0);
     const node = await page
       .locator(".react-flow__node")
       .filter({ hasText: "atlas-nas" })
       .boundingBox();
-    const range = await page
-      .getByTestId("subnet-group")
-      .filter({ hasText: "Home network" })
+    const child = await page
+      .locator(".map-device")
+      .filter({ hasText: "studio-mac" })
       .boundingBox();
-    expect(node && range && node.y + node.height <= range.y).toBeTruthy();
+    expect(node && child && node.y + node.height <= child.y).toBeTruthy();
+    await expect(page.getByTestId("subnet-group")).toHaveCount(0);
     await page.screenshot({
       path: "test-results/hope-hierarchy.png",
       fullPage: true,
@@ -1909,7 +1997,7 @@ test.describe.serial("H.O.P.E console", () => {
     const navigation = page.getByRole("navigation", {
       name: "Main navigation",
     });
-    await expect(navigation.getByRole("button")).toHaveCount(4);
+    await expect(navigation.getByRole("button")).toHaveCount(5);
     await page.getByRole("button", { name: /^Needs attention/ }).click();
     await page.getByRole("button", { name: "Map", exact: true }).click();
     await expect(
@@ -1923,11 +2011,11 @@ test.describe.serial("H.O.P.E console", () => {
       "true",
     );
     await navigation.getByRole("button", { name: "Overview" }).click();
-    await navigation.getByRole("button", { name: "Devices" }).click();
+    await navigation.getByRole("button", { name: "Network map" }).click();
     await expect(page).toHaveURL(/view=map/);
     await page.reload();
     await navigation.getByRole("button", { name: "Overview" }).click();
-    await navigation.getByRole("button", { name: "Devices" }).click();
+    await navigation.getByRole("button", { name: "Network map" }).click();
     await expect(page).toHaveURL(/view=map/);
     await page.getByLabel("Search hosts").fill("atlas-nas");
     await page.locator(".map-device").filter({ hasText: "atlas-nas" }).click();
@@ -2015,7 +2103,7 @@ test.describe.serial("H.O.P.E console", () => {
     ).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(
-      page.getByRole("button", { name: "Devices", exact: true }),
+      page.getByRole("button", { name: "Network map", exact: true }),
     ).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Settings", exact: true }),
@@ -2722,6 +2810,80 @@ test.describe.serial("H.O.P.E console", () => {
       JSON.stringify(overflow),
     ).toBeTruthy();
   });
+  test("topology uses collected guest relationships and keeps missing parents unresolved", async ({
+    page,
+    request,
+  }) => {
+    const bootstrap: Bootstrap = await (
+      await request.get("/api/v1/bootstrap")
+    ).json();
+    const guest = bootstrap.hosts.find((h) => h.name === "dns-container")!;
+    const relation = guest.relationships.find((r) => r.kind === "runs_on")!;
+    expect(relation).toBeTruthy();
+    const parent = bootstrap.hosts.find((h) => h.id === relation.to_device_id)!;
+    expect(parent).toBeTruthy();
+    let canonical = false;
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      body.map.positions = [];
+      if (canonical) {
+        const projected = body.hosts.find(
+          (host: { id: string }) => host.id === guest.id,
+        );
+        projected.id = `canonical-${guest.id}`;
+        projected.child.metrics.memory_used_bytes = Math.floor(
+          projected.child.metrics.memory_total_bytes * 0.95,
+        );
+      }
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto("/?view=map");
+    await expectMapFits(page);
+    const edge = page.locator(
+      `.react-flow__edge[data-id="topology-${parent.id}-${guest.id}"]`,
+    );
+    await expect(edge).toHaveClass(/reported-edge/);
+    await expect(edge).toHaveAttribute("aria-label", /Runs on.*Reported/);
+    const childNode = page.locator(`[data-host-id="${guest.id}"]`);
+    const parentNode = page.locator(`[data-host-id="${parent.id}"]`);
+    const childBox = await childNode.boundingBox(),
+      parentBox = await parentNode.boundingBox();
+    expect(
+      childBox && parentBox && childBox.y > parentBox.y + parentBox.height,
+    ).toBeTruthy();
+    await page.getByLabel("Search hosts").fill("dns-container");
+    await expect(childNode).toBeVisible();
+    await expect(page.locator(".react-flow__edge")).toHaveCount(0);
+    await page
+      .getByRole("button", { name: "Show metrics", exact: true })
+      .click();
+    await expect(childNode.locator(".node-health")).toContainText("RAM 25%");
+    canonical = true;
+    await page.reload();
+    await expect(
+      page.locator(
+        `.react-flow__edge[data-id="topology-${parent.id}-canonical-${guest.id}"]`,
+      ),
+    ).toHaveClass(/reported-edge/);
+    await expect(
+      page.locator(`[data-host-id="canonical-${guest.id}"]`),
+    ).toBeVisible();
+    await expect(
+      page.locator(`[data-host-id="canonical-${guest.id}"]`),
+    ).toHaveAttribute("data-tone", "warning");
+    await expect(
+      page.locator(`[data-host-id="canonical-${guest.id}"] .node-status`),
+    ).toHaveText("Memory at 95%");
+    await expect(childNode).toHaveCount(0);
+    await page.getByRole("button", { name: "Dark", exact: true }).click();
+    await page.screenshot({
+      path: "test-results/redesign-reported-topology.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+  });
+
   test("archived source devices stay out of normal counts and maps until explicitly filtered", async ({
     page,
     request,
@@ -3054,5 +3216,244 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(readings).toContainText("99%");
     await page.reload();
     await expect(readings).toContainText("99%");
+  });
+  test("topology handles a full inventory, cycles and unknown parents without inventing edges", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body: Bootstrap = await response.json();
+      const template = body.hosts[0];
+      body.hosts = Array.from({ length: 250 }, (_, index) => ({
+        ...template,
+        id: `layout-${index}`,
+        name: `layout-host-${index}`,
+        name_override: null,
+        agent_id: null,
+        agent_revoked: false,
+        agent_uninstalled: false,
+        retired: false,
+        source: null,
+        source_device_id: null,
+        child: null,
+        relationships: [],
+        associations: [],
+        inventory: null,
+        metrics: null,
+        addresses: [`10.77.0.${index + 1}`],
+        network_ids: [],
+        last_seen: Date.now() / 1000,
+        last_report: null,
+        parent_id:
+          index === 0
+            ? "layout-1"
+            : index === 1
+              ? "layout-0"
+              : index === 249
+                ? "missing-parent"
+                : "layout-0",
+        parent_reason: "Fixture inferred routing",
+      }));
+      // A reported relationship wins over a contradictory inferred cycle.
+      body.hosts[1].relationships = [
+        {
+          from_device_id: "layout-1",
+          to_device_id: "layout-0",
+          kind: "runs_on",
+          detail: null,
+        },
+      ];
+      body.map = { revision: body.map.revision, positions: [], links: [] };
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto("/?view=map");
+    await expect(page.locator(".map-device")).toHaveCount(250);
+    await expectMapFits(page);
+    await expect(
+      page.locator('.react-flow__edge[data-id="topology-layout-0-layout-1"]'),
+    ).toHaveClass(/reported-edge/);
+    await expect(
+      page.locator('.react-flow__edge[data-id="topology-layout-1-layout-0"]'),
+    ).toHaveCount(0);
+    await expect(
+      page.locator('.react-flow__edge[data-id$="-layout-249"]'),
+    ).toHaveCount(0);
+    expect(
+      await page.locator(".map-device").evaluateAll((nodes) => {
+        const boxes = nodes.map((node) => node.getBoundingClientRect());
+        return boxes.every((a, i) =>
+          boxes
+            .slice(i + 1)
+            .every(
+              (b) =>
+                a.right <= b.left + 0.1 ||
+                b.right <= a.left + 0.1 ||
+                a.bottom <= b.top + 0.1 ||
+                b.bottom <= a.top + 0.1,
+            ),
+        );
+      }),
+    ).toBeTruthy();
+    await page.getByLabel("Search hosts").fill("layout-host-249");
+    await expect(page.locator(".map-device")).toHaveCount(1);
+    await expect(page.locator(".react-flow__edge")).toHaveCount(0);
+    await page.locator(".map-device").click();
+    await expect(page).toHaveURL(/view=host&host=layout-249/);
+  });
+
+  test("topology health updates from real reports and expires without another report", async ({
+    page,
+    request,
+  }) => {
+    const agent = await designAgent(request, "map-health-live");
+    await agent.report(98, 3800, 91);
+    await page.clock.install();
+    await page.goto("/?view=map");
+    const node = page
+      .locator(".map-device")
+      .filter({ hasText: "map-health-live" });
+    await expect(node).toHaveAttribute("data-tone", "critical");
+    await expect(node).toContainText("CPU at 98%");
+    await expect(
+      page.getByRole("button", { name: "Health", exact: true }),
+    ).toHaveCount(0);
+    await expect(node.locator(".node-health")).toHaveCount(0);
+    const toggle = page.getByRole("button", {
+      name: "Show metrics",
+      exact: true,
+    });
+    await toggle.focus();
+    await page.keyboard.press("Space");
+    await expect(toggle).toBeFocused();
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await expect(node.locator(".node-health")).toContainText("98%");
+    await agent.report(10, 3800, 91);
+    await expect(node).toHaveAttribute("data-tone", "warning");
+    await expect(node).toContainText("Memory at 95%");
+    await agent.report(10, 2000, 40);
+    await expect(node).toHaveAttribute("data-tone", "good");
+    await expect(node.locator(".node-status")).toHaveText("Reporting");
+    await expect(node.locator(".node-health")).toContainText("50%");
+    const before = await node.locator("..").getAttribute("style");
+    await toggle.click();
+    await expect(node.locator("..")).toHaveAttribute("style", before!);
+    await toggle.click();
+    await page.clock.fastForward(130_000);
+    await expect(node).toHaveAttribute("data-tone", "critical");
+    await expect(node.locator(".node-status")).toHaveText("Agent stale");
+    await expect(node.locator(".node-health strong")).toHaveText([
+      "—",
+      "—",
+      "—",
+    ]);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.clock.runFor(1000);
+    await expectMapFits(page);
+    await expect(page.locator(".react-flow__minimap")).toBeHidden();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+    await page.screenshot({
+      path: "test-results/redesign-map-mobile.png",
+      fullPage: true,
+    });
+    await node.click();
+    await expect(page).toHaveURL(/view=host/);
+  });
+
+  test("overview ranks memory by bytes and excludes retained stale measurements", async ({
+    page,
+    request,
+  }) => {
+    const gib = 1024 ** 3;
+    const large = await designAgent(request, "memory-large", 4096 * gib);
+    const small = await designAgent(request, "memory-small", 256 * gib);
+    const stale = await designAgent(request, "memory-stale", 8192 * gib);
+    const heartbeat = await designAgent(
+      request,
+      "memory-heartbeat",
+      8192 * gib,
+    );
+    await heartbeat.report(99, 4096 * gib);
+    await large.report(10, 512 * gib);
+    await small.report(10, 192 * gib);
+    await stale.report(99, 4096 * gib);
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const body: Bootstrap = await response.json();
+      const host = body.hosts.find((h) => h.agent_id === stale.agent)!;
+      host.last_report = Date.now() / 1000 - 300;
+      host.metrics_received_at = host.last_report;
+      const heartbeating = body.hosts.find(
+        (host) => host.agent_id === heartbeat.agent,
+      )!;
+      heartbeating.metrics_received_at = Date.now() / 1000 - 300;
+      await route.fulfill({ response, json: body });
+    });
+    await page.goto("/");
+    await expect(page.getByTestId("network-map")).toHaveCount(0);
+    const memory = page.getByRole("region", { name: "Most memory used by" });
+    await expect(memory.locator(".leader-row").nth(0)).toContainText(
+      "memory-large",
+    );
+    await expect(memory.locator(".leader-row").nth(1)).toContainText(
+      "memory-small",
+    );
+    await expect(memory).toContainText("512.0 GiB");
+    await expect(memory).not.toContainText("memory-stale");
+    await expect(memory).not.toContainText("memory-heartbeat");
+    await expect(
+      page.getByRole("region", { name: "Busiest CPUs" }),
+    ).not.toContainText("memory-stale");
+    await page.getByRole("button", { name: "Dark", exact: true }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const style = getComputedStyle(
+            document.querySelector('.nav-item[aria-current="page"]')!,
+          );
+          const luminance = (color: string) => {
+            const channels = (color.match(/[\d.]+/g) ?? [])
+              .slice(0, 3)
+              .map(Number)
+              .map((v) => {
+                const s = v / 255;
+                return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+              });
+            return (
+              channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
+            );
+          };
+          const text = luminance(style.color),
+            background = luminance(style.backgroundColor);
+          return (
+            (Math.max(text, background) + 0.05) /
+            (Math.min(text, background) + 0.05)
+          );
+        }),
+      )
+      .toBeGreaterThan(4.5);
+    await page.screenshot({
+      path: "test-results/redesign-overview-dark.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+    await page.screenshot({
+      path: "test-results/redesign-overview-mobile.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    await memory.getByRole("button", { name: /memory-large/ }).click();
+    await expect(
+      page.getByRole("complementary", { name: "Host details" }),
+    ).toContainText("memory-large");
   });
 });

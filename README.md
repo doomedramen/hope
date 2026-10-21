@@ -10,7 +10,7 @@ Home network discovery, host monitoring and a lightweight reporting agent for up
 
 - **Overview**: recently seen hosts, reporting agents, what needs attention (stale agents, CPU, memory or filesystems above 90%), fleet-wide usage, the busiest hosts and a getting-started checklist until the first agent reports. Devices not recently seen remain available in their own filter and do not count as an issue by themselves.
 - **Hosts**: status filters, sortable columns and inline CPU, memory and disk meters; click a host for details.
-- **Network map**: topology, subnet and health modes with provenance for reported, inferred and manual links, a minimap for large fleets, and drag-to-link.
+- **Network map**: a separate topology page with health on each host, optional CPU/memory/storage readings, and subnet grouping. Reported guest/gateway relationships, inferred routing and manual links have distinct provenance; saved positions, a minimap and drag-to-link remain available.
 - **Host details**: live usage tiles with sparklines, hardware, storage meters and ZFS pools, per-device throughput, temperature sensors, interfaces and counters, systemd units, network monitors, GPUs, and 1 h / 6 h / 24 h / 7 d history that draws outages as gaps. Open a host's full page for a two-column chart dashboard: CPU, load average, memory (used, ZFS ARC, cache and buffers under the total), bandwidth, disk I/O, pool usage and I/O, temperatures, monitor latency, filesystem and GPU usage.
 - **Container history**: open a Docker container for CPU and memory charts over the same history windows. Container IDs keep recreated workloads separate; missing readings remain gaps, and stored history is still accessible when the container disappears from the latest report.
 - **Command palette** (`⌘K` / `Ctrl+K`, or `/`): jump to any host or run any action from the keyboard.
@@ -18,7 +18,7 @@ Home network discovery, host monitoring and a lightweight reporting agent for up
 
 ![Host page: every metric graphed, current values on the charts](docs/screenshots/host-page.png)
 
-| Hosts | Map (health mode) | Host details (dark) |
+| Hosts | Map (resource readings) | Host details (dark) |
 | --- | --- | --- |
 | ![Hosts](docs/screenshots/hosts.png) | ![Map](docs/screenshots/map-health.png) | ![Host details](docs/screenshots/host-details-dark.png) |
 
@@ -39,7 +39,7 @@ Not in scope and not planned for this release: Windows agents, distributed disco
 | # | Stage | Evidence today | Still open |
 | --- | --- | --- | --- |
 | 1 | Discovery and hosts | Controlled two-range Docker fixtures (OrbStack, Linux ARM64): [routed](docs/benchmarks/discovery-routed.json) 25.4 s and [on-link](docs/benchmarks/discovery-on-link.json) 26.4 s for both ranges; fairness, cancellation and enrichment tests | A physical LAN with host networking and ARP; Docker Engine on a physical Linux host; Docker Desktop on Windows |
-| 2 | Map modes and console | Playwright acceptance (17 Chromium tests) for the overview, topology/subnet/health modes, drag persistence, selection, filters, command palette, themes and range removal; screenshots reviewed | Tests use synthetic inventory, not data from real discovery |
+| 2 | Map and console | Playwright acceptance for overview rankings, topology with health and optional metrics, subnet grouping, reported guest links, 250-host layout, drag persistence, selection, filters, command palette, themes and range removal; screenshots reviewed | Browser tests use synthetic inventory and reports sent through the real API, not physical LAN discovery |
 | 3 | Agent and history | Agent fault tests, 250-host retention load test, a 30-minute [Linux x86_64 LXC measurement](docs/benchmarks/agent-linux-x86_64-lxc.json), and a 30-minute macOS arm64 measurement (see "Resource use") | Linux ARM64 and macOS x86_64 measurements; GPU-collector comparisons; the signed musl artifact was not re-measured |
 | 4 | Manual installation | Transactional installer with rollback, covered by a 77-test harness with stubbed service managers and real signatures, **and a real Linux matrix (2026-10-15)**: Debian 13 with systemd, arm64 native and amd64 emulated, system and user services, custom CA; install, reinstall, interrupted activation, upgrade, downgrade refusal, uninstall, purge | **launchd (macOS) installation, upgrade, rollback and uninstall; the default public-CA path; physical x86_64 hardware and other Linux distributions** |
 | 5 | SSH and release hardening | SSH jobs against an in-process SSH server and, since 2026-10-15, against a real OpenSSH 10.0 on Debian 13 (host-key binding, auth failures, user-service fallback, reinstall, dropped connection); a real Caddy 2.10.2 reverse proxy (SSE, Secure cookie, rate-limit key, spoofed `X-Forwarded-For`); Linux x86_64 signed release build and assembly with a throwaway key; CI definitions | The CI workflows have never run on GitHub; no production signing key exists; nginx and Traefik, `sudo` that needs a password |

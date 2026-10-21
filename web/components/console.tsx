@@ -93,7 +93,7 @@ const NetworkMap = dynamic(
 
 type View =
   "overview" | "map" | "hosts" | "host" | "container" | "networks" | "agents";
-type Mode = "topology" | "subnets" | "health";
+type Mode = "topology" | "subnets";
 const SOURCE_FILTERS = [
   ["all", "All source types"],
   ["docker_container", "Docker container"],
@@ -113,8 +113,8 @@ const VIEWS: View[] = [
 ];
 const TITLES: Record<View, string> = {
   overview: "Overview",
-  map: "Devices",
-  hosts: "Devices",
+  map: "Network map",
+  hosts: "Hosts",
   host: "Host",
   container: "Container",
   networks: "Networks",
@@ -226,6 +226,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const view = location.view;
   const selected = location.host;
   const [mode, setMode] = useState<Mode>("topology");
+  const [showMetrics, setShowMetrics] = useState(false);
   const [filter, setFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<HostFilter>("all");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -309,15 +310,6 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
     },
     [go],
   );
-  function openDevices() {
-    let preferred: View = "hosts";
-    try {
-      if (localStorage.getItem("hope-device-view") === "map") preferred = "map";
-    } catch {
-      /* Use the list when storage is unavailable. */
-    }
-    setView(preferred);
-  }
   async function action(work: () => Promise<unknown>) {
     setBusy(true);
     setError("");
@@ -627,7 +619,10 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
         view === target ||
         (target === "agents" &&
           (view === "host" || view === "container") &&
-          lastInventory === "agents")
+          lastInventory === "agents") ||
+        ((target === "hosts" || target === "map") &&
+          (view === "host" || view === "container") &&
+          lastInventory === target)
           ? "page"
           : undefined
       }
@@ -645,26 +640,24 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       </a>
       <aside className="sidebar">
         <Brand />
+        <div className="workspace-label">
+          <Network size={14} />
+          Home network
+        </div>
+        <button
+          type="button"
+          className="palette-trigger sidebar-search"
+          onClick={() => setPaletteOpen(true)}
+          aria-label="Search and commands"
+        >
+          <Search size={14} />
+          <span>Search…</span>
+          <kbd className="key">⌘K</kbd>
+        </button>
         <nav aria-label="Main navigation">
           {navItem("overview", LayoutDashboard, "Overview")}
-          <button
-            type="button"
-            className="nav-item"
-            aria-label="Devices"
-            aria-current={
-              view === "map" ||
-              view === "hosts" ||
-              ((view === "host" || view === "container") &&
-                lastInventory !== "agents")
-                ? "page"
-                : undefined
-            }
-            onClick={openDevices}
-          >
-            <LayoutList />
-            <span>Devices</span>
-            <span className="count">{hosts.length}</span>
-          </button>
+          {navItem("hosts", LayoutList, "Hosts", hosts.length)}
+          {navItem("map", Map, "Network map")}
           {navItem("networks", Network, "Networks", networks.length)}
           {navItem(
             "agents",
@@ -998,7 +991,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           <div className="page">
             <div className="page-heading inventory-heading">
               <div>
-                <h2>Your devices</h2>
+                <h2>{view === "map" ? "Network map" : "Hosts"}</h2>
                 <p>
                   Find a device, inspect its health, or configure uptime alerts.
                 </p>
@@ -1053,7 +1046,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                       <ToggleGroup
                         value={[mode]}
                         onValueChange={(v) => {
-                          if (["topology", "subnets", "health"].includes(v[0]))
+                          if (["topology", "subnets"].includes(v[0]))
                             setMode(v[0] as Mode);
                         }}
                         size="sm"
@@ -1065,8 +1058,17 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                         <ToggleGroupItem value="subnets">
                           Subnets
                         </ToggleGroupItem>
-                        <ToggleGroupItem value="health">Health</ToggleGroupItem>
                       </ToggleGroup>
+                    )}
+                    {view === "map" && mode === "topology" && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        aria-pressed={showMetrics}
+                        onClick={() => setShowMetrics((value) => !value)}
+                      >
+                        Show metrics
+                      </Button>
                     )}
                   </div>
                   <div className="inventory-filters flex flex-wrap items-center gap-2">
@@ -1289,6 +1291,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     )}
                     layout={data.map}
                     mode={mode}
+                    showMetrics={showMetrics}
                     selected={selected}
                     onSelect={select}
                     onSave={saveMap}

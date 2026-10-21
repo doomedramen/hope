@@ -22,6 +22,7 @@ import { StatTile } from "@/components/stat-tile";
 import { bytes, percent0, rate } from "@/lib/api";
 import {
   cpuPercent,
+  hasCurrentMetrics,
   fleetSummary,
   fleetUpdates,
   memoryUsage,
@@ -30,6 +31,7 @@ import {
 } from "@/lib/fleet";
 import type { Bootstrap, Host } from "@/lib/protocol";
 import { hostDisplayName } from "@/lib/devices";
+import { useNow } from "@/lib/clock";
 
 export function Overview({
   data,
@@ -51,6 +53,7 @@ export function Overview({
   onUpdateAll: () => void;
   busy?: boolean;
 }) {
+  useNow(5);
   const { hosts, networks, scans } = data;
   const summary = fleetSummary(hosts, scans);
   const updates = fleetUpdates(hosts, data.agent_release);
@@ -65,7 +68,7 @@ export function Overview({
       ? "warning"
       : "good";
   return (
-    <div className="page">
+    <div className="page overview-page">
       <div className="page-heading">
         <div>
           <h2>Network status</h2>
@@ -415,30 +418,6 @@ export function Overview({
                 )}
               </div>
             </section>
-          </div>
-          <div className="overview-column">
-            <Leaders
-              title="Busiest CPUs"
-              icon={<Cpu />}
-              hosts={hosts}
-              value={cpuPercent}
-              onSelect={onSelect}
-            />
-            <Leaders
-              title="Most memory in use"
-              icon={<MemoryStick />}
-              hosts={hosts}
-              value={memoryUsage}
-              onSelect={onSelect}
-            />
-            <Leaders
-              title="Fullest filesystems"
-              icon={<HardDrive />}
-              hosts={hosts}
-              value={(host) => worstDisk(host)?.percent ?? null}
-              detail={(host) => worstDisk(host)?.disk.mount}
-              onSelect={onSelect}
-            />
             <section className="panel" aria-label="Networks">
               <div className="panel-header">
                 <h3>
@@ -484,6 +463,46 @@ export function Overview({
                 )}
               </div>
             </section>
+          </div>
+          <div className="overview-column">
+            <Leaders
+              title="Most memory used by"
+              icon={<MemoryStick />}
+              hosts={hosts}
+              value={memoryUsage}
+              rank={(host) =>
+                host.metrics?.memory_used_bytes ??
+                host.child?.metrics.memory_used_bytes ??
+                null
+              }
+              detail={(host) => {
+                const used =
+                  host.metrics?.memory_used_bytes ??
+                  host.child?.metrics.memory_used_bytes;
+                const total =
+                  host.metrics?.memory_total_bytes ??
+                  host.child?.metrics.memory_total_bytes;
+                return used != null && total
+                  ? `${bytes(used)} / ${bytes(total)}`
+                  : undefined;
+              }}
+              onSelect={onSelect}
+            />
+            <Leaders
+              title="Busiest CPUs"
+              icon={<Cpu />}
+              hosts={hosts}
+              value={cpuPercent}
+              onSelect={onSelect}
+            />
+            <Leaders
+              title="Fullest filesystems"
+              icon={<HardDrive />}
+              hosts={hosts}
+              value={(host) => worstDisk(host)?.percent ?? null}
+              detail={(host) => worstDisk(host)?.disk.mount}
+              onSelect={onSelect}
+            />
           </div>
         </div>
       )}
@@ -558,6 +577,7 @@ function Leaders({
   icon,
   hosts,
   value,
+  rank,
   detail,
   onSelect,
 }: {
@@ -565,14 +585,18 @@ function Leaders({
   icon: React.ReactNode;
   hosts: Host[];
   value: (host: Host) => number | null;
+  rank?: (host: Host) => number | null;
   detail?: (host: Host) => string | undefined;
   onSelect: (host: Host) => void;
 }) {
   const rows = hosts
+    .filter((host) => hasCurrentMetrics(host))
     .map((host) => ({ host, value: value(host) }))
     .filter((row): row is { host: Host; value: number } => row.value != null)
-    .sort((a, b) => b.value - a.value)
-    .slice(0, 5);
+    .sort((a, b) =>
+      rank ? (rank(b.host) ?? -1) - (rank(a.host) ?? -1) : b.value - a.value,
+    )
+    .slice(0, 4);
   return (
     <section className="panel" aria-label={title}>
       <div className="panel-header">
@@ -594,7 +618,7 @@ function Leaders({
                 <span className="leader-name">
                   {hostDisplayName(host)}
                   {detail?.(host) && (
-                    <span className="ml-1.5 text-muted-foreground">
+                    <span className="leader-detail text-muted-foreground">
                       {detail(host)}
                     </span>
                   )}

@@ -10,13 +10,14 @@ import {
   ReactFlow,
   useNodesInitialized,
   useReactFlow,
+  useStore,
   type Node,
   type NodeProps,
   type NodeChange,
   type Connection,
   type Edge,
 } from "@xyflow/react";
-import { Bot, Router, Network as NetworkIcon } from "lucide-react";
+import { Router, Network as NetworkIcon } from "lucide-react";
 import { ipValue } from "@/lib/fleet";
 import type { Host, MapEdit, MapState, Network } from "@/lib/protocol";
 import { percent0 } from "@/lib/api";
@@ -26,10 +27,14 @@ import { deviceLabel, hostDisplayName } from "@/lib/devices";
 import {
   cpuPercent,
   hostState,
+  hostIssues,
+  hasCurrentMetrics,
   memoryUsage,
   worstDisk,
   type Tone,
 } from "@/lib/fleet";
+import { topology } from "@/lib/network-topology";
+import { useNow } from "@/lib/clock";
 import "@xyflow/react/dist/style.css";
 
 type Data = {
@@ -64,21 +69,24 @@ function SubnetNode({ data }: NodeProps<Node<SubnetData, "subnet">>) {
   );
 }
 function DeviceNode({ data, selected }: NodeProps<Node<Data, "hope">>) {
-  const state = data.host ? hostState(data.host) : null;
-  const cpu = data.host ? cpuPercent(data.host) : null;
-  const memory = data.host ? memoryUsage(data.host) : null;
-  const disk = data.host ? worstDisk(data.host) : null;
+  const now = useNow(5);
+  const state = data.host ? hostState(data.host, now) : null;
+  const current = data.host ? hasCurrentMetrics(data.host, now) : false;
+  const issue = data.host ? hostIssues(data.host, now)[0] : null;
+  const tone = issue?.severity ?? state?.tone ?? "neutral";
+  const cpu = data.host && current ? cpuPercent(data.host) : null;
+  const memory = data.host && current ? memoryUsage(data.host) : null;
+  const disk = data.host && current ? worstDisk(data.host) : null;
   return (
     <div
       className={`map-device ${selected ? "selected" : ""}`}
       data-kind={data.kind}
+      data-tone={tone}
+      data-host-id={data.host?.id}
     >
       <Handle type="target" position={Position.Top} />
-      <div className="flex items-center gap-3">
-        <div
-          className="device-icon"
-          data-tone={data.kind === "host" ? data.tone : undefined}
-        >
+      <div className="map-node-identity flex items-center gap-3">
+        <div className="device-icon">
           {data.kind === "gateway" ? (
             <Router size={18} />
           ) : data.host ? (
@@ -96,18 +104,12 @@ function DeviceNode({ data, selected }: NodeProps<Node<Data, "hope">>) {
       </div>
       {state && (
         <div className="mt-2.5 flex items-center gap-2 text-[11px]">
-          <span
-            className="status-dot"
-            data-tone={state.tone}
-            aria-hidden="true"
-          />
-          <span className={`mr-auto tone-${state.tone}`}>{state.label}</span>
-          {data.host?.agent_id && !data.host.agent_revoked && (
-            <span className="inline-flex items-center gap-1 text-muted-foreground">
-              <Bot size={12} />
-              Agent
-            </span>
-          )}
+          <span className="status-dot" data-tone={tone} aria-hidden="true" />
+          <span className={`node-status tone-${tone}`} title={issue?.message}>
+            {state.key === "stale"
+              ? state.label
+              : (issue?.message ?? state.label)}
+          </span>
         </div>
       )}
       {data.health && data.host && (
@@ -143,24 +145,27 @@ function describe(host: Host) {
     ? `${method} · ${host.services.length} ${host.services.length === 1 ? "service" : "services"}`
     : `Found by ${method}`;
 }
-function InitialViewport() {
+function InitialViewport({ metrics }: { metrics: boolean }) {
   const initialized = useNodesInitialized();
+  const width = useStore((state) => state.width);
+  const height = useStore((state) => state.height);
   const { fitView } = useReactFlow();
-  const fitted = useRef(false);
+  const fitted = useRef<string>("");
   useEffect(() => {
-    if (!initialized || fitted.current) return;
+    const key = `${metrics}:${width}:${height}`;
+    if (!initialized || fitted.current === key) return;
     const frame = requestAnimationFrame(() => {
-      fitted.current = true;
+      fitted.current = key;
       void fitView({ padding: 0.25, maxZoom: 1 });
     });
     return () => cancelAnimationFrame(frame);
-  }, [initialized, fitView]);
+  }, [initialized, fitView, metrics, width, height]);
   return null;
 }
 
-/** Saved-position key: devices inside a range are relative to it; routers above ranges are not. */
+/** The logical hierarchy has a new coordinate system; subnet positions remain relative. */
 function positionKey(mode: string, node: HopeNode) {
-  return node.parentId ? `${mode}:${node.id}` : `${mode}:router:${node.id}`;
+  return `${mode === "topology" ? "topology:v2" : mode}:${node.id}`;
 }
 
 const TONE_COLORS: Record<Tone, string> = {
@@ -175,6 +180,7 @@ export function NetworkMap({
   networks,
   layout,
   mode,
+  showMetrics,
   selected,
   onSelect,
   onSave,
@@ -182,11 +188,13 @@ export function NetworkMap({
   hosts: Host[];
   networks: Network[];
   layout: MapState;
-  mode: "topology" | "subnets" | "health";
+  mode: "topology" | "subnets";
+  showMetrics: boolean;
   selected: string | null;
   onSelect: (id: string) => void;
   onSave: (edit: MapEdit) => Promise<void>;
 }) {
+  const now = useNow(5);
   const [moving, setMoving] = useState<
     Record<string, { x: number; y: number }>
   >({});
@@ -218,229 +226,126 @@ export function NetworkMap({
     const nodes: HopeNode[] = [];
     const edges: Edge[] = [];
     const visibleIds = new Set(hosts.map((h) => h.id));
+    const prefix = mode === "topology" ? "topology:v2" : mode;
     const position = (id: string, fallback: { x: number; y: number }) =>
-      moving[`${mode}:${id}`] ??
-      layout.positions.find((p) => p.id === `${mode}:${id}`) ??
+      moving[`${prefix}:${id}`] ??
+      layout.positions.find((p) => p.id === `${prefix}:${id}`) ??
       fallback;
-    const rowPitch = mode === "health" ? 186 : 118;
-    const groups = [
-      ...networks.map((n) => ({ id: n.id, label: n.name, cidr: n.cidr })),
-      {
-        id: "ungrouped",
-        label: "Other hosts",
-        cidr: "outside configured ranges",
-      },
-    ];
-    // Outside "subnets" mode the map is a hierarchy: a device's parent is the gateway or upstream
-    // router the server inferred (or, for an agent, its reported default gateway). Routers that
-    // have children are lifted out of their range and drawn above the ranges they serve, so one
-    // edge per range replaces a line to every device.
-    const hierarchical = mode !== "subnets";
-    const byId = new Map(hosts.map((h) => [h.id, h]));
-    const parentOf = (host: Host): string | null => {
-      if (
-        host.parent_id &&
-        byId.has(host.parent_id) &&
-        host.parent_id !== host.id
-      )
-        return host.parent_id;
-      const gateway = host.inventory?.interfaces.find(
-        (i) => i.gateway,
-      )?.gateway;
-      const gatewayHost = gateway
-        ? hosts.find((h) => h.addresses.includes(gateway))
-        : undefined;
-      return gatewayHost && gatewayHost.id !== host.id ? gatewayHost.id : null;
-    };
-    const routers = new Set<string>();
-    if (hierarchical)
-      for (const host of hosts) {
-        const parent = parentOf(host);
-        if (parent) routers.add(parent);
-      }
+    const tree = topology(hosts);
     const node = (
       host: Host,
-      extra: Partial<Node<Data, "hope">>,
-    ): Node<Data, "hope"> => {
-      const label = deviceLabel(host);
-      const address = host.addresses[0];
-      return {
-        id: host.id,
-        type: "hope",
-        position: { x: 0, y: 0 },
-        selected: selected === host.id,
-        data: {
-          label: hostDisplayName(host),
-          subtitle:
-            hostDisplayName(host) === address
-              ? (label ?? describe(host))
-              : [label, host.addresses.join(", ")].filter(Boolean).join(" · "),
-          host,
-          kind: "host",
-          health: mode === "health",
-          tone: hostState(host).tone,
-        },
-        ...extra,
-      };
-    };
-    // Range id (or "ungrouped") → centre x, for placing the routers that serve it.
-    const centres = new Map<string, number>();
-    // Range id → the parent most of its devices sit behind.
-    const feeds = new Map<string, string>();
-    let offset = 0;
-    for (const group of groups) {
-      const members = hosts
-        .filter(
-          (h) =>
-            !routers.has(h.id) &&
-            (networks.find((n) => h.network_ids.includes(n.id))?.id ??
-              "ungrouped") === group.id,
-        )
-        .sort(
-          (a, b) =>
-            ipValue(a.addresses[0]) - ipValue(b.addresses[0]) ||
-            a.name.localeCompare(b.name),
+      extra: Partial<Node<Data, "hope">> = {},
+    ): Node<Data, "hope"> => ({
+      id: host.id,
+      type: "hope",
+      position: { x: 0, y: 0 },
+      selected: selected === host.id,
+      ariaLabel: `Inspect ${hostDisplayName(host)}`,
+      data: {
+        label: hostDisplayName(host),
+        subtitle:
+          host.addresses.join(", ") || deviceLabel(host) || describe(host),
+        host,
+        kind: "host",
+        health: showMetrics,
+        tone: hostIssues(host, now)[0]?.severity ?? hostState(host, now).tone,
+      },
+      ...extra,
+    });
+    if (mode === "topology") {
+      for (const host of hosts)
+        nodes.push(
+          node(host, {
+            position: position(
+              host.id,
+              tree.positions.get(host.id) ?? { x: 0, y: 0 },
+            ),
+          }),
         );
-      if (!members.length && group.id === "ungrouped") continue;
-      const columns = Math.min(
-        6,
-        Math.max(2, Math.ceil(Math.sqrt(members.length || 1))),
-      );
-      const rows = Math.max(1, Math.ceil(members.length / columns));
-      // Positions are relative to the container; a host dragged past the grid enlarges it.
-      const placed = members.map((host, index) =>
-        position(host.id, {
-          x: GROUP_PADDING + (index % columns) * COLUMN_PITCH,
-          y:
-            GROUP_HEADER +
-            GROUP_PADDING +
-            Math.floor(index / columns) * rowPitch,
-        }),
-      );
-      const width = Math.max(
-        GROUP_PADDING * 2 + (columns - 1) * COLUMN_PITCH + NODE_WIDTH,
-        ...placed.map((p) => p.x + NODE_WIDTH + GROUP_PADDING),
-      );
-      const height = Math.max(
-        GROUP_HEADER + GROUP_PADDING + rows * rowPitch + GROUP_PADDING / 2,
-        ...placed.map((p) => p.y + rowPitch),
-      );
-      const x = offset;
-      offset += width + 80;
-      centres.set(group.id, x + width / 2);
-      const root = `network-${group.id}`;
-      const counts = new Map<string, number>();
-      if (hierarchical)
-        for (const host of members) {
-          const parent = parentOf(host);
-          if (parent) counts.set(parent, (counts.get(parent) ?? 0) + 1);
-        }
-      const dominant = [...counts.entries()].sort(
-        (a, b) => b[1] - a[1],
-      )[0]?.[0];
-      if (dominant) feeds.set(group.id, dominant);
-      nodes.push({
-        id: root,
-        type: "subnet",
-        position: { x, y: 0 },
-        style: { width, height },
-        data: {
-          label: group.label,
-          cidr: group.cidr,
-          members: members.length,
-          responding: members.filter((h) => hostState(h).tone === "good")
-            .length,
-        },
-        draggable: false,
-        selectable: false,
-        connectable: false,
-      });
-      if (dominant)
+      for (const link of tree.links)
         edges.push({
-          id: `feeds-${dominant}-${group.id}`,
-          source: dominant,
-          target: root,
+          id: `topology-${link.source}-${link.target}`,
+          source: link.source,
+          target: link.target,
           type: "smoothstep",
-          className: "gateway-edge",
+          className: `topology-edge ${link.kind}-edge`,
+          ariaLabel: link.reason,
+          data: { provenance: link.kind, reason: link.reason },
+          label: link.kind === "reported" ? "Reported" : "Inferred",
         });
-      members.forEach((host, index) => {
-        nodes.push(
-          node(host, {
-            parentId: root,
-            extent: "parent",
-            position: placed[index],
+    } else {
+      const rowPitch = showMetrics ? 226 : 154;
+      const groups = [
+        ...networks.map((n) => ({ id: n.id, label: n.name, cidr: n.cidr })),
+        {
+          id: "ungrouped",
+          label: "Other hosts",
+          cidr: "outside configured ranges",
+        },
+      ];
+      let offset = 0;
+      for (const group of groups) {
+        const members = hosts
+          .filter(
+            (h) =>
+              (networks.find((n) => h.network_ids.includes(n.id))?.id ??
+                "ungrouped") === group.id,
+          )
+          .sort(
+            (a, b) =>
+              ipValue(a.addresses[0]) - ipValue(b.addresses[0]) ||
+              a.id.localeCompare(b.id),
+          );
+        if (!members.length) continue;
+        const columns = Math.min(
+          6,
+          Math.max(2, Math.ceil(Math.sqrt(members.length))),
+        );
+        const placed = members.map((host, index) =>
+          position(host.id, {
+            x: GROUP_PADDING + (index % columns) * COLUMN_PITCH,
+            y:
+              GROUP_HEADER +
+              GROUP_PADDING +
+              Math.floor(index / columns) * rowPitch,
           }),
         );
-        const parent = hierarchical ? parentOf(host) : null;
-        // A device behind a different router than the rest of its range gets its own edge.
-        if (parent && parent !== dominant)
-          edges.push({
-            id: `parent-${parent}-${host.id}`,
-            source: parent,
-            target: host.id,
-            type: "smoothstep",
-            className: "gateway-edge",
-          });
-      });
-    }
-    if (hierarchical && routers.size) {
-      // Depth 0 is the top of the chain (a router with no router above it).
-      const depth = (id: string, seen = new Set<string>()): number => {
-        const host = byId.get(id);
-        const parent = host ? parentOf(host) : null;
-        if (!parent || seen.has(parent) || !routers.has(parent)) return 0;
-        seen.add(id);
-        return 1 + depth(parent, seen);
-      };
-      const levels = [...routers].map((id) => ({ id, depth: depth(id) }));
-      const deepest = Math.max(...levels.map((l) => l.depth));
-      const xOf = new Map<string, number>();
-      // Bottom-up: a router sits over the ranges it feeds, an upstream router over its routers.
-      for (let level = deepest; level >= 0; level--) {
-        let free = offset;
-        for (const { id } of levels.filter((l) => l.depth === level)) {
-          const below = [
-            ...[...feeds.entries()]
-              .filter(([, parent]) => parent === id)
-              .map(([group]) => centres.get(group) ?? 0),
-            ...[...routers]
-              .filter((r) => {
-                const host = byId.get(r);
-                return host && parentOf(host) === id && xOf.has(r);
-              })
-              .map((r) => (xOf.get(r) ?? 0) + NODE_WIDTH / 2),
-          ];
-          const centre = below.length
-            ? below.reduce((a, b) => a + b, 0) / below.length
-            : (free += COLUMN_PITCH) - COLUMN_PITCH / 2;
-          xOf.set(id, centre - NODE_WIDTH / 2);
-        }
-      }
-      for (const { id, depth: level } of levels) {
-        const host = byId.get(id);
-        if (!host) continue;
-        nodes.push(
-          node(host, {
-            // Saved apart from its position inside a range: the coordinates mean different things.
-            position: position(`router:${id}`, {
-              x: xOf.get(id) ?? 0,
-              y: -(deepest - level + 1) * (rowPitch + 60),
+        const width = Math.max(
+          GROUP_PADDING * 2 + (columns - 1) * COLUMN_PITCH + NODE_WIDTH,
+          ...placed.map((p) => p.x + NODE_WIDTH + GROUP_PADDING),
+        );
+        const height = Math.max(...placed.map((p) => p.y + rowPitch));
+        const root = `network-${group.id}`;
+        nodes.push({
+          id: root,
+          type: "subnet",
+          position: { x: offset, y: 0 },
+          style: { width, height },
+          data: {
+            label: group.label,
+            cidr: group.cidr,
+            members: members.length,
+            responding: members.filter((h) => hostState(h).tone === "good")
+              .length,
+          },
+          draggable: false,
+          selectable: false,
+          connectable: false,
+        });
+        offset += width + 80;
+        members.forEach((host, index) =>
+          nodes.push(
+            node(host, {
+              parentId: root,
+              extent: "parent",
+              position: placed[index],
             }),
-          }),
+          ),
         );
-        const parent = parentOf(host);
-        if (parent && routers.has(parent))
-          edges.push({
-            id: `upstream-${parent}-${id}`,
-            source: parent,
-            target: id,
-            type: "smoothstep",
-            className: "gateway-edge",
-          });
       }
     }
-    if (mode !== "subnets")
-      for (const link of layout.links)
+    if (mode === "topology")
+      for (const link of layout.links) {
         if (visibleIds.has(link.source) && visibleIds.has(link.target))
           edges.push({
             id: `manual-${link.id}`,
@@ -449,7 +354,9 @@ export function NetworkMap({
             label: `${link.label || "Connection"} · Manual`,
             type: "smoothstep",
             className: "manual-edge",
+            ariaLabel: `${link.label || "Connection"} · Manual`,
           });
+      }
     return {
       nodes: nodes.map((node) => ({
         ...node,
@@ -457,7 +364,17 @@ export function NetworkMap({
       })),
       edges,
     };
-  }, [hosts, networks, layout, mode, moving, selected, measurements]);
+  }, [
+    hosts,
+    networks,
+    layout,
+    mode,
+    showMetrics,
+    moving,
+    selected,
+    measurements,
+    now,
+  ]);
   const connect = (connection: Connection) => {
     if (
       !connection.source ||
@@ -529,7 +446,7 @@ export function NetworkMap({
         deleteKeyCode={null}
         proOptions={{ hideAttribution: false }}
       >
-        <InitialViewport />
+        <InitialViewport metrics={showMetrics} />
         <Background
           variant={BackgroundVariant.Dots}
           gap={22}
@@ -552,23 +469,31 @@ export function NetworkMap({
         )}
       </ReactFlow>
       <div className="map-legend">
-        <span>
-          <i className="legend-box" />
-          Range (hosts grouped by subnet)
-        </span>
-        {mode !== "subnets" && (
+        {mode === "subnets" ? (
+          <span>
+            <i className="legend-box" />
+            Subnet membership
+          </span>
+        ) : (
           <>
             <span>
-              <i className="legend-line" />
-              Gateway or upstream router
+              <i className="legend-line reported" />
+              Reported relationship
+            </span>
+            <span>
+              <i className="legend-line inferred" />
+              Inferred routing
             </span>
             <span>
               <i className="legend-line manual" />
               Manual link
             </span>
             <span>
-              Drag handles to add manual links. Double-click a manual link to
-              remove it.
+              Links describe logical relationships, not physical switch ports.
+            </span>
+            <span>
+              Drag handles to link hosts; double-click a manual link to remove
+              it.
             </span>
           </>
         )}

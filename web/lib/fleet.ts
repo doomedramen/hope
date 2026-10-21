@@ -116,6 +116,18 @@ export function cpuPercent(host: Host): number | null {
   const value = host.metrics?.cpu_percent ?? host.child?.metrics.cpu_percent;
   return value != null && Number.isFinite(value) ? value : null;
 }
+
+/** Report arrival alone does not make an old measurement current. */
+export function hasCurrentMetrics(
+  host: Host,
+  now = Date.now() / 1000,
+): boolean {
+  const state = hostState(host, now);
+  return state.key === "reporting"
+    ? host.metrics_received_at == null ||
+        now - host.metrics_received_at < AGENT_STALE_SECONDS
+    : Boolean(host.source && host.child && state.key === "observed");
+}
 export function memoryUsage(host: Host): number | null {
   if (host.metrics) return memoryPercent(host.metrics);
   const child = host.child?.metrics;
@@ -184,7 +196,7 @@ export function hostIssues(host: Host, now = Date.now() / 1000): Issue[] {
         message: `Sample timestamp is ${duration(Math.abs(offset))} ${offset > 0 ? "ahead of" : "behind"} server receipt; check clocks and queued data`,
       });
   }
-  if (state.key === "reporting" && !staleMeasurements) {
+  if (hasCurrentMetrics(host, now)) {
     const cpu = cpuPercent(host);
     if (cpu != null && cpu >= 90)
       issues.push({
@@ -326,6 +338,7 @@ export function fleetSummary(
       agents++;
     if (state.key !== "reporting") continue;
     reporting++;
+    if (!hasCurrentMetrics(host, now)) continue;
     const cpu = cpuPercent(host);
     if (cpu != null) {
       cpuSum += cpu;

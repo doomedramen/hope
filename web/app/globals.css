@@ -57,30 +57,29 @@
 /*
  * H.O.P.E design tokens.
  *
- * Light: a cool paper plane with white cards. Dark: deep slate with raised
- * cards. Series colors follow the validated categorical palette (blue, orange,
+ * Light and dark share restrained neutral surfaces and quiet borders. Series colors follow the validated categorical palette (blue, orange,
  * aqua, yellow); status colors are reserved for state and never reused for
  * series. Every status color ships with an icon or label, never color alone.
  */
 :root {
   color-scheme: light;
-  --background: #f4f6f9;
-  --foreground: #16202e;
+  --background: #fafafa;
+  --foreground: #18181b;
   --card: #ffffff;
-  --card-foreground: #16202e;
+  --card-foreground: #18181b;
   --popover: #ffffff;
-  --popover-foreground: #16202e;
-  --primary: #2268bd;
-  --primary-foreground: #ffffff;
-  --secondary: #e9f0fb;
-  --secondary-foreground: #1c4f99;
-  --muted: #eef1f5;
-  --muted-foreground: #5f6b7d;
-  --accent: #e9f0fb;
-  --accent-foreground: #1c4f99;
-  --border: #e1e6ee;
-  --input: #d3dae5;
-  --ring: #7fa8ea;
+  --popover-foreground: #18181b;
+  --primary: #27272a;
+  --primary-foreground: #fafafa;
+  --secondary: #ebebee;
+  --secondary-foreground: #27272a;
+  --muted: #f0f0f2;
+  --muted-foreground: #65656f;
+  --accent: #ebebee;
+  --accent-foreground: #27272a;
+  --border: #e3e3e8;
+  --input: #d4d4da;
+  --ring: #71717a;
   --destructive: #c23c3c;
   --chart-1: #2a78d6;
   --chart-2: #eb6834;
@@ -90,15 +89,15 @@
   --chart-6: #e87ba4;
   --chart-7: #008300;
   --chart-8: #e34948;
-  --sidebar: #ffffff;
-  --sidebar-foreground: #16202e;
-  --sidebar-primary: #2a78d6;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #eef1f5;
-  --sidebar-accent-foreground: #16202e;
-  --sidebar-border: #e1e6ee;
-  --sidebar-ring: #7fa8ea;
-  --radius: 0.7rem;
+  --sidebar: #f4f4f5;
+  --sidebar-foreground: #3f3f46;
+  --sidebar-primary: #27272a;
+  --sidebar-primary-foreground: #fafafa;
+  --sidebar-accent: #e9e9ed;
+  --sidebar-accent-foreground: #18181b;
+  --sidebar-border: #e3e3e8;
+  --sidebar-ring: #71717a;
+  --radius: 0.45rem;
   --status-good: #0ca30c;
   --status-good-foreground: #0a6f0a;
   --status-good-soft: #e3f6e3;
@@ -111,9 +110,9 @@
   --status-neutral: #8d97a7;
   --status-neutral-foreground: #5f6b7d;
   --status-neutral-soft: #eef1f5;
-  --grid: #e7ebf1;
-  --canvas: #f8fafc;
-  --shadow-card: 0 1px 2px rgb(22 32 46 / 0.04), 0 1px 1px rgb(22 32 46 / 0.03);
+  --grid: #e5e5e9;
+  --canvas: #fafafa;
+  --shadow-card: none;
   --shadow-float:
     0 12px 32px rgb(22 32 46 / 0.12), 0 2px 6px rgb(22 32 46 / 0.06);
   --font-sans:
@@ -125,23 +124,23 @@
 
 .dark {
   color-scheme: dark;
-  --background: #0e1117;
-  --foreground: #e6e9ef;
-  --card: #161a22;
-  --card-foreground: #e6e9ef;
-  --popover: #1a1f29;
-  --popover-foreground: #e6e9ef;
-  --primary: #286ec7;
-  --primary-foreground: #ffffff;
-  --secondary: #1d2a3f;
-  --secondary-foreground: #9cc0f3;
-  --muted: #1f2531;
-  --muted-foreground: #98a2b3;
-  --accent: #1d2a3f;
-  --accent-foreground: #9cc0f3;
-  --border: rgb(255 255 255 / 0.09);
-  --input: rgb(255 255 255 / 0.14);
-  --ring: #3987e5;
+  --background: #101012;
+  --foreground: #ededf0;
+  --card: #131315;
+  --card-foreground: #ededf0;
+  --popover: #19191c;
+  --popover-foreground: #ededf0;
+  --primary: #ededf0;
+  --primary-foreground: #18181b;
+  --secondary: #252528;
+  --secondary-foreground: #ededf0;
+  --muted: #202024;
+  --muted-foreground: #a1a1aa;
+  --accent: #252528;
+  --accent-foreground: #ededf0;
+  --border: #29292d;
+  --input: #414147;
+  --ring: #b6bacb;
   --destructive: #e66767;
   --chart-1: #3987e5;
   --chart-2: #d95926;
@@ -151,29 +150,29 @@
   --chart-6: #d55181;
   --chart-7: #008300;
   --chart-8: #e66767;
-  --sidebar: #11151c;
-  --sidebar-foreground: #e6e9ef;
-  --sidebar-primary: #3987e5;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #1f2531;
-  --sidebar-accent-foreground: #e6e9ef;
-  --sidebar-border: rgb(255 255 255 / 0.08);
-  --sidebar-ring: #3987e5;
-  --status-good: #0ca30c;
-  --status-good-foreground: #5fd35f;
-  --status-good-soft: rgb(12 163 12 / 0.16);
-  --status-warning: #fab219;
-  --status-warning-foreground: #f5c454;
-  --status-warning-soft: rgb(250 178 25 / 0.16);
-  --status-critical: #e05252;
-  --status-critical-foreground: #f08a8a;
-  --status-critical-soft: rgb(208 59 59 / 0.2);
-  --status-neutral: #6b7585;
-  --status-neutral-foreground: #98a2b3;
-  --status-neutral-soft: #1f2531;
-  --grid: #1f2531;
-  --canvas: #0b0e13;
-  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.3);
+  --sidebar: #0d0d0f;
+  --sidebar-foreground: #a7a7b1;
+  --sidebar-primary: #ededf0;
+  --sidebar-primary-foreground: #18181b;
+  --sidebar-accent: #222225;
+  --sidebar-accent-foreground: #ededf0;
+  --sidebar-border: #29292d;
+  --sidebar-ring: #b6bacb;
+  --status-good: #67bd92;
+  --status-good-foreground: #79c7a1;
+  --status-good-soft: #18271f;
+  --status-warning: #e9b75f;
+  --status-warning-foreground: #e9b75f;
+  --status-warning-soft: #292216;
+  --status-critical: #f17b7b;
+  --status-critical-foreground: #f17b7b;
+  --status-critical-soft: #2d1c1e;
+  --status-neutral: #7b7b86;
+  --status-neutral-foreground: #a1a1aa;
+  --status-neutral-soft: #202024;
+  --grid: #29292e;
+  --canvas: #111113;
+  --shadow-card: none;
   --shadow-float: 0 16px 40px rgb(0 0 0 / 0.55), 0 2px 6px rgb(0 0 0 / 0.4);
 }
 

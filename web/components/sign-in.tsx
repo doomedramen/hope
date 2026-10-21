@@ -16,10 +16,12 @@ import { post } from "@/lib/api";
 export function Brand() {
   return (
     <div className="brand">
-      <div className="brand-mark">
-        <Network size={20} />
+      <div className="brand-mark" aria-hidden="true">
+        H
       </div>
-      <span>H.O.P.E</span>
+      <span>
+        H.O.P.E<span className="brand-subtitle">Home Network Monitor</span>
+      </span>
     </div>
   );
 }
