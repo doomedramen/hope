@@ -149,6 +149,8 @@ jobs:
       - run: sh scripts/package-server.sh --out dist/server
       - run: cd dist/server && sha256sum -c SHA256SUMS-server
       - run: python3 -I -m unittest discover -s tests/installer -p 'test_server_installer.py' -v
+      - name: Server-install systemd readiness unit tests
+        run: python3 -I -m unittest discover -s tests/gates -p 'test_server_install_gate.py' -v
       - name: Real Debian systemd server install, repeat activation and rollback
         run: tests/gates/run.sh server-install --package-dir dist/server
 

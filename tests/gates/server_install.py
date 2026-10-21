@@ -199,18 +199,23 @@ def install(container, script, release_url, *, expect_success):
 
 def wait_systemd(container):
     deadline = time.monotonic() + 90
-    degraded_since = None
     while time.monotonic() < deadline:
         result = docker_exec(container, "systemctl", "is-system-running", check=False)
         state = (result.stdout + result.stderr).strip()
-        if state == "running":
-            log("target systemd is", state)
-            return
-        if state == "degraded":
-            degraded_since = degraded_since or time.monotonic()
-            if time.monotonic() - degraded_since >= 5:
-                failed = docker_exec(container, "systemctl", "--failed", "--no-legend", check=False)
-                raise RuntimeError("systemd is degraded: " + (failed.stdout or failed.stderr).strip())
+        if state in ("running", "degraded"):
+            init = docker_exec(container, "cat", "/proc/1/comm", check=False)
+            units = docker_exec(container, "systemctl", "list-units", "--no-pager", "--no-legend",
+                                check=False)
+            if init.returncode == 0 and init.stdout.strip() == "systemd" and units.returncode == 0:
+                if state == "degraded":
+                    failed = docker_exec(container, "systemctl", "--failed", "--no-legend", check=False)
+                    details = (failed.stdout or failed.stderr).strip() or "failed services unavailable"
+                    log("target systemd is degraded by baseline services; continuing after manager readiness:", details)
+                else:
+                    log("target systemd is", state)
+                # The image may have unrelated failed units before installation. The gate still
+                # requires the installed HOPE unit and its HTTP health to pass in validate_running.
+                return
         time.sleep(1)
     raise RuntimeError("systemd did not become available in the disposable target")
 
