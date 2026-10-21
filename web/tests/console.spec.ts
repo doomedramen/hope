@@ -53,16 +53,23 @@ async function navigate(page: Page, name: string | RegExp) {
 }
 
 async function globalAction(page: Page, name: string) {
-  let target = page
+  const target = page
     .getByRole("button", { name, exact: true })
-    .filter({ visible: true });
+    .filter({ visible: true })
+    .first();
+  const moreActions = page.getByRole("button", {
+    name: "More actions",
+    exact: true,
+  });
+  await expect
+    .poll(
+      async () => (await target.count()) > 0 || (await moreActions.isVisible()),
+      { timeout: 10_000 },
+    )
+    .toBeTruthy();
   if (!(await target.count())) {
-    await page
-      .getByRole("button", { name: "More actions", exact: true })
-      .click();
-    target = page
-      .getByRole("button", { name, exact: true })
-      .filter({ visible: true });
+    await moreActions.click();
+    await expect(target).toBeVisible();
   }
   await target.click();
 }
@@ -1977,6 +1984,12 @@ test.describe.serial("H.O.P.E console", () => {
     await new Promise<void>((resolve) => ntfy.listen(0, "127.0.0.1", resolve));
     const port = (ntfy.address() as { port: number }).port;
     try {
+      // The shell can finish loading before bootstrap has rendered its actions.
+      // Keep that window open so the shared action helper proves it waits for UI.
+      await page.route("**/api/v1/bootstrap", async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await route.continue();
+      });
       await page.goto("/");
       await globalAction(page, "Notification settings");
       const form = page.getByRole("form", { name: "Notification settings" });
