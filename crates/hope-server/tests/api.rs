@@ -134,8 +134,8 @@ async fn request(
 fn inventory() -> Inventory {
     Inventory {
         hostname: "test-host".into(),
-        os: "Linux test".into(),
-        architecture: "aarch64".into(),
+        os: "Linux".into(),
+        architecture: "x86_64".into(),
         cpu_model: "Test CPU".into(),
         cpu_cores: 4,
         memory_total_bytes: 8e9,
@@ -3968,28 +3968,44 @@ async fn an_update_request_reaches_the_agent_in_its_next_report_response_and_cle
     let url = format!("/api/v1/hosts/{host_id}/update-agent");
     let admin = Some(("cookie", cookie.as_str()));
 
-    // Nothing is asked of an agent until an administrator asks.
+    // The default-on rollout starts its canary as soon as a supported agent reports.
     assert_eq!(
         report_as(&app, &bearer, &agent, "0.1.57").await["update_to"],
-        Value::Null
+        "0.1.60"
     );
+    let (_, bootstrap) = request(&app, "GET", "/api/v1/bootstrap", Value::Null, admin).await;
+    assert_eq!(bootstrap["agent_auto_updates_enabled"], true);
     assert_eq!(
         request(&app, "POST", &url, json!({}), None).await.0,
         StatusCode::UNAUTHORIZED
     );
 
+    // Pausing clears server-side automatic requests that have not yet been delivered.
+    let (status, _) = request(
+        &app,
+        "PUT",
+        "/api/v1/settings/agent-updates",
+        json!({ "enabled": false }),
+        admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let host = state.host(&host_id).await.expect("host").expect("exists");
+    assert_eq!(host.update_target, None);
+
     let (status, body) = request(&app, "POST", &url, json!({}), admin).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let host = state.host(&host_id).await.expect("host").expect("exists");
     assert_eq!(host.update_target.as_deref(), Some("0.1.60"));
+    assert_eq!(host.update_request_source.as_deref(), Some("manual"));
+    assert!(host.update_target_release_id.is_some());
     assert!(host.update_requested_at.is_some());
 
     // It stays on offer in every report response until the agent runs the release.
     for _ in 0..2 {
-        assert_eq!(
-            report_as(&app, &bearer, &agent, "0.1.57").await["update_to"],
-            "0.1.60"
-        );
+        let response = report_as(&app, &bearer, &agent, "0.1.57").await;
+        assert_eq!(response["update_to"], "0.1.60");
+        assert!(response["update_release_id"].as_str().is_some());
     }
     let done = report_as(&app, &bearer, &agent, "0.1.60").await;
     assert_eq!(done["update_to"], Value::Null);

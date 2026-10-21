@@ -1478,6 +1478,12 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             );
           });
         }}
+        onSetAgentUpdates={(enabled) => {
+          void action(async () => {
+            await put("/settings/agent-updates", { enabled });
+            toast(`Automatic agent updates ${enabled ? "resumed" : "paused"}.`);
+          });
+        }}
       />
       <CommandPalette
         open={paletteOpen}

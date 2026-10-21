@@ -122,7 +122,11 @@ report_interval_seconds: number | null,
  * Release version an administrator asked this agent to update to; absent when none is pending.
  * The agent only passes the request to its local updater, which decides for itself.
  */
-update_to: string | null, };
+update_to: string | null,
+/**
+ * Immutable signed release directory selected for this update request. Older servers omit it.
+ */
+update_release_id: string | null, };
 export type ErrorResponse = { code: string, error: string, };
 export type NetworkInput = { name: string, cidr: string, enabled: boolean | null, interval_minutes: number | null, };
 export type NetworkUpdate = { enabled: boolean | null, interval_minutes: number | null, };
@@ -394,6 +398,22 @@ update_requested_at: number | null,
  */
 update_target: string | null,
 /**
+ * Immutable release directory for the pending request.
+ */
+update_target_release_id: string | null,
+/**
+ * `manual` or `automatic`; distinguishes automatic work for pause/exclusion handling.
+ */
+update_request_source: string | null,
+/**
+ * A host-level opt-out from future automatic rollouts.
+ */
+auto_update_excluded: boolean,
+/**
+ * Immutable release ID whose automatic update last failed; avoids retrying it forever.
+ */
+auto_update_failed_release_id: string | null,
+/**
  * Hypervisor or container-runtime identity when this device has source inventory.
  */
 source: SourceIdentity | null, lifecycle: DeviceLifecycle | null, source_observed_at: number | null, relationships: Array<DeviceRelationship>, source_device_id: string | null, associations: Array<DeviceAssociation>,
@@ -421,6 +441,14 @@ agent_release: string | null,
  * Seconds between agent samples, as agents are currently asked to report.
  */
 report_interval_seconds: number,
+/**
+ * Server-side automatic rollout control. Missing legacy values default to enabled.
+ */
+agent_auto_updates_enabled: boolean,
+/**
+ * Release-wide safety stop set after a failed or timed-out canary.
+ */
+agent_auto_update_blocked_release_id: string | null,
 /**
  * Command that updates an installed agent on the host where it runs. It carries no token or
  * credential: the agent is already enrolled, and the installer checks the release signature.

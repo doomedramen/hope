@@ -83,6 +83,7 @@ async fn first_reports_after_enrollment_or_ca_update_trust_the_new_monitor_ca() 
                         duplicate: false,
                         report_interval_seconds: Some(30),
                         update_to: None,
+                        update_release_id: None,
                     })
                 }
             }),

@@ -1382,32 +1382,72 @@ export function HostDetails({
                 </div>
               </section>
             )}
-            {update && (
+            {(update ||
+              host.auto_update_failed_release_id ||
+              (host.agent_id &&
+                !host.agent_revoked &&
+                !host.agent_uninstalled)) && (
               <div
                 className="rounded-xl border p-3.5"
                 data-testid="agent-update"
               >
-                <p className="mb-2.5 text-xs leading-relaxed text-muted-foreground">
-                  Agent {update.target} is available (this host runs{" "}
-                  {host.agent_version}).{" "}
-                  {update.state === "ready" &&
-                    "The agent installs it itself, but only after checking the release's signature against the key it was installed with. It keeps its identity and history."}
-                  {update.state === "pending" && (
-                    <>
-                      Update requested{" "}
-                      <Age value={host.update_requested_at} lower />. It starts
-                      when the agent next reports.
-                    </>
-                  )}
-                  {update.state === "manual" &&
-                    "This agent has no updater yet. Run this command on the host once; after that, updates can start from here."}
-                </p>
-                {update.failure && (
+                {update && (
+                  <p className="mb-2.5 text-xs leading-relaxed text-muted-foreground">
+                    Agent {update.target} is available (this host runs{" "}
+                    {host.agent_version}).{" "}
+                    {update.state === "ready" &&
+                      "The agent installs it itself, but only after checking the release's signature against the key it was installed with. It keeps its identity and history."}
+                    {update.state === "pending" && (
+                      <>
+                        Update requested{" "}
+                        <Age value={host.update_requested_at} lower />. It
+                        starts when the agent next reports.
+                      </>
+                    )}
+                    {update.state === "manual" &&
+                      "This agent has no updater yet. Run this command on the host once; after that, updates can start from here."}
+                  </p>
+                )}
+                {update?.failure && (
                   <p className="mb-2.5 text-xs text-destructive">
                     {update.failure}. The previous version is still running.
                   </p>
                 )}
-                {update.state === "manual" ? (
+                {host.auto_update_failed_release_id && (
+                  <p className="mb-2.5 text-xs text-destructive">
+                    Automatic update failed for release{" "}
+                    {host.auto_update_failed_release_id}; the previous version
+                    remains active. A newer release can be tried after rollout
+                    resumes.
+                  </p>
+                )}
+                {host.agent_id &&
+                  !host.agent_revoked &&
+                  !host.agent_uninstalled && (
+                    <button
+                      className="mb-2.5 rounded-md border px-2.5 py-1 text-xs"
+                      onClick={async () => {
+                        try {
+                          await put(`/hosts/${host.id}/auto-update-exclusion`, {
+                            excluded: !host.auto_update_excluded,
+                          });
+                          notify(
+                            host.auto_update_excluded
+                              ? "Automatic updates enabled for this agent."
+                              : "This agent is excluded from automatic updates.",
+                          );
+                          refresh();
+                        } catch (e) {
+                          setError((e as Error).message);
+                        }
+                      }}
+                    >
+                      {host.auto_update_excluded
+                        ? "Include in automatic updates"
+                        : "Exclude from automatic updates"}
+                    </button>
+                  )}
+                {update?.state === "manual" ? (
                   <>
                     <div className="install-command mb-2.5">
                       <code>{upgradeCommand}</code>
@@ -1436,10 +1476,12 @@ export function HostDetails({
                     </Button>
                   </>
                 ) : (
-                  <Button size="sm" variant="outline" onClick={requestUpdate}>
-                    <ArrowDownToLine data-icon="inline-start" />
-                    {update.state === "pending" ? "Ask again" : "Update now"}
-                  </Button>
+                  update && (
+                    <Button size="sm" variant="outline" onClick={requestUpdate}>
+                      <ArrowDownToLine data-icon="inline-start" />
+                      {update.state === "pending" ? "Ask again" : "Update now"}
+                    </Button>
+                  )
                 )}
               </div>
             )}

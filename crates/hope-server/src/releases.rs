@@ -363,6 +363,16 @@ pub async fn current_version(root: &str) -> Option<String> {
     published_version(&directory).await
 }
 
+/// Immutable release selected for this server, but only when it contains the supported agent.
+pub async fn current_linux_x86_64(root: &str) -> Option<(String, String)> {
+    let (id, directory) = selected_release(root).await.ok()?;
+    let platforms = packaged_platforms(&directory).await;
+    if !platforms.iter().any(|platform| platform == "linux-x86_64") {
+        return None;
+    }
+    Some((id, published_version(&directory).await?))
+}
+
 pub async fn availability(
     Extract(state): Extract<State>,
 ) -> ApiResult<axum::Json<hope_protocol::ReleaseAvailability>> {

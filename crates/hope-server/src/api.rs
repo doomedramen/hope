@@ -94,6 +94,13 @@ pub async fn matching_networks(state: &State, addresses: &[String]) -> ApiResult
         .collect())
 }
 pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstrap>> {
+    let current_release_id = crate::releases::current_linux_x86_64(&state.0.release_dir)
+        .await
+        .map(|(id, _)| id);
+    let agent_auto_update_blocked_release_id = state
+        .meta("auto_update_blocked_release_id")
+        .await?
+        .filter(|id| !id.is_empty() && current_release_id.as_deref() == Some(id));
     Ok(Json(Bootstrap {
         networks: networks(&state).await?,
         hosts: state.hosts().await?,
@@ -119,8 +126,43 @@ pub async fn bootstrap(Extract(state): Extract<State>) -> ApiResult<Json<Bootstr
         server_url: state.0.server_url.clone(),
         agent_release: crate::releases::current_version(&state.0.release_dir).await,
         report_interval_seconds: state.report_interval(),
+        agent_auto_updates_enabled: state.auto_updates_enabled().await?,
+        agent_auto_update_blocked_release_id,
         agent_upgrade_command: crate::agents::upgrade_command(&state),
     }))
+}
+/// Pause or resume automatic updates for supported Linux x86_64 agents.
+pub async fn set_agent_updates(
+    Extract(state): Extract<State>,
+    Json(body): Json<hope_protocol::AgentUpdateSettings>,
+) -> ApiResult<Json<hope_protocol::AgentUpdateSettings>> {
+    let _guard = state.0.writes.lock().await;
+    state
+        .set_meta(
+            "agent_auto_updates_enabled",
+            if body.enabled { "true" } else { "false" },
+        )
+        .await?;
+    if !body.enabled {
+        for mut host in state.stored_hosts().await? {
+            if host.update_request_source.as_deref() == Some("automatic") {
+                host.update_requested_at = None;
+                host.update_target = None;
+                host.update_target_release_id = None;
+                host.update_request_source = None;
+                sqlx::query("UPDATE hosts SET body=? WHERE id=?")
+                    .bind(serde_json::to_string(&host)?)
+                    .bind(&host.id)
+                    .execute(&state.0.db)
+                    .await?;
+                state.publish_host(&host.id).await;
+            }
+        }
+        state.set_meta("auto_update_canary_agent", "").await?;
+        state.set_meta("auto_update_canary_passed", "false").await?;
+    }
+    state.changed();
+    Ok(Json(body))
 }
 /// Choose how often agents sample and report; they adopt it with their next accepted report.
 pub async fn set_reporting(

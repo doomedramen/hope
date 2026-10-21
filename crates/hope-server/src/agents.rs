@@ -451,6 +451,7 @@ pub async fn report(
             .or_else(|| head.as_ref().map(|(sequence, _)| *sequence as u64)),
         report_interval_seconds: Some(state.report_interval()),
         update_to: pending_update(&host, now()),
+        update_release_id: pending_update(&host, now()).and(host.update_target_release_id.clone()),
     };
     if duplicate {
         return Ok(Json(response));
@@ -486,8 +487,6 @@ pub async fn report(
     if let Some(version) = agent_version(&headers) {
         host.agent_version = Some(version);
     }
-    settle_update_request(&mut host, now());
-    response.update_to = pending_update(&host, now());
     // A backlog delivered after an outage fills history but never replaces newer live state.
     if live_applied {
         host.last_collected_at = Some(report.collected_at);
@@ -506,6 +505,57 @@ pub async fn report(
         host.metrics = Some(report.metrics);
         host.collectors = report.collectors;
     }
+    let mut rollout_success = false;
+    let mut rollout_failure = None;
+    if live_applied
+        && host.update_request_source.as_deref() == Some("automatic")
+        && let (Some(target), Some(release_id)) = (
+            host.update_target.as_deref(),
+            host.update_target_release_id.clone(),
+        )
+    {
+        if host
+            .update_requested_at
+            .is_some_and(|requested| now() - requested >= UPDATE_REQUEST_SECONDS)
+        {
+            rollout_failure = Some(release_id.clone());
+            host.auto_update_failed_release_id = Some(release_id);
+            host.update_requested_at = None;
+            host.update_target = None;
+            host.update_target_release_id = None;
+            host.update_request_source = None;
+        } else if host
+            .agent_version
+            .as_deref()
+            .is_some_and(|have| !version_newer(target, have))
+        {
+            rollout_success = true;
+            host.auto_update_failed_release_id = None;
+            host.update_requested_at = None;
+            host.update_target = None;
+            host.update_target_release_id = None;
+            host.update_request_source = None;
+        } else if host.collectors.iter().any(|collector| {
+            collector.name == "agent_update"
+                && collector
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| reports_update_failure_for(detail, &release_id))
+        }) {
+            rollout_failure = Some(release_id.clone());
+            host.auto_update_failed_release_id = Some(release_id);
+            host.update_requested_at = None;
+            host.update_target = None;
+            host.update_target_release_id = None;
+            host.update_request_source = None;
+        }
+    }
+    settle_update_request(&mut host, now());
+    response.update_to = pending_update(&host, now());
+    response.update_release_id = response
+        .update_to
+        .as_ref()
+        .and(host.update_target_release_id.clone());
     host.network_ids = crate::api::matching_networks(&state, &host.addresses).await?;
     crate::classify::refresh(&mut host, &state.gateway_set());
     sqlx::query("UPDATE hosts SET name=?,body=? WHERE agent_id=?")
@@ -520,6 +570,37 @@ pub async fn report(
         false
     };
     tx.commit().await?;
+    if rollout_success {
+        let canary = state
+            .meta("auto_update_canary_agent")
+            .await?
+            .unwrap_or_default();
+        if canary == report.agent_id {
+            state.set_meta("auto_update_canary_passed", "true").await?;
+            state
+                .set_meta("auto_update_last_queued_at", &now().to_string())
+                .await?;
+        }
+    }
+    if let Some(release_id) = rollout_failure {
+        state
+            .set_meta("auto_update_blocked_release_id", &release_id)
+            .await?;
+    }
+    if let Err(error) = schedule_auto_update(&state, now()).await {
+        eprintln!("Automatic agent update scheduling failed: {}", error.1);
+    }
+    if let Ok(hosts) = state.stored_hosts().await
+        && let Some(updated_host) = hosts
+            .into_iter()
+            .find(|host| host.agent_id.as_deref() == Some(&report.agent_id))
+    {
+        response.update_to = pending_update(&updated_host, now());
+        response.update_release_id = response
+            .update_to
+            .as_ref()
+            .and(updated_host.update_target_release_id.clone());
+    }
     state.publish_host(&host.id).await;
     if association_changed {
         state.changed();
@@ -562,6 +643,11 @@ fn update_blocker(host: &Host, release: &str) -> Option<&'static str> {
     if host.agent_id.is_none() || host.agent_revoked || host.agent_uninstalled {
         return Some("This host has no active agent to update");
     }
+    if !host.inventory.as_ref().is_some_and(|inventory| {
+        is_linux_os(&inventory.os) && inventory.architecture.eq_ignore_ascii_case("x86_64")
+    }) {
+        return Some("Agent releases currently target Linux x86_64 hosts only");
+    }
     if !host
         .agent_version
         .as_deref()
@@ -582,18 +668,153 @@ fn update_blocker(host: &Host, release: &str) -> Option<&'static str> {
     }
     None
 }
-async fn offered_release(state: &State) -> ApiResult<String> {
-    crate::releases::current_version(&state.0.release_dir)
+
+fn is_linux_os(os: &str) -> bool {
+    os.to_ascii_lowercase().contains("linux")
+}
+
+fn reports_update_failure_for(detail: &str, release_id: &str) -> bool {
+    detail.starts_with("The last update failed")
+        && detail.ends_with(&format!("for release {release_id}"))
+}
+
+fn auto_eligible(host: &Host, release: &str, release_id: &str) -> bool {
+    !host.auto_update_excluded
+        && host.auto_update_failed_release_id.as_deref() != Some(release_id)
+        && host.inventory.as_ref().is_some_and(|inventory| {
+            is_linux_os(&inventory.os) && inventory.architecture.eq_ignore_ascii_case("x86_64")
+        })
+        && update_blocker(host, release).is_none()
+}
+
+/// Schedule at most one automatic update at a time. A single canary must report success before
+/// the fleet advances; subsequent requests are separated by fifteen minutes.
+async fn schedule_auto_update(state: &State, at: f64) -> ApiResult<()> {
+    if !state.auto_updates_enabled().await? {
+        return Ok(());
+    }
+    let Some((release_id, release)) =
+        crate::releases::current_linux_x86_64(&state.0.release_dir).await
+    else {
+        return Ok(());
+    };
+    if state
+        .meta("auto_update_blocked_release_id")
+        .await?
+        .as_deref()
+        == Some(&release_id)
+    {
+        return Ok(());
+    }
+    if state.meta("auto_update_release_id").await?.as_deref() != Some(&release_id) {
+        state
+            .set_meta("auto_update_release_id", &release_id)
+            .await?;
+        state.set_meta("auto_update_canary_agent", "").await?;
+        state.set_meta("auto_update_canary_passed", "false").await?;
+        state.set_meta("auto_update_blocked_release_id", "").await?;
+        state.set_meta("auto_update_last_queued_at", "0").await?;
+    }
+    let hosts = state.stored_hosts().await?;
+    if let Some(mut expired) = hosts
+        .iter()
+        .find(|host| {
+            host.update_request_source.as_deref() == Some("automatic")
+                && host.update_target_release_id.as_deref() == Some(&release_id)
+                && host
+                    .update_requested_at
+                    .is_some_and(|requested| at - requested >= UPDATE_REQUEST_SECONDS)
+        })
+        .cloned()
+    {
+        expired.auto_update_failed_release_id = Some(release_id.clone());
+        expired.update_requested_at = None;
+        expired.update_target = None;
+        expired.update_target_release_id = None;
+        expired.update_request_source = None;
+        sqlx::query("UPDATE hosts SET body=? WHERE id=?")
+            .bind(serde_json::to_string(&expired)?)
+            .bind(&expired.id)
+            .execute(&state.0.db)
+            .await?;
+        state
+            .set_meta("auto_update_blocked_release_id", &release_id)
+            .await?;
+        state.publish_host(&expired.id).await;
+        return Ok(());
+    }
+    if state.meta("auto_update_canary_passed").await?.as_deref() != Some("true") {
+        let canary = state
+            .meta("auto_update_canary_agent")
+            .await?
+            .unwrap_or_default();
+        if canary.is_empty() {
+            let mut hosts = hosts;
+            hosts.sort_by(|a, b| a.id.cmp(&b.id));
+            if let Some(host) = hosts.into_iter().find(|host| {
+                auto_eligible(host, &release, &release_id) && pending_update(host, at).is_none()
+            }) {
+                let mut host = host;
+                mark_update_requested(state, &mut host, &release_id, &release, "automatic").await?;
+                state
+                    .set_meta(
+                        "auto_update_canary_agent",
+                        host.agent_id.as_deref().unwrap_or(&host.id),
+                    )
+                    .await?;
+                state
+                    .set_meta("auto_update_last_queued_at", &at.to_string())
+                    .await?;
+            }
+        }
+        return Ok(());
+    }
+    let last: f64 = state
+        .meta("auto_update_last_queued_at")
+        .await?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0.0);
+    if at - last < 900.0 {
+        return Ok(());
+    }
+    let mut hosts = hosts;
+    hosts.sort_by(|a, b| a.id.cmp(&b.id));
+    if hosts.iter().any(|host| {
+        host.update_request_source.as_deref() == Some("automatic")
+            && pending_update(host, at).is_some()
+    }) {
+        return Ok(());
+    }
+    if let Some(mut host) = hosts.into_iter().find(|host| {
+        auto_eligible(host, &release, &release_id) && pending_update(host, at).is_none()
+    }) {
+        mark_update_requested(state, &mut host, &release_id, &release, "automatic").await?;
+        state
+            .set_meta("auto_update_last_queued_at", &at.to_string())
+            .await?;
+    }
+    Ok(())
+}
+async fn offered_release(state: &State) -> ApiResult<(String, String)> {
+    crate::releases::current_linux_x86_64(&state.0.release_dir)
         .await
-        .ok_or_else(|| ApiError::bad("This server publishes no signed agent release to update to"))
+        .ok_or_else(|| {
+            ApiError::bad(
+                "This server publishes no signed agent release for Linux x86_64 to update to",
+            )
+        })
 }
 async fn mark_update_requested(
     state: &State,
     host: &mut StoredHost,
+    release_id: &str,
     release: &str,
+    source: &str,
 ) -> ApiResult<()> {
     host.update_requested_at = Some(now());
     host.update_target = Some(release.to_string());
+    host.update_target_release_id = Some(release_id.to_string());
+    host.update_request_source = Some(source.to_string());
     sqlx::query("UPDATE hosts SET body=? WHERE id=?")
         .bind(serde_json::to_string(&*host)?)
         .bind(&host.id)
@@ -613,11 +834,11 @@ pub async fn request_update(
         .stored_host(&id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let release = offered_release(&state).await?;
+    let (release_id, release) = offered_release(&state).await?;
     if let Some(reason) = update_blocker(&host, &release) {
         return Err(ApiError::bad(reason));
     }
-    mark_update_requested(&state, &mut host, &release).await?;
+    mark_update_requested(&state, &mut host, &release_id, &release, "manual").await?;
     Ok(Json(OkResponse { ok: true }))
 }
 /// Ask every agent that runs an older release than the one on offer to update.
@@ -625,15 +846,47 @@ pub async fn request_all_updates(
     Extract(state): Extract<State>,
 ) -> ApiResult<Json<UpdateRequested>> {
     let _guard = state.0.writes.lock().await;
-    let release = offered_release(&state).await?;
+    let (release_id, release) = offered_release(&state).await?;
     let mut requested = 0;
     for mut host in state.stored_hosts().await? {
         if update_blocker(&host, &release).is_none() {
-            mark_update_requested(&state, &mut host, &release).await?;
+            mark_update_requested(&state, &mut host, &release_id, &release, "manual").await?;
             requested += 1;
         }
     }
     Ok(Json(UpdateRequested { requested }))
+}
+
+/// Exclude or restore one host in automatic Linux x86_64 release rollouts.
+pub async fn set_auto_update_exclusion(
+    Extract(state): Extract<State>,
+    Path(id): Path<String>,
+    Json(body): Json<hope_protocol::AgentAutoUpdateExclusion>,
+) -> ApiResult<Json<hope_protocol::AgentAutoUpdateExclusion>> {
+    let _guard = state.0.writes.lock().await;
+    let Some(mut host) = state.stored_host(&id).await? else {
+        return Err(ApiError::not_found());
+    };
+    host.auto_update_excluded = body.excluded;
+    if body.excluded && host.update_request_source.as_deref() == Some("automatic") {
+        host.update_requested_at = None;
+        host.update_target = None;
+        host.update_target_release_id = None;
+        host.update_request_source = None;
+    }
+    if body.excluded
+        && state.meta("auto_update_canary_agent").await?.as_deref()
+            == Some(host.agent_id.as_deref().unwrap_or(&host.id))
+    {
+        state.set_meta("auto_update_canary_agent", "").await?;
+    }
+    sqlx::query("UPDATE hosts SET body=? WHERE id=?")
+        .bind(serde_json::to_string(&host)?)
+        .bind(&host.id)
+        .execute(&state.0.db)
+        .await?;
+    state.publish_host(&host.id).await;
+    Ok(Json(body))
 }
 
 pub async fn revoke(
@@ -678,6 +931,8 @@ pub async fn complete_uninstall_by_id(state: &State, id: &str) -> ApiResult<()> 
     host.agent_uninstalled = true;
     host.update_requested_at = None;
     host.update_target = None;
+    host.update_target_release_id = None;
+    host.update_request_source = None;
     host.last_seen = 0.0;
     host.discovery_method = "tcp".into();
     host.primary_ip = crate::addresses::primary_ip(&host.addresses, &networks);
@@ -724,7 +979,7 @@ mod tests {
     fn inventory_addresses_exclude_loopback_unspecified_and_link_local() {
         let inventory = Inventory {
             hostname: "host".into(),
-            os: "Linux".into(),
+            os: "Debian GNU/Linux 13".into(),
             architecture: "x86_64".into(),
             cpu_model: "CPU".into(),
             cpu_cores: 1,
@@ -752,6 +1007,18 @@ mod tests {
         let mut host = Host::new("h".into(), "h".into(), "icmp");
         host.agent_id = Some("a".into());
         host.agent_version = Some(version.into());
+        host.inventory = Some(Inventory {
+            hostname: "h".into(),
+            os: "Linux".into(),
+            architecture: "x86_64".into(),
+            cpu_model: "cpu".into(),
+            cpu_cores: 1,
+            memory_total_bytes: 1.0,
+            interfaces: vec![],
+            disks: vec![],
+            gpus: vec![],
+            collectors: vec![],
+        });
         host.update_requested_at = requested;
         host.update_target = requested.map(|_| "0.1.60".to_string());
         host.collectors = vec![hope_protocol::CollectorStatus {
@@ -812,6 +1079,32 @@ mod tests {
         let mut unavailable = host_at("0.1.57", None);
         unavailable.collectors[0].available = false;
         assert!(update_blocker(&unavailable, "0.1.60").is_some());
+    }
+
+    #[test]
+    fn automatic_updates_require_linux_x86_64_and_respect_opt_out_and_failure() {
+        let mut host = host_at("0.1.57", None);
+        assert!(auto_eligible(&host, "0.1.82", "0.1.82-a1b2c3d4e5f6"));
+        host.auto_update_excluded = true;
+        assert!(!auto_eligible(&host, "0.1.82", "0.1.82-a1b2c3d4e5f6"));
+        host.auto_update_excluded = false;
+        host.auto_update_failed_release_id = Some("0.1.82-a1b2c3d4e5f6".into());
+        assert!(!auto_eligible(&host, "0.1.82", "0.1.82-a1b2c3d4e5f6"));
+        host.auto_update_failed_release_id = None;
+        host.inventory.as_mut().unwrap().architecture = "aarch64".into();
+        assert!(update_blocker(&host, "0.1.82").is_some());
+    }
+
+    #[test]
+    fn an_old_update_failure_does_not_block_a_different_immutable_release() {
+        assert!(reports_update_failure_for(
+            "The last update failed (MANIFEST_INVALID) for release 0.1.82-a1b2c3d4e5f6",
+            "0.1.82-a1b2c3d4e5f6"
+        ));
+        assert!(!reports_update_failure_for(
+            "The last update failed (MANIFEST_INVALID) for release 0.1.82-a1b2c3d4e5f6",
+            "0.1.83-f1e2d3c4b5a6"
+        ));
     }
     #[test]
     fn agent_versions_come_only_from_well_formed_user_agents() {

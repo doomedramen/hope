@@ -288,6 +288,10 @@ impl State {
             .report_interval
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+    pub async fn auto_updates_enabled(&self) -> Result<bool> {
+        let value = self.meta("agent_auto_updates_enabled").await?;
+        Ok(value.map(|s| s == "true").unwrap_or(true))
+    }
     pub async fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(sqlx::query_scalar("SELECT value FROM meta WHERE key=?")
             .bind(key)

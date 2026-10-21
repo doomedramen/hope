@@ -915,7 +915,8 @@ class Updater(Base):
         """What the agent does when the server asks for an update: leave a request file."""
         env = env or self.env
         queue = env.paths('system')['state'] / 'update-queue'
-        (queue / 'request').write_text('v2')
+        release_id = env.capture_release()
+        (queue / 'request').write_text(release_id + '\n')
         return queue / 'request'
 
     def result_of(self, env=None):
@@ -963,11 +964,12 @@ class Updater(Base):
         paths = self.installed()
         self.env.publish('v2')
         request = self.request()
+        selected = request.read_text().strip()
         result = self.env.updater()
         self.ok(result)
         self.assertEqual('v2', self.version(paths['binary']))
         self.assertFalse(request.exists())
-        self.assertEqual({'status': 'updated', 'version': 'v2'}, {k: v for k, v in self.result_of().items() if k != 'at'})
+        self.assertEqual({'status': 'updated', 'version': 'v2', 'release_id': selected}, {k: v for k, v in self.result_of().items() if k != 'at'})
         config = (paths['state'] / 'config.json').read_text()
         self.assertIn('credential=' + harness.CREDENTIAL, config)
         self.assertIn('hope-install: result=updated v2', result.err)
@@ -1030,6 +1032,25 @@ class Updater(Base):
         request = self.request()
         self.env.updater(HOPE_FIRST_REPORT_TIMEOUT=2)
         self.assertFalse(request.exists())
+
+    def test_a_queued_update_stays_pinned_when_the_server_publishes_a_newer_release(self):
+        paths = self.installed()
+        self.env.publish('v2')
+        request = self.request()
+        selected = request.read_text().strip()
+        self.env.publish('v3')
+        self.ok(self.env.updater())
+        self.assertFalse(request.exists())
+        self.assertEqual('v2', self.version(paths['binary']))
+        self.assertIn('/by-id/' + selected + '/', '\n'.join(self.env.log().splitlines()))
+
+    def test_a_legacy_version_only_request_still_uses_the_current_release(self):
+        paths = self.installed()
+        self.env.publish('v2')
+        queue = paths['state'] / 'update-queue'
+        (queue / 'request').write_text('v2\n')
+        self.ok(self.env.updater())
+        self.assertEqual('v2', self.version(paths['binary']))
 
     def test_a_link_in_the_state_directory_stops_the_update_before_anything_runs_as_root(self):
         paths = self.installed()

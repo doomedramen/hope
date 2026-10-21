@@ -39,6 +39,57 @@ impl Requests {
         self.handle(dir, version, seconds).await
     }
 
+    pub async fn handle_pinned_now(&mut self, dir: &Path, version: &str, release_id: &str) -> bool {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        self.handle_pinned(dir, version, release_id, seconds).await
+    }
+
+    pub async fn handle_pinned(
+        &mut self,
+        dir: &Path,
+        version: &str,
+        release_id: &str,
+        now: u64,
+    ) -> bool {
+        if !plain_version(version)
+            || !plain_release_id(release_id)
+            || !queue_ready(dir)
+            || recently_asked(dir, release_id, now)
+        {
+            return false;
+        }
+        let path = dir.join(QUEUE).join(REQUEST);
+        if path.symlink_metadata().is_ok() {
+            return false;
+        }
+        let asked = dir.join(ASKED);
+        if crate::config::write_private(&asked, format!("{release_id} {now}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&path).await {
+            Ok(mut request) => {
+                let _ = request
+                    .write_all(format!("{release_id}\n").as_bytes())
+                    .await;
+                let _ = request.flush().await;
+                true
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(asked).await;
+                false
+            }
+        }
+    }
+
     /// As `handle_now`, at `now` seconds since the epoch.
     pub async fn handle(&mut self, dir: &Path, version: &str, now: u64) -> bool {
         if !plain_version(version) || !queue_ready(dir) || recently_asked(dir, version, now) {
@@ -107,6 +158,17 @@ fn recently_asked(dir: &Path, version: &str, now: u64) -> bool {
         && now.saturating_sub(at) < RETRY_AFTER.as_secs()
 }
 
+fn plain_release_id(id: &str) -> bool {
+    let Some((version, nonce)) = id.rsplit_once('-') else {
+        return false;
+    };
+    plain_version(version)
+        && nonce.len() == 12
+        && nonce
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 fn plain_version(version: &str) -> bool {
     !version.is_empty()
         && version.len() <= 64
@@ -162,10 +224,15 @@ fn describe(dir: &Path) -> (bool, String) {
                     && c.len() <= 40
                     && c.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')
             });
-            (
-                true,
-                format!("The last update failed ({})", code.unwrap_or("UNKNOWN")),
-            )
+            let release = field("release_id").filter(|id| plain_release_id(id));
+            let detail = match release {
+                Some(release) => format!(
+                    "The last update failed ({}) for release {release}",
+                    code.unwrap_or("UNKNOWN")
+                ),
+                None => format!("The last update failed ({})", code.unwrap_or("UNKNOWN")),
+            };
+            (true, detail)
         }
         _ => (true, "Updater ready".into()),
     }
@@ -221,6 +288,35 @@ mod tests {
         assert!(
             requests
                 .handle(dir.path(), "0.1.61", start + RETRY_AFTER.as_secs())
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_request_contains_immutable_release_id_and_cools_down_by_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(QUEUE)).expect("queue");
+        let mut requests = Requests;
+        let release = "0.1.82-a1b2c3d4e5f6";
+        assert!(
+            requests
+                .handle_pinned(dir.path(), "0.1.82", release, 10_000)
+                .await
+        );
+        let request = dir.path().join(QUEUE).join(REQUEST);
+        assert_eq!(
+            std::fs::read_to_string(&request).expect("request"),
+            format!("{release}\n")
+        );
+        std::fs::remove_file(&request).expect("consume");
+        assert!(
+            !requests
+                .handle_pinned(dir.path(), "0.1.82", release, 10_001)
+                .await
+        );
+        assert!(
+            !requests
+                .handle_pinned(dir.path(), "0.1.82", "../current", 10_001)
                 .await
         );
     }
@@ -356,6 +452,11 @@ mod tests {
                 "status=failed\ncode=MANIFEST_INVALID\nat=1",
                 true,
                 "The last update failed (MANIFEST_INVALID)",
+            ),
+            (
+                "status=failed\ncode=MANIFEST_INVALID\nrelease_id=0.1.82-a1b2c3d4e5f6\nat=1",
+                true,
+                "The last update failed (MANIFEST_INVALID) for release 0.1.82-a1b2c3d4e5f6",
             ),
             (
                 "status=failed\ncode=bad code!\nat=1",

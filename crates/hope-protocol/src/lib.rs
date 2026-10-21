@@ -163,6 +163,9 @@ pub struct ReportResponse {
     /// The agent only passes the request to its local updater, which decides for itself.
     #[serde(default)]
     pub update_to: Option<String>,
+    /// Immutable signed release directory selected for this update request. Older servers omit it.
+    #[serde(default)]
+    pub update_release_id: Option<String>,
 }
 /// How many agents an "update all" request reached.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -970,6 +973,17 @@ pub struct ReportingSettings {
     pub interval_seconds: u32,
 }
 
+/// Whether the server automatically queues signed agent updates for supported Linux hosts.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+pub struct AgentUpdateSettings {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+pub struct AgentAutoUpdateExclusion {
+    pub excluded: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ScanJob {
     pub id: String,
@@ -1130,6 +1144,18 @@ pub struct Host {
     /// The release version the pending request is for.
     #[serde(default)]
     pub update_target: Option<String>,
+    /// Immutable release directory for the pending request.
+    #[serde(default)]
+    pub update_target_release_id: Option<String>,
+    /// `manual` or `automatic`; distinguishes automatic work for pause/exclusion handling.
+    #[serde(default)]
+    pub update_request_source: Option<String>,
+    /// A host-level opt-out from future automatic rollouts.
+    #[serde(default)]
+    pub auto_update_excluded: bool,
+    /// Immutable release ID whose automatic update last failed; avoids retrying it forever.
+    #[serde(default)]
+    pub auto_update_failed_release_id: Option<String>,
     /// Hypervisor or container-runtime identity when this device has source inventory.
     #[serde(default)]
     pub source: Option<SourceIdentity>,
@@ -1184,6 +1210,10 @@ impl Host {
             agent_version: None,
             update_requested_at: None,
             update_target: None,
+            update_target_release_id: None,
+            update_request_source: None,
+            auto_update_excluded: false,
+            auto_update_failed_release_id: None,
             source: None,
             lifecycle: None,
             source_observed_at: None,
@@ -1264,9 +1294,19 @@ pub struct Bootstrap {
     pub agent_release: Option<String>,
     /// Seconds between agent samples, as agents are currently asked to report.
     pub report_interval_seconds: u32,
+    /// Server-side automatic rollout control. Missing legacy values default to enabled.
+    #[serde(default = "default_agent_auto_updates")]
+    pub agent_auto_updates_enabled: bool,
+    /// Release-wide safety stop set after a failed or timed-out canary.
+    #[serde(default)]
+    pub agent_auto_update_blocked_release_id: Option<String>,
     /// Command that updates an installed agent on the host where it runs. It carries no token or
     /// credential: the agent is already enrolled, and the installer checks the release signature.
     pub agent_upgrade_command: String,
+}
+
+fn default_agent_auto_updates() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

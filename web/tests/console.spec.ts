@@ -2105,12 +2105,14 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(card).toContainText("Update requested");
     await expect(card.getByRole("button", { name: "Ask again" })).toBeVisible();
 
-    // An agent that is up to date has no card at all.
+    // An up-to-date enrolled agent still exposes the automatic-update exclusion control.
     await page.getByRole("button", { name: "Close host details" }).click();
     await page.getByRole("row").filter({ hasText: "compute-node" }).click();
     await expect(details.getByText("Agent 0.1.60")).toBeVisible();
     await details.getByRole("tab", { name: "Settings", exact: true }).click();
-    await expect(details.getByTestId("agent-update")).toHaveCount(0);
+    await expect(details.getByTestId("agent-update")).toContainText(
+      "Exclude from automatic updates",
+    );
   });
   test("the map draws inferred routing above its observed hosts", async ({
     page,

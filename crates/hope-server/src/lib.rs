@@ -53,6 +53,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
         )
         .route("/notifications/test", post(notify::test))
         .route("/settings/reporting", put(api::set_reporting))
+        .route("/settings/agent-updates", put(api::set_agent_updates))
         .route("/hosts/{id}/type", put(api::set_device_type))
         .route("/hosts/{id}/identity", put(api::set_host_identity))
         .route("/hosts/{id}/uptime", put(uptime::configure))
@@ -83,6 +84,10 @@ pub fn router(state: State, web_dir: &str) -> Router {
         )
         .route("/agents/update", post(agents::request_all_updates))
         .route("/hosts/{id}/update-agent", post(agents::request_update))
+        .route(
+            "/hosts/{id}/auto-update-exclusion",
+            put(agents::set_auto_update_exclusion),
+        )
         .route("/events", get(api::events))
         .route("/ssh/fingerprint", post(ssh::fingerprint))
         .route("/ssh/install", post(ssh::install))

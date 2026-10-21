@@ -32,12 +32,14 @@ export function SettingsDialog({
   onOpenChange,
   data,
   onSetReportInterval,
+  onSetAgentUpdates,
   busy,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   data: Bootstrap | null;
   onSetReportInterval: (seconds: number) => void;
+  onSetAgentUpdates: (enabled: boolean) => void;
   busy: boolean;
 }) {
   return (
@@ -50,6 +52,39 @@ export function SettingsDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-6">
+          <section className="flex flex-col gap-2">
+            <h3 className="text-sm font-semibold">Agent updates</h3>
+            <p className="text-xs text-muted-foreground">
+              Automatic signed updates target Linux x86_64 agents. Rollouts are
+              paced; an update failure or timeout pauses that release. Disabling
+              this stops new automatic requests, while an update already handed
+              to an agent may finish. Readiness uses the agent&apos;s installed
+              queue sentinel; it does not prove the system service is currently
+              running, so missing reports eventually appear as timed-out
+              rollouts.
+            </p>
+            <button
+              className="self-start rounded-md border px-3 py-1.5 text-sm"
+              disabled={busy || !data}
+              onClick={() =>
+                onSetAgentUpdates(!data?.agent_auto_updates_enabled)
+              }
+            >
+              {data?.agent_auto_updates_enabled
+                ? "Pause automatic updates"
+                : "Resume automatic updates"}
+            </button>
+            <span className="text-xs text-muted-foreground">
+              {data?.agent_auto_updates_enabled ? "Enabled" : "Paused"}
+            </span>
+            {data?.agent_auto_update_blocked_release_id && (
+              <span className="text-xs text-destructive">
+                Release {data.agent_auto_update_blocked_release_id} is paused
+                after an update failure or timeout. A newer signed release
+                starts a new rollout.
+              </span>
+            )}
+          </section>
           <section className="flex flex-col gap-3">
             <h3 className="text-sm font-semibold">This server</h3>
             <dl className="detail-list">

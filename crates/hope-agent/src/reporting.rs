@@ -370,7 +370,13 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                         debug_assert!(response.accepted);
                         if let Some(watermark) = response.report_sequence { sequence.advance(dir, watermark).await?; }
                         spool.remove(&report.report_id); failures=0; retry_at=Instant::now();
-                        if let Some(version)=&response.update_to { update_requests.handle_now(dir,version).await; }
+                        if let Some(version)=&response.update_to {
+                            if let Some(release_id)=&response.update_release_id {
+                                update_requests.handle_pinned_now(dir,version,release_id).await;
+                            } else {
+                                update_requests.handle_now(dir,version).await;
+                            }
+                        }
                         if let Some(seconds)=response.report_interval_seconds { period_tx.send_if_modified(|period| { let next=Duration::from_secs(seconds.clamp(MIN_INTERVAL_SECONDS,MAX_INTERVAL_SECONDS).into()); if *period==next { false } else { *period=next; true } }); }
                         let applied = response.live_applied != Some(false);
                         if applied { inventory_delivery.accept(&report)?; }
@@ -947,6 +953,7 @@ mod tests {
                             report_sequence: Some(watermark),
                             report_interval_seconds: None,
                             update_to: None,
+                            update_release_id: None,
                         })
                     },
                 ),

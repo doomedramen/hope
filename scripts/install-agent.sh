@@ -54,7 +54,7 @@ txn=
 txn_active=0
 rb_ok=1
 no_manager=0
-preserve=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR,HOPE_RESET_CREDENTIAL,HOPE_PURGE_IDENTITY,HOPE_FIRST_REPORT_TIMEOUT,HOPE_POLL_INTERVAL,HOPE_INSTALL_ROOT,HOPE_REQUIRE_PERSISTENT_SERVICE,HOPE_ONLY_NEWER,HOPE_UPDATER,HOPE_EXPECT_AGENT_ID
+preserve=HOPE_SERVER,HOPE_ENROLLMENT_TOKEN,HOPE_CA_CERT,HOPE_INSTALL_MODE,HOPE_AGENT_DIR,HOPE_RESET_CREDENTIAL,HOPE_PURGE_IDENTITY,HOPE_FIRST_REPORT_TIMEOUT,HOPE_POLL_INTERVAL,HOPE_INSTALL_ROOT,HOPE_REQUIRE_PERSISTENT_SERVICE,HOPE_ONLY_NEWER,HOPE_UPDATER,HOPE_EXPECT_AGENT_ID,HOPE_UPDATE_RELEASE_ID
 root=${HOPE_INSTALL_ROOT:-}
 root=${root%/}
 
@@ -321,14 +321,31 @@ else
 fi
 log=$(mktemp)
 trap 'if [ -n "$lock" ]; then rm -rf "$lock"; fi; rm -f "$log"' EXIT
-# The request only wakes this script; nothing in it is read or followed.
-if [ -d "$queue" ] && [ ! -L "$queue" ] && [ ! -L "$state" ]; then rm -f "$queue/request"; fi
+# The request is untrusted data. Accept only an immutable release ID; never treat it as a path.
+requested_release=
+if [ -d "$queue" ] && [ ! -L "$queue" ] && [ ! -L "$state" ]; then
+    if [ -L "$queue/request" ]; then
+        rm -f "$queue/request"
+    elif [ -f "$queue/request" ]; then
+        requested_release=$(head -n 1 "$queue/request" 2>/dev/null | tr -d '\r')
+        rm -f "$queue/request"
+    fi
+fi
 HOPE_SERVER=$(cat "$dir/server")
 HOPE_AGENT_DIR=$state
 HOPE_INSTALL_MODE=system
 HOPE_ONLY_NEWER=1
 HOPE_UPDATER=1
 export HOPE_SERVER HOPE_AGENT_DIR HOPE_INSTALL_MODE HOPE_ONLY_NEWER HOPE_UPDATER
+if [ -n "$requested_release" ]; then
+    if printf '%s\n' "$requested_release" | grep -Eq '^[0-9][0-9A-Za-z.-]{0,63}-[0-9a-f]{12}$'; then
+        HOPE_UPDATE_RELEASE_ID=$requested_release
+        export HOPE_UPDATE_RELEASE_ID
+    elif ! printf '%s\n' "$requested_release" | grep -Eq '^[vV]?[0-9][0-9A-Za-z._+-]{0,63}$'; then
+        echo 'hope-agent-update: ignored invalid release request' >&2
+        exit 64
+    fi
+fi
 if [ -f "$dir/ca" ]; then HOPE_CA_CERT=$(cat "$dir/ca"); export HOPE_CA_CERT; fi
 if [ -n "$root" ]; then HOPE_INSTALL_ROOT=$root; export HOPE_INSTALL_ROOT; fi
 rc=0
@@ -343,6 +360,9 @@ if [ -L "$state" ] || { [ -d "$state" ] && [ -n "$(find "$state" -maxdepth 2 -ty
 else
     # Progress goes to the journal as it happens (an update can wait two minutes for the new agent's
     # first report); the same text is kept to find the outcome in.
+    if [ -d "$state" ] && [ ! -L "$state" ]; then
+        out=$(mktemp "$state/.update-result.XXXXXX") && { printf 'status=running\nat=%s\n' "$(date +%s)" > "$out"; chmod 644 "$out"; mv -f "$out" "$state/update-result"; } || true
+    fi
     rcfile=$(mktemp)
     { code=0; sh "$dir/install-agent.sh" upgrade 2>&1 || code=$?; echo "$code" > "$rcfile"; } | tee "$log" >&2
     rc=$(cat "$rcfile" 2>/dev/null || echo 1)
@@ -356,6 +376,10 @@ version=${outcome#* }"
 else
     status="status=failed
 code=${code:-UNKNOWN}"
+fi
+if [ -n "${HOPE_UPDATE_RELEASE_ID:-}" ]; then
+    status="$status
+release_id=$HOPE_UPDATE_RELEASE_ID"
 fi
 # Tell the agent what happened; it reports this to the server. A new file in a private name, so a
 # link left by the agent cannot redirect the write.
@@ -665,11 +689,15 @@ fetch() {
     fi
 }
 # The server binds a freshly fetched installer to its release. The root-owned saved updater
-# retains this verification key but selects the currently published release once per upgrade.
+# retains this verification key and honors a server-pinned immutable target when present.
 release_id='@@HOPE_RELEASE_ID@@'
 if [ "$operation" = upgrade ]; then
-    release_id=$(fetch --max-filesize 128 "$HOPE_SERVER/agent/releases/current-id") \
-        || fail RELEASE_UNAVAILABLE 'No immutable agent release could be selected. The running agent was kept.'
+    if [ -n "${HOPE_UPDATE_RELEASE_ID:-}" ]; then
+        release_id=$HOPE_UPDATE_RELEASE_ID
+    else
+        release_id=$(fetch --max-filesize 128 "$HOPE_SERVER/agent/releases/current-id") \
+            || fail RELEASE_UNAVAILABLE 'No immutable agent release could be selected. The running agent was kept.'
+    fi
 fi
 # Reject slashes, whitespace, shell syntax and unresolved template markers before constructing URLs.
 case "$release_id" in
