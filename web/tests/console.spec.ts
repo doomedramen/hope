@@ -3,6 +3,7 @@ import {
   expect,
   type APIRequestContext,
   type BrowserContext,
+  type Page,
 } from "@playwright/test";
 import { randomUUID, randomBytes } from "node:crypto";
 import type { Bootstrap } from "@/lib/protocol";
@@ -16,6 +17,7 @@ const test = base.extend({
 });
 
 async function expectMapFits(page: import("@playwright/test").Page) {
+  await page.getByRole("button", { name: "Fit all", exact: true }).click();
   await expect
     .poll(() =>
       page.evaluate(() => {
@@ -39,6 +41,182 @@ async function expectMapFits(page: import("@playwright/test").Page) {
       }),
     )
     .toBeTruthy();
+}
+
+async function navigate(page: Page, name: string | RegExp) {
+  const target = page
+    .getByRole("navigation", { name: "Main navigation" })
+    .getByRole("button", { name });
+  if (!(await target.isVisible()))
+    await page.getByRole("button", { name: "Navigation", exact: true }).click();
+  await target.click();
+}
+
+async function globalAction(page: Page, name: string) {
+  let target = page
+    .getByRole("button", { name, exact: true })
+    .filter({ visible: true });
+  if (!(await target.count())) {
+    await page
+      .getByRole("button", { name: "More actions", exact: true })
+      .click();
+    target = page
+      .getByRole("button", { name, exact: true })
+      .filter({ visible: true });
+  }
+  await target.click();
+}
+
+/** A bounded, representative snapshot for visual and interaction acceptance. */
+function refinementSnapshot(bootstrap: Bootstrap): Bootstrap {
+  const template = bootstrap.hosts.find((host) => host.metrics)!;
+  const now = Date.now() / 1000;
+  const gib = 1024 ** 3;
+  const names = [
+    "gateway",
+    "proxmox-01",
+    "atlas-nas",
+    "docker-01",
+    "dns-01",
+    "immich",
+    "home-assistant",
+    "studio-mac",
+    "backup-01",
+    "worker",
+    "worker",
+    "workshop-pi",
+  ];
+  const parents = [null, 0, 0, 0, 1, 1, 1, 0, 0, 3, 3, null];
+  const hosts = names.map((name, index) => {
+    const address = `192.168.1.${index + 1}`;
+    const used = [0, 48, 88, 12, 3.8, 6, 2, 14, 4, 3, 2, 1][index];
+    const total = [8, 128, 128, 32, 4, 16, 4, 32, 16, 4, 4, 4][index];
+    const host: Bootstrap["hosts"][number] = {
+      ...template,
+      id: `refinement-${index}`,
+      name,
+      name_override: null,
+      icon_override: null,
+      addresses: [address],
+      primary_ip: address,
+      agent_id: index === 0 ? null : `refinement-agent-${index}`,
+      agent_revoked: false,
+      agent_uninstalled: false,
+      retired: false,
+      source: null,
+      source_device_id: null,
+      source_observed_at: null,
+      child: null,
+      lifecycle: null,
+      associations: [],
+      relationships: [],
+      last_report: index === 11 ? now - 300 : now,
+      last_seen: now,
+      last_collected_at: now,
+      metrics_received_at: now,
+      agent_version: bootstrap.agent_release,
+      update_requested_at: null,
+      update_target: null,
+      uptime: { enabled: false, device: false, ports: [] },
+      network_ids: ["refinement-home"],
+      parent_id: parents[index] == null ? null : `refinement-${parents[index]}`,
+      parent_reason: "Observed routing gateway",
+      device: {
+        kind:
+          index === 0
+            ? "router"
+            : index === 1
+              ? "hypervisor"
+              : index === 2
+                ? "nas"
+                : "server",
+        label: index === 0 ? "Router" : "Server",
+        confidence: 100,
+        reasons: [],
+        manual: false,
+      },
+      inventory: template.inventory
+        ? { ...template.inventory, hostname: name, interfaces: [], disks: [] }
+        : null,
+      metrics:
+        index === 0
+          ? null
+          : {
+              ...template.metrics!,
+              cpu_percent: [0, 38, 17, 42, 8, 24, 6, 12, 4, 36, 18, 7][index],
+              memory_used_bytes: used * gib,
+              memory_total_bytes: total * gib,
+              disks: [
+                {
+                  name: "root",
+                  mount: "/",
+                  filesystem: "ext4",
+                  total_bytes: 1000 * gib,
+                  available_bytes: (index === 2 ? 40 : 650) * gib,
+                },
+              ],
+              pools:
+                index === 2
+                  ? [
+                      {
+                        name: "tank",
+                        kind: "zfs",
+                        size_bytes: 8e12,
+                        allocated_bytes: 6e12,
+                        health: "DEGRADED",
+                        read_bytes_per_second: null,
+                        write_bytes_per_second: null,
+                        root: false,
+                      },
+                    ]
+                  : [],
+              services: [],
+              service_summary: null,
+              monitors: [],
+              temperatures: [],
+              containers: [],
+              gpus: [],
+            },
+    };
+    if ([4, 5, 6, 9, 10].includes(index))
+      host.relationships = [
+        {
+          from_device_id: host.id,
+          to_device_id: host.parent_id!,
+          kind: "runs_on",
+          detail: null,
+        },
+      ];
+    return host;
+  });
+  return {
+    ...bootstrap,
+    hosts,
+    networks: [
+      {
+        id: "refinement-home",
+        name: "Home network",
+        cidr: "192.168.1.0/24",
+        enabled: true,
+        interval_minutes: 5,
+      },
+    ],
+    scans: [
+      {
+        id: "refinement-scan",
+        network_id: "refinement-home",
+        cidr: "192.168.1.0/24",
+        status: "completed",
+        scanned: 254,
+        total: 254,
+        discovered: 12,
+        started_at: now - 180,
+        finished_at: now - 150,
+        error: null,
+      },
+    ],
+    map: { revision: bootstrap.map.revision, positions: [], links: [] },
+  };
 }
 
 function extended(sample: number) {
@@ -521,24 +699,7 @@ test.describe.serial("H.O.P.E console", () => {
       .getByRole("button", { name: "Show metrics", exact: true })
       .click();
     await expect(page.locator(".node-health").first()).toBeVisible();
-    await expect
-      .poll(() =>
-        page.evaluate(() => {
-          const canvas = document
-            .querySelector(".react-flow")!
-            .getBoundingClientRect();
-          return [...document.querySelectorAll(".map-device")].every((node) => {
-            const box = node.getBoundingClientRect();
-            return (
-              box.left >= canvas.left - 2 &&
-              box.right <= canvas.right + 2 &&
-              box.top >= canvas.top - 2 &&
-              box.bottom <= canvas.bottom + 2
-            );
-          });
-        }),
-      )
-      .toBeTruthy();
+    await expectMapFits(page);
     await expect(
       page
         .locator(".map-device")
@@ -552,7 +713,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(page).toHaveURL(/view=host&host=/);
     await expect(page.getByTestId("network-map")).toHaveCount(0);
     await page.getByRole("button", { name: "Close host details" }).click();
-    await page.getByRole("button", { name: "List", exact: true }).click();
+    await navigate(page, /^Hosts/);
     await expect(page.getByRole("table")).toContainText("atlas-nas");
     await expect(
       page.getByRole("row").filter({ hasText: "atlas-nas" }),
@@ -620,7 +781,7 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByLabel("Search hosts").fill("workshop");
     await expect(page.getByRole("table").getByRole("row")).toHaveCount(2);
     await page.getByLabel("Search hosts").fill("");
-    await page.getByRole("button", { name: "Map", exact: true }).click();
+    await navigate(page, "Network map");
     await page.getByRole("button", { name: "Subnets", exact: true }).click();
     await expect(page.getByTestId("subnet-group").first()).toBeVisible();
     await expect(page.locator(".react-flow__edge")).toHaveCount(0);
@@ -820,7 +981,7 @@ test.describe.serial("H.O.P.E console", () => {
         return Math.hypot(position.x - saved.x, position.y - saved.y);
       })
       .toBeLessThan(0.01);
-    await page.getByRole("button", { name: "List", exact: true }).click();
+    await navigate(page, /^Hosts/);
     await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`host=${host.id}`));
     await page.getByRole("button", { name: "Close host details" }).click();
@@ -1035,10 +1196,7 @@ test.describe.serial("H.O.P.E console", () => {
     await page.goto("/?view=map");
     await expect(page.getByTestId("network-map")).toBeVisible();
     await page.setViewportSize({ width: 390, height: 844 });
-    await page
-      .getByRole("button", { name: "Sign out", exact: true })
-      .filter({ visible: true })
-      .click();
+    await globalAction(page, "Sign out");
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
     await page.getByLabel("Administrator password").fill(password);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
@@ -1783,7 +1941,7 @@ test.describe.serial("H.O.P.E console", () => {
       .click();
     await expect(cpu).toContainText("81%");
     await page.getByRole("button", { name: "Close host details" }).click();
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await globalAction(page, "Settings");
     const dialog = page.getByRole("dialog", { name: "Settings" });
     await dialog
       .getByRole("combobox", { name: "Agent report interval" })
@@ -1820,9 +1978,7 @@ test.describe.serial("H.O.P.E console", () => {
     const port = (ntfy.address() as { port: number }).port;
     try {
       await page.goto("/");
-      await page
-        .getByRole("button", { name: "Notification settings", exact: true })
-        .click();
+      await globalAction(page, "Notification settings");
       const form = page.getByRole("form", { name: "Notification settings" });
       await form.getByLabel("Send notifications").check();
       await form.getByLabel("ntfy server").fill(`http://127.0.0.1:${port}`);
@@ -1842,9 +1998,7 @@ test.describe.serial("H.O.P.E console", () => {
         "Last notification sent",
       );
       await page.keyboard.press("Escape");
-      await page
-        .getByRole("button", { name: "Notification settings", exact: true })
-        .click();
+      await globalAction(page, "Notification settings");
       await expect(form.getByLabel("Access token (optional)")).toHaveAttribute(
         "placeholder",
         "Stored; type to replace",
@@ -1999,7 +2153,7 @@ test.describe.serial("H.O.P.E console", () => {
     });
     await expect(navigation.getByRole("button")).toHaveCount(5);
     await page.getByRole("button", { name: /^Needs attention/ }).click();
-    await page.getByRole("button", { name: "Map", exact: true }).click();
+    await navigate(page, "Network map");
     await expect(
       page.getByRole("button", { name: /^Needs attention/ }),
     ).toHaveAttribute("aria-pressed", "true");
@@ -2025,7 +2179,7 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("button", { name: "Close host details" }).click();
     await expect(page).toHaveURL(/view=map/);
     await expect(page.getByLabel("Search hosts")).toHaveValue("atlas-nas");
-    await page.getByRole("button", { name: "List", exact: true }).click();
+    await navigate(page, /^Hosts/);
     await page.getByRole("button", { name: "atlas-nas", exact: true }).click();
     await expect(page).toHaveURL(/view=host&host=/);
     await expect(page.locator(".inventory-layout")).toHaveCount(0);
@@ -2102,12 +2256,18 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByRole("region", { name: "Scan progress" }),
     ).toHaveCount(0);
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("button", { name: "Navigation", exact: true }).click();
     await expect(
       page.getByRole("button", { name: "Network map", exact: true }),
     ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page
+      .getByRole("button", { name: "More actions", exact: true })
+      .click();
     await expect(
       page.getByRole("button", { name: "Settings", exact: true }),
     ).toBeVisible();
+    await page.keyboard.press("Escape");
     await trigger.click();
     expect(
       await page.evaluate(
@@ -2139,7 +2299,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("combobox", { name: "Scan interval for Home network" }),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await globalAction(page, "Settings");
     await expect(
       page
         .getByRole("dialog", { name: "Settings" })
@@ -2516,7 +2676,7 @@ test.describe.serial("H.O.P.E console", () => {
 
     await page.goto("/");
     // Networks holds ranges and server facts only; the theme lives in the sidebar.
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await globalAction(page, "Settings");
     await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
     await expect(
       page.getByRole("dialog").getByRole("group", { name: "Theme" }),
@@ -2525,7 +2685,7 @@ test.describe.serial("H.O.P.E console", () => {
       page.getByRole("dialog").getByRole("form", { name: "Change password" }),
     ).toHaveCount(0);
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Account", exact: true }).click();
+    await globalAction(page, "Account");
     await expect(page.getByRole("dialog", { name: "Account" })).toBeVisible();
     const form = page.getByRole("form", { name: "Change password" });
     const submit = form.getByRole("button", { name: "Change password" });
@@ -3327,8 +3487,15 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(toggle).toBeFocused();
     await expect(toggle).toHaveAttribute("aria-pressed", "true");
     await expect(node.locator(".node-health")).toContainText("98%");
+    const viewportBeforeReport = await page
+      .locator(".react-flow__viewport")
+      .getAttribute("style");
     await agent.report(10, 3800, 91);
     await expect(node).toHaveAttribute("data-tone", "warning");
+    await expect(page.locator(".react-flow__viewport")).toHaveAttribute(
+      "style",
+      viewportBeforeReport!,
+    );
     await expect(node).toContainText("Memory at 95%");
     await agent.report(10, 2000, 40);
     await expect(node).toHaveAttribute("data-tone", "good");
@@ -3458,5 +3625,259 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByRole("complementary", { name: "Host details" }),
     ).toContainText("memory-large");
+  });
+  test("refined overview groups host problems and uses byte-scaled memory comparisons", async ({
+    page,
+    request,
+  }) => {
+    const snapshot = refinementSnapshot(
+      await (await request.get("/api/v1/bootstrap")).json(),
+    );
+    await page.route("**/api/v1/bootstrap", (route) =>
+      route.fulfill({ json: snapshot }),
+    );
+    await page.goto("/");
+    await page.getByRole("button", { name: "Dark", exact: true }).click();
+    const attention = page.getByRole("region", { name: "Needs attention" });
+    await expect(
+      attention.locator('.attention-host[data-host-id="refinement-2"]'),
+    ).toHaveCount(1);
+    await expect(
+      attention.locator('.attention-host[data-host-id="refinement-2"]'),
+    ).toContainText("2 issues");
+    await expect(attention).toContainText("Pool tank is DEGRADED");
+    const memory = page.getByRole("region", { name: "Most memory used by" });
+    await expect(memory.locator(".leader-value").first()).toHaveText(
+      "88.0 GiB",
+    );
+    const bars = await memory
+      .locator(".leader-byte-comparison > span")
+      .evaluateAll((nodes) =>
+        nodes.map((node) => parseFloat((node as HTMLElement).style.width)),
+      );
+    expect(bars[0]).toBe(100);
+    expect(bars[1]).toBeCloseTo((48 / 88) * 100);
+    await expect(memory).toContainText("69% of 128.0 GiB");
+    const cpus = page.getByRole("region", { name: "Busiest CPUs" });
+    await expect(cpus.getByRole("button", { name: /worker/ })).toContainText(
+      "192.168.1.10",
+    );
+    await page.screenshot({
+      path: "test-results/refined-overview-desktop.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: "test-results/refined-overview-mobile.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    const attentionWidth = await attention.evaluate(
+      (node) => node.getBoundingClientRect().width,
+    );
+    const rankingsWidth = await memory.evaluate(
+      (node) => node.getBoundingClientRect().width,
+    );
+    expect(Math.abs(attentionWidth - rankingsWidth)).toBeLessThan(1);
+    // Exercise five affected hosts, repeated names, and issue disclosure together.
+    const worker = snapshot.hosts[9].metrics!;
+    worker.cpu_percent = 99;
+    worker.memory_used_bytes = worker.memory_total_bytes! * 0.98;
+    worker.temperatures = [
+      { sensor: "cpu", label: "CPU package", celsius: 99 },
+    ];
+    worker.pools = snapshot.hosts[2].metrics!.pools;
+    snapshot.hosts[10].metrics!.cpu_percent = 94;
+    snapshot.hosts[10].metrics!.memory_used_bytes =
+      snapshot.hosts[10].metrics!.memory_total_bytes! * 0.93;
+    await page.setViewportSize({ width: 1512, height: 982 });
+    await page.reload();
+    await expect(attention.locator(".attention-host")).toHaveCount(5);
+    const busyWorker = attention.locator('[data-host-id="refinement-9"]');
+    await expect(busyWorker).toContainText("192.168.1.10");
+    await busyWorker.locator("summary").focus();
+    await page.keyboard.press("Enter");
+    await expect(busyWorker.locator("details")).toHaveAttribute("open", "");
+    await page.screenshot({
+      path: "test-results/refined-overview-busy-desktop.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: "test-results/refined-overview-busy-mobile.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+    await attention.getByRole("button", { name: /atlas-nas/ }).click();
+    await expect(page).toHaveURL(/host=refinement-2/);
+  });
+
+  test("refined map defaults to readable cards with compact reachable mobile controls", async ({
+    page,
+    request,
+  }) => {
+    const snapshot = refinementSnapshot(
+      await (await request.get("/api/v1/bootstrap")).json(),
+    );
+    await page.route("**/api/v1/bootstrap", (route) =>
+      route.fulfill({ json: snapshot }),
+    );
+    await page.goto("/?view=map");
+    await page.getByRole("button", { name: "Dark", exact: true }).click();
+    await expect(page.locator(".map-device")).toHaveCount(12);
+    await expect
+      .poll(() =>
+        page
+          .locator('.map-device[data-host-id="refinement-2"]')
+          .evaluate((node) => node.getBoundingClientRect().width),
+      )
+      .toBeGreaterThan(168);
+    await page.screenshot({
+      path: "test-results/refined-map-desktop.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await expect(
+      page.getByRole("combobox", { name: "Filter by parent" }),
+    ).toBeHidden();
+    await expect(page.locator(".react-flow__minimap")).toBeHidden();
+    await page.getByRole("button", { name: /^Filters/ }).click();
+    await expect(
+      page.getByRole("combobox", { name: "Filter by parent" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /^Filters/ }).click();
+    await page.screenshot({
+      path: "test-results/refined-map-tablet.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect
+      .poll(() =>
+        page
+          .locator(".react-flow")
+          .evaluate((node) => node.getBoundingClientRect().top),
+      )
+      .toBeLessThan(430);
+    const focal = page.locator('.map-device[data-host-id="refinement-2"]');
+    await expect
+      .poll(() => focal.evaluate((node) => node.getBoundingClientRect().width))
+      .toBeGreaterThan(168);
+    await expect
+      .poll(() =>
+        focal.evaluate((node) => {
+          const box = node.getBoundingClientRect(),
+            canvas = document
+              .querySelector(".react-flow")!
+              .getBoundingClientRect();
+          return (
+            box.left >= canvas.left &&
+            box.right <= canvas.right &&
+            box.top >= canvas.top &&
+            box.bottom <= canvas.bottom
+          );
+        }),
+      )
+      .toBeTruthy();
+    await page.screenshot({
+      path: "test-results/refined-map-mobile-dark.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    await expectMapFits(page);
+    await page
+      .getByRole("button", { name: "Readable view", exact: true })
+      .click();
+    await expect
+      .poll(() => focal.evaluate((node) => node.getBoundingClientRect().width))
+      .toBeGreaterThan(168);
+    await page.getByLabel("Search hosts").fill("dns-01");
+    await expect(page.locator(".map-device")).toHaveCount(1);
+    await expect(page.locator(".map-device")).toBeInViewport();
+    await page
+      .getByRole("button", { name: "Clear search", exact: true })
+      .click();
+    await page.getByRole("button", { name: /^Filters/ }).click();
+    await page.getByRole("combobox", { name: "Filter by parent" }).click();
+    await page.getByRole("option", { name: "proxmox-01", exact: true }).click();
+    await expect(page.locator(".map-device")).toHaveCount(3);
+    await page
+      .getByRole("button", { name: "Clear filters", exact: true })
+      .click();
+    await expect(page.locator(".map-device")).toHaveCount(12);
+    await page.getByRole("button", { name: /^Filters/ }).click();
+    await globalAction(page, "Settings");
+    await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page
+      .getByRole("button", { name: "More actions", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Light", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await page.screenshot({
+      path: "test-results/refined-map-mobile-light.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+    await navigate(page, "Networks");
+    await expect(page).toHaveURL(/view=networks/);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+  });
+  test("mobile navigation, filters and host inspection work with touch input", async ({
+    browser,
+    request,
+  }) => {
+    const snapshot = refinementSnapshot(
+      await (await request.get("/api/v1/bootstrap")).json(),
+    );
+    const context = await browser.newContext({
+      storageState: adminState,
+      baseURL: "http://127.0.0.1:8087",
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    try {
+      const page = await context.newPage();
+      await page.route("**/api/v1/bootstrap", (route) =>
+        route.fulfill({ json: snapshot }),
+      );
+      await page.goto("/?view=map");
+      await page.getByRole("button", { name: "Navigation", exact: true }).tap();
+      await expect(
+        page
+          .getByRole("navigation", { name: "Main navigation" })
+          .getByRole("button"),
+      ).toHaveCount(5);
+      await page.getByRole("button", { name: "Networks", exact: true }).tap();
+      await expect(page).toHaveURL(/view=networks/);
+      await page.getByRole("button", { name: "Navigation", exact: true }).tap();
+      await page
+        .getByRole("button", { name: "Network map", exact: true })
+        .tap();
+      await page.getByRole("button", { name: /^Filters/ }).tap();
+      await expect(
+        page.getByRole("combobox", { name: "Filter by network" }),
+      ).toBeVisible();
+      await page.getByRole("button", { name: /^Filters/ }).tap();
+      await page.getByLabel("Search hosts").fill("dns-01");
+      await expect(page.locator(".map-device")).toHaveCount(1);
+      await page.locator(".map-device").tap();
+      await expect(page).toHaveURL(/host=refinement-4/);
+    } finally {
+      await context.close();
+    }
   });
 });

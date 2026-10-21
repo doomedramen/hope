@@ -1,9 +1,10 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
   Controls,
+  ControlButton,
   Handle,
   MiniMap,
   Position,
@@ -11,13 +12,21 @@ import {
   useNodesInitialized,
   useReactFlow,
   useStore,
+  getViewportForBounds,
   type Node,
   type NodeProps,
   type NodeChange,
   type Connection,
   type Edge,
 } from "@xyflow/react";
-import { Router, Network as NetworkIcon } from "lucide-react";
+import {
+  Focus,
+  Minus,
+  Plus,
+  Router,
+  Scan,
+  Network as NetworkIcon,
+} from "lucide-react";
 import { ipValue } from "@/lib/fleet";
 import type { Host, MapEdit, MapState, Network } from "@/lib/protocol";
 import { percent0 } from "@/lib/api";
@@ -96,8 +105,13 @@ function DeviceNode({ data, selected }: NodeProps<Node<Data, "hope">>) {
           )}
         </div>
         <div className="min-w-0">
-          <div className="truncate font-semibold">{data.label}</div>
-          <div className="mono truncate text-[11px] text-muted-foreground">
+          <div className="truncate font-semibold" title={data.label}>
+            {data.label}
+          </div>
+          <div
+            className="mono truncate text-[11px] text-muted-foreground"
+            title={data.subtitle}
+          >
             {data.subtitle}
           </div>
         </div>
@@ -145,22 +159,136 @@ function describe(host: Host) {
     ? `${method} · ${host.services.length} ${host.services.length === 1 ? "service" : "services"}`
     : `Found by ${method}`;
 }
-function InitialViewport({ metrics }: { metrics: boolean }) {
+function MapViewport({
+  metrics,
+  inventoryKey,
+}: {
+  metrics: boolean;
+  inventoryKey: string;
+}) {
   const initialized = useNodesInitialized();
   const width = useStore((state) => state.width);
   const height = useStore((state) => state.height);
-  const { fitView } = useReactFlow();
+  const { getNodes, getEdges, getNodesBounds, setViewport, zoomIn, zoomOut } =
+    useReactFlow<HopeNode>();
   const fitted = useRef<string>("");
+  const fitAll = useCallback(() => {
+    if (!width || !height) return;
+    void setViewport(
+      getViewportForBounds(getNodesBounds(getNodes()), width, height, 0.02, 1, {
+        top: "24px",
+        right: "24px",
+        bottom: "76px",
+        left: "24px",
+      }),
+    );
+  }, [getNodes, getNodesBounds, setViewport, width, height]);
+  const readableView = useCallback(() => {
+    const nodes = getNodes().filter((node) => node.type === "hope");
+    if (!nodes.length || !width || !height) return;
+    const minimumZoom = 0.92;
+    const all = getViewportForBounds(
+      getNodesBounds(nodes),
+      width,
+      height,
+      0.02,
+      1,
+      { top: "24px", right: "24px", bottom: "76px", left: "24px" },
+    );
+    if (all.zoom >= minimumZoom) {
+      void setViewport(all);
+      return;
+    }
+    const edges = getEdges();
+    const score = (node: HopeNode) => {
+      if (node.selected) return 100;
+      if (node.type !== "hope" || !node.data.host) return 0;
+      const issue = hostIssues(node.data.host)[0];
+      const severity = issue?.severity === "critical" ? 3 : issue ? 2 : 0;
+      const related = edges.some(
+        (edge) => edge.source === node.id || edge.target === node.id,
+      );
+      return severity * 10 + Number(related);
+    };
+    const anchor = [...nodes].sort((a, b) => score(b) - score(a))[0];
+    const familyIds = new Set([anchor.id]);
+    for (const edge of edges) {
+      if (edge.source === anchor.id) familyIds.add(edge.target);
+      if (edge.target === anchor.id) familyIds.add(edge.source);
+    }
+    const family = nodes.filter((node) => familyIds.has(node.id));
+    const viewport = getViewportForBounds(
+      getNodesBounds(family),
+      width,
+      height,
+      minimumZoom,
+      1,
+      0.12,
+    );
+    // A wide family can extend off screen. Its focal host must remain fully usable.
+    const anchorBounds = getNodesBounds([anchor]);
+    const screenX = anchorBounds.x * viewport.zoom + viewport.x;
+    const screenY = anchorBounds.y * viewport.zoom + viewport.y;
+    const right = Math.max(24, width - anchorBounds.width * viewport.zoom - 24);
+    const bottom = Math.max(
+      24,
+      height - anchorBounds.height * viewport.zoom - 76,
+    );
+    viewport.x += Math.min(right, Math.max(24, screenX)) - screenX;
+    viewport.y += Math.min(bottom, Math.max(24, screenY)) - screenY;
+    void setViewport(viewport);
+  }, [getNodes, getEdges, getNodesBounds, setViewport, width, height]);
   useEffect(() => {
-    const key = `${metrics}:${width}:${height}`;
+    const key = `${inventoryKey}:${metrics}:${width}:${height}`;
     if (!initialized || fitted.current === key) return;
     const frame = requestAnimationFrame(() => {
       fitted.current = key;
-      void fitView({ padding: 0.25, maxZoom: 1 });
+      readableView();
     });
     return () => cancelAnimationFrame(frame);
-  }, [initialized, fitView, metrics, width, height]);
-  return null;
+  }, [initialized, inventoryKey, metrics, width, height, readableView]);
+  return (
+    <Controls
+      showInteractive={false}
+      showFitView={false}
+      showZoom={false}
+      orientation="horizontal"
+      aria-label="Map navigation"
+    >
+      <ControlButton
+        onClick={() => void zoomIn()}
+        title="Zoom in"
+        aria-label="Zoom in"
+      >
+        <Plus size={16} />
+      </ControlButton>
+      <ControlButton
+        onClick={() => void zoomOut()}
+        title="Zoom out"
+        aria-label="Zoom out"
+      >
+        <Minus size={16} />
+      </ControlButton>
+      <ControlButton
+        className="map-viewport-action"
+        onClick={readableView}
+        title="Show readable host cards, starting with selected or attention hosts"
+        aria-label="Readable view"
+      >
+        <Focus size={15} />
+        <span>Readable view</span>
+      </ControlButton>
+      <ControlButton
+        className="map-viewport-action"
+        onClick={fitAll}
+        title="Fit all hosts; large inventories may appear small"
+        aria-label="Fit all"
+      >
+        <Scan size={15} />
+        <span>Fit all</span>
+      </ControlButton>
+    </Controls>
+  );
 }
 
 /** The logical hierarchy has a new coordinate system; subnet positions remain relative. */
@@ -446,14 +574,19 @@ export function NetworkMap({
         deleteKeyCode={null}
         proOptions={{ hideAttribution: false }}
       >
-        <InitialViewport metrics={showMetrics} />
+        <MapViewport
+          metrics={showMetrics}
+          inventoryKey={hosts
+            .map((host) => host.id)
+            .sort()
+            .join("|")}
+        />
         <Background
           variant={BackgroundVariant.Dots}
           gap={22}
           size={1.2}
           color="var(--grid)"
         />
-        <Controls showInteractive={false} />
         {nodes.length > 8 && (
           <MiniMap
             pannable
@@ -488,13 +621,23 @@ export function NetworkMap({
               <i className="legend-line manual" />
               Manual link
             </span>
-            <span>
-              Links describe logical relationships, not physical switch ports.
-            </span>
-            <span>
-              Drag handles to link hosts; double-click a manual link to remove
-              it.
-            </span>
+            <details className="map-explanation">
+              <summary>About this map</summary>
+              <div>
+                <p>
+                  Links describe logical relationships, not physical switch
+                  ports. Some hosts have no known relationship yet.
+                </p>
+                <p>
+                  Drag the canvas to explore. Use Readable view for legible
+                  cards or Fit all to see the whole inventory.
+                </p>
+                <p>
+                  Drag handles to link hosts; double-click a manual link to
+                  remove it. Host positions and manual links save automatically.
+                </p>
+              </div>
+            </details>
           </>
         )}
       </div>

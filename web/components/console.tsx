@@ -13,6 +13,9 @@ import {
   LogOut,
   Map,
   Monitor,
+  Menu,
+  MoreHorizontal,
+  SlidersHorizontal,
   Moon,
   Plus,
   Radar,
@@ -23,6 +26,7 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Popover } from "@base-ui/react/popover";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
@@ -238,6 +242,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
   const [accountOpen, setAccountOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -406,6 +413,20 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       matchesFilter(h, statusFilter) &&
       matchesSearch(h, filter),
   );
+  const activeFilterCount = [
+    !!filter,
+    network !== "all",
+    sourceFilter !== "all",
+    parentFilter !== "all",
+    statusFilter !== "all",
+  ].filter(Boolean).length;
+  function clearFilters() {
+    setFilter("");
+    setNetwork("all");
+    setSourceFilter("all");
+    setParentFilter("all");
+    setStatusFilter("all");
+  }
   const host =
     allHosts.find(
       (h) => h.id === selected || h.source_device_id === selected,
@@ -626,7 +647,10 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           ? "page"
           : undefined
       }
-      onClick={() => setView(target)}
+      onClick={() => {
+        setView(target);
+        setNavigationOpen(false);
+      }}
     >
       <Icon />
       <span>{label}</span>
@@ -654,7 +678,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           <span>Search…</span>
           <kbd className="key">⌘K</kbd>
         </button>
-        <nav aria-label="Main navigation">
+        <nav aria-label="Main navigation" className="desktop-navigation">
           {navItem("overview", LayoutDashboard, "Overview")}
           {navItem("hosts", LayoutList, "Hosts", hosts.length)}
           {navItem("map", Map, "Network map")}
@@ -668,6 +692,41 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             ).length,
           )}
         </nav>
+        <Popover.Root open={navigationOpen} onOpenChange={setNavigationOpen}>
+          <Popover.Trigger
+            render={
+              <Button variant="ghost" className="mobile-navigation-trigger" />
+            }
+            aria-label="Navigation"
+          >
+            <span>{TITLES[view]}</span>
+            <Menu aria-hidden="true" />
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Positioner sideOffset={8} align="end" className="z-50">
+              <Popover.Popup className="shell-menu navigation-popup">
+                <Popover.Title className="shell-menu-title">
+                  Navigation
+                </Popover.Title>
+                <nav aria-label="Main navigation" className="mobile-navigation">
+                  {navItem("overview", LayoutDashboard, "Overview")}
+                  {navItem("hosts", LayoutList, "Hosts", hosts.length)}
+                  {navItem("map", Map, "Network map")}
+                  {navItem("networks", Network, "Networks", networks.length)}
+                  {navItem(
+                    "agents",
+                    Bot,
+                    "Agents",
+                    hosts.filter(
+                      (h) =>
+                        h.agent_id && !h.agent_revoked && !h.agent_uninstalled,
+                    ).length,
+                  )}
+                </nav>
+              </Popover.Popup>
+            </Popover.Positioner>
+          </Popover.Portal>
+        </Popover.Root>
         <div className="sidebar-bottom">
           <div className="theme-switch" role="group" aria-label="Theme">
             {(
@@ -740,20 +799,12 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
             <Button
               variant="ghost"
               size="icon"
+              className="desktop-topbar-control"
               aria-label="Notification settings"
               title="Notification settings"
               onClick={() => setNotificationsOpen(true)}
             >
               <BellRing />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="mobile-only"
-              aria-label="Settings"
-              onClick={() => setSettingsOpen(true)}
-            >
-              <Settings2 />
             </Button>
             <button
               type="button"
@@ -766,34 +817,106 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
               <kbd className="key">⌘K</kbd>
             </button>
             <Button
-              variant="ghost"
-              size="icon"
-              className="mobile-only"
-              aria-label="Account"
-              onClick={() => setAccountOpen(true)}
-            >
-              <UserRound />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="mobile-logout"
-              aria-label="Sign out"
-              onClick={() => {
-                void action(onLogout);
-              }}
-            >
-              <LogOut />
-            </Button>
-            <Button
               variant="outline"
-              className="topbar-action"
+              className="topbar-action desktop-topbar-control"
               aria-label="Add agent"
               onClick={() => setInstallOpen(true)}
             >
               <ArrowDownToLine data-icon="inline-start" />
               <span className="btn-label">Add agent</span>
             </Button>
+            <Popover.Root open={actionsOpen} onOpenChange={setActionsOpen}>
+              <Popover.Trigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="mobile-actions-trigger"
+                  />
+                }
+                aria-label="More actions"
+              >
+                <MoreHorizontal />
+              </Popover.Trigger>
+              <Popover.Portal>
+                <Popover.Positioner sideOffset={8} align="end" className="z-50">
+                  <Popover.Popup className="shell-menu actions-popup">
+                    <Popover.Title className="shell-menu-title">
+                      Actions
+                    </Popover.Title>
+                    {[
+                      {
+                        label: "Add agent",
+                        Icon: ArrowDownToLine,
+                        run: () => setInstallOpen(true),
+                      },
+                      {
+                        label: "Notification settings",
+                        Icon: BellRing,
+                        run: () => setNotificationsOpen(true),
+                      },
+                      {
+                        label: "Settings",
+                        Icon: Settings2,
+                        run: () => setSettingsOpen(true),
+                      },
+                      {
+                        label: "Account",
+                        Icon: UserRound,
+                        run: () => setAccountOpen(true),
+                      },
+                    ].map(({ label, Icon, run }) => (
+                      <button
+                        key={label}
+                        type="button"
+                        className="shell-menu-item"
+                        onClick={() => {
+                          setActionsOpen(false);
+                          run();
+                        }}
+                      >
+                        <Icon />
+                        <span>{label}</span>
+                      </button>
+                    ))}
+                    <div
+                      className="theme-switch"
+                      role="group"
+                      aria-label="Theme"
+                    >
+                      {(
+                        [
+                          ["light", Sun, "Light"],
+                          ["dark", Moon, "Dark"],
+                          ["system", Monitor, "Auto"],
+                        ] as const
+                      ).map(([key, Icon, label]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          aria-pressed={theme === key}
+                          onClick={() => setTheme(key)}
+                        >
+                          <Icon />
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      className="shell-menu-item"
+                      onClick={() => {
+                        setActionsOpen(false);
+                        void action(onLogout);
+                      }}
+                    >
+                      <LogOut />
+                      <span>Sign out</span>
+                    </button>
+                  </Popover.Popup>
+                </Popover.Positioner>
+              </Popover.Portal>
+            </Popover.Root>
             <DiscoveryMenu
               networks={networks}
               scans={scans}
@@ -993,55 +1116,16 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
               <div>
                 <h2>{view === "map" ? "Network map" : "Hosts"}</h2>
                 <p>
-                  Find a device, inspect its health, or configure uptime alerts.
+                  {view === "map"
+                    ? "Health and logical connections from your inventory."
+                    : "Find a device, inspect its health, or configure uptime alerts."}
                 </p>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                aria-pressed={statusFilter === "monitored"}
-                onClick={() =>
-                  setStatusFilter(
-                    statusFilter === "monitored" ? "all" : "monitored",
-                  )
-                }
-              >
-                <BellRing data-icon="inline-start" />
-                {hosts.filter((h) => h.uptime?.enabled).length} uptime monitored
-              </Button>
             </div>
-            {data.capabilities.limitations.length > 0 && (
-              <details className="capability-notice capability-disclosure">
-                <summary>
-                  <CircleHelp size={15} aria-hidden="true" />
-                  <span>Discovery has limited network visibility</span>
-                  <ChevronDown size={15} aria-hidden="true" />
-                </summary>
-                <p>{data.capabilities.limitations.join(" ")}</p>
-              </details>
-            )}
             <div className="inventory-layout">
               <section className="inventory-main">
                 <div className="view-toolbar">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <ToggleGroup
-                      value={[view]}
-                      onValueChange={(v) => {
-                        if (v[0] === "map" || v[0] === "hosts") setView(v[0]);
-                      }}
-                      variant="outline"
-                      size="sm"
-                      aria-label="Inventory view"
-                    >
-                      <ToggleGroupItem value="map">
-                        <Map data-icon="inline-start" />
-                        Map
-                      </ToggleGroupItem>
-                      <ToggleGroupItem value="hosts">
-                        <LayoutList data-icon="inline-start" />
-                        List
-                      </ToggleGroupItem>
-                    </ToggleGroup>
+                  <div className="map-view-controls">
                     {view === "map" && (
                       <ToggleGroup
                         value={[mode]}
@@ -1071,7 +1155,60 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                       </Button>
                     )}
                   </div>
-                  <div className="inventory-filters flex flex-wrap items-center gap-2">
+                  <div className="inventory-search-row">
+                    <div className="search-box">
+                      <Search size={15} />
+                      <input
+                        ref={searchRef}
+                        aria-label="Search hosts"
+                        placeholder="Name, IP, or service…"
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                      />
+                      {filter && (
+                        <button
+                          type="button"
+                          aria-label="Clear search"
+                          onClick={() => setFilter("")}
+                        >
+                          <X size={13} />
+                        </button>
+                      )}
+                    </div>
+                    <Button
+                      variant="outline"
+                      className="mobile-filter-trigger"
+                      aria-label={`Filters${activeFilterCount ? `, ${activeFilterCount} active` : ""}`}
+                      aria-expanded={filtersOpen}
+                      aria-controls="inventory-advanced-filters"
+                      onClick={() => setFiltersOpen((open) => !open)}
+                    >
+                      <SlidersHorizontal /> Filters
+                      {activeFilterCount > 0 && (
+                        <span className="filter-count">
+                          {activeFilterCount}
+                        </span>
+                      )}
+                    </Button>
+                  </div>
+                  <div
+                    id="inventory-advanced-filters"
+                    className={`inventory-filters advanced-filters flex flex-wrap items-center gap-2${filtersOpen ? " is-open" : ""}`}
+                  >
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-pressed={statusFilter === "monitored"}
+                      onClick={() =>
+                        setStatusFilter(
+                          statusFilter === "monitored" ? "all" : "monitored",
+                        )
+                      }
+                    >
+                      <BellRing data-icon="inline-start" />
+                      {hosts.filter((h) => h.uptime?.enabled).length} uptime
+                      monitored
+                    </Button>
                     <DuplicateReviewDialog onMerged={() => void refresh()} />
                     <Select
                       value={sourceFilter}
@@ -1142,25 +1279,17 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                         </SelectGroup>
                       </SelectContent>
                     </Select>
-                    <div className="search-box">
-                      <Search size={15} />
-                      <input
-                        ref={searchRef}
-                        aria-label="Search hosts"
-                        placeholder="Name, IP, or service…"
-                        value={filter}
-                        onChange={(e) => setFilter(e.target.value)}
-                      />
-                      {filter && (
-                        <button
-                          type="button"
-                          aria-label="Clear search"
-                          onClick={() => setFilter("")}
-                        >
-                          <X size={13} />
-                        </button>
-                      )}
-                    </div>
+
+                    {activeFilterCount > 0 && visible.length > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="advanced-filter-reset"
+                        onClick={clearFilters}
+                      >
+                        Clear filters
+                      </Button>
+                    )}
                   </div>
                 </div>
                 {allHosts.length > 0 && (
@@ -1208,26 +1337,6 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                         </button>
                       );
                     })}
-                    {(filter ||
-                      network !== "all" ||
-                      sourceFilter !== "all" ||
-                      parentFilter !== "all" ||
-                      statusFilter !== "all") &&
-                      visible.length > 0 && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            setFilter("");
-                            setNetwork("all");
-                            setSourceFilter("all");
-                            setParentFilter("all");
-                            setStatusFilter("all");
-                          }}
-                        >
-                          Clear filters
-                        </Button>
-                      )}
                   </div>
                 )}
                 {HOST_FILTER_HINTS[statusFilter] && (
@@ -1271,14 +1380,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                         Try another network, status or search term.
                       </EmptyDescription>
                     </EmptyHeader>
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        setFilter("");
-                        setNetwork("all");
-                        setStatusFilter("all");
-                      }}
-                    >
+                    <Button variant="outline" onClick={clearFilters}>
                       Clear filters
                     </Button>
                   </Empty>
@@ -1305,7 +1407,9 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                 )}
                 <footer className="inventory-footer">
                   <span>
-                    {visible.length} of {hosts.length} hosts in view
+                    {visible.length === hosts.length
+                      ? `${visible.length} ${visible.length === 1 ? "host" : "hosts"}`
+                      : `${visible.length} of ${hosts.length} hosts match filters`}
                     {hosts.length > 0 &&
                       ` · ${hosts.filter((h) => hostState(h).tone === "good").length} responding`}
                   </span>
@@ -1319,6 +1423,16 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                 </footer>
               </section>
             </div>
+            {data.capabilities.limitations.length > 0 && (
+              <details className="capability-disclosure inventory-capability">
+                <summary>
+                  <CircleHelp size={15} aria-hidden="true" />
+                  <span>Discovery has limited network visibility</span>
+                  <ChevronDown size={15} aria-hidden="true" />
+                </summary>
+                <p>{data.capabilities.limitations.join(" ")}</p>
+              </details>
+            )}
           </div>
         )}
       </main>

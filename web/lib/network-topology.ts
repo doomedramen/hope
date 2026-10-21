@@ -86,30 +86,34 @@ export function topology(hosts: Host[]) {
   }
   const nodeWidth = 188;
   const columnGap = 28;
-  const rowPitch = 244;
+  // Reserve expanded-card space so toggling metrics never shifts the hierarchy.
+  const cardHeight = 190;
+  const rowPitch = cardHeight + 44;
+  const maxColumns = 4;
   const sizes = new Map<string, { width: number; height: number }>();
   function measure(host: Host): { width: number; height: number } {
     const cached = sizes.get(host.id);
     if (cached) return cached;
     const below = children.get(host.id) ?? [];
     const grid =
-      below.length > 6 && below.every((child) => !children.has(child.id));
+      below.length > maxColumns &&
+      below.every((child) => !children.has(child.id));
     const childSizes = below.map(measure);
     const size = {
       width: Math.max(
         nodeWidth,
         grid
-          ? 6 * (nodeWidth + columnGap) - columnGap
+          ? maxColumns * (nodeWidth + columnGap) - columnGap
           : childSizes.reduce(
               (sum, child) => sum + child.width + columnGap,
               -columnGap,
             ),
       ),
-      height:
-        rowPitch +
-        (grid
-          ? Math.ceil(below.length / 6) * rowPitch
-          : Math.max(0, ...childSizes.map((child) => child.height))),
+      height: !below.length
+        ? cardHeight
+        : grid
+          ? Math.ceil(below.length / maxColumns) * rowPitch + cardHeight
+          : rowPitch + Math.max(...childSizes.map((child) => child.height)),
     };
     sizes.set(host.id, size);
     return size;
@@ -120,13 +124,14 @@ export function topology(hosts: Host[]) {
     positions.set(host.id, { x: x + (size.width - nodeWidth) / 2, y });
     const below = children.get(host.id) ?? [];
     const grid =
-      below.length > 6 && below.every((child) => !children.has(child.id));
+      below.length > maxColumns &&
+      below.every((child) => !children.has(child.id));
     let offset = x;
     below.forEach((child, index) => {
       place(
         child,
-        grid ? x + (index % 6) * (nodeWidth + columnGap) : offset,
-        y + rowPitch * (grid ? 1 + Math.floor(index / 6) : 1),
+        grid ? x + (index % maxColumns) * (nodeWidth + columnGap) : offset,
+        y + rowPitch * (grid ? 1 + Math.floor(index / maxColumns) : 1),
       );
       offset += measure(child).width + columnGap;
     });
@@ -136,7 +141,7 @@ export function topology(hosts: Host[]) {
     rowHeight = 0;
   for (const root of ordered.filter((host) => !parents.has(host.id))) {
     const size = measure(root);
-    if (x && x + size.width > 1400) {
+    if (x && x + size.width > maxColumns * (nodeWidth + columnGap)) {
       x = 0;
       y += rowHeight + 60;
       rowHeight = 0;

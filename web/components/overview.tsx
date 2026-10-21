@@ -5,10 +5,11 @@ import {
   ArrowDownToLine,
   ArrowRight,
   Check,
+  ChevronRight,
   CircleCheck,
   Cpu,
   HardDrive,
-  Map,
+  Map as MapIcon,
   MemoryStick,
   Network,
   Plus,
@@ -60,8 +61,14 @@ export function Overview({
   const agentsInstalled = hosts.some((h) => h.agent_id && !h.agent_uninstalled);
   const scanned = scans.length > 0 || hosts.length > 0;
   const onboarding = !networks.length || !scanned || !agentsInstalled;
-  const affectedHosts = new Set(summary.issues.map((issue) => issue.host.id))
-    .size;
+  const issuesByHost = new Map<string, Issue[]>();
+  for (const issue of summary.issues) {
+    const group = issuesByHost.get(issue.host.id) ?? [];
+    group.push(issue);
+    issuesByHost.set(issue.host.id, group);
+  }
+  const attentionGroups = [...issuesByHost.values()];
+  const affectedHosts = attentionGroups.length;
   const attentionTone = summary.issues.some((i) => i.severity === "critical")
     ? "critical"
     : summary.issues.length
@@ -299,8 +306,9 @@ export function Overview({
                     Needs attention
                   </h3>
                   <p>
-                    Agents not reporting and reported resource, service or
-                    monitor problems.
+                    {affectedHosts
+                      ? `${affectedHosts} ${affectedHosts === 1 ? "host" : "hosts"} · ${summary.issues.length} ${summary.issues.length === 1 ? "issue" : "issues"}`
+                      : "Agent, resource, service and monitor health."}
                   </p>
                 </div>
                 {summary.issues.length > 0 && (
@@ -309,19 +317,19 @@ export function Overview({
                     size="sm"
                     onClick={() => onView("hosts", "attention")}
                   >
-                    View all
+                    View all {affectedHosts} hosts
                     <ArrowRight data-icon="inline-end" />
                   </Button>
                 )}
               </div>
               <div className="issue-list mt-3">
                 {summary.issues.length ? (
-                  summary.issues
-                    .slice(0, 8)
-                    .map((issue) => (
+                  attentionGroups
+                    .slice(0, 5)
+                    .map((issues) => (
                       <IssueRow
-                        key={`${issue.host.id}:${issue.kind}`}
-                        issue={issue}
+                        key={issues[0].host.id}
+                        issues={issues}
                         onSelect={onSelect}
                       />
                     ))
@@ -340,10 +348,7 @@ export function Overview({
                     <Activity />
                     Fleet usage
                   </h3>
-                  <p>
-                    Latest sample from {summary.reporting} reporting{" "}
-                    {summary.reporting === 1 ? "agent" : "agents"}.
-                  </p>
+                  <p>Current measurements from reporting agents.</p>
                 </div>
               </div>
               <div className="panel-body">
@@ -400,7 +405,8 @@ export function Overview({
                         </strong>
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        Sum of every agent&rsquo;s primary interfaces.
+                        Sum of current reporting agents&rsquo; primary
+                        interfaces.
                       </p>
                     </div>
                   </div>
@@ -426,7 +432,7 @@ export function Overview({
                 </h3>
                 <Button variant="ghost" size="sm" onClick={() => onView("map")}>
                   Open map
-                  <Map data-icon="inline-end" />
+                  <MapIcon data-icon="inline-end" />
                 </Button>
               </div>
               <div className="panel-body flex flex-col gap-3">
@@ -470,20 +476,19 @@ export function Overview({
               icon={<MemoryStick />}
               hosts={hosts}
               value={memoryUsage}
+              compareBytes
               rank={(host) =>
                 host.metrics?.memory_used_bytes ??
                 host.child?.metrics.memory_used_bytes ??
                 null
               }
               detail={(host) => {
-                const used =
-                  host.metrics?.memory_used_bytes ??
-                  host.child?.metrics.memory_used_bytes;
                 const total =
                   host.metrics?.memory_total_bytes ??
                   host.child?.metrics.memory_total_bytes;
-                return used != null && total
-                  ? `${bytes(used)} / ${bytes(total)}`
+                const usage = memoryUsage(host);
+                return usage != null && total
+                  ? `${percent0(usage)} of ${bytes(total)} capacity`
                   : undefined;
               }}
               onSelect={onSelect}
@@ -542,33 +547,81 @@ function Step({
 }
 
 function IssueRow({
-  issue,
+  issues,
   onSelect,
 }: {
-  issue: Issue;
+  issues: Issue[];
   onSelect: (host: Host) => void;
 }) {
+  const { host, severity } = issues[0];
+  const visible = issues.slice(0, 3);
+  const remaining = issues.slice(3);
   return (
-    <button
-      type="button"
-      className="issue-row"
-      onClick={() => onSelect(issue.host)}
-    >
-      <span
-        className="status-dot"
-        data-tone={issue.severity}
-        aria-label={issue.severity}
-      />
-      <span className="min-w-0">
-        <span className="issue-host">{hostDisplayName(issue.host)}</span>
-        <span className="issue-message block">{issue.message}</span>
-      </span>
-      <span className="issue-when">
-        <Age
-          value={Math.max(issue.host.last_report ?? 0, issue.host.last_seen)}
+    <div className="attention-host" data-host-id={host.id}>
+      <button
+        type="button"
+        className="issue-row attention-host-button"
+        onClick={() => onSelect(host)}
+      >
+        <span
+          className="status-dot"
+          data-tone={severity}
+          aria-label={severity}
         />
-      </span>
-    </button>
+        <span className="attention-identity">
+          <span className="issue-host">{hostDisplayName(host)}</span>
+          <span className="attention-address mono">{hostIdentity(host)}</span>
+          <span className="attention-freshness">
+            {host.agent_id ? (
+              host.last_report ? (
+                <>
+                  Last report <Age value={host.last_report} lower />
+                </>
+              ) : (
+                "No reports yet"
+              )
+            ) : (
+              <>
+                Last seen <Age value={host.last_seen} lower />
+              </>
+            )}
+          </span>
+        </span>
+        <span className="attention-messages">
+          <span className="attention-count">
+            {issues.length} {issues.length === 1 ? "issue" : "issues"}
+          </span>
+          {visible.map((issue, index) => (
+            <span className="issue-message" key={`${issue.kind}:${index}`}>
+              {issue.message}
+            </span>
+          ))}
+        </span>
+        <ChevronRight className="attention-chevron" size={15} aria-hidden />
+      </button>
+      {remaining.length > 0 && (
+        <details className="attention-more">
+          <summary>
+            Show {remaining.length} more{" "}
+            {remaining.length === 1 ? "issue" : "issues"}
+          </summary>
+          <ul>
+            {remaining.map((issue, index) => (
+              <li key={`${issue.kind}:${index}`}>{issue.message}</li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function hostIdentity(host: Host) {
+  return (
+    host.primary_ip ??
+    host.addresses[0] ??
+    host.source_device_id ??
+    `ID ${host.id.slice(0, 8)}`
   );
 }
 
@@ -579,6 +632,7 @@ function Leaders({
   value,
   rank,
   detail,
+  compareBytes = false,
   onSelect,
 }: {
   title: string;
@@ -587,28 +641,44 @@ function Leaders({
   value: (host: Host) => number | null;
   rank?: (host: Host) => number | null;
   detail?: (host: Host) => string | undefined;
+  compareBytes?: boolean;
   onSelect: (host: Host) => void;
 }) {
   const rows = hosts
     .filter((host) => hasCurrentMetrics(host))
-    .map((host) => ({ host, value: value(host) }))
-    .filter((row): row is { host: Host; value: number } => row.value != null)
+    .map((host) => ({ host, value: value(host), rankedValue: rank?.(host) }))
+    .filter(
+      (
+        row,
+      ): row is {
+        host: Host;
+        value: number;
+        rankedValue: number | null | undefined;
+      } => row.value != null && (!compareBytes || row.rankedValue != null),
+    )
     .sort((a, b) =>
       rank ? (rank(b.host) ?? -1) - (rank(a.host) ?? -1) : b.value - a.value,
     )
     .slice(0, 4);
+  const maximum = rows[0]?.rankedValue ?? 0;
   return (
-    <section className="panel" aria-label={title}>
+    <section
+      className={`panel${compareBytes ? " memory-leaders" : ""}`}
+      aria-label={title}
+    >
       <div className="panel-header">
-        <h3>
-          {icon}
-          {title}
-        </h3>
+        <div>
+          <h3>
+            {icon}
+            {title}
+          </h3>
+          {compareBytes && <p>Bars compare used memory, highest first.</p>}
+        </div>
       </div>
       <div className="panel-body">
         {rows.length ? (
           <div className="leader-list">
-            {rows.map(({ host, value }) => (
+            {rows.map(({ host, value, rankedValue }) => (
               <button
                 key={host.id}
                 type="button"
@@ -616,15 +686,32 @@ function Leaders({
                 onClick={() => onSelect(host)}
               >
                 <span className="leader-name">
-                  {hostDisplayName(host)}
+                  <span className="leader-host-name">
+                    {hostDisplayName(host)}
+                  </span>
+                  <span className="leader-address mono">
+                    {hostIdentity(host)}
+                  </span>
                   {detail?.(host) && (
                     <span className="leader-detail text-muted-foreground">
                       {detail(host)}
                     </span>
                   )}
                 </span>
-                <Meter value={value} thin />
-                <span className="leader-value">{percent0(value)}</span>
+                {compareBytes ? (
+                  <span className="leader-byte-comparison" aria-hidden>
+                    <span
+                      style={{
+                        width: `${maximum ? ((rankedValue ?? 0) / maximum) * 100 : 0}%`,
+                      }}
+                    />
+                  </span>
+                ) : (
+                  <Meter value={value} thin />
+                )}
+                <span className="leader-value">
+                  {compareBytes ? bytes(rankedValue) : percent0(value)}
+                </span>
               </button>
             ))}
           </div>

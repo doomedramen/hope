@@ -1,0 +1,119 @@
+/* Map refinements preserve the console palette while keeping the graph readable. */
+.network-canvas .map-device {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.network-canvas .map-device .node-status {
+  min-width: 0;
+  font-size: 11px;
+}
+.network-canvas .map-device .node-health {
+  font-size: 11px;
+}
+.network-canvas .map-device .node-health > span {
+  grid-template-columns: 25px minmax(0, 1fr) 36px;
+}
+.network-canvas .react-flow__controls {
+  align-items: stretch;
+  margin: 12px;
+}
+.network-canvas .react-flow__controls-button {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  border-bottom: 0;
+  border-right: 1px solid var(--border);
+}
+.network-canvas .react-flow__controls-button:last-child {
+  border-right: 0;
+}
+.network-canvas .react-flow__controls-button.map-viewport-action {
+  width: auto;
+  padding: 0 11px;
+  gap: 6px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--foreground);
+}
+.network-canvas .react-flow__controls-button svg {
+  width: 16px;
+  height: 16px;
+  max-width: 16px;
+  max-height: 16px;
+  fill: none;
+  stroke: currentColor;
+  flex-shrink: 0;
+}
+.network-canvas .react-flow__controls-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -3px;
+}
+.network-canvas .map-legend {
+  align-items: center;
+  gap: 10px 18px;
+  padding: 10px 14px;
+  font-size: 11px;
+  pointer-events: auto;
+}
+.map-explanation {
+  position: relative;
+  margin-left: auto;
+}
+.map-explanation summary {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  list-style: none;
+}
+.map-explanation summary::-webkit-details-marker {
+  display: none;
+}
+.map-explanation summary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+.map-explanation > div {
+  position: absolute;
+  z-index: 10;
+  right: 0;
+  bottom: calc(100% + 14px);
+  width: min(320px, calc(100vw - 62px));
+  padding: 14px 16px;
+  border: 1px solid var(--input);
+  border-radius: 7px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+  box-shadow: var(--shadow-float);
+}
+.map-explanation p + p {
+  margin-top: 8px;
+}
+@media (max-width: 1000px) {
+  .network-canvas .react-flow__minimap {
+    display: none;
+  }
+}
+@media (max-width: 720px) {
+  .network-canvas .react-flow__controls-button {
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+  }
+  .network-canvas .react-flow__controls-button.map-viewport-action {
+    padding-inline: 9px;
+    gap: 5px;
+  }
+  .network-canvas .map-legend {
+    gap: 8px 14px;
+    padding-block: 8px;
+    font-size: 10px;
+  }
+  .map-explanation summary {
+    min-height: 32px;
+    display: flex;
+    align-items: center;
+  }
+}

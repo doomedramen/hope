@@ -1,6 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import "./console.css";
+import "./shell-refinements.css";
+import "./overview-refinements.css";
+import "./map-refinements.css";
 
 export const metadata: Metadata = {
   title: "H.O.P.E",
