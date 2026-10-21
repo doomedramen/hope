@@ -181,7 +181,8 @@ pub async fn child_report(
         }
     } else {
         false
-    };
+    } && (source != "proxmox"
+        || (shared_scope && batch.proxmox_guest_presence.is_some()));
 
     let mut seen: HashSet<(String, String)> = batch
         .devices
@@ -430,12 +431,39 @@ pub async fn child_report(
                     .map(|host| (id, host.last_seen))
             })
             .collect::<HashMap<_, _>>();
-        let rows = sqlx::query("SELECT id,source_key,incarnation,host_id,missing_complete_count,missing_since,missing_inventory_generation FROM source_devices WHERE parent_agent_id=? AND source=? AND source_scope=? AND lifecycle!='archived'")
+        let proxmox_presence = batch
+            .proxmox_guest_presence
+            .as_ref()
+            .map(|members| {
+                members
+                    .iter()
+                    .map(|member| {
+                        let kind = match member.kind {
+                            hope_protocol::ChildDeviceKind::ProxmoxVm => "proxmox_vm",
+                            hope_protocol::ChildDeviceKind::ProxmoxLxc => "proxmox_lxc",
+                            hope_protocol::ChildDeviceKind::DockerContainer => "docker_container",
+                        };
+                        (
+                            (kind.to_owned(), member.key.clone()),
+                            member.incarnation.clone(),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let rows = sqlx::query("SELECT id,source_key,incarnation,kind,host_id,missing_complete_count,missing_since,missing_inventory_generation FROM source_devices WHERE parent_agent_id=? AND source=? AND source_scope=? AND lifecycle!='archived'")
             .bind(&batch.agent_id).bind(source).bind(&batch.source_scope).fetch_all(&mut *tx).await?;
         for row in rows {
             let key: String = sqlx::Row::get(&row, "source_key");
             let incarnation: String = sqlx::Row::get(&row, "incarnation");
-            if seen.contains(&(key, incarnation)) {
+            let kind: String = sqlx::Row::get(&row, "kind");
+            if seen.contains(&(key.clone(), incarnation.clone())) {
+                continue;
+            }
+            if proxmox_presence
+                .get(&(kind, key.clone()))
+                .is_some_and(|current| current.as_ref().is_none_or(|value| value == &incarnation))
+            {
                 continue;
             }
             let id: String = sqlx::Row::get(&row, "id");

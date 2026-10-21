@@ -210,6 +210,7 @@ mod tests {
             source_token: None,
             legacy_source_scope: None,
             legacy_identities: vec![],
+            proxmox_guest_presence: None,
             sequence,
             inventory_generation: sequence,
             inventory_id: None,

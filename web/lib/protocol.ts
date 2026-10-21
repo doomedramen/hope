@@ -232,6 +232,12 @@ export type GuestFilesystem = { mountpoint: string, filesystem_type: string | nu
 observed_at: number, };
 export type GuestNetworkConfiguration = { name: string, bridge: string | null, vlan_tag: number | null, model: string | null, mac: string | null, };
 export type GuestDiskConfiguration = { name: string, storage: string | null, volume: string | null, size_bytes: number | null, };
+export type ProxmoxGuestPresence = { kind: ChildDeviceKind, key: string,
+/**
+ * `None` means the reporting node has not yet learned the shared incarnation; servers
+ * must conservatively protect that VMID from absence-based archival.
+ */
+incarnation: string | null, };
 export type ChildDeviceReport = { identity: SourceIdentity,
 /**
  * Monotonic cluster-shared ownership epoch used to reject delayed reports after migration.
@@ -261,7 +267,12 @@ legacy_source_scope: string | null,
 /**
  * Evidence-only aliases from this same authenticated parent’s old per-node inventory.
  */
-legacy_identities: Array<LegacySourceIdentity>, sequence: number, inventory_generation: number,
+legacy_identities: Array<LegacySourceIdentity>,
+/**
+ * Cluster-wide Proxmox membership evidence. Local node inventories may omit remote guests,
+ * so servers use this only to avoid treating those omissions as deletions.
+ */
+proxmox_guest_presence: Array<ProxmoxGuestPresence> | null, sequence: number, inventory_generation: number,
 /**
  * Identifies all bounded batches that make up one inventory generation.
  */

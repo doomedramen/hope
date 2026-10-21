@@ -104,6 +104,29 @@ pub fn child_batch(value: &ChildReportBatch) -> Result<(), &'static str> {
             .is_some_and(|scope| scope.is_empty() || !text(scope, 128))
         || value.legacy_identities.len() > 500
         || (value.legacy_source_scope.is_none() && !value.legacy_identities.is_empty())
+        || value
+            .proxmox_guest_presence
+            .as_ref()
+            .is_some_and(|members| {
+                value.source != ChildSourceKind::Proxmox
+                    || value.source_token.is_none()
+                    || members.len() > 500
+                    || {
+                        let mut keys = std::collections::HashSet::new();
+                        members.iter().any(|member| {
+                            !matches!(
+                                member.kind,
+                                ChildDeviceKind::ProxmoxVm | ChildDeviceKind::ProxmoxLxc
+                            ) || member.key.parse::<u64>().is_err()
+                                || member.key.is_empty()
+                                || !text(&member.key, 32)
+                                || member.incarnation.as_ref().is_some_and(|incarnation| {
+                                    incarnation.is_empty() || !text(incarnation, 128)
+                                })
+                                || !keys.insert((member.kind, member.key.as_str()))
+                        })
+                    }
+            })
         || value.sequence == 0
         || value.sequence > i64::MAX as u64
         || value.inventory_generation == 0

@@ -697,6 +697,17 @@ pub struct GuestDiskConfiguration {
     pub size_bytes: Option<f64>,
 }
 
+/// Metadata-only membership evidence from `/cluster/resources`; it never carries guest metrics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+pub struct ProxmoxGuestPresence {
+    pub kind: ChildDeviceKind,
+    pub key: String,
+    /// `None` means the reporting node has not yet learned the shared incarnation; servers
+    /// must conservatively protect that VMID from absence-based archival.
+    #[serde(default)]
+    pub incarnation: Option<String>,
+}
+
 /// One atomic source inventory. Incomplete batches update seen children but never imply deletion.
 #[derive(Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ChildReportBatch {
@@ -715,6 +726,10 @@ pub struct ChildReportBatch {
     /// Evidence-only aliases from this same authenticated parent’s old per-node inventory.
     #[serde(default)]
     pub legacy_identities: Vec<LegacySourceIdentity>,
+    /// Cluster-wide Proxmox membership evidence. Local node inventories may omit remote guests,
+    /// so servers use this only to avoid treating those omissions as deletions.
+    #[serde(default)]
+    pub proxmox_guest_presence: Option<Vec<ProxmoxGuestPresence>>,
     #[ts(type = "number")]
     pub sequence: u64,
     #[ts(type = "number")]
@@ -745,6 +760,7 @@ impl std::fmt::Debug for ChildReportBatch {
             )
             .field("legacy_source_scope", &self.legacy_source_scope)
             .field("legacy_identities", &self.legacy_identities)
+            .field("proxmox_guest_presence", &self.proxmox_guest_presence)
             .field("sequence", &self.sequence)
             .field("inventory_generation", &self.inventory_generation)
             .field("inventory_id", &self.inventory_id)
@@ -1340,6 +1356,7 @@ pub fn typescript() -> String {
         GuestFilesystem::decl(),
         GuestNetworkConfiguration::decl(),
         GuestDiskConfiguration::decl(),
+        ProxmoxGuestPresence::decl(),
         ChildDeviceReport::decl(),
         ChildReportBatch::decl(),
         LegacySourceIdentity::decl(),
@@ -1400,6 +1417,7 @@ mod tests {
             source_token: Some("a".repeat(64)),
             legacy_source_scope: None,
             legacy_identities: vec![],
+            proxmox_guest_presence: Some(vec![]),
             sequence: 1,
             inventory_generation: 1,
             inventory_id: None,

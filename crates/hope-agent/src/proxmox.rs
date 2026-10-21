@@ -38,6 +38,8 @@ struct SnapshotFile {
     #[serde(default)]
     legacy_identities: Vec<hope_protocol::LegacySourceIdentity>,
     #[serde(default)]
+    proxmox_guest_presence: Option<Vec<hope_protocol::ProxmoxGuestPresence>>,
+    #[serde(default)]
     observed_at: f64,
     devices: Vec<ChildDeviceReport>,
     inventory_complete: bool,
@@ -131,6 +133,11 @@ pub fn read_snapshot() -> Option<ChildSnapshot> {
         source_token: file.source_token,
         legacy_source_scope: file.legacy_source_scope,
         legacy_identities: file.legacy_identities,
+        proxmox_guest_presence: if fresh {
+            file.proxmox_guest_presence
+        } else {
+            None
+        },
         observed_at,
         devices: if fresh { file.devices } else { vec![] },
         inventory_complete: fresh && file.inventory_complete,
@@ -179,6 +186,7 @@ pub async fn collect() -> Result<()> {
                 source_token: Some(source_token),
                 legacy_source_scope: None,
                 legacy_identities: vec![],
+                proxmox_guest_presence: None,
                 observed_at: unix_now(),
                 devices: vec![],
                 inventory_complete: false,
@@ -192,6 +200,7 @@ pub async fn collect() -> Result<()> {
             source_token: Some(source_token),
             legacy_source_scope: None,
             legacy_identities: vec![],
+            proxmox_guest_presence: None,
             observed_at: unix_now(),
             devices: vec![],
             inventory_complete: false,
@@ -208,6 +217,7 @@ pub async fn collect() -> Result<()> {
             source_token: Some(source_token),
             legacy_source_scope: None,
             legacy_identities: vec![],
+            proxmox_guest_presence: None,
             observed_at: unix_now(),
             devices: vec![],
             inventory_complete: false,
@@ -387,7 +397,7 @@ pub async fn collect() -> Result<()> {
     });
     refresh_guest_enrichment(&mut devices, &mut config_cache, observed_at).await;
     write_config_cache(&config_cache)?;
-    let (legacy_source_scope, legacy_identities) = update_guest_identities(
+    let (legacy_source_scope, legacy_identities, proxmox_guest_presence) = update_guest_identities(
         &mut devices,
         &cluster_id,
         complete,
@@ -400,6 +410,7 @@ pub async fn collect() -> Result<()> {
         source_token: Some(source_token),
         legacy_source_scope,
         legacy_identities,
+        proxmox_guest_presence: Some(proxmox_guest_presence),
         observed_at,
         devices,
         inventory_complete: complete,
@@ -446,7 +457,11 @@ fn update_guest_identities(
     complete: bool,
     now: f64,
     global_present: &HashSet<String>,
-) -> Result<(Option<String>, Vec<hope_protocol::LegacySourceIdentity>)> {
+) -> Result<(
+    Option<String>,
+    Vec<hope_protocol::LegacySourceIdentity>,
+    Vec<hope_protocol::ProxmoxGuestPresence>,
+)> {
     let _lock = acquire_shared_lock()?;
     devices.retain(local_owner_config_exists);
     let local_legacy = read_private::<GuestIdentityMap>(LEGACY_GUEST_IDENTITIES);
@@ -509,7 +524,29 @@ fn update_guest_identities(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Ok((legacy_scope, legacy_identities))
+    let mut proxmox_guest_presence = global_present
+        .iter()
+        .filter_map(|key| {
+            let (kind, key) = key.split_once(':')?;
+            let kind = match kind {
+                "ProxmoxVm" => ChildDeviceKind::ProxmoxVm,
+                "ProxmoxLxc" => ChildDeviceKind::ProxmoxLxc,
+                _ => return None,
+            };
+            let incarnation = identities
+                .entries
+                .get(&format!("{kind:?}:{key}"))
+                .map(|entry| entry.incarnation.clone());
+            Some(hope_protocol::ProxmoxGuestPresence {
+                kind,
+                key: key.to_owned(),
+                incarnation,
+            })
+        })
+        .collect::<Vec<_>>();
+    proxmox_guest_presence
+        .sort_by(|left, right| (left.kind as u8, &left.key).cmp(&(right.kind as u8, &right.key)));
+    Ok((legacy_scope, legacy_identities, proxmox_guest_presence))
 }
 
 fn assign_guest_identities(

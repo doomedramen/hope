@@ -442,6 +442,7 @@ pub struct ChildSnapshot {
     pub source_token: Option<String>,
     pub legacy_source_scope: Option<String>,
     pub legacy_identities: Vec<hope_protocol::LegacySourceIdentity>,
+    pub proxmox_guest_presence: Option<Vec<hope_protocol::ProxmoxGuestPresence>>,
     pub observed_at: f64,
     pub devices: Vec<ChildDeviceReport>,
     pub inventory_complete: bool,
@@ -999,6 +1000,7 @@ impl Collector {
                 source_token: None,
                 legacy_source_scope: None,
                 legacy_identities: vec![],
+                proxmox_guest_presence: None,
                 observed_at: SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap_or_default()

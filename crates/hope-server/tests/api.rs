@@ -198,6 +198,7 @@ fn child_batch(
         source_token: None,
         legacy_source_scope: None,
         legacy_identities: vec![],
+        proxmox_guest_presence: None,
         sequence,
         inventory_generation: generation,
         inventory_id: complete.then(|| Uuid::new_v4().to_string()),
@@ -915,6 +916,108 @@ async fn child_batches_are_idempotent_ordered_and_archive_only_after_complete_ab
 }
 
 #[tokio::test]
+async fn local_proxmox_inventory_does_not_archive_a_guest_present_on_another_cluster_node() {
+    let (_dir, state, app, _) = setup().await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let cluster = Uuid::new_v4().to_string();
+    let token = "ab".repeat(32);
+    let t0 = now() - 500.0;
+    let mut guest = child_device();
+    guest.identity = SourceIdentity {
+        kind: ChildDeviceKind::ProxmoxLxc,
+        scope: cluster.clone(),
+        key: "241".into(),
+        incarnation: "guest-incarnation-241".into(),
+    };
+    guest.name = "dns1".into();
+    guest.node = Some("remote-node".into());
+    let make_batch = |sequence, generation, observed_at, devices, presence| {
+        let mut batch = child_batch(&agent, sequence, generation, true, observed_at, devices);
+        batch.source = ChildSourceKind::Proxmox;
+        batch.source_scope = cluster.clone();
+        batch.source_token = Some(token.clone());
+        batch.proxmox_guest_presence = Some(presence);
+        batch
+    };
+    let present = vec![hope_protocol::ProxmoxGuestPresence {
+        kind: ChildDeviceKind::ProxmoxLxc,
+        key: "241".into(),
+        incarnation: Some("guest-incarnation-241".into()),
+    }];
+    let batches = [
+        make_batch(1, 1, t0, vec![guest], present.clone()),
+        // This reporter's local view is empty, while cluster membership still lists the guest.
+        make_batch(2, 2, t0 + 30.0, vec![], present.clone()),
+        make_batch(3, 3, t0 + 61.0, vec![], present.clone()),
+        make_batch(4, 4, t0 + 240.0, vec![], present.clone()),
+        make_batch(5, 5, t0 + 361.0, vec![], present.clone()),
+    ];
+    for batch in batches {
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(batch),
+            Some(("authorization", &bearer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        lifecycle, "running",
+        "remote presence blocks local absence aging"
+    );
+
+    // An old/partial agent report without cluster-presence evidence is not proof
+    // that the guest was deleted cluster-wide.
+    let mut unproven = make_batch(6, 6, t0 + 400.0, vec![], vec![]);
+    unproven.proxmox_guest_presence = None;
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/agent/children",
+        json!(unproven),
+        Some(("authorization", &bearer)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        lifecycle, "running",
+        "missing membership proof is nonauthoritative"
+    );
+
+    for (sequence, generation, elapsed) in [(7, 7, 422.0), (8, 8, 601.0), (9, 9, 722.0)] {
+        let batch = make_batch(sequence, generation, t0 + elapsed, vec![], vec![]);
+        let (status, body) = request(
+            &app,
+            "POST",
+            "/api/v1/agent/children",
+            json!(batch),
+            Some(("authorization", &bearer)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let lifecycle: String = sqlx::query_scalar("SELECT lifecycle FROM source_devices")
+        .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        lifecycle, "archived",
+        "cluster-wide absence still ages a deleted guest"
+    );
+}
+
+#[tokio::test]
 async fn shared_proxmox_identity_follows_authorized_owner_and_rejects_delayed_old_owner() {
     let (_dir, state, app, cookie) = setup().await;
     let (first, first_credential, _) = enrolled(&state, &app).await;
@@ -945,6 +1048,13 @@ async fn shared_proxmox_identity_follows_authorized_owner_and_rejects_delayed_ol
     );
     let original_id: String = sqlx::query_scalar("SELECT id FROM source_devices")
         .fetch_one(&state.0.db)
+        .await
+        .unwrap();
+    // Simulate a row archived by an older node-local collector before the cluster-presence
+    // evidence contract existed. A current owner report should recover this canonical row.
+    sqlx::query("UPDATE source_devices SET lifecycle='archived' WHERE id=?")
+        .bind(&original_id)
+        .execute(&state.0.db)
         .await
         .unwrap();
 
@@ -989,6 +1099,13 @@ async fn shared_proxmox_identity_follows_authorized_owner_and_rejects_delayed_ol
         .await
         .unwrap();
     assert_eq!(canonical_count, 1);
+    let recovered_lifecycle: String =
+        sqlx::query_scalar("SELECT lifecycle FROM source_devices WHERE id=?")
+            .bind(&original_id)
+            .fetch_one(&state.0.db)
+            .await
+            .unwrap();
+    assert_eq!(recovered_lifecycle, "running");
 
     guest.node = Some("node-a".into());
     guest.ownership_generation = Some(1);
