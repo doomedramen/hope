@@ -229,25 +229,8 @@ pub async fn collect() -> Result<()> {
     // collector's bounded enrichment work.
     let qemu_path = format!("/nodes/{local_node}/qemu");
     let lxc_path = format!("/nodes/{local_node}/lxc");
-    let qemu_args = [
-        "get",
-        qemu_path.as_str(),
-        // Proxmox's VM index can include full active-guest status in the same bulk request.
-        "--full",
-        "1",
-        "--output-format",
-        "json",
-    ];
-    let lxc_args = [
-        "get",
-        lxc_path.as_str(),
-        // Match the QEMU bulk listing: the full node-local rows include current guest
-        // telemetry on Proxmox versions that omit it from the abbreviated index.
-        "--full",
-        "1",
-        "--output-format",
-        "json",
-    ];
+    let qemu_args = guest_list_args(GuestListKind::Qemu, &qemu_path);
+    let lxc_args = guest_list_args(GuestListKind::Lxc, &lxc_path);
     let (qemu, lxc) = tokio::join!(pvesh(&qemu_args), pvesh(&lxc_args));
     let qemu = match qemu {
         Ok(value) => value,
@@ -415,6 +398,23 @@ pub async fn collect() -> Result<()> {
         devices,
         inventory_complete: complete,
     })
+}
+
+#[derive(Clone, Copy)]
+enum GuestListKind {
+    Qemu,
+    Lxc,
+}
+
+fn guest_list_args(kind: GuestListKind, path: &str) -> Vec<&str> {
+    let mut args = vec!["get", path];
+    if matches!(kind, GuestListKind::Qemu) {
+        // The QEMU index supports --full and includes active-guest status in the bulk response.
+        // The LXC index rejects --full on supported Proxmox 9 releases.
+        args.extend(["--full", "1"]);
+    }
+    args.extend(["--output-format", "json"]);
+    args
 }
 
 fn fill_missing_resource_fields(resource: &mut Value, member: &Value, kind: &str, node: &str) {
@@ -1782,6 +1782,25 @@ fn terminate_group(_pid: Option<u32>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_guest_list_arguments_only_request_full_qemu_inventory() {
+        assert_eq!(
+            guest_list_args(GuestListKind::Qemu, "/nodes/pve-a/qemu"),
+            [
+                "get",
+                "/nodes/pve-a/qemu",
+                "--full",
+                "1",
+                "--output-format",
+                "json"
+            ]
+        );
+        assert_eq!(
+            guest_list_args(GuestListKind::Lxc, "/nodes/pve-a/lxc"),
+            ["get", "/nodes/pve-a/lxc", "--output-format", "json"]
+        );
+    }
 
     #[test]
     fn pve_inventory_keeps_vm_and_lxc_measurements_and_configured_addresses_distinct() {
