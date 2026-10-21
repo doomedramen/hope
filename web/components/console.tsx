@@ -280,8 +280,10 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
       setLocation((current) => {
         const target = { ...current, ...next };
         const url = new URL(window.location.href);
-        if (target.view === "overview") url.searchParams.delete("view");
-        else url.searchParams.set("view", target.view);
+        if (target.view === "overview") {
+          url.search = "";
+          url.hash = "";
+        } else url.searchParams.set("view", target.view);
         if (target.host) url.searchParams.set("host", target.host);
         else url.searchParams.delete("host");
         if (target.view !== "container" || !target.container)
@@ -309,11 +311,7 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
           /* Storage may be unavailable. */
         }
       }
-      go(
-        next === "networks" || next === "agents"
-          ? { view: next, host: null }
-          : { view: next },
-      );
+      go({ view: next, host: null, container: null });
     },
     [go],
   );

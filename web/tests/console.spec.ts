@@ -2433,6 +2433,57 @@ test.describe.serial("H.O.P.E console", () => {
     await page.getByRole("button", { name: "Close host details" }).click();
     await expect(page).toHaveURL(/view=agents/);
   });
+  test("top-level navigation clears host deep links and keeps Overview canonical", async ({
+    page,
+  }) => {
+    await page.route("**/api/v1/bootstrap", async (route) => {
+      const response = await route.fetch();
+      const data = await response.json();
+      const template = data.hosts.find(
+        (host: { name: string }) => host.name === "atlas-nas",
+      );
+      const agent = {
+        ...template,
+        id: "navigation-agent-host",
+        agent_id: "navigation-agent-id",
+        name: "navigation-agent",
+        last_report: Date.now() / 1000,
+        agent_revoked: false,
+        agent_uninstalled: false,
+      };
+      await route.fulfill({
+        response,
+        json: { ...data, hosts: [...data.hosts, agent] },
+      });
+    });
+
+    await page.goto("/?view=agents");
+    await page
+      .getByRole("button", { name: "navigation-agent", exact: true })
+      .click();
+    await expect(page).toHaveURL(/view=host&host=navigation-agent-host/);
+    await expect(page.locator(".host-page")).toBeVisible();
+
+    await navigate(page, "Overview");
+    await expect(
+      page.getByRole("heading", { name: "Overview", exact: true }),
+    ).toBeVisible();
+    await expect(page).toHaveURL((url) => url.search === "");
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: "Overview", exact: true }),
+    ).toBeVisible();
+    await expect(page).toHaveURL((url) => url.search === "");
+
+    await page.goBack();
+    await expect(page).toHaveURL(/view=host&host=navigation-agent-host/);
+    await expect(page.locator(".host-page")).toBeVisible();
+    await page.goForward();
+    await expect(page).toHaveURL((url) => url.search === "");
+    await expect(
+      page.getByRole("heading", { name: "Overview", exact: true }),
+    ).toBeVisible();
+  });
   test("agent uninstall keeps history and makes device removal explicit", async ({
     page,
     request,
