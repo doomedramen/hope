@@ -2537,9 +2537,8 @@ test.describe.serial("H.O.P.E console", () => {
       .click();
     const dialog = page.getByRole("dialog", { name: "Uninstall agent" });
     await dialog.getByRole("tab", { name: "Uninstall manually" }).click();
-    await expect(dialog.locator("code")).toContainText("/agent/uninstall");
     await expect(dialog.locator("code")).toContainText(
-      'sh "$installer" uninstall',
+      "/install | sh -s -- uninstall",
     );
     await expect(dialog).toContainText("Device history stays");
     await expect(dialog).toContainText("cannot confirm it remotely");
