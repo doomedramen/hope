@@ -632,6 +632,10 @@ test("agents are offered an update only when the server's release is newer", () 
   expect(agentUpdate(agent, "0.2.1")).toBe("0.2.1");
   expect(agentUpdate(agent, "0.1.57")).toBeNull();
   expect(agentUpdate(agent, "0.1.9")).toBeNull();
+  // Read as the installer reads them.
+  expect(agentUpdate(agent, "v0.1.60")).toBe("v0.1.60");
+  expect(agentUpdate(agent, "0.1.57rc1")).toBeNull();
+  expect(agentUpdate(agent, "0.1.57+build.5")).toBeNull();
   expect(agentUpdate(agent, null)).toBeNull();
   // Agents too old to report a version, discovered hosts and revoked agents are never flagged.
   expect(agentUpdate(host({ agent_id: "a" }), "0.1.60")).toBeNull();

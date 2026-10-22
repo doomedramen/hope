@@ -567,11 +567,10 @@ export function fleetUpdates(
 }
 
 /** Numeric parts of a version (`0.1.57` → [0, 1, 57]); anything after the numbers is ignored. */
+/** The installer's rule: drop a leading `v`, keep the leading digits and dots, compare numbers. */
 function versionParts(version: string): number[] {
-  return version
-    .split(/[-+]/)[0]
-    .split(".")
-    .map((part) => Number.parseInt(part, 10) || 0);
+  const numeric = /^[0-9.]*/.exec(version.replace(/^v/, ""))?.[0] ?? "";
+  return numeric.split(".").map((part) => Number.parseInt(part, 10) || 0);
 }
 
 /**

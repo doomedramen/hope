@@ -177,11 +177,14 @@ pub const UPDATE_REQUEST_SECONDS: f64 = 86400.0;
 /// Whether `candidate` is a later release than `installed`. Compares the dotted numbers only
 /// (`0.1.57` against `0.1.9`), ignoring anything after `-` or `+`.
 pub fn version_newer(candidate: &str, installed: &str) -> bool {
+    // The installer's rule (`version_lt` in scripts/install-agent.sh), which decides in the end:
+    // drop a leading `v`, keep the leading run of digits and dots, compare the parts as numbers.
     fn parts(version: &str) -> Vec<u64> {
-        version
-            .split(['-', '+'])
-            .next()
-            .unwrap_or("")
+        let version = version.strip_prefix('v').unwrap_or(version);
+        let end = version
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(version.len());
+        version[..end]
             .split('.')
             .map(|part| part.parse().unwrap_or(0))
             .collect()
@@ -1535,6 +1538,11 @@ mod tests {
         assert!(!version_newer("0.1.57", "0.1.57-rc.1"));
         assert!(version_newer("0.1.58-rc.1", "0.1.57"));
         assert!(!version_newer("garbage", "0.1.0"));
+        // Read as the installer reads them, so server and host agree on what is newer.
+        assert!(!version_newer("0.1.58rc1", "0.1.58"));
+        assert!(version_newer("0.1.58rc1", "0.1.57"));
+        assert!(version_newer("v0.1.60", "0.1.57"));
+        assert!(!version_newer("0.1.57+build.5", "0.1.57"));
     }
     #[test]
     fn guest_storage_is_recognised() {
