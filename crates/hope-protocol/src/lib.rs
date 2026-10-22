@@ -1150,6 +1150,10 @@ pub struct Host {
     /// `manual` or `automatic`; distinguishes automatic work for pause/exclusion handling.
     #[serde(default)]
     pub update_request_source: Option<String>,
+    /// The agent already reported a failure for the requested release when it was asked. That
+    /// report is not this request's outcome; it counts again once the agent reports anything else.
+    #[serde(default)]
+    pub update_failure_predates_request: bool,
     /// A host-level opt-out from future automatic rollouts.
     #[serde(default)]
     pub auto_update_excluded: bool,
@@ -1212,6 +1216,7 @@ impl Host {
             update_target: None,
             update_target_release_id: None,
             update_request_source: None,
+            update_failure_predates_request: false,
             auto_update_excluded: false,
             auto_update_failed_release_id: None,
             source: None,

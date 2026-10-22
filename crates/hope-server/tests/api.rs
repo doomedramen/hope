@@ -4069,6 +4069,22 @@ async fn report_with_updater(
     version: &str,
     updater: bool,
 ) -> Value {
+    report_with_updater_detail(
+        app,
+        bearer,
+        agent,
+        version,
+        updater.then_some("Updater ready"),
+    )
+    .await
+}
+async fn report_with_updater_detail(
+    app: &Router,
+    bearer: &str,
+    agent: &str,
+    version: &str,
+    detail: Option<&str>,
+) -> Value {
     let report = AgentReport {
         schema_version: 1,
         report_id: Uuid::new_v4().to_string(),
@@ -4077,15 +4093,15 @@ async fn report_with_updater(
         collected_at: now(),
         inventory: None,
         metrics: Metrics::default(),
-        collectors: if updater {
-            vec![CollectorStatus {
-                name: "agent_update".into(),
-                available: true,
-                detail: Some("Updater ready".into()),
-            }]
-        } else {
-            vec![]
-        },
+        collectors: detail
+            .map(|detail| {
+                vec![CollectorStatus {
+                    name: "agent_update".into(),
+                    available: true,
+                    detail: Some(detail.into()),
+                }]
+            })
+            .unwrap_or_default(),
     };
     let response = app
         .clone()
@@ -4171,6 +4187,59 @@ async fn an_update_request_reaches_the_agent_in_its_next_report_response_and_cle
     // An agent that already runs the release cannot be asked again.
     let (status, _) = request(&app, "POST", &url, json!({}), admin).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_failed_manual_update_ends_its_request_but_an_earlier_failure_does_not() {
+    let release = publish_release("0.1.60");
+    let (_dir, state, app, cookie) =
+        setup_with(release.path().to_str().expect("path").into()).await;
+    let (agent, credential, _) = enrolled(&state, &app).await;
+    let bearer = format!("Bearer {credential}");
+    let host_id = state.hosts().await.expect("hosts")[0].id.clone();
+    let url = format!("/api/v1/hosts/{host_id}/update-agent");
+    let admin = Some(("cookie", cookie.as_str()));
+    let (status, _) = request(
+        &app,
+        "PUT",
+        "/api/v1/settings/agent-updates",
+        json!({ "enabled": false }),
+        admin,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    report_as(&app, &bearer, &agent, "0.1.57").await;
+    let ask = || async {
+        let (status, body) = request(&app, "POST", &url, json!({}), admin).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        state
+            .host(&host_id)
+            .await
+            .expect("host")
+            .expect("exists")
+            .update_target_release_id
+            .expect("pinned release")
+    };
+
+    let release_id = ask().await;
+    let failed = format!("The last update failed (FIRST_REPORT_TIMEOUT) for release {release_id}");
+    let response = report_with_updater_detail(&app, &bearer, &agent, "0.1.57", Some(&failed)).await;
+    assert_eq!(response["update_to"], Value::Null);
+    let host = state.host(&host_id).await.expect("host").expect("exists");
+    assert_eq!((host.update_target, host.update_requested_at), (None, None));
+    // A manual failure does not hold the release back from automatic rollouts or other hosts.
+    assert_eq!(host.auto_update_failed_release_id, None);
+
+    // Asking again while that failure is still displayed: it is not the new request's outcome.
+    assert_eq!(ask().await, release_id);
+    for _ in 0..2 {
+        let response =
+            report_with_updater_detail(&app, &bearer, &agent, "0.1.57", Some(&failed)).await;
+        assert_eq!(response["update_to"], "0.1.60");
+    }
+    report_with_updater_detail(&app, &bearer, &agent, "0.1.57", Some("Updater ready")).await;
+    let response = report_with_updater_detail(&app, &bearer, &agent, "0.1.57", Some(&failed)).await;
+    assert_eq!(response["update_to"], Value::Null);
 }
 
 #[tokio::test]

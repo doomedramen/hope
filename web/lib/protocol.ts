@@ -406,6 +406,11 @@ update_target_release_id: string | null,
  */
 update_request_source: string | null,
 /**
+ * The agent already reported a failure for the requested release when it was asked. That
+ * report is not this request's outcome; it counts again once the agent reports anything else.
+ */
+update_failure_predates_request: boolean,
+/**
  * A host-level opt-out from future automatic rollouts.
  */
 auto_update_excluded: boolean,

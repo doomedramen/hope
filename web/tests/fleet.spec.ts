@@ -63,6 +63,7 @@ function host(overrides: Partial<Host>): Host {
     update_target: null,
     update_target_release_id: null,
     update_request_source: null,
+    update_failure_predates_request: false,
     auto_update_excluded: false,
     auto_update_failed_release_id: null,
     name: "host",

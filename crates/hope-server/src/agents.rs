@@ -507,6 +507,17 @@ pub async fn report(
     }
     let mut rollout_success = false;
     let mut rollout_failure = None;
+    // A failed manual request ends here rather than being retried hourly for the rest of its day.
+    if live_applied
+        && host.update_request_source.as_deref() == Some("manual")
+        && let Some(release_id) = host.update_target_release_id.clone()
+        && reported_failure(&mut host, &release_id)
+    {
+        host.update_requested_at = None;
+        host.update_target = None;
+        host.update_target_release_id = None;
+        host.update_request_source = None;
+    }
     if live_applied
         && host.update_request_source.as_deref() == Some("automatic")
         && let (Some(target), Some(release_id)) = (
@@ -535,13 +546,7 @@ pub async fn report(
             host.update_target = None;
             host.update_target_release_id = None;
             host.update_request_source = None;
-        } else if host.collectors.iter().any(|collector| {
-            collector.name == "agent_update"
-                && collector
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| reports_update_failure_for(detail, &release_id))
-        }) {
+        } else if reported_failure(&mut host, &release_id) {
             rollout_failure = Some(release_id.clone());
             host.auto_update_failed_release_id = Some(release_id);
             host.update_requested_at = None;
@@ -672,6 +677,27 @@ fn is_linux_os(os: &str) -> bool {
 fn reports_update_failure_for(detail: &str, release_id: &str) -> bool {
     detail.starts_with("The last update failed")
         && detail.ends_with(&format!("for release {release_id}"))
+}
+
+fn failure_reported(host: &Host, release_id: &str) -> bool {
+    host.collectors.iter().any(|collector| {
+        collector.name == "agent_update"
+            && collector
+                .detail
+                .as_deref()
+                .is_some_and(|detail| reports_update_failure_for(detail, release_id))
+    })
+}
+
+/// Whether the latest report says the requested release failed, ignoring a failure that was
+/// already on display when the request was made until the agent has reported something else.
+fn reported_failure(host: &mut Host, release_id: &str) -> bool {
+    let failed = failure_reported(host, release_id);
+    if host.update_failure_predates_request {
+        host.update_failure_predates_request = failed;
+        return false;
+    }
+    failed
 }
 
 fn auto_eligible(host: &Host, release: &str, release_id: &str) -> bool {
@@ -935,6 +961,7 @@ fn set_update_request(
     host.update_target = Some(release.to_string());
     host.update_target_release_id = Some(release_id.to_string());
     host.update_request_source = Some(source.to_string());
+    host.update_failure_predates_request = failure_reported(host, release_id);
 }
 /// Ask one host's agent to update to the release this server offers. The agent learns of it in
 /// its next report response and passes it to its local updater, which checks the signature itself.
