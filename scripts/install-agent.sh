@@ -1010,7 +1010,9 @@ PrivateTmp=true
 RuntimeDirectory=hope-agent
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
-ReadWritePaths=/run/hope-agent /etc/hope-agent /etc/pve/priv/hope-agent /etc/pve/priv/lock
+# pvesh runs lxc-info for each container, which takes a lock file under /run/lxc/lock. On a
+# read-only /run it fails and Proxmox reports 0 memory, CPU and disk for every container.
+ReadWritePaths=/run/hope-agent /etc/hope-agent /etc/pve/priv/hope-agent /etc/pve/priv/lock -/run/lxc/lock
 EOF
         cat > "$temporary/proxmox.timer.new" <<'EOF'
 [Unit]

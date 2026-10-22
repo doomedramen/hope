@@ -423,6 +423,11 @@ fn fill_missing_resource_fields(resource: &mut Value, member: &Value, kind: &str
     };
     object.insert("type".into(), Value::String(kind.into()));
     object.insert("node".into(), Value::String(node.into()));
+    // A one-off node-local listing has no earlier sample to measure CPU against, so its `cpu` is
+    // always 0. pvestatd's cluster view measures CPU over its own interval: prefer it when present.
+    if let Some(cpu) = member.get("cpu").filter(|value| value.is_number()) {
+        object.insert("cpu".into(), cpu.clone());
+    }
     // Prefer the detailed local row, but use cluster-wide values when that endpoint
     // omitted a measurement. Preserve explicit numeric zeroes as real measurements.
     for field in [
@@ -1897,7 +1902,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_local_lxc_row_uses_cluster_telemetry_without_overwriting_zeroes() {
+    fn sparse_local_lxc_row_uses_cluster_telemetry_without_overwriting_zeroes_except_cpu() {
         let mut local = serde_json::json!({
             "vmid": 303,
             "status": "running",
@@ -1918,7 +1923,18 @@ mod tests {
         fill_missing_resource_fields(&mut local, &cluster, "lxc", "pve-a");
         let device = resource_device(&local, &Uuid::new_v4().to_string()).unwrap();
 
-        assert_eq!(device.metrics.cpu_percent, Some(0.0));
+        // The local listing's CPU is always 0 (no earlier sample); the cluster's is measured.
+        assert_eq!(
+            device.metrics.cpu_percent,
+            resource_device(
+                &serde_json::json!({"type":"lxc","vmid":303,"node":"pve-a","status":"running","cpu":0.75}),
+                &Uuid::new_v4().to_string()
+            )
+            .unwrap()
+            .metrics
+            .cpu_percent
+        );
+        assert_ne!(device.metrics.cpu_percent, Some(0.0));
         assert_eq!(device.metrics.memory_used_bytes, Some(512.0));
         assert_eq!(device.metrics.memory_total_bytes, Some(2048.0));
         assert_eq!(device.metrics.network_rx_bytes, Some(0.0));

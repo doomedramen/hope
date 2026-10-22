@@ -64,6 +64,8 @@ class Linux(Base):
         self.assertIn('collect-proxmox', unit)
         self.assertIn('ReadWritePaths=/run/hope-agent /etc/hope-agent', unit)
         self.assertIn('/etc/pve/priv/hope-agent /etc/pve/priv/lock', unit)
+        # lxc-info needs its lock directory, or Proxmox reports every container's usage as 0.
+        self.assertIn('-/run/lxc/lock', unit)
         self.assertIn('TimeoutStartSec=45s', unit)
         self.assertIn('RuntimeDirectory=hope-agent', unit)
         self.assertEqual((self.env.root / 'etc/hope-agent').stat().st_mode & 0o777, 0o750)
