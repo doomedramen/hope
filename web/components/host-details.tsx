@@ -1368,7 +1368,7 @@ export function HostDetails({
                       </>
                     )}
                     {update.state === "manual" &&
-                      "This agent has no updater yet. Run this command on the host once; after that, updates can start from here."}
+                      "This agent has no working updater. Run this command on the host once; after that, updates can start from here."}
                   </p>
                 )}
                 {update?.failure && (

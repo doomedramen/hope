@@ -23,6 +23,12 @@ const RESULT: &str = "update-result";
 const ASKED: &str = "update-asked";
 /// A request that did not lead to an update is repeated no sooner than this.
 const RETRY_AFTER: Duration = Duration::from_secs(3600);
+/// The updater consumes a request within seconds, or within one five-minute retry when it is busy.
+/// A request still waiting after this means nothing watches the queue (a stopped or failed unit).
+const STALLED_AFTER: Duration = Duration::from_secs(20 * 60);
+/// An updater run is bounded by its service timeout. A `running` result older than this was cut
+/// short (killed or powered off) before it could write its outcome.
+const INTERRUPTED_AFTER: Duration = Duration::from_secs(90 * 60);
 
 pub const COLLECTOR: &str = "agent_update";
 
@@ -185,7 +191,11 @@ fn queue_ready(dir: &Path) -> bool {
 /// What to tell the server about updates on this host. `available` means an updater is installed
 /// (so a request can lead somewhere), not that the last update worked; the detail says that.
 pub fn status(dir: &Path) -> CollectorStatus {
-    let (available, detail) = describe(dir);
+    status_at(dir, SystemTime::now())
+}
+
+fn status_at(dir: &Path, now: SystemTime) -> CollectorStatus {
+    let (available, detail) = describe(dir, now);
     CollectorStatus {
         name: COLLECTOR.into(),
         available,
@@ -193,11 +203,20 @@ pub fn status(dir: &Path) -> CollectorStatus {
     }
 }
 
-fn describe(dir: &Path) -> (bool, String) {
+fn describe(dir: &Path, now: SystemTime) -> (bool, String) {
     if !queue_ready(dir) {
         return (
             false,
             "No updater is installed here, so updates cannot start from H.O.P.E. Run the upgrade command on this host once to enable them.".into(),
+        );
+    }
+    // Not available: a one-click update would only queue behind the request nobody picks up.
+    if let Some((waited, requested)) = waiting_request(dir, now)
+        && waited >= STALLED_AFTER
+    {
+        return (
+            false,
+            failure_detail("UPDATER_NOT_RUNNING", requested.as_deref()),
         );
     }
     let Some(result) = read_result(dir) else {
@@ -225,17 +244,53 @@ fn describe(dir: &Path) -> (bool, String) {
                     && c.chars().all(|ch| ch.is_ascii_uppercase() || ch == '_')
             });
             let release = field("release_id").filter(|id| plain_release_id(id));
-            let detail = match release {
-                Some(release) => format!(
-                    "The last update failed ({}) for release {release}",
-                    code.unwrap_or("UNKNOWN")
-                ),
-                None => format!("The last update failed ({})", code.unwrap_or("UNKNOWN")),
-            };
-            (true, detail)
+            (true, failure_detail(code.unwrap_or("UNKNOWN"), release))
+        }
+        Some("running")
+            if field("at")
+                .and_then(|at| at.parse::<u64>().ok())
+                .is_some_and(|at| {
+                    seconds(now).saturating_sub(at) >= INTERRUPTED_AFTER.as_secs()
+                }) =>
+        {
+            let release = field("release_id").filter(|id| plain_release_id(id));
+            (true, failure_detail("UPDATER_INTERRUPTED", release))
         }
         _ => (true, "Updater ready".into()),
     }
+}
+
+/// The server attributes a failure to a release only by this exact wording.
+fn failure_detail(code: &str, release: Option<&str>) -> String {
+    match release {
+        Some(release) => format!("The last update failed ({code}) for release {release}"),
+        None => format!("The last update failed ({code})"),
+    }
+}
+
+fn seconds(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// How long a request has waited in the queue, and the release it names when it names one.
+fn waiting_request(dir: &Path, now: SystemTime) -> Option<(Duration, Option<String>)> {
+    let path = dir.join(QUEUE).join(REQUEST);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    // A clock set back makes the request look new, which only delays the report.
+    let waited = now
+        .duration_since(meta.modified().ok()?)
+        .unwrap_or_default();
+    let mut text = String::new();
+    let release = std::fs::File::open(&path)
+        .and_then(|file| file.take(128).read_to_string(&mut text))
+        .ok()
+        .and_then(|_| text.lines().next().map(str::trim).map(str::to_owned))
+        .filter(|id| plain_release_id(id));
+    Some((waited, release))
 }
 
 fn read_result(dir: &Path) -> Option<String> {
@@ -476,6 +531,54 @@ mod tests {
             );
             assert_eq!(got.name, COLLECTOR);
         }
+    }
+
+    #[test]
+    fn a_request_nobody_picks_up_is_reported_as_a_failure() {
+        let dir = installed();
+        let release = "0.1.82-a1b2c3d4e5f6";
+        std::fs::write(dir.path().join(QUEUE).join(REQUEST), format!("{release}\n"))
+            .expect("request");
+        let now = SystemTime::now();
+        let waiting = status_at(dir.path(), now);
+        assert!(waiting.available);
+        assert_eq!(waiting.detail.as_deref(), Some("Updater ready"));
+        let stalled = status_at(dir.path(), now + STALLED_AFTER + Duration::from_secs(1));
+        assert!(!stalled.available);
+        assert_eq!(
+            stalled.detail.as_deref(),
+            Some("The last update failed (UPDATER_NOT_RUNNING) for release 0.1.82-a1b2c3d4e5f6")
+        );
+        // A legacy request names no release; anything else in it is not repeated.
+        std::fs::write(dir.path().join(QUEUE).join(REQUEST), "<script>\n").expect("request");
+        assert_eq!(
+            status_at(dir.path(), now + STALLED_AFTER + Duration::from_secs(1))
+                .detail
+                .as_deref(),
+            Some("The last update failed (UPDATER_NOT_RUNNING)")
+        );
+    }
+
+    #[test]
+    fn an_update_cut_short_is_reported_as_a_failure() {
+        let dir = installed();
+        let started = 1_000_000;
+        std::fs::write(
+            dir.path().join(RESULT),
+            format!("status=running\nat={started}\nrelease_id=0.1.82-a1b2c3d4e5f6\n"),
+        )
+        .expect("result");
+        let at = |offset: u64| UNIX_EPOCH + Duration::from_secs(started + offset);
+        assert_eq!(
+            status_at(dir.path(), at(60)).detail.as_deref(),
+            Some("Updater ready")
+        );
+        let interrupted = status_at(dir.path(), at(INTERRUPTED_AFTER.as_secs()));
+        assert!(interrupted.available);
+        assert_eq!(
+            interrupted.detail.as_deref(),
+            Some("The last update failed (UPDATER_INTERRUPTED) for release 0.1.82-a1b2c3d4e5f6")
+        );
     }
 
     #[test]

@@ -2116,7 +2116,7 @@ test.describe.serial("H.O.P.E console", () => {
     await details.getByRole("tab", { name: "Settings", exact: true }).click();
     const card = details.getByTestId("agent-update");
     await expect(card).toContainText("Agent 0.1.60 is available");
-    await expect(card).toContainText("has no updater yet");
+    await expect(card).toContainText("has no working updater");
     await expect(card.locator("code")).toContainText("/agent/install");
     await expect(card.locator("code")).toContainText("HOPE_ONLY_NEWER=1");
     await expect(card.locator("code")).not.toContainText(

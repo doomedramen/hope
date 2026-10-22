@@ -659,7 +659,7 @@ fn update_blocker(host: &Host, release: &str) -> Option<&'static str> {
         .any(|c| c.name == "agent_update" && c.available)
     {
         return Some(
-            "This agent has no updater yet. Run the upgrade command on the host once; later updates can start from H.O.P.E",
+            "This agent has no working updater. Run the upgrade command on the host once; later updates can start from H.O.P.E",
         );
     }
     None

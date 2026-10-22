@@ -522,7 +522,7 @@ export type UpdatePlan = {
   /**
    * ready: the agent has an updater, so it can be asked from here.
    * pending: it was asked and starts the update when it next reports.
-   * manual: it has no updater yet; the upgrade command must be run on the host once.
+   * manual: it has no working updater; the upgrade command must be run on the host once.
    */
   state: "ready" | "pending" | "manual";
   /** What the updater last said, when the last update failed. */
@@ -541,12 +541,12 @@ export function updatePlan(
     host.update_requested_at != null &&
     host.update_target != null &&
     now - host.update_requested_at < UPDATE_REQUEST_SECONDS;
-  const failed =
-    updater?.available && updater.detail?.startsWith("The last update failed");
+  // A stalled updater reports itself unavailable and failed: show both the command and the reason.
+  const failed = updater?.detail?.startsWith("The last update failed");
   return {
     target,
     state: pending ? "pending" : updater?.available ? "ready" : "manual",
-    failure: failed ? (updater.detail ?? null) : null,
+    failure: failed ? (updater?.detail ?? null) : null,
   };
 }
 

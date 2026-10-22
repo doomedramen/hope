@@ -679,6 +679,18 @@ test("an update plan says whether the agent can be asked, is waiting, or needs t
     state: "ready",
     failure: "The last update failed (BAD_SIGNATURE)",
   });
+  // An updater whose watcher stopped needs the command again, and says why.
+  const stalled = old({
+    collectors: updater(
+      false,
+      "The last update failed (UPDATER_NOT_RUNNING) for release 0.1.60-a1b2c3d4e5f6",
+    ),
+  });
+  expect(updatePlan(stalled, "0.1.60", now)).toMatchObject({
+    state: "manual",
+    failure:
+      "The last update failed (UPDATER_NOT_RUNNING) for release 0.1.60-a1b2c3d4e5f6",
+  });
   // Up to date, unknown version, revoked or discovered-only hosts have no plan.
   expect(
     updatePlan(old({ agent_version: "0.1.60" }), "0.1.60", now),

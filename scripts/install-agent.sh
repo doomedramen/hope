@@ -364,7 +364,13 @@ else
     # Progress goes to the journal as it happens (an update can wait two minutes for the new agent's
     # first report); the same text is kept to find the outcome in.
     if [ -d "$state" ] && [ ! -L "$state" ]; then
-        out=$(mktemp "$state/.update-result.XXXXXX") && { printf 'status=running\nat=%s\n' "$(date +%s)" > "$out"; chmod 644 "$out"; mv -f "$out" "$state/update-result"; } || true
+        # The agent reports a run that never replaced this record as interrupted, for this release.
+        out=$(mktemp "$state/.update-result.XXXXXX") && {
+            printf 'status=running\nat=%s\n' "$(date +%s)" > "$out"
+            if [ -n "${HOPE_UPDATE_RELEASE_ID:-}" ]; then printf 'release_id=%s\n' "$HOPE_UPDATE_RELEASE_ID" >> "$out"; fi
+            chmod 644 "$out"
+            mv -f "$out" "$state/update-result"
+        } || true
     fi
     rcfile=$(mktemp)
     { code=0; sh "$dir/install-agent.sh" upgrade 2>&1 || code=$?; echo "$code" > "$rcfile"; } | tee "$log" >&2

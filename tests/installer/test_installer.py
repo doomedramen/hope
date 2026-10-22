@@ -1027,6 +1027,31 @@ class Updater(Base):
         self.assertEqual('v1', self.version(paths['binary']))
         self.assertTrue((self.env.base / 'service/system.active').exists())
 
+    def test_a_running_update_records_its_release(self):
+        """If the updater dies mid-run, the agent reports this record as interrupted for the release."""
+        import time
+        self.installed()
+        self.env.publish('v2')
+        request = self.request()
+        selected = request.read_text().strip()
+        self.env.capture_release()
+        self.env.fault('stall-at-place-binary')
+        wrapper = self.env.root / 'usr/local/sbin/hope-agent-update'
+        env = self.env._environment(0, None, None, None, {})
+        process = subprocess.Popen(['sh', str(wrapper)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        self.addCleanup(process.kill)
+        stalled = self.env.base / 'fake/stalled'
+        deadline = time.time() + 30
+        while not stalled.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(stalled.exists())
+        record = self.result_of()
+        self.assertEqual('running', record['status'])
+        self.assertEqual(selected, record['release_id'])
+        (self.env.base / 'fault/release').write_text('')
+        self.assertEqual(0, process.wait(timeout=60))
+        self.assertEqual('updated', self.result_of()['status'])
+
     def test_the_request_file_is_removed_before_the_update_so_it_cannot_loop(self):
         self.installed()
         self.env.publish('v2')
