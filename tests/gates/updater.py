@@ -26,6 +26,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -39,6 +40,10 @@ PASSWORD = 'hopegate-administrator-password'
 V1, V2, V3, V4 = '0.9.1', '0.9.2', '0.9.3', '0.9.4'
 STATE = '/var/lib/hope-agent'
 UPDATER_DIR = '/var/lib/hope-agent-update'
+# The rollback cell waits for a new agent that can never report. A systemd drop-in shortens the
+# installer's two-minute wait for that; the updater passes its environment on to the installer.
+GATE_DROP_IN = '/etc/systemd/system/hope-agent-update.service.d/gate.conf'
+FIRST_REPORT_TIMEOUT = 20
 
 machine = platform.machine()
 ARCH = 'x86_64' if machine.lower() in ('x86_64', 'amd64') else None
@@ -106,7 +111,8 @@ class Gate:
             if os.environ.get('HOPEGATE_SKIP_BUILD') == '1' and (out / f'hope-agent-linux-{ARCH}').exists():
                 continue
             env = dict(os.environ, HOPE_BUILD_VERSION=version)
-            run(['sh', 'scripts/build-agent.sh', TRIPLE, '--out', str(out)], cwd=REPO, env=env, timeout=3000)
+            # The version is compiled in, so each one relinks the agent; the gate profile keeps that quick.
+            run(['sh', 'scripts/build-agent.sh', TRIPLE, '--out', str(out), '--profile', 'gate'], cwd=REPO, env=env, timeout=3000)
 
     def make_keys(self):
         for name in ('good', 'other'):
@@ -292,14 +298,26 @@ class Gate:
         status, body, _ = self.api('POST', '/api/v1/agents/update')
         expect(status == 200 and body.get('requested') == expected, f'update all answered {status} {body}, expected {expected} request')
 
+    def prepare_container(self):
+        """Build and boot the target in the background; it needs nothing from the cargo builds."""
+        try:
+            self.start_container()
+        except BaseException as error:  # reported by run_all on the main thread
+            self.container_error = error
+
     def run_all(self):
         self.make_keys()
+        self.container_error = None
+        container = threading.Thread(target=self.prepare_container, daemon=True)
+        container.start()
         self.build()
         self.publish(V1, 'good')
         self.start_server()
         self.start_proxy()
         self.login()
-        self.start_container()
+        container.join()
+        if self.container_error:
+            raise self.container_error
 
         with self.cell('install as root with the console command puts a root-owned updater in place') as go:
             if go:
@@ -401,6 +419,9 @@ class Gate:
                 # gets an accepted report. The journal still holds the earlier update's phases.
                 self.stop_proxy()
                 self.start_proxy(reject_agent_version=V4)
+                self.must(f'mkdir -p {pathlib.PurePosixPath(GATE_DROP_IN).parent} && '
+                          f'printf "[Service]\\nEnvironment=HOPE_FIRST_REPORT_TIMEOUT={FIRST_REPORT_TIMEOUT}\\n" > {GATE_DROP_IN} && '
+                          'systemctl daemon-reload')
                 waits = self.updater_journal().count('phase=wait-report')
                 self.request_all()
                 wait_for('the updater to wait for the new agent', lambda: self.updater_journal().count('phase=wait-report') > waits, 180, 1)
@@ -420,14 +441,17 @@ class Gate:
                 expect('phase=rollback' in journal, 'the updater journal shows no rollback')
                 # A rollback restarts the agent. It must not ask for the same release again at once
                 # (it used to, which retried a failing release in a loop).
+                expect(f'within {FIRST_REPORT_TIMEOUT}s' in journal, 'the shortened first-report timeout did not apply')
                 attempts = journal.count('phase=wait-report')
-                time.sleep(30)
+                # Three report intervals: long enough for the restored agent to have asked again.
+                time.sleep(15)
                 expect(self.updater_journal().count('phase=wait-report') == attempts, 'the updater tried the failing release again right after rolling back')
                 expect(self.installed_version() == V2 and self.installed_sha() == sha, 'the previous agent was not restored')
                 expect(self.must('systemctl is-active hope-agent') == 'active', 'the previous agent is not running')
                 expect(self.dx('test -d /var/lib/hope-agent-install').returncode != 0, 'an install transaction was left behind')
                 wait_for('the restored agent to report again', lambda: self.reporting(V2), 90)
                 wait_for('the failure to be reported', lambda: 'FIRST_REPORT_TIMEOUT' in ((self.collector(self.host() or {}) or {}).get('detail') or ''), 60)
+                self.must(f'rm -f {GATE_DROP_IN} && systemctl daemon-reload')
 
         with self.cell('uninstalling with the pinned installer removes the updater') as go:
             if go:

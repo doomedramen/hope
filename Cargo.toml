@@ -26,6 +26,14 @@ lto = "thin"
 strip = true
 codegen-units = 1
 
+# Test agents for the updater gate (tests/gates/updater.py), which builds four versions in a row. The
+# same code without whole-program optimisation, so each version relinks in seconds. Never published.
+[profile.gate]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
 # Build-time proc macros are loaded by rustc, not shipped with H.O.P.E. Keep
 # their symbols intact to avoid malformed stripped Mach-O libraries on macOS.
 [profile.release.build-override]

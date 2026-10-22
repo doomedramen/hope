@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build one release agent for one target triple and record what the artifact actually requires.
 #
-#   scripts/build-agent.sh <target-triple> [--out DIR]
+#   scripts/build-agent.sh <target-triple> [--out DIR] [--profile gate]
 #
 # Supported target (the release matrix):
 #   x86_64-unknown-linux-musl   fully static; no libc or loader needed
@@ -12,15 +12,21 @@
 #
 # A target must be built on a host that can link and ideally run it (see .github/workflows). This script
 # never signs anything; signing happens only in scripts/assemble-release.sh.
+# --profile gate builds the quick, unoptimised test agents the updater gate needs; releases use the default.
 set -eu
 
 die() { echo "build-agent: $*" >&2; exit 1; }
 
 target=
 out=dist/agents
+profile=release
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) [ $# -ge 2 ] || die '--out needs a directory'; out=$2; shift ;;
+        --profile)
+            [ $# -ge 2 ] || die '--profile needs a name'
+            case "$2" in release|gate) profile=$2 ;; *) die "unknown profile $2 (release or gate)" ;; esac
+            shift ;;
         -*) die "unknown option $1" ;;
         *) [ -z "$target" ] || die 'only one target triple is accepted'; target=$1 ;;
     esac
@@ -51,8 +57,8 @@ if command -v musl-gcc >/dev/null 2>&1; then
     eval "[ -n \"\${CC_$underscore:-}\" ] || export CC_$underscore=musl-gcc"
 fi
 
-cargo build --release --locked -p hope-agent --target "$target"
-built="${CARGO_TARGET_DIR:-target}/$target/release/hope-agent"
+cargo build --profile "$profile" --locked -p hope-agent --target "$target"
+built="${CARGO_TARGET_DIR:-target}/$target/$profile/hope-agent"
 [ -s "$built" ] || die "cargo did not produce $built"
 
 # HOPE_BUILD_VERSION (set by CI for published builds) is also compiled into the binary.
