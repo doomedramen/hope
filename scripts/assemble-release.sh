@@ -9,7 +9,8 @@
 #         release platforms (written by scripts/build-agent.sh).
 # Output: OUT/<version>-<random>/ (a complete release directory) and the symlink OUT/current pointing at
 #         it. The release holds the binaries, a per-artifact .sig, manifest.json, manifest.json.sig and
-#         release-public.pem. The manifest (format 1) lists version, commit, key id, and per artifact the
+#         release-public.pem, plus install-agent.sh (the installer template from beside this script) and its
+#         .sig, which installed updaters adopt with the key they already trust. The manifest (format 1) lists version, commit, key id, and per artifact the
 #         sha256, size, minimum OS and target; its signature is what ties versions together. Point the
 #         server's HOPE_RELEASE_DIR (and a Docker bind mount) at OUT, never at a versioned directory.
 #
@@ -104,6 +105,8 @@ version_lt() {
             exit 1 }'
 }
 info_get() { sed -n "s/^$2=//p" "$1" | head -n 1; }
+# The installer template ships beside this script (scripts/ in the repository, tools/ in a server package).
+installer_template=$(cd "$(dirname "$0")" && pwd -P)/install-agent.sh
 
 [ -d "$staging" ] || die "staging directory $staging does not exist"
 for artifact in "$staging"/hope-agent-*; do
@@ -222,6 +225,13 @@ for platform in $present; do
     rows="$rows    {\"platform\":\"$os\",\"arch\":\"$arch\",\"file\":\"$file\",\"sha256\":\"$(sha256_of "$new/$file")\",\"size\":$(size_of "$new/$file"),\"min_os\":\"$(info_get "$staging/$file.info" min_os)\",\"target\":\"$(info_get "$staging/$file.info" target)\"}$comma
 "
 done
+if [ -f "$installer_template" ]; then
+    grep -qx '@@HOPE_PUBLIC_KEY@@' "$installer_template" || die "$installer_template is not an installer template"
+    cp "$installer_template" "$new/install-agent.sh"
+    openssl dgst -sha256 -sign "$key" -out "$new/install-agent.sh.sig" "$new/install-agent.sh"
+else
+    note "warning: no install-agent.sh beside this script; installed updaters keep the installer they have"
+fi
 if [ "$partial" = 1 ] || [ -n "$missing" ]; then partial_json=true; else partial_json=false; fi
 {
     printf '{\n'
@@ -259,13 +269,16 @@ while IFS= read -r row; do
 done < "$rows_file"
 expected=0
 for platform in $present; do expected=$((expected + 1)); done
+if [ -f "$new/install-agent.sh" ]; then
+    openssl dgst -sha256 -verify "$pub" -signature "$new/install-agent.sh.sig" "$new/install-agent.sh" >/dev/null || die 'install-agent.sh signature does not verify'
+fi
 [ "$listed" = "$expected" ] || die "manifest lists $listed artifacts, expected $expected"
 if [ "$partial" = 0 ]; then
     [ "$listed" = 1 ] || die 'a complete release must list exactly the Linux x86_64 artifact'
 fi
 for file in "$new"/*; do
     case "${file##*/}" in
-        hope-agent-*.sig|manifest.json|manifest.json.sig|release-public.pem) ;;
+        hope-agent-*.sig|manifest.json|manifest.json.sig|release-public.pem|install-agent.sh|install-agent.sh.sig) ;;
         hope-agent-*) grep -qF "\"file\":\"${file##*/}\"" "$new/manifest.json" || die "${file##*/} is not listed in the manifest" ;;
         *) die "unexpected file ${file##*/}" ;;
     esac

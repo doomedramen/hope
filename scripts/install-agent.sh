@@ -5,7 +5,7 @@
 # (custom CA via HOPE_CA_CERT when needed). The installer verifies every downloaded
 # binary against it before executing anything it downloaded.
 #
-# Operations: install | upgrade | uninstall
+# Operations: install | upgrade | uninstall  (refresh-updater is internal: see Updater below)
 # Environment:
 #   HOPE_SERVER, HOPE_ENROLLMENT_TOKEN, HOPE_CA_CERT, HOPE_AGENT_DIR, HOPE_RESET_CREDENTIAL
 #   HOPE_INSTALL_MODE=auto|user|system  (auto detects an existing install, else root/sudo decides)
@@ -29,6 +29,9 @@
 # creating update-request in its state directory when the server says one is wanted; a systemd path
 # unit (launchd WatchPaths on macOS) then starts hope-agent-update as root. A later release is
 # therefore checked against the key pinned here, never against one the server sends at update time.
+# A release may also carry install-agent.sh signed with that key. After an update (or a check that
+# finds the same version) the updater adopts it with the pinned key written back in, and runs it as
+# `refresh-updater` so the updater script and units come from the newer installer too.
 # An administrator can also run it by hand: sudo hope-agent-update
 #
 # Phases: preflight -> stage -> verify -> stop -> place-binary -> configure -> write-unit
@@ -423,7 +426,8 @@ RestartPreventExitStatus=1
 EOF
         mv -f "$updater_path_unit.new" "$updater_path_unit" && mv -f "$updater_service_unit.new" "$updater_service_unit" || return 1
         [ "$no_manager" = 0 ] || return 0
-        sc daemon-reload && sc enable --now hope-agent-update.path || return 1
+        # Restart rather than start: an already active path unit keeps its old watch list otherwise.
+        sc daemon-reload && sc enable hope-agent-update.path && sc restart hope-agent-update.path || return 1
     else
         xml_text() { printf '%s' "$1" | sed 's/\&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
         cat > "$updater_plist.new" <<EOF
@@ -447,6 +451,38 @@ updater_setup_failed() {
     rm -rf "$state/update-queue"
     note 'warning=UPDATER_NOT_INSTALLED The agent was kept, but automatic updates are unavailable; run the upgrade command on this host to repair them.'
 }
+# Adopt the installer template a release carries, when it is signed with the key this installer
+# embeds. The key and release ID are written into it here, so a release can never change the key.
+adopt_release_installer() {
+    { is_system && is_linux && [ "${HOPE_UPDATER:-}" = 1 ]; } || return 0
+    template=$temporary/installer.template
+    # Split so that rendering this installer (which replaces every marker) leaves these intact.
+    key_marker='@@HOPE_''PUBLIC_KEY@@'
+    # Releases published before installers were signed carry none; keep the current installer.
+    fetch --max-filesize 1048576 -o "$template" "$release_url/install-agent.sh" 2>/dev/null || return 0
+    fetch --max-filesize 16384 -o "$template.sig" "$release_url/install-agent.sh.sig" 2>/dev/null \
+        || { note 'warning=INSTALLER_NOT_REFRESHED The release installer signature could not be downloaded.'; return 0; }
+    if ! openssl dgst -sha256 -verify "$temporary/release-public.pem" -signature "$template.sig" "$template" >/dev/null 2>&1; then
+        note 'warning=INSTALLER_NOT_REFRESHED The release installer is not signed with the pinned key; the current installer was kept.'
+        return 0
+    fi
+    { [ "$(sed -n '1p' "$template")" = '#!/bin/sh' ] && [ "$(grep -cx "$key_marker" "$template")" = 1 ]; } \
+        || { note 'warning=INSTALLER_NOT_REFRESHED The release installer is not a template; the current installer was kept.'; return 0; }
+    if ! awk -v key="$temporary/release-public.pem" -v id="$release_id" -v marker="$key_marker" '
+        $0 == marker { while ((getline line < key) > 0) print line; close(key); next }
+        { gsub("@@HOPE_" "RELEASE_ID@@", id); print }' "$template" > "$temporary/install-agent.sh" \
+        || ! sh -n "$temporary/install-agent.sh"; then
+        note 'warning=INSTALLER_NOT_REFRESHED The release installer could not be prepared; the current installer was kept.'
+        return 0
+    fi
+    if sh "$temporary/install-agent.sh" refresh-updater > "$temporary/refresh.log" 2>&1; then
+        note 'notice=INSTALLER_REFRESHED'
+    else
+        refresh_code=$(sed -n 's/^hope-install: error=\([A-Z_]\{1,40\}\) .*/\1/p' "$temporary/refresh.log" | head -n 1)
+        note "warning=INSTALLER_NOT_REFRESHED The newer installer could not refresh the updater (${refresh_code:-UNKNOWN})."
+    fi
+    return 0
+}
 remove_updater() {
     updater_paths
     if [ "$no_manager" = 0 ]; then
@@ -461,7 +497,7 @@ remove_updater() {
 
 # =================================== phase: preflight =========================================
 phase preflight
-case "$operation" in install|upgrade|uninstall) ;; *) err USAGE 'Usage: install-agent.sh [install|upgrade|uninstall]'; exit 2;; esac
+case "$operation" in install|upgrade|uninstall|refresh-updater) ;; *) err USAGE 'Usage: install-agent.sh [install|upgrade|uninstall]'; exit 2;; esac
 case "$(uname -s)" in
     Linux) platform=linux ;;
     Darwin)
@@ -663,6 +699,14 @@ export HOPE_SERVER
 if [ -n "${HOPE_CA_CERT:-}" ] && { [ ! -f "$HOPE_CA_CERT" ] || [ ! -r "$HOPE_CA_CERT" ]; }; then
     fail CA_UNREADABLE 'HOPE_CA_CERT is not a readable file.'
 fi
+# Run by an older installer that verified this one: rewrite the updater from this text and stop.
+if [ "$operation" = refresh-updater ]; then
+    { is_system && is_linux && [ "${HOPE_UPDATER:-}" = 1 ]; } || fail USAGE 'refresh-updater is run only by hope-agent-update.'
+    { [ -d "$state/update-queue" ] && [ ! -L "$state/update-queue" ]; } || fail NOT_INSTALLED 'No updater is installed to refresh.'
+    install_updater || fail PATH_UNWRITABLE 'The updater files or units could not be rewritten.'
+    phase complete
+    exit 0
+fi
 command -v curl >/dev/null 2>&1 || fail DOWNLOAD_FAILED 'Install curl first.'
 command -v openssl >/dev/null 2>&1 || fail BAD_SIGNATURE 'Install OpenSSL first to verify the signed release.'
 if [ ! -f "$state/config.json" ] && [ -z "${HOPE_ENROLLMENT_TOKEN:-}" ]; then
@@ -771,6 +815,8 @@ if [ "${HOPE_ONLY_NEWER:-}" = 1 ]; then
             lock_installation
             install_updater || updater_setup_failed
         fi
+        # An older offer's installer is older too; adopt only the installer of the running release.
+        [ "$installed_version" != "$m_version" ] || adopt_release_installer
         note "result=current $installed_version"
         phase complete
         exit 0
@@ -1074,6 +1120,7 @@ if [ "$operation" = upgrade ]; then note "result=updated $m_version"; else note 
 if is_system && [ "${HOPE_UPDATER:-}" != 1 ]; then
     install_updater || updater_setup_failed
 fi
+adopt_release_installer
 if ! is_system; then
     if is_linux; then echo 'To report after logout, ask an administrator to enable lingering for your account (loginctl enable-linger).'
     else echo 'This LaunchAgent reports only while you are logged in to a graphical session.'; fi

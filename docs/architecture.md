@@ -76,7 +76,7 @@ Container CPU and memory gauges are averaged by daemon container ID. Containers 
 
 ### Releases and manifest
 
-`scripts/build-agent.sh` builds the static-musl Linux x86_64 target. `scripts/assemble-release.sh` validates and signs that artifact and a `manifest.json` (version, key id, per-artifact SHA-256, size, minimum OS) with an RSA key held outside the repository, verifies the result, and publishes it by atomically swapping a `current` symlink. `releases.rs` offers a platform only if the manifest is well formed, its `key_id` matches the public key, and the files exist with the listed size. `GET /agent/install` serves `scripts/install-agent.sh` with the public key embedded. CI definitions are in `.github/workflows` (see `validation.md`).
+`scripts/build-agent.sh` builds the static-musl Linux x86_64 target. `scripts/assemble-release.sh` validates and signs that artifact and a `manifest.json` (version, key id, per-artifact SHA-256, size, minimum OS) with an RSA key held outside the repository, verifies the result, and publishes it by atomically swapping a `current` symlink. `releases.rs` offers a platform only if the manifest is well formed, its `key_id` matches the public key, and the files exist with the listed size. It also signs the installer template it ships beside (`install-agent.sh`), which installed updaters adopt with their own pinned key written in. `GET /agent/install` serves `scripts/install-agent.sh` with the public key embedded. CI definitions are in `.github/workflows` (see `validation.md`).
 
 ## Identity reconciliation
 

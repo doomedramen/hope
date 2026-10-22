@@ -1,7 +1,7 @@
 #!/bin/sh
 # Package the server for install-hope.sh: hope-server-<arch>-linux.tar.gz holding the release
-# binary, the static console export, the licence, VERSION and tools/assemble-release.sh, plus a
-# SHA256SUMS-server line.
+# binary, the static console export, the licence, VERSION, tools/assemble-release.sh and the agent
+# installer template it signs, plus a SHA256SUMS-server line.
 #
 #   scripts/package-server.sh --out dist/server          # builds web/out and target/release first
 #   scripts/package-server.sh --out dist/server --no-build
@@ -39,6 +39,7 @@ cp LICENSE "$staging/hope-server-$version/LICENSE"
 # install-hope.sh signs the release's hope-agents.tar.gz with this, using the server's own key.
 mkdir -p "$staging/hope-server-$version/tools"
 install -m 755 scripts/assemble-release.sh "$staging/hope-server-$version/tools/assemble-release.sh"
+install -m 644 scripts/install-agent.sh "$staging/hope-server-$version/tools/install-agent.sh"
 install -m 755 scripts/activate-server.py "$staging/hope-server-$version/tools/activate-server.py"
 printf '%s\n' "$version" > "$staging/hope-server-$version/VERSION"
 name=hope-server-$architecture-linux.tar.gz

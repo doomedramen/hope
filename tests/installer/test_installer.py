@@ -1,5 +1,6 @@
 """Installer behaviour tests. Run: python3 -I -m unittest discover -s tests/installer -v"""
 import json
+import subprocess
 from pathlib import Path
 import sys
 import unittest
@@ -944,7 +945,8 @@ class Updater(Base):
         self.assertIn('RestartSec=5min', service_unit)
         self.assertIn('RestartPreventExitStatus=1', service_unit)
         self.assertIn('exit_rc=75', wrapper.read_text())
-        self.assertIn('systemctl[system] enable --now hope-agent-update.path', self.env.log())
+        self.assertIn('systemctl[system] enable hope-agent-update.path', self.env.log())
+        self.assertIn('systemctl[system] restart hope-agent-update.path', self.env.log())
 
     def test_the_updater_holds_no_secret(self):
         self.installed()
@@ -1134,7 +1136,83 @@ class Updater(Base):
             self.assertIn('--cacert ' + str(ca), line)
             self.assertIn(harness.SERVER, line)
 
-    def test_an_update_does_not_replace_the_pinned_installer(self):
+    def sign_installer(self, text, key='good'):
+        """Publish an installer template beside the release, as assemble-release.sh does."""
+        template = self.env.rel / 'install-agent.sh'
+        template.write_text(text)
+        subprocess.run(['openssl', 'dgst', '-sha256', '-sign', str(harness.keys()[key][0]), '-out', str(template) + '.sig', str(template)], check=True, capture_output=True)
+
+    def test_an_update_adopts_the_signed_release_installer_with_the_pinned_key(self):
+        self.installed()
+        pinned = self.env.root / 'var/lib/hope-agent-update/install-agent.sh'
+        self.sign_installer(harness.INSTALLER.read_text() + '# newer installer\n')
+        self.env.publish('v2')
+        request = self.request()
+        selected = request.read_text().strip()
+        before = len(self.env.log())
+        result = self.env.updater()
+        self.ok(result)
+        self.assertEqual('updated', self.result_of()['status'])
+        self.assertIn('notice=INSTALLER_REFRESHED', result.err)
+        adopted = pinned.read_text()
+        self.assertIn('# newer installer', adopted)
+        self.assertIn(harness.keys()['good'][1], adopted)
+        self.assertNotIn('@@HOPE_PUBLIC_KEY@@', adopted)
+        self.assertIn(f"release_id='{selected}'", adopted)
+        self.assertIn('systemctl[system] restart hope-agent-update.path', self.env.log()[before:])
+        # The adopted installer still drives the next update.
+        self.env.publish('v3')
+        self.ok(self.env.updater())
+        self.assertEqual('v3', self.version(self.env.paths('system')['binary']))
+
+    def test_a_current_agent_still_adopts_the_installer_of_its_own_release(self):
+        self.installed()
+        pinned = self.env.root / 'var/lib/hope-agent-update/install-agent.sh'
+        self.sign_installer(harness.INSTALLER.read_text() + '# newer installer\n')
+        self.ok(self.env.updater())
+        self.assertEqual('current', self.result_of()['status'])
+        self.assertIn('# newer installer', pinned.read_text())
+
+    def test_an_older_offer_does_not_bring_its_installer(self):
+        self.installed()
+        pinned = self.env.root / 'var/lib/hope-agent-update/install-agent.sh'
+        before = pinned.read_text()
+        self.sign_installer(harness.INSTALLER.read_text() + '# older installer\n')
+        self.env.publish('v0')
+        self.ok(self.env.updater())
+        self.assertEqual(before, pinned.read_text())
+
+    def test_a_release_installer_signed_by_another_key_is_not_adopted(self):
+        self.installed()
+        pinned = self.env.root / 'var/lib/hope-agent-update/install-agent.sh'
+        before = pinned.read_text()
+        self.sign_installer(harness.INSTALLER.read_text() + '# foreign installer\n', key='other')
+        self.env.publish('v2')
+        result = self.env.updater()
+        self.ok(result)
+        self.assertEqual('updated', self.result_of()['status'])
+        self.assertIn('warning=INSTALLER_NOT_REFRESHED', result.err)
+        self.assertEqual(before, pinned.read_text())
+
+    def test_a_release_installer_cannot_bring_its_own_key(self):
+        self.installed()
+        pinned = self.env.root / 'var/lib/hope-agent-update/install-agent.sh'
+        before = pinned.read_text()
+        foreign = harness.INSTALLER.read_text().replace('@@HOPE_PUBLIC_KEY@@', harness.keys()['other'][1])
+        self.sign_installer(foreign)
+        self.env.publish('v2')
+        result = self.env.updater()
+        self.ok(result)
+        self.assertIn('warning=INSTALLER_NOT_REFRESHED', result.err)
+        self.assertEqual(before, pinned.read_text())
+        self.assertNotIn(harness.keys()['other'][1], pinned.read_text())
+
+    def test_refresh_updater_is_only_for_the_updater(self):
+        self.installed()
+        result = self.env.run('refresh-updater', token=None)
+        self.failed(result, 'USAGE')
+
+    def test_an_update_without_a_release_installer_keeps_the_pinned_installer(self):
         self.installed()
         pinned = self.env.root / 'var/lib/hope-agent-update/install-agent.sh'
         before = pinned.read_text()
@@ -1224,7 +1302,7 @@ class Updater(Base):
         self.env.publish('v2')
         before = self.env.log()
         self.ok(self.env.updater())
-        self.assertNotIn('enable --now hope-agent-update', self.env.log()[len(before):])
+        self.assertNotIn('hope-agent-update.path', self.env.log()[len(before):])
 
     def test_uninstall_removes_the_updater(self):
         paths = self.installed()

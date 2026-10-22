@@ -76,6 +76,27 @@ class Assemble(unittest.TestCase):
         self.assertEqual('Test OS 1.0', manifest['artifacts'][0]['min_os'])
         self.assertEqual([p.name for p in self.out.iterdir() if p.name.startswith('.')], [])
 
+    def test_the_installer_template_beside_the_script_is_shipped_and_signed(self):
+        self.stage_all()
+        done = self.run_script()
+        self.assertEqual(0, done.returncode, done.stderr)
+        current = self.out / 'current'
+        shipped = current / 'install-agent.sh'
+        self.assertEqual((REPO / 'scripts/install-agent.sh').read_bytes(), shipped.read_bytes())
+        subprocess.run(['openssl', 'dgst', '-sha256', '-verify', str(current / 'release-public.pem'), '-signature', str(shipped) + '.sig', str(shipped)], check=True, capture_output=True)
+
+    def test_a_copy_without_an_installer_template_still_publishes(self):
+        tools = self.base / 'tools'
+        tools.mkdir()
+        shutil.copyfile(SCRIPT, tools / 'assemble-release.sh')
+        self.stage_all()
+        env = dict(os.environ, HOPE_SIGNING_KEY=str(self.keys / 'a.pem'))
+        done = subprocess.run(['sh', str(tools / 'assemble-release.sh'), '--staging', str(self.stage), '--version', '1.0.0', '--out', str(self.out)],
+                              env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertIn('installed updaters keep the installer they have', done.stdout)
+        self.assertFalse((self.out / 'current' / 'install-agent.sh').exists())
+
     def test_missing_supported_target_is_refused(self):
         refused = self.run_script()
         self.assertNotEqual(0, refused.returncode)

@@ -125,6 +125,8 @@ pub async fn serve_pinned(
             | "release-public.pem"
             | "hope-agent-linux-x86_64"
             | "hope-agent-linux-x86_64.sig"
+            | "install-agent.sh"
+            | "install-agent.sh.sig"
     ) {
         return StatusCode::NOT_FOUND.into_response();
     }

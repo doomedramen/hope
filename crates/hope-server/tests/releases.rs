@@ -141,6 +141,8 @@ async fn pinned_downloads_stay_on_one_release_through_publish_and_key_rotation()
         "hope-agent-linux-x86_64",
         "hope-agent-linux-x86_64.sig",
         "release-public.pem",
+        "install-agent.sh",
+        "install-agent.sh.sig",
     ];
     for (id, label) in [(first, "first"), (second, "second")] {
         std::fs::create_dir(root.path().join(id)).unwrap();
