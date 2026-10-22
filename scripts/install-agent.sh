@@ -284,22 +284,19 @@ install_updater() {
     mkdir -p "$state/update-queue" && chmod 700 "$state/update-queue" \
         && chown "$service_user:$service_group" "$state/update-queue" || return 1
     [ -f "$0" ] || { note 'warning=UPDATER_NOT_INSTALLED The installer was not run from a file, so it cannot be kept for updates.'; return 1; }
-    pinned_ca=
-    if [ -n "${HOPE_CA_CERT:-}" ]; then
-        case "$HOPE_CA_CERT" in
-            /*) pinned_ca=$HOPE_CA_CERT;;
-            *) pinned_ca=$(cd "$(dirname "$HOPE_CA_CERT")" 2>/dev/null && pwd)/$(basename "$HOPE_CA_CERT") || return 1;;
-        esac
-    fi
     mkdir_public "$(dirname "$updater_bin")" && mkdir_public "$updater_dir" || return 1
     # The installer text carries the verification key this host now trusts. It is replaced only by
     # an administrator running a full installation again, never by an update.
     cp "$0" "$updater_dir/install-agent.sh.new" && chmod 755 "$updater_dir/install-agent.sh.new" \
         && mv -f "$updater_dir/install-agent.sh.new" "$updater_dir/install-agent.sh" || return 1
     printf '%s\n' "$HOPE_SERVER" > "$updater_dir/server.new" && mv -f "$updater_dir/server.new" "$updater_dir/server" || return 1
-    if [ -n "$pinned_ca" ]; then
-        printf '%s\n' "$pinned_ca" > "$updater_dir/ca.new" && mv -f "$updater_dir/ca.new" "$updater_dir/ca" || return 1
-    else rm -f "$updater_dir/ca"; fi
+    # Keep the CA itself, root-owned: the file it was installed from may move, be replaced, or be
+    # writable by someone other than root. `ca` names the copy, as it named the original before.
+    if [ -n "${HOPE_CA_CERT:-}" ]; then
+        cp "$HOPE_CA_CERT" "$updater_dir/ca.pem.new" && chmod 644 "$updater_dir/ca.pem.new" \
+            && mv -f "$updater_dir/ca.pem.new" "$updater_dir/ca.pem" || return 1
+        printf '%s\n' "$updater_dir/ca.pem" > "$updater_dir/ca.new" && mv -f "$updater_dir/ca.new" "$updater_dir/ca" || return 1
+    else rm -f "$updater_dir/ca" "$updater_dir/ca.pem"; fi
     {
         printf '#!/bin/sh\n# H.O.P.E agent updater, written by install-agent.sh and owned by root.\n'
         printf "dir='%s'\nstate='%s'\nroot='%s'\nplatform='%s'\n" "$updater_dir" "$state" "$root" "$platform"

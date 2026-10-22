@@ -1171,15 +1171,27 @@ class Updater(Base):
         ca = self.env.base / 'ca.pem'
         ca.write_text('CA')
         self.ok(self.env.run(HOPE_CA_CERT=ca))
-        self.assertEqual(str(ca), (self.env.root / 'var/lib/hope-agent-update/ca').read_text().strip())
+        pinned = self.env.root / 'var/lib/hope-agent-update/ca.pem'
+        self.assertEqual(str(pinned), (self.env.root / 'var/lib/hope-agent-update/ca').read_text().strip())
+        self.assertEqual('CA', pinned.read_text())
+        # The CA the host was installed with is kept even if the original file goes away.
+        ca.unlink()
         self.env.publish('v2')
         before = len(self.env.log())
         self.ok(self.env.updater())
         curls = [line for line in self.env.log()[before:].splitlines() if line.startswith('curl ')]
         self.assertTrue(curls)
         for line in curls:
-            self.assertIn('--cacert ' + str(ca), line)
+            self.assertIn('--cacert ' + str(pinned), line)
             self.assertIn(harness.SERVER, line)
+
+    def test_an_installation_without_a_ca_forgets_a_pinned_one(self):
+        ca = self.env.base / 'ca.pem'
+        ca.write_text('CA')
+        self.ok(self.env.run(HOPE_CA_CERT=ca))
+        self.ok(self.env.run())
+        for name in ('ca', 'ca.pem'):
+            self.assertFalse((self.env.root / 'var/lib/hope-agent-update' / name).exists(), name)
 
     def sign_installer(self, text, key='good'):
         """Publish an installer template beside the release, as assemble-release.sh does."""
