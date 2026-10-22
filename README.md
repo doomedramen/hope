@@ -70,6 +70,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/ct
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/doomedramen/hope/main/scripts/install-hope.sh)"
 ```
 
+The container serves HTTPS on its own IP through a bundled Caddy. To put it behind a proxy you already run (NPMplus, Nginx Proxy Manager), see [Proxmox LXC behind an existing proxy](docs/operations.md#proxmox-lxc-behind-npmplus-or-another-existing-proxy).
+
 The Proxmox pair (`ct/hope.sh`, `install/hope-install.sh`, `json/hope.json`) follows the community-scripts work instructions to the letter so it can be submitted to DevScripts unchanged; the host script uses the latest GitHub release when one is published and otherwise builds from source. Details, environment variables and what has and has not been verified: [docs/operations.md](docs/operations.md#one-command-installer).
 
 ## Quick start (Docker, Linux host networking)

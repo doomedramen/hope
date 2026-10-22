@@ -124,6 +124,31 @@ Proxy requirements: forward `Host` and `Origin` unchanged, pass `X-Forwarded-For
 
 A minimal Caddy site, `hope.example.com { reverse_proxy 127.0.0.1:8080 }`, is the intended shape. Caddy 2.10.2 with exactly that site shape (TLS from a private CA, no flush or header tuning) was tested on 2026-10-15: server-sent events arrive within 0.1 s, the `Secure` cookie, HSTS and `no-store` pass through, a foreign `Origin` is refused, and with `HOPE_TRUSTED_PROXIES` set to the proxy's address the rate-limit key is the real client (a spoofed `X-Forwarded-For` is overwritten by Caddy and ignored); without it all clients share one key. **nginx and Traefik have not been tested.** See [validation.md](validation.md#release-gate-fixture--2026-10-15).
 
+### Proxmox LXC behind NPMplus or another existing proxy
+
+The Proxmox container ([One-command installer](#one-command-installer)) runs its own Caddy with `tls internal` on the container IP. When a proxy elsewhere on the network, such as NPMplus or Nginx Proxy Manager, should own the name and certificate instead, replace Caddy rather than chaining two proxies. This setup follows the proxy requirements above but has not been tested; nginx, which NPMplus is built on, is untested in general.
+
+1. Create the container as usual on the Proxmox host. Attach it to the bridge of the LAN you want discovered, and note its IP address.
+2. Inside the container (`pct enter <id>`), stop Caddy: `systemctl disable --now caddy`.
+3. Edit `/etc/hope/hope.env`:
+   - `HOPE_SERVER_URL=https://hope.example.com`: the exact origin configured in the proxy. Any other origin fails the origin check.
+   - `HOPE_BIND=0.0.0.0:8080`, so the proxy can reach the server. A non-loopback bind trusts no proxy automatically.
+   - `HOPE_TRUSTED_PROXIES=<proxy IP>`, the proxy's address as the container sees it. Without it, every client shares the proxy's rate-limit key.
+   - `HOPE_AGENT_CA`: delete the line if the proxy serves a publicly trusted certificate (Let's Encrypt). Otherwise, point it at the CA that issued the proxy's certificate. The default `/etc/hope/ca.crt` is Caddy's internal root, which no longer applies, and generated agent commands would expect it on every agent host.
+4. `systemctl restart hope`, then `curl -s http://127.0.0.1:8080/healthz`.
+5. In the proxy, add a host for `hope.example.com` that forwards over `http` to the container IP on port `8080`, with SSL forced. Add this to the advanced/custom nginx configuration so the event stream is neither buffered nor timed out:
+
+   ```nginx
+   proxy_buffering off;
+   proxy_cache off;
+   proxy_read_timeout 1h;
+   ```
+
+   Leave the server's own response headers alone ([Headers](#response-headers)). In particular, do not add a replacement Content-Security-Policy.
+6. Open `https://hope.example.com` and finish [First-run setup](#first-run-setup) with `HOPE_SETUP_TOKEN` from `/etc/hope/hope.env`.
+
+The in-container `update` command keeps `/etc/hope/hope.env` and never re-enables Caddy, so these settings survive updates. If the console stops updating live, the event stream is being buffered: check step 5. The console falls back to polling every 15 s.
+
 ## First-run setup
 
 While no administrator exists, every start prints `H.O.P.E first-run setup token: <token>` to standard error (`docker compose logs hope`). A new random token is generated on each start unless `HOPE_SETUP_TOKEN` is set; only its SHA-256 is stored. The console asks for this token plus a password of 8 to 256 characters (hashed with Argon2). Failed attempts are rate limited per client. Setup can run only once.
