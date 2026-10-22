@@ -1255,7 +1255,8 @@ class Updater(Base):
         self.assertIn('flock -n 9', wrapper.read_text())
         self.assertNotIn('phase=stop', result.err)
         unit = (self.env.root / 'etc/systemd/system/hope-agent-update.path').read_text()
-        self.assertIn(f'PathExists={self.env.txn()}', unit)
+        self.assertIn(f"PathExists={self.env.root / 'var/lib/hope-agent-update/recover'}", unit)
+        self.assertNotIn(f'PathExists={self.env.txn()}', unit)
 
     def test_orphaned_kernel_lock_file_does_not_prevent_recovery(self):
         self.installed()
@@ -1284,13 +1285,39 @@ class Updater(Base):
         interrupted = self.env.updater()
         self.assertNotEqual(0, interrupted.code)
         self.assertTrue(self.env.txn().exists())
+        marker = self.env.root / 'var/lib/hope-agent-update/recover'
+        self.assertTrue(marker.exists())
         self.assertFalse((self.env.base / 'service/system.active').exists())
         # The transaction watcher invokes the updater; the agent is stopped and cannot queue work.
         recovered = self.env.updater()
         self.ok(recovered)
         self.assertFalse(self.env.txn().exists())
+        self.assertFalse(marker.exists())
         self.assertTrue((self.env.base / 'service/system.active').exists())
         self.assertEqual('updated', self.result_of()['status'])
+
+    def test_a_backup_that_cannot_be_restored_does_not_restart_the_updater(self):
+        self.installed()
+        self.env.publish('v2')
+        self.env.fault('enable-fail')
+        self.env.set('fault/delete-at-activate', str(self.env.txn() / 'binary.prev'))
+        result = self.env.updater()
+        self.assertIn('ROLLBACK_INCOMPLETE', result.errors)
+        self.assertTrue(self.env.txn().exists())
+        # The kept backup must not keep the path unit firing. One more run may try again, no more.
+        marker = self.env.root / 'var/lib/hope-agent-update/recover'
+        if marker.exists():
+            retry = self.env.updater()
+            self.assertIn('ROLLBACK_INCOMPLETE', retry.errors)
+        self.assertTrue(self.env.txn().exists())
+        self.assertFalse(marker.exists())
+
+    def test_a_successful_installation_leaves_no_recovery_marker(self):
+        self.installed()
+        self.assertFalse((self.env.root / 'var/lib/hope-agent-update/recover').exists())
+        self.env.publish('v2')
+        self.ok(self.env.updater())
+        self.assertFalse((self.env.root / 'var/lib/hope-agent-update/recover').exists())
 
     def test_a_full_installation_again_refreshes_the_pinned_key(self):
         self.installed()

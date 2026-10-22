@@ -119,6 +119,12 @@ proxmox_paths() {
     proxmox_service=$root/etc/systemd/system/hope-agent-proxmox-collect.service
     proxmox_timer=$root/etc/systemd/system/hope-agent-proxmox-collect.timer
 }
+# The updater's path unit watches this root-owned marker so an interrupted transaction is recovered
+# without an agent request. The updater deletes it before each run: watching the transaction
+# itself would restart the updater for as long as an unrecoverable backup is kept.
+recovery_marker() { updater_paths; printf '%s\n' "$updater_dir/recover"; }
+mark_recovery() { if is_system && is_linux && [ -d "$(dirname "$(recovery_marker)")" ]; then : > "$(recovery_marker)" || true; fi; }
+clear_recovery() { if is_system && is_linux; then rm -f "$(recovery_marker)"; fi; }
 stop_proxmox_collector() {
     if is_system && is_linux; then
         systemctl stop hope-agent-proxmox-collect.timer hope-agent-proxmox-collect.service >/dev/null 2>&1 || true
@@ -244,7 +250,7 @@ rollback() {
     if [ "$(jget was_active)" = 1 ] && [ "$rb_ok" = 1 ]; then
         svc_start || { note 'warning=the previous service could not be restarted'; rb_ok=0; }
     fi
-    if [ "$rb_ok" = 1 ]; then rm -rf "$txn"
+    if [ "$rb_ok" = 1 ]; then rm -rf "$txn"; clear_recovery
     else err ROLLBACK_INCOMPLETE "Some files could not be restored; the backup was kept in $txn for the next run."; fi
     return 0
 }
@@ -311,6 +317,8 @@ lock=$dir/lock
 if [ "$platform" = linux ]; then
     exec 9>"$dir/update.lock"
     flock -n 9 || { echo 'hope-agent-update: another update is already running' >&2; exit 75; }
+    # Consumed once per run, so a transaction this run cannot restore does not start it again.
+    rm -f "$dir/recover"
     if [ -d "$lock" ]; then
         find "$lock" -maxdepth 0 -mmin +30 -exec rm -rf {} + 2>/dev/null || true
         [ ! -d "$lock" ] || { echo 'hope-agent-update: another update is already running' >&2; exit 75; }
@@ -412,7 +420,7 @@ UPDATER_SCRIPT_END
 Description=H.O.P.E agent update requests
 [Path]
 PathExists=$state/update-queue/request
-PathExists=$txn
+PathExists=$updater_dir/recover
 Unit=hope-agent-update.service
 [Install]
 WantedBy=multi-user.target
@@ -653,7 +661,7 @@ if [ -d "$txn" ]; then
         rollback
         [ "$rb_ok" = 1 ] || fail ROLLBACK_INCOMPLETE 'An interrupted installation could not be restored automatically.'
         note 'notice=An interrupted earlier run was rolled back; continuing.'
-    else rm -rf "$txn"; fi
+    else rm -rf "$txn"; clear_recovery; fi
 fi
 rm -rf "$txn.tmp"
 
@@ -1068,6 +1076,7 @@ fi
     echo step=begin
 } > "$txn.tmp/journal"
 txn_active=1
+mark_recovery
 mv "$txn.tmp" "$txn"
 
 phase stop
@@ -1121,6 +1130,7 @@ done
 # Success: discard the previous binary/unit/config backup.
 txn_active=0
 rm -rf "$txn"
+clear_recovery
 phase complete
 if [ "$operation" = upgrade ]; then note "result=updated $m_version"; else note "result=installed $m_version"; fi
 if is_system && [ "${HOPE_UPDATER:-}" != 1 ]; then
