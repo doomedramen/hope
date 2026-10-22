@@ -67,7 +67,13 @@ class Linux(Base):
         self.assertIn('TimeoutStartSec=45s', unit)
         self.assertIn('RuntimeDirectory=hope-agent', unit)
         self.assertEqual((self.env.root / 'etc/hope-agent').stat().st_mode & 0o777, 0o750)
-        self.assertIn('OnUnitActiveSec=30s', timer.read_text())
+        # A timer started long after boot (any later installation) must still fire: it counts from
+        # its own start and from the end of each run, never only from boot or a run's start.
+        schedule = timer.read_text()
+        self.assertIn('OnActiveSec=30s', schedule)
+        self.assertIn('OnUnitInactiveSec=30s', schedule)
+        self.assertNotIn('OnBootSec', schedule)
+        self.assertNotIn('OnUnitActiveSec', schedule)
         self.assertIn('systemctl[system] enable --now hope-agent-proxmox-collect.timer', self.env.log())
 
     def test_root_install(self):

@@ -1016,10 +1016,12 @@ EOF
 [Unit]
 Description=Refresh H.O.P.E Proxmox inventory
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=30s
+# Counted from the timer's own start (boot or installation) and from the end of each run. Counting
+# from boot and from the last run's start instead left nothing to count from when the timer started
+# long after boot with no run recorded since, so it never fired.
+OnActiveSec=30s
+OnUnitInactiveSec=30s
 AccuracySec=2s
-Persistent=true
 Unit=hope-agent-proxmox-collect.service
 [Install]
 WantedBy=timers.target
