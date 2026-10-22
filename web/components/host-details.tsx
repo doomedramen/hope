@@ -133,17 +133,24 @@ export function HostDetails({
       .map((name) => name.trim().toLocaleLowerCase()),
   );
   const proxmoxGuests = hosts
-    .filter(
-      (item) =>
-        item.parent_id === host.id &&
+    .filter((item) => {
+      const reportedRunsOn =
+        item.source_device_id !== null &&
+        item.relationships.some(
+          (relationship) =>
+            relationship.kind === "runs_on" &&
+            relationship.from_device_id === item.source_device_id &&
+            relationship.to_device_id === host.id,
+        );
+      return (
+        (item.parent_id === host.id || reportedRunsOn) &&
         item.lifecycle !== "archived" &&
         (item.source?.kind === "proxmox_vm" ||
           item.source?.kind === "proxmox_lxc") &&
         (!item.child?.node ||
-          localProxmoxNodeNames.has(
-            item.child.node.trim().toLocaleLowerCase(),
-          )),
-    )
+          localProxmoxNodeNames.has(item.child.node.trim().toLocaleLowerCase()))
+      );
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
   const hasProxmoxGuests = proxmoxGuests.length > 0;
   const isProxmoxHost =
