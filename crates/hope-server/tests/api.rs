@@ -273,8 +273,11 @@ async fn uninstall_instructions_require_admin_and_work_without_published_release
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["custom_ca_required"], ca.is_some());
         let command = body["command"].as_str().unwrap();
-        assert!(command.contains("/agent/uninstall"));
-        assert!(command.contains("sh \"$installer\" uninstall"));
+        assert!(
+            command.starts_with("curl -fsS")
+                && command.contains("http://localhost:8080/install | sh -s -- uninstall"),
+            "{command}"
+        );
         assert!(!command.contains("HOPE_ENROLLMENT_TOKEN"));
         assert!(!command.contains("HOPE_PURGE_IDENTITY"));
         if let Some(ca) = ca {
@@ -4419,17 +4422,69 @@ async fn the_upgrade_command_needs_no_token_and_only_upgrades() {
     let command = bootstrap["agent_upgrade_command"]
         .as_str()
         .expect("command");
+    assert_eq!(
+        command,
+        "curl -fsS http://localhost:8080/install | sh -s -- upgrade"
+    );
+}
+
+#[tokio::test]
+async fn install_commands_are_short_and_the_starter_knows_the_server_and_ca() {
+    let absent = tempfile::tempdir().unwrap();
+    let ca = "/etc/hope/owner's CA.pem";
+    let (_dir, _state, app, cookie) =
+        setup_with_ca(absent.path().to_str().unwrap().into(), Some(ca.into())).await;
+    let (status, body) = request(
+        &app,
+        "POST",
+        "/api/v1/enrollment-tokens",
+        json!({}),
+        Some(("cookie", &cookie)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let token = body["token"].as_str().expect("token");
+    assert_eq!(
+        body["command"],
+        format!(
+            "curl -fsS --cacert {} http://localhost:8080/install | sh -s -- {token}",
+            agents::shell_quote(ca)
+        )
+    );
+
+    // The starter is public (it is fetched before any login exists) and carries no secret.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/install")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let script = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes()
+            .to_vec(),
+    )
+    .expect("text");
     assert!(
-        command.contains("http://localhost:8080/agent/install")
-            || command.contains("'http://localhost:8080'/agent/install"),
-        "{command}"
+        script.contains("server='http://localhost:8080'\n"),
+        "{script}"
     );
     assert!(
-        command.contains("HOPE_ONLY_NEWER=1") && command.trim_end().ends_with("upgrade )"),
-        "{command}"
+        script.contains("ca='/etc/hope/owner'\"'\"'s CA.pem'\n"),
+        "{script}"
     );
-    assert!(!command.contains("HOPE_ENROLLMENT_TOKEN"), "{command}");
-    assert!(command.contains("--proto '=https'"), "{command}");
+    assert!(!script.contains("@@"));
+    assert!(!script.contains(token));
 }
 
 #[tokio::test]

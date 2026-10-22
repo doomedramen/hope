@@ -115,6 +115,7 @@ pub fn router(state: State, web_dir: &str) -> Router {
             }),
         )
         .route("/readyz", get(health::readiness))
+        .route("/install", get(releases::starter))
         .route("/agent/install", get(releases::installer))
         .route("/agent/uninstall", get(releases::uninstaller))
         .nest_service(

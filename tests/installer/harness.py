@@ -260,6 +260,15 @@ elif name == 'curl':
     prefix = 'https://hope.test:8443/agent/releases/'
     if flag('curl-unreachable'):
         sys.exit(6)
+    # The installer scripts themselves, as the server serves them (fetched by the /install starter).
+    script = {'https://hope.test:8443/agent/install': 'install', 'https://hope.test:8443/agent/uninstall': 'uninstall'}.get(url)
+    if script:
+        path = os.path.join(R, 'served', script)
+        if not os.path.isfile(path):
+            sys.exit(22)
+        import shutil
+        shutil.copyfile(path, output)
+        sys.exit(0)
     if not url.startswith(prefix):
         sys.exit(22)
     relative = url[len(prefix):]

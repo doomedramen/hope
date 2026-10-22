@@ -292,6 +292,14 @@ Agents are installed from the console (a command that fetches the server-embedde
 Manual command (copy from the console; the token lasts 15 minutes, is single use and is stored only hashed):
 
 ```sh
+curl -fsS https://hope.example.com/install | sh -s -- <token>
+```
+
+The same starter takes `upgrade` or `uninstall` instead of a token, which is what the console's upgrade and uninstall commands use. With a private CA the first `curl` gets `--cacert /etc/hope/ca.crt` (the console adds it). Other installer settings pass through the environment, for example `... | HOPE_INSTALL_MODE=user sh -s -- <token>`, and a credential reset is `... | HOPE_RESET_CREDENTIAL=1 sh -s -- <token>`.
+
+`GET /install` serves `scripts/install-starter.sh` with this server's `HOPE_SERVER_URL` and `HOPE_AGENT_CA` written in. It needs no published release and holds no secret. It downloads `/agent/install` (or `/agent/uninstall`) over HTTPS only (`--proto '=https' --proto-redir '=https'`) to a private temporary file and runs it from there, because the installer keeps a copy of itself for the updater and re-runs itself under sudo, which a script read from a pipe cannot do; the file is removed afterwards. All of the starter is inside one function called on its last line, so a download cut off part-way runs nothing. The installer itself, and every check it makes, is unchanged. The long self-contained form still works and is what SSH jobs send:
+
+```sh
 ( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f "$installer"' EXIT
   curl --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https' \
     https://hope.example.com/agent/install -o "$installer" \

@@ -23,6 +23,29 @@ pub async fn uninstaller() -> impl IntoResponse {
     )
 }
 
+/// The short starter behind `curl -fsS <server>/install | sh -s -- <token>`. It needs no published
+/// release: it only fetches `/agent/install` (or `/agent/uninstall`) and runs it from a file.
+pub async fn starter(Extract(state): Extract<State>) -> impl IntoResponse {
+    let ca = state
+        .0
+        .enrollment_ca
+        .as_deref()
+        .map(crate::agents::shell_quote)
+        .unwrap_or_else(|| "''".into());
+    (
+        [
+            ("content-type", "text/x-shellscript"),
+            ("cache-control", "no-store"),
+        ],
+        include_str!("../../../scripts/install-starter.sh")
+            .replace(
+                "@@HOPE_SERVER@@",
+                &crate::agents::shell_quote(&state.0.server_url),
+            )
+            .replace("@@HOPE_AGENT_CA@@", &ca),
+    )
+}
+
 pub async fn installer(Extract(state): Extract<State>) -> ApiResult<impl IntoResponse> {
     let (id, directory) = selected_release(&state.0.release_dir).await?;
     let key = tokio::fs::read_to_string(directory.join("release-public.pem"))

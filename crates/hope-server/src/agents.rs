@@ -37,11 +37,41 @@ pub async fn uninstall_instructions(
         return Err(ApiError::not_found());
     }
     Ok(Json(hope_protocol::AgentUninstallInstructions {
-        command: uninstall_command(&state),
+        command: starter_command(&state, "", "uninstall"),
         custom_ca_required: state.0.enrollment_ca.is_some(),
     }))
 }
 
+/// A word the shell reads as itself, quoted only when it has to be, so commands stay readable.
+fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._~:/%+=,@-".contains(&b))
+    {
+        value.to_string()
+    } else {
+        shell_quote(value)
+    }
+}
+
+/// The command people run: `curl -fsS <server>/install | sh -s -- <argument>`. The served starter
+/// already knows the server and custom CA; `environment` is set for the installer (`NAME=value `).
+pub fn starter_command(state: &State, environment: &str, argument: &str) -> String {
+    let curl_ca = state
+        .0
+        .enrollment_ca
+        .as_ref()
+        .map(|path| format!(" --cacert {}", shell_word(path)))
+        .unwrap_or_default();
+    let url = shell_word(&format!("{}/install", state.0.server_url));
+    format!(
+        "curl -fsS{curl_ca} {url} | {environment}sh -s -- {}",
+        shell_word(argument)
+    )
+}
+
+/// The self-contained uninstall script an SSH job sends. Console users get `starter_command`.
 pub fn uninstall_command(state: &State) -> String {
     let url = shell_quote(&format!("{}/agent/uninstall", state.0.server_url));
     let curl_ca = state
@@ -92,29 +122,10 @@ pub async fn issue_token_for_reset(
 /// identity, verifies the signed release and changes nothing unless the release is newer. Running
 /// it as a full installation also puts the updater in place, so later updates can be one click.
 pub fn upgrade_command(state: &State) -> String {
-    let server = shell_quote(&state.0.server_url);
-    let ca = state
-        .0
-        .enrollment_ca
-        .as_ref()
-        .map(|path| format!(" HOPE_CA_CERT={}", shell_quote(path)))
-        .unwrap_or_default();
-    let curl_ca = state
-        .0
-        .enrollment_ca
-        .as_ref()
-        .map(|path| format!(" --cacert {}", shell_quote(path)))
-        .unwrap_or_default();
-    format!(
-        "( umask 077; installer=$(mktemp) || exit 1; trap 'rm -f \"$installer\"' EXIT; curl --fail --silent --show-error --location --max-time 30 --proto '=https' --proto-redir '=https'{curl_ca} {server}/agent/install -o \"$installer\" && HOPE_SERVER={server}{ca} HOPE_ONLY_NEWER=1 sh \"$installer\" upgrade )"
-    )
+    starter_command(state, "", "upgrade")
 }
-pub fn install_command(state: &State, token: &str) -> String {
-    install_command_with_reset(state, token, false)
-}
-pub fn install_command_with_reset(state: &State, token: &str, reset: bool) -> String {
-    install_command_for(state, token, reset, false)
-}
+
+/// The self-contained install script an SSH job sends. Console users get `starter_command`.
 /// `persistent` adds `HOPE_REQUIRE_PERSISTENT_SERVICE=1` (SSH jobs: nobody is logged in afterwards,
 /// so a user service that stops at logout must be refused before anything is installed).
 pub fn install_command_for(state: &State, token: &str, reset: bool, persistent: bool) -> String {
@@ -153,7 +164,15 @@ pub async fn token(
 ) -> ApiResult<Json<EnrollmentTokenResponse>> {
     let token = issue_token_for_reset(&state, body.reset_agent_id.as_deref()).await?;
     Ok(Json(EnrollmentTokenResponse {
-        command: install_command_with_reset(&state, &token, body.reset_agent_id.is_some()),
+        command: starter_command(
+            &state,
+            if body.reset_agent_id.is_some() {
+                "HOPE_RESET_CREDENTIAL=1 "
+            } else {
+                ""
+            },
+            &token,
+        ),
         token,
         expires_at: now() + 900.0,
         custom_ca_required: state.0.enrollment_ca.is_some(),
