@@ -941,10 +941,10 @@ class Updater(Base):
         service_unit = (root / 'etc/systemd/system/hope-agent-update.service').read_text()
         self.assertIn('Type=oneshot', service_unit)
         self.assertIn(f'ExecStart="{wrapper}"', service_unit)
-        self.assertIn('Restart=on-failure', service_unit)
-        self.assertIn('RestartSec=5min', service_unit)
-        self.assertIn('RestartPreventExitStatus=1', service_unit)
-        self.assertIn('exit_rc=75', wrapper.read_text())
+        # systemd before 244 refuses any Restart= on a oneshot unit; the wrapper retries instead.
+        self.assertNotIn('Restart=', service_unit)
+        self.assertIn('TimeoutStartSec=3600', service_unit)
+        self.assertIn('flock -w "$retry" 9', wrapper.read_text())
         self.assertIn('systemctl[system] enable hope-agent-update.path', self.env.log())
         self.assertIn('systemctl[system] restart hope-agent-update.path', self.env.log())
 
@@ -1051,6 +1051,26 @@ class Updater(Base):
         (self.env.base / 'fault/release').write_text('')
         self.assertEqual(0, process.wait(timeout=60))
         self.assertEqual('updated', self.result_of()['status'])
+
+    def test_a_failing_download_is_retried_in_the_same_run_with_the_same_release(self):
+        paths = self.installed()
+        self.env.publish('v2')
+        request = self.request()
+        selected = request.read_text().strip()
+        self.env.fault(f'curl-fail-hope-agent-{self.env.platform}-{self.env.arch_name}')
+        result = self.env.updater(HOPE_UPDATER_RETRY_SECONDS=0)
+        self.assertNotEqual(0, result.code)
+        self.assertEqual(3, result.err.count('Downloading signed'))
+        self.assertIn('attempt 2 of 3', result.err)
+        self.assertEqual({'status': 'failed', 'code': 'DOWNLOAD_FAILED', 'release_id': selected}, {k: v for k, v in self.result_of().items() if k != 'at'})
+        self.assertEqual('v1', self.version(paths['binary']))
+
+    def test_other_failures_are_not_retried(self):
+        self.installed()
+        self.env.publish('v2', key='other', manifest_key='other')
+        result = self.env.updater(HOPE_UPDATER_RETRY_SECONDS=0)
+        self.assertNotEqual(0, result.code)
+        self.assertEqual(1, result.err.count('Downloading signed'))
 
     def test_the_request_file_is_removed_before_the_update_so_it_cannot_loop(self):
         self.installed()
@@ -1252,7 +1272,7 @@ class Updater(Base):
         result = self.env.run('upgrade', token=None, HOPE_ONLY_NEWER=1)
         self.ok(result)
         self.assertIn('result=current v1', result.err)
-        self.assertIn('flock -n 9', wrapper.read_text())
+        self.assertIn('flock -w "$retry" 9', wrapper.read_text())
         self.assertNotIn('phase=stop', result.err)
         unit = (self.env.root / 'etc/systemd/system/hope-agent-update.path').read_text()
         self.assertIn(f"PathExists={self.env.root / 'var/lib/hope-agent-update/recover'}", unit)

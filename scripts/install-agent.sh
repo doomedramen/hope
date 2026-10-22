@@ -311,12 +311,17 @@ umask 077
 PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 queue=$state/update-queue
+# Retries happen here, not through systemd: Restart= on a oneshot service needs systemd 244.
+retry=${HOPE_UPDATER_RETRY_SECONDS:-300}
+case "$retry" in ''|*[!0-9]*) retry=300;; esac
 # Linux uses a process-owned lock: SIGKILL cannot leave it held. Keep the
 # legacy directory interlock during migration, and retain requests when busy.
 lock=$dir/lock
 if [ "$platform" = linux ]; then
     exec 9>"$dir/update.lock"
-    flock -n 9 || { echo 'hope-agent-update: another update is already running' >&2; exit 75; }
+    # Wait for a busy lock instead of exiting at once: the path unit starts this again while its
+    # request or marker remains, and quick exits would use up the unit's start limit.
+    flock -w "$retry" 9 || { echo 'hope-agent-update: another update is already running' >&2; exit 75; }
     # Consumed once per run, so a transaction this run cannot restore does not start it again.
     rm -f "$dir/recover"
     if [ -d "$lock" ]; then
@@ -380,12 +385,21 @@ else
             mv -f "$out" "$state/update-result"
         } || true
     fi
-    rcfile=$(mktemp)
-    { code=0; sh "$dir/install-agent.sh" upgrade 2>&1 || code=$?; echo "$code" > "$rcfile"; } | tee "$log" >&2
-    rc=$(cat "$rcfile" 2>/dev/null || echo 1)
-    rm -f "$rcfile"
-    outcome=$(sed -En 's/^hope-install: result=(updated|current) ([A-Za-z0-9._+-]{1,64})$/\1 \2/p' "$log" | tail -n 1)
-    code=$(sed -n 's/^hope-install: error=\([A-Z_]\{1,40\}\) .*/\1/p' "$log" | head -n 1)
+    # Retry only downloads, which can fail transiently. Signature, state and installer failures need
+    # an operator or a new server request; repeating those can delay a later valid update.
+    attempt=1
+    while :; do
+        rcfile=$(mktemp)
+        { code=0; sh "$dir/install-agent.sh" upgrade 2>&1 || code=$?; echo "$code" > "$rcfile"; } | tee "$log" >&2
+        rc=$(cat "$rcfile" 2>/dev/null || echo 1)
+        rm -f "$rcfile"
+        outcome=$(sed -En 's/^hope-install: result=(updated|current) ([A-Za-z0-9._+-]{1,64})$/\1 \2/p' "$log" | tail -n 1)
+        code=$(sed -n 's/^hope-install: error=\([A-Z_]\{1,40\}\) .*/\1/p' "$log" | head -n 1)
+        { [ "$rc" -ne 0 ] && [ "$code" = DOWNLOAD_FAILED ] && [ "$attempt" -lt 3 ]; } || break
+        attempt=$((attempt + 1))
+        echo "hope-agent-update: download failed; retrying in ${retry}s (attempt $attempt of 3)" >&2
+        sleep "$retry"
+    done
 fi
 if [ "$rc" -eq 0 ] && [ -n "$outcome" ]; then
     status="status=${outcome%% *}
@@ -407,11 +421,7 @@ if [ -d "$state" ] && [ ! -L "$state" ]; then
         mv -f "$out" "$state/update-result"
     } || true
 fi
-exit_rc=$rc
-# Retry only downloads, which can fail transiently. Signature, state and installer failures need an
-# operator or a new server request; restarting those automatically can delay a later valid update.
-if [ "$rc" -ne 0 ] && [ "$code" = DOWNLOAD_FAILED ]; then exit_rc=75; fi
-exit "$exit_rc"
+exit "$rc"
 UPDATER_SCRIPT_END
     } > "$updater_bin.new" && chmod 755 "$updater_bin.new" && mv -f "$updater_bin.new" "$updater_bin" || return 1
     if is_linux; then
@@ -433,10 +443,7 @@ StartLimitBurst=12
 [Service]
 Type=oneshot
 ExecStart="$updater_bin"
-TimeoutStartSec=1800
-Restart=on-failure
-RestartSec=5min
-RestartPreventExitStatus=1
+TimeoutStartSec=3600
 EOF
         mv -f "$updater_path_unit.new" "$updater_path_unit" && mv -f "$updater_service_unit.new" "$updater_service_unit" || return 1
         [ "$no_manager" = 0 ] || return 0
