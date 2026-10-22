@@ -2998,7 +2998,14 @@ test.describe.serial("H.O.P.E console", () => {
         return {
           ...sourceGuest!,
           id: `scanned-guest-${index}`,
-          name: index === 0 ? "dns-container" : `matched-guest-${index}`,
+          name:
+            index === 0
+              ? "dns-container"
+              : index === 1
+                ? "plex"
+                : `matched-guest-${index}`,
+          // A container's network card is Proxmox's, whatever runs inside it.
+          vendor: "Proxmox Server Solutions",
           discovery_method: "arp",
           addresses: [`192.168.1.${41 + index}`],
           macs: [`02:fe:00:00:00:${(2 + index).toString(16).padStart(2, "0")}`],
@@ -3113,6 +3120,10 @@ test.describe.serial("H.O.P.E console", () => {
       name: "Host details",
     });
     await proxmoxDetails.getByRole("tab", { name: "Guests" }).click();
+    // The guest's app, not its network card's vendor, picks the icon.
+    await expect(
+      proxmoxDetails.getByAltText("plex application icon"),
+    ).toBeVisible();
     await expect(
       proxmoxDetails.getByRole("heading", { name: "Proxmox guests" }),
     ).toBeVisible();

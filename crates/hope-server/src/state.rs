@@ -634,6 +634,11 @@ fn source_networks(networks: &[Network], addresses: &[String]) -> Vec<String> {
 
 fn merge_source_host(target: &mut Host, source: Host) {
     target.retired |= source.retired;
+    // A device found by scanning is named after its address until something names it. The guest it
+    // turned out to be is named by its hypervisor, which says what it is; a discovered name stays.
+    if target.name.parse::<std::net::IpAddr>().is_ok() && !source.name.trim().is_empty() {
+        target.name = source.name.clone();
+    }
     if target.name_override.is_none() {
         target.name_override = source.name_override.clone();
     }
@@ -683,5 +688,31 @@ fn merge_source_host(target: &mut Host, source: Host) {
         }) {
             target.relationships.push(relationship);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_matched_guest_names_a_device_known_only_by_its_address() {
+        let mut scanned = Host::new("scan".into(), "192.168.1.206".into(), "arp");
+        merge_source_host(
+            &mut scanned,
+            Host::new("guest".into(), "plex".into(), "proxmox"),
+        );
+        assert_eq!(scanned.name, "plex");
+
+        let mut named = Host::new("scan".into(), "Home Assistant".into(), "mdns");
+        merge_source_host(
+            &mut named,
+            Host::new("guest".into(), "homeassistant".into(), "proxmox"),
+        );
+        assert_eq!(named.name, "Home Assistant");
+
+        let mut v6 = Host::new("scan".into(), "fd00::5".into(), "ndp");
+        merge_source_host(&mut v6, Host::new("guest".into(), " ".into(), "proxmox"));
+        assert_eq!(v6.name, "fd00::5");
     }
 }

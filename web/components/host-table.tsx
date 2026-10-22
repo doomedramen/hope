@@ -57,6 +57,16 @@ export function HostIcon({ host, size }: { host: Host; size: number }) {
       />
     );
   }
+  // A guest's network card is the hypervisor's (vendor "Proxmox Server Solutions"), which says
+  // nothing about what runs in it: its name says more, so try the app first.
+  const guest =
+    host.source?.kind === "proxmox_vm" || host.source?.kind === "proxmox_lxc";
+  const guestApp = guest ? deviceAppIcon(host) : null;
+  if (guestApp) {
+    return (
+      <HostAppIcon key={guestApp} slug={guestApp} host={host} size={size} />
+    );
+  }
   const fingerprint = deviceFingerprintId(host);
   if (fingerprint) {
     return (
