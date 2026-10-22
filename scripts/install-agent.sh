@@ -157,15 +157,25 @@ install_proxmox_collector() {
 mkdir_public() { ( umask 022; mkdir -p "$1" ); }
 state_safe() { [ ! -L "$state" ] && [ ! -L "$state/config.json" ]; }
 install_lock_held=0
+directory_lock=
 lock_installation() {
-    # Share the updater's process-owned lock before recovering or starting a
-    # manual transaction. The updater's installer child already inherits fd 9.
-    if is_system && is_linux && [ "${HOPE_UPDATER:-}" != 1 ] && [ "$install_lock_held" = 0 ]; then
+    # Share the updater's lock before recovering or starting a manual transaction. The updater's
+    # installer child already holds it (fd 9 on Linux, the lock directory on macOS).
+    if is_system && [ "${HOPE_UPDATER:-}" != 1 ] && [ "$install_lock_held" = 0 ]; then
         updater_paths
-        command -v flock >/dev/null 2>&1 || fail LOCK_UNAVAILABLE 'Install flock (util-linux) before installing a system agent.'
         mkdir_public "$updater_dir"
-        exec 8>"$updater_dir/update.lock"
-        flock -n 8 || fail INSTALL_BUSY 'Another agent installation or update is running. Retry after it finishes.'
+        if is_linux; then
+            command -v flock >/dev/null 2>&1 || fail LOCK_UNAVAILABLE 'Install flock (util-linux) before installing a system agent.'
+            exec 8>"$updater_dir/update.lock"
+            flock -n 8 || fail INSTALL_BUSY 'Another agent installation or update is running. Retry after it finishes.'
+        else
+            # No flock on macOS: the updater's directory lock, cleared after 30 minutes as it does.
+            if ! mkdir "$updater_dir/lock" 2>/dev/null; then
+                find "$updater_dir/lock" -maxdepth 0 -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+                mkdir "$updater_dir/lock" 2>/dev/null || fail INSTALL_BUSY 'Another agent installation or update is running. Retry after it finishes.'
+            fi
+            directory_lock=$updater_dir/lock
+        fi
         install_lock_held=1
     fi
 }
@@ -266,6 +276,7 @@ on_exit() {
     fi
     [ -n "$temporary" ] && rm -rf "$temporary"
     [ -n "$txn" ] && [ "$txn_active" = 0 ] && rm -rf "$txn.tmp"
+    [ -n "$directory_lock" ] && rmdir "$directory_lock" 2>/dev/null
     exit "$rc"
 }
 on_signal() { trap '' HUP INT TERM QUIT; err INTERRUPTED 'The installer was interrupted.'; exit 1; }

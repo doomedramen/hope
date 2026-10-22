@@ -164,11 +164,18 @@ fn recently_asked(dir: &Path, version: &str, now: u64) -> bool {
         && now.saturating_sub(at) < RETRY_AFTER.as_secs()
 }
 
+/// The server's and updater's rule: a version starting with a digit, of letters, digits, dots and
+/// dashes, then a dash and twelve lowercase hex digits.
 fn plain_release_id(id: &str) -> bool {
     let Some((version, nonce)) = id.rsplit_once('-') else {
         return false;
     };
-    plain_version(version)
+    !version.is_empty()
+        && version.len() <= 64
+        && version.as_bytes()[0].is_ascii_digit()
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
         && nonce.len() == 12
         && nonce
             .bytes()
@@ -369,11 +376,19 @@ mod tests {
                 .handle_pinned(dir.path(), "0.1.82", release, 10_001)
                 .await
         );
-        assert!(
-            !requests
-                .handle_pinned(dir.path(), "0.1.82", "../current", 10_001)
-                .await
-        );
+        for refused in [
+            "../current",
+            "v0.1.82-a1b2c3d4e5f6",
+            "0.1+82-a1b2c3d4e5f6",
+            "0_1-a1b2c3d4e5f6",
+        ] {
+            assert!(
+                !requests
+                    .handle_pinned(dir.path(), "0.1.82", refused, 10_001)
+                    .await,
+                "{refused}"
+            );
+        }
     }
 
     #[tokio::test]

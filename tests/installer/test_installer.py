@@ -189,6 +189,18 @@ class Linux(Base):
         self.ok(legacy_env.run('uninstall', token=None, server=None))
         self.assertFalse(paths['binary'].exists())
 
+    def test_macos_uninstall_waits_for_a_running_update(self):
+        env = self.new_env('Darwin', 'arm64')
+        paths = env.preinstall()
+        lock = env.root / 'Library/Application Support/hope-agent-update/lock'
+        lock.mkdir(parents=True)
+        self.failed(env.run('uninstall', token=None, server=None), 'INSTALL_BUSY')
+        self.assertTrue(paths['binary'].exists())
+        lock.rmdir()
+        self.ok(env.run('uninstall', token=None, server=None))
+        self.assertFalse(paths['binary'].exists())
+        self.assertFalse(lock.exists())
+
     def test_existing_identity_for_another_server_is_rejected_before_stopping(self):
         paths = self.env.preinstall(server='https://other.test')
         result = self.env.run()
