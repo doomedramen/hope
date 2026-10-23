@@ -2938,26 +2938,28 @@ test.describe.serial("H.O.P.E console", () => {
     const collectedAt = Date.now() / 1000;
     let historicalCpu = 44;
     await page.route(
-      "**/api/v1/hosts/*/source-metrics?hours=24",
+      "**/api/v1/hosts/*/source-metrics?hours=*",
       async (route) => {
-        const sourceId = decodeURIComponent(
-          new URL(route.request().url()).pathname.split("/").at(-2)!,
-        );
+        const url = new URL(route.request().url());
+        const windowSeconds = Number(url.searchParams.get("hours")) * 3600;
+        const sourceId = decodeURIComponent(url.pathname.split("/").at(-2)!);
         await route.fulfill({
           json: [
-            {
+            ...[windowSeconds / 2, windowSeconds / 4, 60].map((age, index) => ({
               source_device_id: sourceId,
-              collected_at: collectedAt - 60,
+              collected_at: collectedAt - age,
               resolution_seconds: 30,
               metrics: {
-                cpu_percent: 15,
+                cpu_percent: 15 + index,
                 memory_used_bytes: 512 * 1024 * 1024,
                 memory_total_bytes: 2 * 1024 * 1024 * 1024,
                 memory_measurement: "hypervisor_guest",
                 network_rx_bytes_per_second: 10,
                 network_tx_bytes_per_second: 5,
+                disk_read_bytes_per_second: 2048,
+                disk_write_bytes_per_second: 0,
               },
-            },
+            })),
             {
               source_device_id: "historical-source-1234",
               collected_at: collectedAt - 120,
@@ -3190,6 +3192,34 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(
       page.getByTestId("chart-Proxmox hypervisor disk I/O"),
     ).toBeVisible();
+    // Stored samples across half the window must occupy half the plot, rather
+    // than collapsing together at the left edge of an incorrectly scaled axis.
+    for (const range of ["24h", "1h", "6h", "7d"]) {
+      await page.getByRole("button", { name: range, exact: true }).click();
+      for (const title of ["CPU", "memory", "network", "disk I/O"]) {
+        const chart = page.getByTestId(`chart-Proxmox hypervisor ${title}`);
+        await expect
+          .poll(() =>
+            chart.evaluate((element) => {
+              const svg = element.querySelector("svg.recharts-surface");
+              const samples = Array.from(
+                element.querySelectorAll<SVGGraphicsElement>(
+                  "circle.history-sample",
+                ),
+              );
+              const positions = samples.map((sample) =>
+                Number(sample.getAttribute("cx")),
+              );
+              return svg && positions.length
+                ? (Math.max(...positions) - Math.min(...positions)) /
+                    svg.getBoundingClientRect().width
+                : 0;
+            }),
+          )
+          .toBeGreaterThan(0.3);
+      }
+    }
+    await page.getByRole("button", { name: "24h", exact: true }).click();
     await page.getByRole("tab", { name: "Info" }).click();
     await expect(page.locator(".reading-meter-card")).toHaveCount(0);
     await expect(
@@ -3220,20 +3250,17 @@ test.describe.serial("H.O.P.E console", () => {
     const sourceHistory = page.getByRole("region", {
       name: "Source metrics history",
     });
-    await expect(sourceHistory.getByRole("table").getByRole("row")).toHaveCount(
-      2,
-    );
+    await expect(sourceHistory.getByRole("table")).toHaveCount(0);
+    const sourceCpu = sourceHistory.getByTestId("chart-Proxmox hypervisor CPU");
     await sourceHistory.getByLabel("Historical source").click();
     await page
       .getByRole("option", { name: /^Merged source · historic/ })
       .click();
-    await expect(sourceHistory.getByRole("table")).toContainText("44.0%");
+    await expect(sourceCpu.locator(".chart-latest")).toHaveText("44%");
     historicalCpu = 55;
     await page.clock.runFor(31000);
-    await expect(sourceHistory.getByRole("table")).toContainText("55.0%");
-    await expect(sourceHistory.getByRole("table").getByRole("row")).toHaveCount(
-      2,
-    );
+    await expect(sourceCpu.locator(".chart-latest")).toHaveText("55%");
+    await expect(sourceCpu.locator("circle.history-sample")).toHaveCount(1);
     await page.getByRole("tab", { name: "Info" }).click();
     await expect(proxmoxDetails).toContainText("Runs on");
     await proxmoxDetails

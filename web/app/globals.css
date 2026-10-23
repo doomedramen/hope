@@ -2559,9 +2559,6 @@ kbd.key {
   width: min(100%, 260px);
   min-width: 0;
 }
-.source-history-table {
-  min-width: 560px;
-}
 .container-info-section h2 {
   display: flex;
   align-items: center;

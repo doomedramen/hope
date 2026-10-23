@@ -25,7 +25,7 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, bytes, percentage } from "@/lib/api";
+import { api, bytes } from "@/lib/api";
 import { appendLiveHistory, historySeries, memoryPercent } from "@/lib/history";
 import { useNow } from "@/lib/clock";
 import type { MetricPoint, Metrics, SourceMetricPoint } from "@/lib/protocol";
@@ -89,13 +89,6 @@ export function SourceMetricHistory({
     : primarySourceId && sourceIds.includes(primarySourceId)
       ? primarySourceId
       : (sourceIds[0] ?? hostId);
-  const recent =
-    points
-      ?.filter(
-        (point) => (point.source_device_id ?? hostId) === effectiveSource,
-      )
-      .slice(-20)
-      .reverse() ?? [];
   const start = now - Number(hours) * 3600;
   const selectedPoints =
     points
@@ -164,7 +157,7 @@ export function SourceMetricHistory({
         </Alert>
       ) : points == null ? (
         <Skeleton className="h-24 w-full" />
-      ) : recent.length === 0 ? (
+      ) : selectedPoints.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           No source samples in this window.
         </p>
@@ -178,8 +171,8 @@ export function SourceMetricHistory({
               data={sourceSeries((metric) => ({ cpu: metric.cpu_percent }))}
               format={percent}
               height="h-32"
-              start={start * 1000}
-              end={now * 1000}
+              start={start}
+              end={now}
               timeLabel={timeLabel}
             />
             <ChartBlock
@@ -202,8 +195,8 @@ export function SourceMetricHistory({
               }))}
               format={gib}
               height="h-32"
-              start={start * 1000}
-              end={now * 1000}
+              start={start}
+              end={now}
               timeLabel={timeLabel}
             />
             <ChartBlock
@@ -219,8 +212,8 @@ export function SourceMetricHistory({
               }))}
               format={ratePerSecond}
               height="h-32"
-              start={start * 1000}
-              end={now * 1000}
+              start={start}
+              end={now}
               timeLabel={timeLabel}
             />
             <ChartBlock
@@ -236,8 +229,8 @@ export function SourceMetricHistory({
               }))}
               format={ratePerSecond}
               height="h-32"
-              start={start * 1000}
-              end={now * 1000}
+              start={start}
+              end={now}
               timeLabel={timeLabel}
             />
           </div>
@@ -245,82 +238,6 @@ export function SourceMetricHistory({
             Values come from {sourceLabel}; unavailable readings remain gaps.
             CPU and memory are not inferred from network or disk activity.
           </p>
-          <div className="overflow-x-auto">
-            <table className="source-history-table w-full text-left text-sm">
-              <thead>
-                <tr>
-                  {sourceIds.length > 1 && <th>Source</th>}
-                  <th>Observed</th>
-                  <th>CPU · {sourceLabel}</th>
-                  <th>Memory · {sourceLabel}</th>
-                  <th>Network RX</th>
-                  <th>Network TX</th>
-                  <th>Disk I/O</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recent.map((point) => {
-                  const metric = point.metrics;
-                  const memoryLabel =
-                    metric.memory_measurement === "docker_working_set"
-                      ? "Working set"
-                      : metric.memory_measurement === "hypervisor_guest"
-                        ? "Hypervisor"
-                        : metric.memory_measurement === "guest_operating_system"
-                          ? "Guest OS"
-                          : "Source";
-                  return (
-                    <tr
-                      key={`${point.source_device_id ?? hostId}:${point.collected_at}:${point.resolution_seconds}`}
-                    >
-                      {sourceIds.length > 1 && (
-                        <td>
-                          {point.source_device_id === primarySourceId
-                            ? "Current source"
-                            : `Historical source ${point.source_device_id?.slice(0, 8) ?? hostId.slice(0, 8)}`}
-                        </td>
-                      )}
-                      <td>
-                        <time
-                          dateTime={new Date(
-                            point.collected_at * 1000,
-                          ).toISOString()}
-                        >
-                          {new Date(point.collected_at * 1000).toLocaleString()}
-                        </time>
-                      </td>
-                      <td>{percentage(metric.cpu_percent)}</td>
-                      <td>
-                        {metric.memory_used_bytes == null
-                          ? "—"
-                          : `${bytes(metric.memory_used_bytes)}${metric.memory_total_bytes == null ? "" : ` / ${bytes(metric.memory_total_bytes)}`} · ${memoryLabel}`}
-                      </td>
-                      <td>
-                        {metric.network_rx_bytes_per_second == null
-                          ? "—"
-                          : `${bytes(metric.network_rx_bytes_per_second)}/s`}
-                      </td>
-                      <td>
-                        {metric.network_tx_bytes_per_second == null
-                          ? "—"
-                          : `${bytes(metric.network_tx_bytes_per_second)}/s`}
-                      </td>
-                      <td>
-                        Read{" "}
-                        {metric.disk_read_bytes_per_second == null
-                          ? "—"
-                          : `${bytes(metric.disk_read_bytes_per_second)}/s`}{" "}
-                        · Write{" "}
-                        {metric.disk_write_bytes_per_second == null
-                          ? "—"
-                          : `${bytes(metric.disk_write_bytes_per_second)}/s`}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
         </>
       )}
     </section>
