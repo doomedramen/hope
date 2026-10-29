@@ -3353,8 +3353,8 @@ test.describe.serial("H.O.P.E console", () => {
       page.locator(`[data-host-id="canonical-${guest.id}"]`),
     ).toHaveAttribute("data-tone", "warning");
     await expect(
-      page.locator(`[data-host-id="canonical-${guest.id}"] .node-status`),
-    ).toHaveText("Memory at 95%");
+      page.locator(`[data-host-id="canonical-${guest.id}"] .status-dot`),
+    ).toHaveAttribute("aria-label", "Memory at 95%");
     await expect(childNode).toHaveCount(0);
     await page.getByRole("button", { name: "Dark", exact: true }).click();
     await page.screenshot({
@@ -3801,7 +3801,10 @@ test.describe.serial("H.O.P.E console", () => {
       .locator(".map-device")
       .filter({ hasText: "map-health-live" });
     await expect(node).toHaveAttribute("data-tone", "critical");
-    await expect(node).toContainText("CPU at 98%");
+    await expect(node.locator(".status-dot")).toHaveAttribute(
+      "aria-label",
+      "CPU at 98%",
+    );
     await expect(
       page.getByRole("button", { name: "Health", exact: true }),
     ).toHaveCount(0);
@@ -3824,10 +3827,16 @@ test.describe.serial("H.O.P.E console", () => {
       "style",
       viewportBeforeReport!,
     );
-    await expect(node).toContainText("Memory at 95%");
+    await expect(node.locator(".status-dot")).toHaveAttribute(
+      "aria-label",
+      "Memory at 95%",
+    );
     await agent.report(10, 2000, 40);
     await expect(node).toHaveAttribute("data-tone", "good");
-    await expect(node.locator(".node-status")).toHaveText("Reporting");
+    await expect(node.locator(".status-dot")).toHaveAttribute(
+      "aria-label",
+      "Reporting",
+    );
     await expect(node.locator(".node-health")).toContainText("50%");
     const before = await node.locator("..").getAttribute("style");
     await toggle.click();
@@ -3835,7 +3844,10 @@ test.describe.serial("H.O.P.E console", () => {
     await toggle.click();
     await page.clock.fastForward(130_000);
     await expect(node).toHaveAttribute("data-tone", "critical");
-    await expect(node.locator(".node-status")).toHaveText("Agent stale");
+    await expect(node.locator(".status-dot")).toHaveAttribute(
+      "aria-label",
+      "Agent stale",
+    );
     await expect(node.locator(".node-health strong")).toHaveText([
       "—",
       "—",
