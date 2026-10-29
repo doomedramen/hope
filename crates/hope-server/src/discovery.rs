@@ -75,8 +75,10 @@ async fn scheduled_scans(state: &State) -> anyhow::Result<()> {
                 .await?;
         // A few seconds of slack so a one-minute timer does not push a 5-minute range to 6.
         let due = last.is_none_or(|t| now() - t >= network.interval_minutes as f64 * 60.0 - 5.0);
-        if due {
-            let _ = scanner::start_scheduled(state, &network).await;
+        if due
+            && let Err(error) = scanner::start_scheduled(state, &network).await
+        {
+            tracing::warn!(network_id = %network.id, error = %error.1, "scheduled scan could not start");
         }
     }
     Ok(())

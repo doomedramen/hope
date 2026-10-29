@@ -222,6 +222,23 @@ async fn begin(state: &State, network: &Network, gentle: bool) -> ApiResult<Scan
     }
     let net = parse_range(&network.cidr)?;
     let mut active = state.0.scans.lock().await;
+    // A failed terminal write can leave a running row after its worker was cancelled.
+    // Serialize with scan creation and recover only rows without live work.
+    let unfinished: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM scans WHERE network_id=? AND status IN ('queued','running')",
+    )
+    .bind(&network.id)
+    .fetch_all(&state.0.db)
+    .await?;
+    for id in unfinished {
+        if active.get(&id).is_some_and(|token| !token.is_cancelled()) {
+            continue;
+        }
+        sqlx::query("UPDATE scans SET status='interrupted',finished_at=?,error='Scan worker stopped; discovery will retry' WHERE id=? AND status IN ('queued','running')")
+            .bind(now()).bind(&id).execute(&state.0.db).await?;
+        active.remove(&id);
+        tracing::warn!(scan_id = %id, "recovered abandoned scan");
+    }
     let running: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM scans WHERE network_id=? AND status IN ('queued','running')",
     )
@@ -393,6 +410,8 @@ async fn run_probe(
     }
     let update = async {
         if found { persist_observation(&state, &job, ip, observation, &cancel).await?; }
+        // Share the host-writer gate instead of competing with agent/enrichment writes.
+        let _write_guard = state.0.writes.lock().await;
         let row = sqlx::query("UPDATE scans SET scanned=scanned+1,discovered=discovered+? WHERE id=? AND status='running' RETURNING scanned,total")
             .bind(if found {1} else {0}).bind(&job.id).fetch_optional(&state.0.db).await?;
         if let Some(row) = row
@@ -404,7 +423,9 @@ async fn run_probe(
     }.await;
     if let Err(error) = update {
         tracing::error!(%error, "scan persistence failed");
-        let _ = sqlx::query("UPDATE scans SET status='failed',finished_at=?,error='Could not persist scan results' WHERE id=? AND status='running'").bind(now()).bind(&job.id).execute(&state.0.db).await;
+        if let Err(terminal_error) = sqlx::query("UPDATE scans SET status='failed',finished_at=?,error='Could not persist scan results' WHERE id=? AND status='running'").bind(now()).bind(&job.id).execute(&state.0.db).await {
+            tracing::error!(%terminal_error, scan_id = %job.id, "could not mark scan failed; next scan will recover it");
+        }
         cancel.cancel();
         state.0.scans.lock().await.remove(&job.id);
         state.changed();
@@ -561,6 +582,32 @@ mod tests {
         .expect("state");
         (directory, state, calls)
     }
+    #[tokio::test]
+    async fn abandoned_running_scan_does_not_block_replacement() {
+        let (_directory, state, _) = fixture().await;
+        let network = Network {
+            id: "orphan-network".into(),
+            name: "Test".into(),
+            cidr: "192.168.1.0/30".into(),
+            enabled: true,
+            interval_minutes: 5,
+        };
+        sqlx::query("INSERT INTO scans(id,network_id,cidr,status,total,started_at) VALUES('orphan',?,?,'running',2,0)")
+            .bind(&network.id).bind(&network.cidr).execute(&state.0.db).await.expect("orphan");
+        start_scheduled(&state, &network)
+            .await
+            .expect("replacement scan");
+        let status: String = sqlx::query_scalar("SELECT status FROM scans WHERE id='orphan'")
+            .fetch_one(&state.0.db)
+            .await
+            .expect("status");
+        assert_eq!(status, "interrupted");
+        assert!(
+            start_scheduled(&state, &network).await.is_err(),
+            "live scan must still block duplicates"
+        );
+    }
+
     #[tokio::test]
     async fn ambiguous_observations_do_not_create_repeated_duplicates() {
         let (_directory, state, _) = fixture().await;
