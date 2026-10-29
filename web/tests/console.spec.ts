@@ -3846,7 +3846,7 @@ test.describe.serial("H.O.P.E console", () => {
     await expect(node).toHaveAttribute("data-tone", "critical");
     await expect(node.locator(".status-dot")).toHaveAttribute(
       "aria-label",
-      "Agent stale",
+      /Agent silent/,
     );
     await expect(node.locator(".node-health strong")).toHaveText([
       "—",
