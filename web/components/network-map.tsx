@@ -16,7 +16,6 @@ import {
   type Node,
   type NodeProps,
   type NodeChange,
-  type Connection,
   type Edge,
 } from "@xyflow/react";
 import {
@@ -28,7 +27,7 @@ import {
   Network as NetworkIcon,
 } from "lucide-react";
 import { ipValue } from "@/lib/fleet";
-import type { Host, MapEdit, MapState, Network } from "@/lib/protocol";
+import type { Host, MapState, Network } from "@/lib/protocol";
 import { percent0 } from "@/lib/api";
 import { Meter } from "@/components/ui/meter";
 import { HostIcon } from "@/components/host-table";
@@ -93,7 +92,7 @@ function DeviceNode({ data, selected }: NodeProps<Node<Data, "hope">>) {
       data-tone={tone}
       data-host-id={data.host?.id}
     >
-      <Handle type="target" position={Position.Top} />
+      <Handle type="target" position={Position.Top} isConnectable={false} />
       <div className="map-node-identity flex items-center gap-3">
         <div className="device-icon">
           {data.kind === "gateway" ? (
@@ -104,28 +103,23 @@ function DeviceNode({ data, selected }: NodeProps<Node<Data, "hope">>) {
             <NetworkIcon size={18} />
           )}
         </div>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="truncate font-semibold" title={data.label}>
             {data.label}
           </div>
           <div
             className="mono truncate text-[11px] text-muted-foreground"
-            title={data.subtitle}
+            title={data.host?.addresses.join(", ") || data.subtitle}
           >
-            {data.subtitle}
+            {data.subtitle !== data.label ? data.subtitle : null}
           </div>
         </div>
+        {state && (
+          <span className="status-dot shrink-0" data-tone={tone}
+            role="img" aria-label={issue?.message ?? state.label}
+            title={issue?.message ?? state.label} />
+        )}
       </div>
-      {state && (
-        <div className="mt-2.5 flex items-center gap-2 text-[11px]">
-          <span className="status-dot" data-tone={tone} aria-hidden="true" />
-          <span className={`node-status tone-${tone}`} title={issue?.message}>
-            {state.key === "stale"
-              ? state.label
-              : (issue?.message ?? state.label)}
-          </span>
-        </div>
-      )}
       {data.health && data.host && (
         <div className="node-health">
           <span>
@@ -142,7 +136,7 @@ function DeviceNode({ data, selected }: NodeProps<Node<Data, "hope">>) {
           </span>
         </div>
       )}
-      <Handle type="source" position={Position.Bottom} />
+      <Handle type="source" position={Position.Bottom} isConnectable={false} />
     </div>
   );
 }
@@ -291,11 +285,6 @@ function MapViewport({
   );
 }
 
-/** The logical hierarchy has a new coordinate system; subnet positions remain relative. */
-function positionKey(mode: string, node: HopeNode) {
-  return `${mode === "topology" ? "topology:v2" : mode}:${node.id}`;
-}
-
 const TONE_COLORS: Record<Tone, string> = {
   good: "var(--status-good)",
   warning: "var(--status-warning)",
@@ -311,7 +300,6 @@ export function NetworkMap({
   showMetrics,
   selected,
   onSelect,
-  onSave,
 }: {
   hosts: Host[];
   networks: Network[];
@@ -320,12 +308,8 @@ export function NetworkMap({
   showMetrics: boolean;
   selected: string | null;
   onSelect: (id: string) => void;
-  onSave: (edit: MapEdit) => Promise<void>;
 }) {
   const now = useNow(5);
-  const [moving, setMoving] = useState<
-    Record<string, { x: number; y: number }>
-  >({});
   const [measurements, setMeasurements] = useState<
     Record<string, { width: number; height: number }>
   >({});
@@ -356,7 +340,6 @@ export function NetworkMap({
     const visibleIds = new Set(hosts.map((h) => h.id));
     const prefix = mode === "topology" ? "topology:v2" : mode;
     const position = (id: string, fallback: { x: number; y: number }) =>
-      moving[`${prefix}:${id}`] ??
       layout.positions.find((p) => p.id === `${prefix}:${id}`) ??
       fallback;
     const tree = topology(hosts);
@@ -372,7 +355,8 @@ export function NetworkMap({
       data: {
         label: hostDisplayName(host),
         subtitle:
-          host.addresses.join(", ") || deviceLabel(host) || describe(host),
+          host.addresses.find((address) => !address.includes(":")) ||
+          host.addresses[0] || deviceLabel(host) || describe(host),
         host,
         kind: "host",
         health: showMetrics,
@@ -399,7 +383,6 @@ export function NetworkMap({
           className: `topology-edge ${link.kind}-edge`,
           ariaLabel: link.reason,
           data: { provenance: link.kind, reason: link.reason },
-          label: link.kind === "reported" ? "Reported" : "Inferred",
         });
     } else {
       const rowPitch = showMetrics ? 226 : 154;
@@ -498,33 +481,10 @@ export function NetworkMap({
     layout,
     mode,
     showMetrics,
-    moving,
     selected,
     measurements,
     now,
   ]);
-  const connect = (connection: Connection) => {
-    if (
-      !connection.source ||
-      !connection.target ||
-      connection.source === connection.target
-    )
-      return;
-    if (
-      !hosts.some((h) => h.id === connection.source) ||
-      !hosts.some((h) => h.id === connection.target)
-    )
-      return;
-    void onSave({
-      operation: "add_link",
-      link: {
-        id: crypto.randomUUID(),
-        source: connection.source,
-        target: connection.target,
-        label: "Connection",
-      },
-    });
-  };
   return (
     <div className="network-canvas" data-testid="network-map">
       <ReactFlow<HopeNode>
@@ -538,39 +498,10 @@ export function NetworkMap({
           if (node.type === "hope" && (node.data as Data).host)
             onSelect(node.id);
         }}
-        onNodeDrag={(_, node) =>
-          setMoving((previous) => ({
-            ...previous,
-            [positionKey(mode, node)]: node.position,
-          }))
-        }
-        onNodeDragStop={(_, node) => {
-          const key = positionKey(mode, node);
-          const position = node.position;
-          void onSave({
-            operation: "set_position",
-            position: { id: key, ...position },
-          }).then(() => {
-            setMoving((previous) => {
-              if (
-                previous[key]?.x !== position.x ||
-                previous[key]?.y !== position.y
-              )
-                return previous;
-              const next = { ...previous };
-              delete next[key];
-              return next;
-            });
-          });
-        }}
-        onConnect={connect}
-        onEdgeDoubleClick={(_, edge) => {
-          if (edge.id.startsWith("manual-"))
-            void onSave({
-              operation: "remove_link",
-              id: edge.id.slice("manual-".length),
-            });
-        }}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        edgesReconnectable={false}
+        edgesFocusable={false}
         deleteKeyCode={null}
         proOptions={{ hideAttribution: false }}
       >
@@ -632,10 +563,7 @@ export function NetworkMap({
                   Drag the canvas to explore. Use Readable view for legible
                   cards or Fit all to see the whole inventory.
                 </p>
-                <p>
-                  Drag handles to link hosts; double-click a manual link to
-                  remove it. Host positions and manual links save automatically.
-                </p>
+
               </div>
             </details>
           </>

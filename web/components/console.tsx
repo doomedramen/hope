@@ -1394,7 +1394,6 @@ function Dashboard({ onLogout }: { onLogout: () => Promise<void> }) {
                     showMetrics={showMetrics}
                     selected={selected}
                     onSelect={select}
-                    onSave={saveMap}
                   />
                 ) : (
                   <HostTable

@@ -84,8 +84,8 @@ export function topology(hosts: Host[]) {
         host,
       ]);
   }
-  const nodeWidth = 188;
-  const columnGap = 28;
+  const nodeWidth = 232;
+  const columnGap = 48;
   // Reserve expanded-card space so toggling metrics never shifts the hierarchy.
   const cardHeight = 190;
   const rowPitch = cardHeight + 44;

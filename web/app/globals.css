@@ -2894,3 +2894,27 @@ kbd.key {
     min-height: 36px;
   }
 }
+
+/* Keep long host names and IPv6 addresses inside their map card. */
+.map-node-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.map-node-identity > .min-w-0 {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.map-node-identity .truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Handles anchor relationship lines without presenting editing controls. */
+.network-canvas .react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+}
