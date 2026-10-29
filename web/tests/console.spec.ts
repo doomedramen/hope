@@ -701,7 +701,7 @@ test.describe.serial("H.O.P.E console", () => {
     expect(attempts).toBe(2);
     release();
   });
-  test("maps, hosts, selection, history, and manual relationships", async ({
+  test("maps, hosts, selection, history, and read-only relationships", async ({
     page,
     request,
   }) => {
@@ -844,7 +844,7 @@ test.describe.serial("H.O.P.E console", () => {
     await page.locator(".manual-edge .react-flow__edge-textbg").dblclick();
     await expect(
       page.getByText("Fixture · Manual", { exact: true }),
-    ).toHaveCount(0);
+    ).toBeVisible();
     expect(errors).toEqual([]);
   });
   test("mobile layout and reload of selected host", async ({
@@ -919,20 +919,11 @@ test.describe.serial("H.O.P.E console", () => {
     const node = page.locator(`[data-id="${host.id}"]`);
     await expect(node).toHaveAttribute("style", /translate\(276px, 310px\)/);
     await expectMapFits(page);
-    let rejectFirstSave = true;
+    let mapWrites = 0;
     await page.route("**/api/v1/map", (route) => {
-      if (rejectFirstSave) {
-        rejectFirstSave = false;
-        return route.fulfill({
-          status: 503,
-          contentType: "application/json",
-          body: JSON.stringify({ error: "Fixture save failure" }),
-        });
-      }
+      mapWrites++;
       return route.continue();
     });
-    // Hover waits for the measured/fitted node to be stable and receive events.
-    // Raw mouse coordinates captured during first layout can hit another node.
     await node.hover();
     const bounds = await node.boundingBox();
     expect(bounds).not.toBeNull();
@@ -940,31 +931,15 @@ test.describe.serial("H.O.P.E console", () => {
     await page.mouse.move(
       bounds!.x + bounds!.width / 2 + 40,
       bounds!.y + bounds!.height / 2 + 30,
-      {
-        steps: 5,
-      },
+      { steps: 5 },
     );
     await page.mouse.up();
+    await expect(node).toHaveAttribute("style", /translate\(276px, 310px\)/);
+    const saved = { x: 276, y: 310 };
+    expect(mapWrites).toBe(0);
     await expect(
       page.getByRole("button", { name: "Retry 1 unsaved map change" }),
-    ).toBeVisible();
-    await page
-      .getByRole("button", { name: "Retry 1 unsaved map change" })
-      .click();
-    await expect
-      .poll(async () => {
-        const state = await (await request.get("/api/v1/bootstrap")).json();
-        const x = state.map.positions.find(
-          (p: { id: string }) => p.id === `topology:v2:${host.id}`,
-        )?.x;
-        return typeof x === "number" && x !== 276;
-      })
-      .toBeTruthy();
-    const saved = (
-      await (await request.get("/api/v1/bootstrap")).json()
-    ).map.positions.find(
-      (p: { id: string }) => p.id === `topology:v2:${host.id}`,
-    );
+    ).toHaveCount(0);
     await page
       .getByRole("button", { name: "Show metrics", exact: true })
       .click();
