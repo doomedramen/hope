@@ -607,14 +607,13 @@ pub async fn report(
         set_meta_in_transaction(&mut tx, "auto_update_blocked_release_id", &release_id).await?;
     }
     tx.commit().await?;
+    // The report and all revocation-sensitive writes are committed. Release the
+    // global writer mutex before rollout selection and response refresh.
+    drop(_guard);
     if let Err(error) = schedule_auto_update(&state, now()).await {
         eprintln!("Automatic agent update scheduling failed: {}", error.1);
     }
-    if let Ok(hosts) = state.stored_hosts().await
-        && let Some(updated_host) = hosts
-            .into_iter()
-            .find(|host| host.agent_id.as_deref() == Some(&report.agent_id))
-    {
+    if let Ok(Some(updated_host)) = state.stored_host(&host.id).await {
         response.update_to = pending_update(&updated_host, now());
         response.update_release_id = response
             .update_to
@@ -736,6 +735,7 @@ async fn schedule_auto_update(state: &State, at: f64) -> ApiResult<()> {
     else {
         return Ok(());
     };
+    let _guard = state.0.writes.lock().await;
     let mut tx = state.write_transaction().await?;
     if meta_in_transaction(&mut tx, "agent_auto_updates_enabled")
         .await?
@@ -761,6 +761,48 @@ async fn schedule_auto_update(state: &State, at: f64) -> ApiResult<()> {
         set_meta_in_transaction(&mut tx, "auto_update_blocked_release_id", "").await?;
         set_meta_in_transaction(&mut tx, "auto_update_last_queued_at", "0").await?;
     }
+    let canary_passed = meta_in_transaction(&mut tx, "auto_update_canary_passed")
+        .await?
+        .as_deref()
+        == Some("true");
+    let mut canary = meta_in_transaction(&mut tx, "auto_update_canary_agent")
+        .await?
+        .unwrap_or_default();
+
+    // While the canary is still reporting the requested version, ordinary
+    // reports from other agents cannot change rollout state. Check that one
+    // host by its unique agent ID instead of decoding the whole fleet.
+    if !canary_passed && !canary.is_empty() {
+        let body: Option<String> = sqlx::query_scalar("SELECT body FROM hosts WHERE agent_id=?")
+            .bind(&canary)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if body
+            .map(|body| StoredHost::decode(&body))
+            .transpose()?
+            .is_some_and(|host| {
+                host.update_request_source.as_deref() == Some("automatic")
+                    && pending_update(&host, at).is_some()
+            })
+        {
+            tx.commit().await?;
+            return Ok(());
+        }
+    }
+
+    // The persisted queue time proves no next host can be selected yet. Avoid
+    // a fleet scan on every report during the 15-minute rollout spacing window.
+    if canary_passed {
+        let last: f64 = meta_in_transaction(&mut tx, "auto_update_last_queued_at")
+            .await?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0);
+        if at - last < 900.0 {
+            tx.commit().await?;
+            return Ok(());
+        }
+    }
+
     let mut hosts = stored_hosts_in_transaction(&mut tx).await?;
     if let Some(index) = hosts.iter().position(|host| {
         host.update_request_source.as_deref() == Some("automatic")
@@ -791,15 +833,7 @@ async fn schedule_auto_update(state: &State, at: f64) -> ApiResult<()> {
             return Ok(());
         }
     }
-    let canary_passed = meta_in_transaction(&mut tx, "auto_update_canary_passed")
-        .await?
-        .as_deref()
-        == Some("true");
     if !canary_passed {
-        let mut canary = meta_in_transaction(&mut tx, "auto_update_canary_agent")
-            .await?
-            .unwrap_or_default();
-
         // The request and canary marker used to be written separately. If the server stopped
         // between those writes, recover the already-persisted request instead of selecting a
         // second host and updating both at once.
@@ -871,14 +905,6 @@ async fn schedule_auto_update(state: &State, at: f64) -> ApiResult<()> {
             state.publish_host(&host_id).await;
             return Ok(());
         }
-        tx.commit().await?;
-        return Ok(());
-    }
-    let last: f64 = meta_in_transaction(&mut tx, "auto_update_last_queued_at")
-        .await?
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0.0);
-    if at - last < 900.0 {
         tx.commit().await?;
         return Ok(());
     }

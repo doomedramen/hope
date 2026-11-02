@@ -717,10 +717,7 @@ async fn retain_at(state: &State, reference: f64) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn retain_source_metrics(
-    state: &State,
-    cutoff: f64,
-) -> anyhow::Result<()> {
+async fn retain_source_metrics(state: &State, cutoff: f64) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let groups = sqlx::query("SELECT source_device_id,CAST(observed_at/300 AS INTEGER) AS bucket FROM source_metrics WHERE resolution=30 AND observed_at<? GROUP BY source_device_id,bucket LIMIT 128")
         .bind(cutoff).fetch_all(&state.0.db).await?;
