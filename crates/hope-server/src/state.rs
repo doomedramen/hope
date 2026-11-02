@@ -349,9 +349,14 @@ impl State {
     async fn device_views(&self, id: Option<&str>) -> Result<Vec<Host>> {
         // All pieces of a view come from one SQLite snapshot during concurrent writes.
         let mut tx = self.0.db.begin().await?;
-        let rows = sqlx::query("SELECT body FROM hosts WHERE ? IS NULL OR id=? OR id=(SELECT host_id FROM source_devices WHERE id=?) ORDER BY name COLLATE NOCASE")
-            .bind(id).bind(id).bind(id).fetch_all(&mut *tx)
-            .await?;
+        let rows = if let Some(id) = id {
+            sqlx::query("SELECT body FROM hosts WHERE id=? OR id=(SELECT host_id FROM source_devices WHERE id=?) ORDER BY name COLLATE NOCASE")
+                .bind(id).bind(id).fetch_all(&mut *tx).await?
+        } else {
+            sqlx::query("SELECT body FROM hosts ORDER BY name COLLATE NOCASE")
+                .fetch_all(&mut *tx)
+                .await?
+        };
         let mut hosts: Vec<Host> = rows
             .into_iter()
             .map(|r| StoredHost::decode(r.get("body")).map(StoredHost::into_view))
@@ -378,8 +383,13 @@ impl State {
                     interval_minutes: row.get::<i64, _>("interval_minutes") as u32,
                 })
                 .collect::<Vec<_>>();
-        let association_rows = sqlx::query("SELECT a.source_device_id,a.host_id,h.name,a.status,a.reason,a.evidence FROM device_associations a JOIN hosts h ON h.id=a.host_id WHERE ? IS NULL OR a.source_device_id=? OR a.host_id=? OR a.host_id=(SELECT host_id FROM source_devices WHERE id=?) ORDER BY CASE a.status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,h.name COLLATE NOCASE")
-            .bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *tx).await?;
+        let association_rows = if let Some(id) = id {
+            sqlx::query("SELECT a.source_device_id,a.host_id,h.name,a.status,a.reason,a.evidence FROM device_associations a JOIN hosts h ON h.id=a.host_id WHERE a.source_device_id=? OR a.host_id=? OR a.host_id=(SELECT host_id FROM source_devices WHERE id=?) ORDER BY CASE a.status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,h.name COLLATE NOCASE")
+                .bind(id).bind(id).bind(id).fetch_all(&mut *tx).await?
+        } else {
+            sqlx::query("SELECT a.source_device_id,a.host_id,h.name,a.status,a.reason,a.evidence FROM device_associations a JOIN hosts h ON h.id=a.host_id ORDER BY CASE a.status WHEN 'confirmed' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END,h.name COLLATE NOCASE")
+                .fetch_all(&mut *tx).await?
+        };
         let mut associations = HashMap::<String, Vec<DeviceAssociation>>::new();
         for row in association_rows {
             associations
@@ -387,15 +397,23 @@ impl State {
                 .or_default()
                 .push(source_association(&row)?);
         }
-        let children = sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) AND (? IS NOT NULL OR d.lifecycle!='archived') AND (? IS NULL OR d.id=? OR d.host_id=? OR d.host_id=(SELECT host_id FROM source_devices WHERE id=?))")
-            .bind(id).bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *tx).await?;
+        let children = if let Some(id) = id {
+            sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) AND (d.id=? OR d.host_id=? OR d.host_id=(SELECT host_id FROM source_devices WHERE id=?))")
+                .bind(id).bind(id).bind(id).fetch_all(&mut *tx).await?
+        } else {
+            sqlx::query("SELECT d.id,d.source,d.source_scope,d.source_key,d.incarnation,d.lifecycle,d.name,d.observed_at,d.body,d.host_id,(SELECT r.to_device_id FROM device_relationships r WHERE r.source_device_id=d.id AND r.kind='runs_on' ORDER BY r.observed_at DESC LIMIT 1) AS to_device_id FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) AND d.lifecycle!='archived'")
+                .fetch_all(&mut *tx).await?
+        };
         let mut service_relationships = source_service_relationships(&mut tx, id).await?;
-        let mut settings: HashMap<String, String> =
-            sqlx::query_as("SELECT source_device_id,body FROM source_device_settings WHERE ? IS NULL OR source_device_id=? OR source_device_id IN (SELECT id FROM source_devices WHERE host_id=? OR host_id=(SELECT host_id FROM source_devices WHERE id=?))")
-                .bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *tx)
+        let setting_rows = if let Some(id) = id {
+            sqlx::query_as("SELECT source_device_id,body FROM source_device_settings WHERE source_device_id=? OR source_device_id IN (SELECT id FROM source_devices WHERE host_id=? OR host_id=(SELECT host_id FROM source_devices WHERE id=?))")
+                .bind(id).bind(id).bind(id).fetch_all(&mut *tx).await?
+        } else {
+            sqlx::query_as("SELECT source_device_id,body FROM source_device_settings")
+                .fetch_all(&mut *tx)
                 .await?
-                .into_iter()
-                .collect();
+        };
+        let mut settings: HashMap<String, String> = setting_rows.into_iter().collect();
         for row in children {
             let mut source = source_device_host(&row)?;
             let source_parent = row.try_get::<Option<String>, _>("host_id").ok().flatten();
@@ -514,7 +532,13 @@ async fn source_service_relationships(
     db: &mut sqlx::SqliteConnection,
     id: Option<&str>,
 ) -> Result<HashMap<String, Vec<DeviceRelationship>>> {
-    let rows = sqlx::query("SELECT from_device_id,to_device_id,detail FROM device_relationships WHERE kind='exposes_service' AND (? IS NULL OR source_device_id=? OR source_device_id IN (SELECT id FROM source_devices WHERE host_id=? OR host_id=(SELECT host_id FROM source_devices WHERE id=?)))").bind(id).bind(id).bind(id).bind(id).fetch_all(&mut *db).await?;
+    let rows = if let Some(id) = id {
+        sqlx::query("SELECT from_device_id,to_device_id,detail FROM device_relationships WHERE kind='exposes_service' AND source_device_id IN (SELECT id FROM source_devices WHERE id=? OR host_id=? OR host_id=(SELECT host_id FROM source_devices WHERE id=?))")
+            .bind(id).bind(id).bind(id).fetch_all(&mut *db).await?
+    } else {
+        sqlx::query("SELECT from_device_id,to_device_id,detail FROM device_relationships WHERE kind='exposes_service'")
+            .fetch_all(&mut *db).await?
+    };
     let mut relationships = HashMap::<String, Vec<DeviceRelationship>>::new();
     for row in rows {
         let from_device_id: String = row.get("from_device_id");

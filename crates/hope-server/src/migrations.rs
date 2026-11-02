@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 20;
+const LATEST: i64 = 23;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
@@ -176,6 +176,36 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     }
+    if version < 21 {
+        sqlx::raw_sql(include_str!(
+            "migrations/0021_service_relationship_lookup.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("PRAGMA user_version = 21")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 22 {
+        sqlx::raw_sql(include_str!(
+            "migrations/0022_source_relationship_latest.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("PRAGMA user_version = 22")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 23 {
+        sqlx::raw_sql(include_str!(
+            "migrations/0023_source_metric_rollup_groups.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("PRAGMA user_version = 23")
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -334,7 +364,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 20);
+        assert_eq!(version, 23);
         let source_cleanup_index: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='source_metrics_cleanup'",
         )
@@ -342,7 +372,13 @@ mod tests {
         .await
         .expect("source retention index");
         assert_eq!(source_cleanup_index, 1);
-        for index in ["source_observations_expiry", "child_batches_expiry"] {
+        for index in [
+            "source_observations_expiry",
+            "child_batches_expiry",
+            "device_relationships_kind_source",
+            "device_relationships_source_latest",
+            "source_metrics_rollup_groups",
+        ] {
             let exists: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
             )
