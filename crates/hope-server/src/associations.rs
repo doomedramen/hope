@@ -1,6 +1,9 @@
 use hope_protocol::{ChildDeviceReport, Host, Network};
 use ipnet::IpNet;
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+};
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -11,192 +14,268 @@ pub struct Candidate {
     pub evidence: Vec<String>,
 }
 
-/// Match source interfaces to scan hosts. Unique MAC+address matches can be confirmed anywhere
-/// both sides have compatible context; when ARP did not provide a scan-side MAC, a unique fresh
-/// address match on a managed network is also sufficient. Other overlaps need review.
+#[derive(Default)]
+struct HostFacts {
+    ips: HashSet<IpAddr>,
+    macs: HashSet<String>,
+    networks: HashSet<String>,
+}
+
+/// Index the host-side facts once per reconciliation pass instead of reparsing every host for
+/// every reported child device.
+pub(crate) struct Matcher<'a> {
+    hosts: &'a [Host],
+    networks: Vec<(String, IpNet)>,
+    facts: Vec<HostFacts>,
+    mac_owners: HashMap<String, usize>,
+    ip_owners: HashMap<IpAddr, usize>,
+    hosts_by_mac: HashMap<String, Vec<usize>>,
+    hosts_by_ip: HashMap<IpAddr, Vec<usize>>,
+    hosts_by_name: HashMap<String, Vec<usize>>,
+    recent_after: f64,
+}
+
+impl<'a> Matcher<'a> {
+    pub(crate) fn new(hosts: &'a [Host], networks: &[Network]) -> Self {
+        let networks: Vec<_> = networks
+            .iter()
+            .filter(|network| network.enabled)
+            .filter_map(|network| {
+                network
+                    .cidr
+                    .parse::<IpNet>()
+                    .ok()
+                    .map(|cidr| (network.id.clone(), cidr))
+            })
+            .collect();
+        let recent_after = crate::state::now() - 7.0 * 86400.0;
+        let mut facts = Vec::with_capacity(hosts.len());
+        let mut mac_owners = HashMap::new();
+        let mut ip_owners = HashMap::new();
+        let mut hosts_by_mac = HashMap::<String, Vec<usize>>::new();
+        let mut hosts_by_ip = HashMap::<IpAddr, Vec<usize>>::new();
+        let mut hosts_by_name = HashMap::<String, Vec<usize>>::new();
+
+        for (index, host) in hosts.iter().enumerate() {
+            let macs: HashSet<_> = host
+                .macs
+                .iter()
+                .map(|mac| mac.to_ascii_lowercase())
+                .collect();
+            let ips: HashSet<_> = host
+                .addresses
+                .iter()
+                .filter_map(|address| crate::addresses::usable_ip(address))
+                .collect();
+            let host_networks = networks_for_ips(&ips, &networks);
+
+            for mac in &macs {
+                *mac_owners.entry(mac.clone()).or_insert(0) += 1;
+                hosts_by_mac.entry(mac.clone()).or_default().push(index);
+            }
+            for ip in &ips {
+                hosts_by_ip.entry(*ip).or_default().push(index);
+                if host.last_seen >= recent_after {
+                    *ip_owners.entry(*ip).or_insert(0) += 1;
+                }
+            }
+            hosts_by_name
+                .entry(host.name.trim_end_matches('.').to_ascii_lowercase())
+                .or_default()
+                .push(index);
+            facts.push(HostFacts {
+                ips,
+                macs,
+                networks: host_networks,
+            });
+        }
+
+        Self {
+            hosts,
+            networks,
+            facts,
+            mac_owners,
+            ip_owners,
+            hosts_by_mac,
+            hosts_by_ip,
+            hosts_by_name,
+            recent_after,
+        }
+    }
+
+    /// Match source interfaces to scan hosts. Unique MAC+address matches can be confirmed
+    /// anywhere both sides have compatible context; a unique fresh managed-network address also
+    /// suffices when ARP did not provide a scan-side MAC. Other overlaps need review.
+    pub(crate) fn candidates(&self, child: &ChildDeviceReport) -> Vec<Candidate> {
+        let child_ips: HashSet<_> = child
+            .interfaces
+            .iter()
+            .flat_map(|interface| &interface.addresses)
+            .filter_map(|address| crate::addresses::usable_ip(address))
+            .collect();
+        let child_macs: HashSet<_> = child
+            .interfaces
+            .iter()
+            .filter_map(|interface| interface.mac.as_deref())
+            .chain(
+                child
+                    .network_configuration
+                    .iter()
+                    .filter_map(|network| network.mac.as_deref()),
+            )
+            .map(str::to_ascii_lowercase)
+            .collect();
+        if child_ips.is_empty() && child_macs.is_empty() {
+            return vec![];
+        }
+
+        let child_networks = networks_for_ips(&child_ips, &self.networks);
+        let mut host_indices = HashSet::new();
+        for mac in &child_macs {
+            if let Some(indices) = self.hosts_by_mac.get(mac) {
+                host_indices.extend(indices.iter().copied());
+            }
+        }
+        for ip in &child_ips {
+            if let Some(indices) = self.hosts_by_ip.get(ip) {
+                host_indices.extend(indices.iter().copied());
+            }
+        }
+        if let Some(indices) = self
+            .hosts_by_name
+            .get(&child.name.trim_end_matches('.').to_ascii_lowercase())
+        {
+            host_indices.extend(indices.iter().copied());
+        }
+        let mut host_indices: Vec<_> = host_indices.into_iter().collect();
+        host_indices.sort_unstable();
+
+        let mut result = Vec::new();
+        for index in host_indices {
+            let host = &self.hosts[index];
+            let facts = &self.facts[index];
+            let shared_macs: Vec<_> = child_macs
+                .iter()
+                .filter(|mac| facts.macs.contains(*mac))
+                .collect();
+            let shared_ips: Vec<_> = child_ips
+                .iter()
+                .filter(|ip| facts.ips.contains(*ip))
+                .copied()
+                .collect();
+            let hostname_match = child
+                .name
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case(host.name.trim_end_matches('.'));
+            let compatible_network = child_networks
+                .iter()
+                .any(|network| facts.networks.contains(network));
+            let unique_mac = shared_macs
+                .iter()
+                .any(|mac| self.mac_owners.get(*mac) == Some(&1));
+            // Every shared address must resolve to just this current host. One clear address
+            // must not hide a second ambiguous address on another interface.
+            let unique_ip = !shared_ips.is_empty()
+                && shared_ips
+                    .iter()
+                    .all(|ip| self.ip_owners.get(ip) == Some(&1));
+            let mac_context_consistent =
+                child_macs.is_empty() || host.macs.is_empty() || !shared_macs.is_empty();
+            // Proxmox can report a configured guest NIC MAC without an in-guest address or
+            // interface. A unique MAC then identifies the scanned host directly; when guest IPs
+            // do provide managed-network context, still require that context to agree.
+            let network_matches = child_networks.is_empty() || compatible_network;
+            let strong_mac = !shared_macs.is_empty()
+                && network_matches
+                && unique_mac
+                && (shared_ips.is_empty() || unique_ip)
+                && host.last_seen >= self.recent_after;
+            let strong_ip = shared_macs.is_empty()
+                && unique_ip
+                && !child_networks.is_empty()
+                && compatible_network
+                && mac_context_consistent
+                && host.last_seen >= self.recent_after;
+            let strong = strong_mac || strong_ip;
+            let mut evidence = Vec::new();
+            if !shared_macs.is_empty() {
+                let macs = shared_macs
+                    .iter()
+                    .map(|mac| mac.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                evidence.push(format!("MAC {macs}"));
+            }
+            if !shared_ips.is_empty() {
+                evidence.push(format!(
+                    "address {}",
+                    shared_ips
+                        .iter()
+                        .map(|ip| ip.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if hostname_match {
+                evidence.push(format!("hostname {}", child.name));
+            }
+            if compatible_network {
+                let mut common = child_networks
+                    .iter()
+                    .filter(|network| facts.networks.contains(*network))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                common.sort_unstable();
+                evidence.push(format!("same managed network {}", common.join(", ")));
+            } else if !child_networks.is_empty() {
+                evidence.push("network context is missing or conflicts".into());
+            }
+            result.push(Candidate {
+                host_id: host.id.clone(),
+                host_name: host.name.clone(),
+                strong,
+                reason: if strong {
+                    if strong_ip {
+                        "Unique address match in a managed network".into()
+                    } else {
+                        "Unique interface, address, and managed-network match".into()
+                    }
+                } else {
+                    "Interface evidence needs review".into()
+                },
+                evidence,
+            });
+        }
+        if result.iter().filter(|candidate| candidate.strong).count() != 1 {
+            for candidate in &mut result {
+                candidate.strong = false;
+                candidate.reason = "Multiple or incomplete interface matches need review".into();
+            }
+        }
+        result.sort_by(|left, right| left.host_name.cmp(&right.host_name));
+        result.truncate(16);
+        result
+    }
+}
+
+/// Match source interfaces to scan hosts using a one-off index for callers outside a shared
+/// reconciliation pass.
 pub fn candidates(
     child: &ChildDeviceReport,
     hosts: &[Host],
     networks: &[Network],
 ) -> Vec<Candidate> {
-    let child_ips: HashSet<_> = child
-        .interfaces
-        .iter()
-        .flat_map(|interface| &interface.addresses)
-        .filter_map(|address| crate::addresses::usable_ip(address))
-        .collect();
-    let child_macs: HashSet<_> = child
-        .interfaces
-        .iter()
-        .filter_map(|interface| interface.mac.as_deref())
-        .chain(
-            child
-                .network_configuration
-                .iter()
-                .filter_map(|network| network.mac.as_deref()),
-        )
-        .map(str::to_ascii_lowercase)
-        .collect();
-    if child_ips.is_empty() && child_macs.is_empty() {
-        return vec![];
-    }
+    Matcher::new(hosts, networks).candidates(child)
+}
 
-    let networks: Vec<_> = networks
-        .iter()
-        .filter(|network| network.enabled)
-        .filter_map(|network| {
-            network
-                .cidr
-                .parse::<IpNet>()
-                .ok()
-                .map(|cidr| (network.id.as_str(), cidr))
-        })
-        .collect();
-    let child_networks: HashSet<_> = child_ips
-        .iter()
+fn networks_for_ips(ips: &HashSet<IpAddr>, networks: &[(String, IpNet)]) -> HashSet<String> {
+    ips.iter()
         .filter_map(|ip| {
             networks
                 .iter()
-                .find_map(|(id, cidr)| cidr.contains(ip).then_some(*id))
+                .find_map(|(id, cidr)| cidr.contains(ip).then_some(id.clone()))
         })
-        .collect();
-    let recent_after = crate::state::now() - 7.0 * 86400.0;
-    let mac_owners = |mac: &str| {
-        hosts
-            .iter()
-            .filter(|host| {
-                host.macs
-                    .iter()
-                    .any(|known| known.eq_ignore_ascii_case(mac))
-            })
-            .count()
-    };
-    let ip_owners = |ip: &std::net::IpAddr| {
-        hosts
-            .iter()
-            .filter(|host| {
-                host.last_seen >= recent_after
-                    && host
-                        .addresses
-                        .iter()
-                        .any(|known| crate::addresses::usable_ip(known).as_ref() == Some(ip))
-            })
-            .count()
-    };
-    let mut result = Vec::new();
-    for host in hosts {
-        let shared_macs: Vec<_> = child_macs
-            .iter()
-            .filter(|mac| {
-                host.macs
-                    .iter()
-                    .any(|known| known.eq_ignore_ascii_case(mac))
-            })
-            .cloned()
-            .collect();
-        let shared_ips: Vec<_> = child_ips
-            .iter()
-            .filter(|ip| {
-                host.addresses
-                    .iter()
-                    .any(|known| crate::addresses::usable_ip(known).as_ref() == Some(ip))
-            })
-            .collect();
-        let hostname_match = child
-            .name
-            .trim_end_matches('.')
-            .eq_ignore_ascii_case(host.name.trim_end_matches('.'));
-        if shared_macs.is_empty() && shared_ips.is_empty() && !hostname_match {
-            continue;
-        }
-        let host_networks: HashSet<_> = host
-            .addresses
-            .iter()
-            .filter_map(|address| crate::addresses::usable_ip(address))
-            .filter_map(|ip| {
-                networks
-                    .iter()
-                    .find_map(|(id, cidr)| cidr.contains(&ip).then_some(*id))
-            })
-            .collect();
-        let compatible_network = child_networks
-            .iter()
-            .any(|network| host_networks.contains(network));
-        let unique_mac = shared_macs.iter().any(|mac| mac_owners(mac) == 1);
-        // Every shared address must resolve to just this current host. One clear address must
-        // not hide a second ambiguous address on another interface.
-        let unique_ip = !shared_ips.is_empty() && shared_ips.iter().all(|ip| ip_owners(ip) == 1);
-        let mac_context_consistent =
-            child_macs.is_empty() || host.macs.is_empty() || !shared_macs.is_empty();
-        // Proxmox can report a configured guest NIC MAC without an in-guest address or
-        // interface. A unique MAC then identifies the scanned host directly; when guest IPs
-        // do provide managed-network context, still require that context to agree.
-        let network_matches = child_networks.is_empty() || compatible_network;
-        let strong_mac = !shared_macs.is_empty()
-            && network_matches
-            && unique_mac
-            && (shared_ips.is_empty() || unique_ip)
-            && host.last_seen >= recent_after;
-        let strong_ip = shared_macs.is_empty()
-            && unique_ip
-            && !child_networks.is_empty()
-            && compatible_network
-            && mac_context_consistent
-            && host.last_seen >= recent_after;
-        let strong = strong_mac || strong_ip;
-        let mut evidence = Vec::new();
-        if !shared_macs.is_empty() {
-            evidence.push(format!("MAC {}", shared_macs.join(", ")));
-        }
-        if !shared_ips.is_empty() {
-            evidence.push(format!(
-                "address {}",
-                shared_ips
-                    .iter()
-                    .map(|ip| ip.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if hostname_match {
-            evidence.push(format!("hostname {}", child.name));
-        }
-        if compatible_network {
-            let mut common = child_networks
-                .iter()
-                .filter(|network| host_networks.contains(*network))
-                .copied()
-                .collect::<Vec<_>>();
-            common.sort_unstable();
-            evidence.push(format!("same managed network {}", common.join(", ")));
-        } else if !child_networks.is_empty() {
-            evidence.push("network context is missing or conflicts".into());
-        }
-        result.push(Candidate {
-            host_id: host.id.clone(),
-            host_name: host.name.clone(),
-            strong,
-            reason: if strong {
-                if strong_ip {
-                    "Unique address match in a managed network".into()
-                } else {
-                    "Unique interface, address, and managed-network match".into()
-                }
-            } else {
-                "Interface evidence needs review".into()
-            },
-            evidence,
-        });
-    }
-    if result.iter().filter(|candidate| candidate.strong).count() != 1 {
-        for candidate in &mut result {
-            candidate.strong = false;
-            candidate.reason = "Multiple or incomplete interface matches need review".into();
-        }
-    }
-    result.sort_by(|left, right| left.host_name.cmp(&right.host_name));
-    result.truncate(16);
-    result
+        .collect()
 }
 
 #[cfg(test)]

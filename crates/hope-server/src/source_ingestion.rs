@@ -347,9 +347,12 @@ pub async fn child_report(
         }
         sqlx::query("INSERT INTO source_device_identities(source,identity_owner,source_scope,source_key,incarnation,source_device_id) VALUES(?,?,?,?,?,?) ON CONFLICT(source,identity_owner,source_scope,source_key,incarnation) DO UPDATE SET source_device_id=excluded.source_device_id")
             .bind(source).bind(identity_owner).bind(&batch.source_scope).bind(&identity.key).bind(&identity.incarnation).bind(&id).execute(&mut *tx).await?;
-        sqlx::query("INSERT OR IGNORE INTO source_observations(source_device_id,batch_id,observed_at,inventory_generation,body) VALUES(?,?,?,?,?)")
+        // The observation ledger is used for identity/completeness counts; metrics and the
+        // latest full device report already have dedicated tables. Avoid copying the complete
+        // report into every retained observation row.
+        sqlx::query("INSERT OR IGNORE INTO source_observations(source_device_id,batch_id,observed_at,inventory_generation,body) VALUES(?,?,?,?,'{}')")
             .bind(&id).bind(&batch.batch_id).bind(batch.observed_at).bind(batch.inventory_generation as i64)
-            .bind(&body).execute(&mut *tx).await?;
+            .execute(&mut *tx).await?;
         sqlx::query("INSERT OR IGNORE INTO source_metrics(source_device_id,report_id,observed_at,resolution,body) VALUES(?,?,?,30,?)")
             .bind(&id).bind(&batch.batch_id).bind(batch.observed_at)
             .bind(serde_json::to_string(&device.metrics)?).execute(&mut *tx).await?;
@@ -400,7 +403,7 @@ pub async fn child_report(
     if authoritative_complete {
         if let Some(inventory_id) = &batch.inventory_id {
             let rows = sqlx::query(
-                "SELECT DISTINCT d.source_key,d.incarnation FROM source_observations o JOIN child_batches b ON b.batch_id=o.batch_id JOIN source_devices d ON d.id=o.source_device_id WHERE b.parent_agent_id=? AND b.source=? AND b.source_scope=? AND b.inventory_id=? AND b.inventory_generation=?",
+                "SELECT d.source_key,d.incarnation FROM child_batches b JOIN source_observations o ON o.batch_id=b.batch_id JOIN source_devices d ON d.id=o.source_device_id WHERE b.parent_agent_id=? AND b.source=? AND b.source_scope=? AND b.inventory_id=? AND b.inventory_generation=?",
             )
             .bind(&batch.agent_id)
             .bind(source)

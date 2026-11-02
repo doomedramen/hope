@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 23;
+const LATEST: i64 = 25;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
@@ -206,6 +206,26 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     }
+    if version < 24 {
+        sqlx::raw_sql(include_str!(
+            "migrations/0024_shared_source_identity_lookup.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("PRAGMA user_version = 24")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if version < 25 {
+        sqlx::raw_sql(include_str!(
+            "migrations/0025_source_observations_batch_lookup.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("PRAGMA user_version = 25")
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -364,7 +384,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 23);
+        assert_eq!(version, 25);
         let source_cleanup_index: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='source_metrics_cleanup'",
         )

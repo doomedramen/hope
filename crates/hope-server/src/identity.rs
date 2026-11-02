@@ -6,7 +6,7 @@ use crate::{
     state::{State, hash, now},
 };
 use hope_protocol::{AssociationUpdate, ChildDeviceReport, Host, Network};
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
 use std::collections::{HashMap, HashSet};
 
 /// Reconcile after observations or settings change, in the same transaction as the write.
@@ -24,6 +24,9 @@ async fn reconcile_selected(
     tx: &mut Transaction<'_, Sqlite>,
     selected: Option<&HashSet<String>>,
 ) -> anyhow::Result<bool> {
+    if selected.is_some_and(HashSet::is_empty) {
+        return Ok(false);
+    }
     let hosts = sqlx::query_scalar::<_, String>("SELECT body FROM hosts ORDER BY id")
         .fetch_all(&mut **tx)
         .await?
@@ -43,6 +46,7 @@ async fn reconcile_selected(
                 interval_minutes: row.get::<i64, _>("interval_minutes") as u32,
             })
             .collect::<Vec<_>>();
+    let matcher = associations::Matcher::new(&hosts, &networks);
     let rows = sqlx::query(
         "SELECT source_device_id,host_id FROM device_associations WHERE status='confirmed'",
     )
@@ -56,24 +60,41 @@ async fn reconcile_selected(
         by_source.insert(source.clone(), host.clone());
         by_host.insert(host, source);
     }
-    let sources=sqlx::query("SELECT id,body FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id) ORDER BY id")
-        .fetch_all(&mut **tx).await?;
+    let mut source_query = QueryBuilder::<Sqlite>::new(
+        "SELECT d.id,d.body FROM source_devices d WHERE NOT EXISTS(SELECT 1 FROM source_device_aliases a WHERE a.alias_id=d.id)",
+    );
+    if let Some(ids) = selected {
+        source_query.push(" AND d.id IN (");
+        let mut separated = source_query.separated(",");
+        for id in ids {
+            separated.push_bind(id);
+        }
+        separated.push_unseparated(")");
+    }
+    source_query.push(" ORDER BY d.id");
+    let sources = source_query.build().fetch_all(&mut **tx).await?;
     for row in sources {
         let id: String = row.get("id");
-        if selected.is_some_and(|ids| !ids.contains(&id)) {
-            continue;
-        }
         let child: ChildDeviceReport = serde_json::from_str(row.get("body"))?;
-        // Only inferred suggestions expire. Manual decisions survive missing/changed evidence.
-        sqlx::query("DELETE FROM device_associations WHERE source_device_id=? AND status='suggested' AND manual=0")
-            .bind(&id).execute(&mut **tx).await?;
-        for candidate in associations::candidates(&child, &hosts, &networks) {
-            let prior:Option<(String,bool)>=sqlx::query_as("SELECT status,manual FROM device_associations WHERE source_device_id=? AND host_id=?")
-                .bind(&id).bind(&candidate.host_id).fetch_optional(&mut **tx).await?;
-            if prior
-                .as_ref()
-                .is_some_and(|(status, manual)| *manual || status == "confirmed")
-            {
+        let prior_rows = sqlx::query(
+            "SELECT host_id,status,manual FROM device_associations WHERE source_device_id=?",
+        )
+        .bind(&id)
+        .fetch_all(&mut **tx)
+        .await?;
+        let prior = prior_rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("host_id"),
+                    (row.get::<String, _>("status"), row.get::<bool, _>("manual")),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let candidates = matcher.candidates(&child);
+        for candidate in &candidates {
+            let prior = prior.get(&candidate.host_id);
+            if prior.is_some_and(|(status, manual)| *manual || status == "confirmed") {
                 continue;
             }
             let confirm = candidate.strong
@@ -84,17 +105,47 @@ async fn reconcile_selected(
                     .get(&candidate.host_id)
                     .is_none_or(|source| source == &id);
             let evidence = serde_json::to_string(&candidate.evidence)?;
-            sqlx::query("INSERT INTO device_associations(source_device_id,host_id,status,reason,evidence,evidence_hash,updated_at,manual) VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(source_device_id,host_id) DO UPDATE SET status=excluded.status,reason=excluded.reason,evidence=excluded.evidence,evidence_hash=excluded.evidence_hash,updated_at=excluded.updated_at")
+            sqlx::query("INSERT INTO device_associations(source_device_id,host_id,status,reason,evidence,evidence_hash,updated_at,manual) VALUES(?,?,?,?,?,?,?,0) ON CONFLICT(source_device_id,host_id) DO UPDATE SET status=excluded.status,reason=excluded.reason,evidence=excluded.evidence,evidence_hash=excluded.evidence_hash,updated_at=excluded.updated_at WHERE device_associations.manual=0 AND (device_associations.status IS NOT excluded.status OR device_associations.reason IS NOT excluded.reason OR device_associations.evidence IS NOT excluded.evidence OR device_associations.evidence_hash IS NOT excluded.evidence_hash)")
                 .bind(&id).bind(&candidate.host_id).bind(if confirm {"confirmed"} else {"suggested"})
                 .bind(&candidate.reason).bind(&evidence).bind(hash(&evidence)).bind(now()).execute(&mut **tx).await?;
             if confirm {
                 by_source.insert(id.clone(), candidate.host_id.clone());
-                by_host.insert(candidate.host_id, id.clone());
+                by_host.insert(candidate.host_id.clone(), id.clone());
             }
         }
+        // Suggestions are derived from current evidence. Keep matching rows in place so a
+        // routine report does not delete and recreate identical associations.
+        let mut delete_stale =
+            QueryBuilder::<Sqlite>::new("DELETE FROM device_associations WHERE source_device_id=");
+        delete_stale.push_bind(&id);
+        delete_stale.push(" AND status='suggested' AND manual=0");
+        if candidates.is_empty() {
+            delete_stale.build().execute(&mut **tx).await?;
+        } else {
+            delete_stale.push(" AND host_id NOT IN (");
+            let mut separated = delete_stale.separated(",");
+            for candidate in &candidates {
+                separated.push_bind(&candidate.host_id);
+            }
+            separated.push_unseparated(")");
+            delete_stale.build().execute(&mut **tx).await?;
+        }
     }
-    let changed = sqlx::query("UPDATE source_devices SET host_id=(SELECT host_id FROM device_associations WHERE source_device_id=source_devices.id AND status='confirmed') WHERE host_id IS NOT (SELECT host_id FROM device_associations WHERE source_device_id=source_devices.id AND status='confirmed')")
-        .execute(&mut **tx).await?.rows_affected() > 0;
+    let changed = if let Some(ids) = selected {
+        let mut update = QueryBuilder::<Sqlite>::new(
+            "UPDATE source_devices SET host_id=(SELECT host_id FROM device_associations WHERE source_device_id=source_devices.id AND status='confirmed') WHERE id IN (",
+        );
+        let mut separated = update.separated(",");
+        for id in ids {
+            separated.push_bind(id);
+        }
+        separated.push_unseparated(")");
+        update.push(" AND host_id IS NOT (SELECT host_id FROM device_associations WHERE source_device_id=source_devices.id AND status='confirmed')");
+        update.build().execute(&mut **tx).await?.rows_affected() > 0
+    } else {
+        sqlx::query("UPDATE source_devices SET host_id=(SELECT host_id FROM device_associations WHERE source_device_id=source_devices.id AND status='confirmed') WHERE host_id IS NOT (SELECT host_id FROM device_associations WHERE source_device_id=source_devices.id AND status='confirmed')")
+            .execute(&mut **tx).await?.rows_affected() > 0
+    };
     Ok(changed)
 }
 
