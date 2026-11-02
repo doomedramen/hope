@@ -22,7 +22,7 @@ pub type Sample = (Inventory, Metrics, Vec<CollectorStatus>);
 pub type Sampling<'a> = Pin<Box<dyn Future<Output = Sample> + 'a>>;
 pub trait Sampler {
     fn sample(&mut self) -> Sampling<'_>;
-    fn child_snapshots(&self) -> Vec<collect::ChildSnapshot> {
+    fn take_child_snapshots(&mut self) -> Vec<collect::ChildSnapshot> {
         vec![]
     }
 }
@@ -30,8 +30,8 @@ impl Sampler for collect::Collector {
     fn sample(&mut self) -> Sampling<'_> {
         Box::pin(self.sample())
     }
-    fn child_snapshots(&self) -> Vec<collect::ChildSnapshot> {
-        collect::Collector::child_snapshots(self)
+    fn take_child_snapshots(&mut self) -> Vec<collect::ChildSnapshot> {
+        collect::Collector::take_child_snapshots(self)
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -286,7 +286,7 @@ async fn sample_loop<C: Sampler>(
         let tick = Instant::now();
         let sample = collector.sample().await;
         let collected_at = now();
-        let child_snapshots = collector.child_snapshots();
+        let child_snapshots = collector.take_child_snapshots();
         if sender
             .send((sample, collected_at, child_snapshots))
             .await
@@ -495,7 +495,9 @@ pub async fn run<C: Sampler, S: Future<Output = ()>>(
                 }
                 current_reports.insert(report.report_id.clone());
                 spool.push(report,now())?;
-                current_reports.retain(|id| spool.iter().any(|report| &report.report_id == id));
+                let queued_ids: std::collections::HashSet<_> =
+                    spool.iter().map(|report| report.report_id.as_str()).collect();
+                current_reports.retain(|id| queued_ids.contains(id.as_str()));
                 config::write_private(&dir.join("spool.json"),&spool.encode()?).await?;
             }
         }
@@ -832,7 +834,7 @@ mod tests {
                 )
             })
         }
-        fn child_snapshots(&self) -> Vec<collect::ChildSnapshot> {
+        fn take_child_snapshots(&mut self) -> Vec<collect::ChildSnapshot> {
             vec![collect::ChildSnapshot {
                 source: ChildSourceKind::Docker,
                 source_scope: "docker-engine".into(),

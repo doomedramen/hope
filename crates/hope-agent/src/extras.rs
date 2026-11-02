@@ -21,6 +21,7 @@ const MAX_SENSORS: usize = 64;
 const MAX_POOLS: usize = 64;
 const MAX_UNITS: usize = 128;
 const MONITOR_TIMEOUT: Duration = Duration::from_secs(5);
+const SENSOR_DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Operator settings read at start: `HOPE_MONITORS` and `HOPE_WATCH_SERVICES` (comma
 /// separated) take precedence over `settings.json` in the state directory, which holds
@@ -102,16 +103,33 @@ pub async fn memory_breakdown(is_container: bool) -> MemoryBreakdown {
 }
 /// Page cache, buffers and reclaimable slab, in bytes.
 pub fn parse_meminfo_cache(text: &str) -> Option<f64> {
-    let mut values = HashMap::new();
+    let mut cached = None;
+    let mut buffers = 0u64;
+    let mut reclaimable_slab = 0u64;
     for line in text.lines() {
-        let (key, rest) = line.split_once(':')?;
-        let number = rest.split_whitespace().next()?.parse::<u64>().ok()?;
-        values.insert(key.trim(), number.saturating_mul(1024));
+        let Some((key, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Some(number) = rest
+            .split_whitespace()
+            .next()
+            .and_then(|number| number.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let bytes = number.saturating_mul(1024);
+        match key.trim() {
+            "Cached" => cached = Some(bytes),
+            "Buffers" => buffers = bytes,
+            "SReclaimable" => reclaimable_slab = bytes,
+            _ => {}
+        }
     }
-    let cached = *values.get("Cached")?;
-    let buffers = values.get("Buffers").copied().unwrap_or(0);
-    let slab = values.get("SReclaimable").copied().unwrap_or(0);
-    Some(cached.saturating_add(buffers).saturating_add(slab) as f64)
+    Some(
+        cached?
+            .saturating_add(buffers)
+            .saturating_add(reclaimable_slab) as f64,
+    )
 }
 pub fn parse_arc_size(text: &str) -> Option<f64> {
     text.lines()
@@ -142,15 +160,31 @@ pub fn load_average() -> Option<LoadAverage> {
 
 pub struct Sensors {
     components: Components,
+    last_discovery: Option<Instant>,
 }
 impl Sensors {
     pub fn new() -> Self {
         Self {
             components: Components::new(),
+            last_discovery: None,
         }
     }
     pub fn sample(&mut self) -> Vec<Temperature> {
-        self.components.refresh(true);
+        let now = Instant::now();
+        if self
+            .last_discovery
+            .is_none_or(|at| at.elapsed() >= SENSOR_DISCOVERY_INTERVAL)
+        {
+            // Hardware topology changes slowly. Refreshing the full list on every
+            // sample re-enumerates IOKit/hwmon; refresh existing readings every
+            // sample and rediscover devices once a minute.
+            self.components.refresh(true);
+            self.last_discovery = Some(now);
+        } else {
+            for component in self.components.list_mut() {
+                component.refresh();
+            }
+        }
         let mut seen = HashSet::new();
         let mut result: Vec<Temperature> = self
             .components
@@ -267,51 +301,106 @@ pub struct DeviceCounters {
     pub write_bytes: u64,
     pub busy_ms: u64,
 }
-pub async fn device_counters() -> HashMap<String, DeviceCounters> {
-    if !cfg!(target_os = "linux") {
-        return HashMap::new();
-    }
-    let Ok(text) = tokio::fs::read_to_string("/proc/diskstats").await else {
-        return HashMap::new();
-    };
-    let mut result = HashMap::new();
-    for (name, counters) in parse_diskstats(&text) {
-        if result.len() >= MAX_DEVICES {
-            break;
-        }
-        if tokio::fs::try_exists(format!("/sys/block/{name}"))
-            .await
-            .unwrap_or(false)
-        {
-            result.insert(name, counters);
-        }
-    }
-    result
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiskByteCounters {
+    pub read_bytes: u64,
+    pub write_bytes: u64,
 }
+
+pub struct DiskSnapshot {
+    pub aggregate: Option<DiskByteCounters>,
+    pub devices: HashMap<String, DeviceCounters>,
+}
+
+fn include_in_host_disk_total(name: &str) -> bool {
+    !["loop", "ram", "dm-", "md", "zram"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// Read Linux disk counters once for both host totals and per-device reporting.
+pub async fn disk_snapshot() -> Option<DiskSnapshot> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let text = tokio::fs::read_to_string("/proc/diskstats").await.ok()?;
+    let mut block_devices = HashSet::new();
+    let mut entries = tokio::fs::read_dir("/sys/block").await.ok()?;
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                block_devices.insert(entry.file_name().to_string_lossy().into_owned());
+            }
+            Ok(None) => break,
+            Err(_) => return None,
+        }
+    }
+
+    let mut read = 0u64;
+    let mut written = 0u64;
+    let mut found_aggregate = false;
+    let mut devices = HashMap::new();
+    for (name, counters) in text.lines().filter_map(parse_diskstats_row) {
+        if !block_devices.contains(name) {
+            continue;
+        }
+
+        // Preserve the host aggregate's existing whole-device scope. The
+        // per-device view also includes device-mapper and software RAID devices.
+        if include_in_host_disk_total(name) {
+            read = read.saturating_add(counters.read_bytes);
+            written = written.saturating_add(counters.write_bytes);
+            found_aggregate = true;
+        }
+        if !["loop", "ram", "zram", "sr", "fd"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            && devices.len() < MAX_DEVICES
+        {
+            devices.insert(name.to_string(), counters);
+        }
+    }
+
+    Some(DiskSnapshot {
+        aggregate: found_aggregate.then_some(DiskByteCounters {
+            read_bytes: read,
+            write_bytes: written,
+        }),
+        devices,
+    })
+}
+
+#[cfg(test)]
 pub fn parse_diskstats(text: &str) -> Vec<(String, DeviceCounters)> {
     text.lines()
-        .filter_map(|line| {
-            let p: Vec<_> = line.split_whitespace().collect();
-            if p.len() < 14 {
-                return None;
-            }
-            let name = p[2];
-            if ["loop", "ram", "zram", "sr", "fd"]
+        .filter_map(parse_diskstats_row)
+        .filter(|(name, _)| {
+            !["loop", "ram", "zram", "sr", "fd"]
                 .iter()
                 .any(|prefix| name.starts_with(prefix))
-            {
-                return None;
-            }
-            Some((
-                name.to_string(),
-                DeviceCounters {
-                    read_bytes: p[5].parse::<u64>().ok()?.saturating_mul(512),
-                    write_bytes: p[9].parse::<u64>().ok()?.saturating_mul(512),
-                    busy_ms: p[12].parse::<u64>().ok()?,
-                },
-            ))
         })
+        .map(|(name, counters)| (name.to_string(), counters))
         .collect()
+}
+
+fn parse_diskstats_row(line: &str) -> Option<(&str, DeviceCounters)> {
+    let mut fields = line.split_whitespace();
+    fields.next()?; // major
+    fields.next()?; // minor
+    let name = fields.next()?;
+    let read_sectors = fields.nth(2)?.parse::<u64>().ok()?;
+    let write_sectors = fields.nth(3)?.parse::<u64>().ok()?;
+    let busy_ms = fields.nth(2)?.parse::<u64>().ok()?;
+    fields.next()?; // weighted I/O time; retain the previous minimum row length
+    Some((
+        name,
+        DeviceCounters {
+            read_bytes: read_sectors.saturating_mul(512),
+            write_bytes: write_sectors.saturating_mul(512),
+            busy_ms,
+        },
+    ))
 }
 pub fn device_rates(
     previous: &HashMap<String, DeviceCounters>,
@@ -367,72 +456,54 @@ pub fn parse_zpool_list(output: &str) -> Vec<PoolCapacity> {
         .lines()
         .take(MAX_POOLS)
         .filter_map(|line| {
-            let f: Vec<_> = line.split('\t').collect();
-            if f.len() < 5 {
-                return None;
-            }
-            let size = f[1]
+            let mut fields = line.split('\t');
+            let name = fields.next()?;
+            let size = fields
+                .next()?
                 .parse::<f64>()
                 .ok()
                 .filter(|v| v.is_finite() && *v >= 0.0)?;
-            let allocated = f[2]
+            let allocated = fields
+                .next()?
                 .parse::<f64>()
                 .ok()
                 .filter(|v| v.is_finite() && *v >= 0.0)?;
+            fields.next()?; // free
+            let health = fields.next()?;
             Some(PoolCapacity {
-                name: clean(f[0], 128),
+                name: clean(name, 128),
                 size_bytes: size,
                 allocated_bytes: allocated.min(size),
-                health: clean(f[4], 32),
+                health: clean(health, 32),
             })
         })
         .collect()
 }
-/// Cumulative bytes read and written per pool, summed over its datasets' kstats.
+/// Cumulative pool-level bytes read and written from each pool's `io` kstat.
 pub async fn pool_counters(pools: &[PoolCapacity]) -> HashMap<String, (u64, u64)> {
     let mut result = HashMap::new();
     if !cfg!(target_os = "linux") {
         return result;
     }
     for pool in pools {
-        let Ok(mut entries) =
-            tokio::fs::read_dir(format!("/proc/spl/kstat/zfs/{}", pool.name)).await
-        else {
-            continue;
-        };
-        let mut read = 0u64;
-        let mut written = 0u64;
-        let mut found = false;
-        let mut objsets = 0;
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            if !entry.file_name().to_string_lossy().starts_with("objset-") {
-                continue;
-            }
-            objsets += 1;
-            if objsets > 4096 {
-                break;
-            }
-            if let Ok(text) = tokio::fs::read_to_string(entry.path()).await
-                && let Some((r, w)) = parse_objset(&text)
-            {
-                read = read.saturating_add(r);
-                written = written.saturating_add(w);
-                found = true;
-            }
-        }
-        if found {
-            result.insert(pool.name.clone(), (read, written));
+        let io_path = format!("/proc/spl/kstat/zfs/{}/io", pool.name);
+        if let Ok(text) = tokio::fs::read_to_string(&io_path).await
+            && let Some(counters) = parse_pool_io(&text)
+        {
+            result.insert(pool.name.clone(), counters);
         }
     }
     result
 }
-pub fn parse_objset(text: &str) -> Option<(u64, u64)> {
-    let field = |key: &str| {
+pub fn parse_pool_io(text: &str) -> Option<(u64, u64)> {
+    let field = |key: &str| -> Option<u64> {
         text.lines().find_map(|line| {
             let mut parts = line.split_whitespace();
-            (parts.next()? == key)
-                .then(|| parts.nth(1)?.parse::<u64>().ok())
-                .flatten()
+            if parts.next()? != key {
+                return None;
+            }
+            parts.next()?; // kstat data type
+            parts.next()?.parse().ok()
         })
     };
     Some((field("nread")?, field("nwritten")?))
@@ -815,7 +886,7 @@ mod tests {
         assert_eq!(first[0].busy_percent, None);
     }
     #[test]
-    fn zpool_list_and_objset_counters_parse() {
+    fn zpool_list_and_pool_io_counters_parse() {
         let pools = parse_zpool_list(
             "rpool\t1000000\t400000\t600000\tONLINE\ntank\t2000\t3000\t0\tDEGRADED\nbroken line\n",
         );
@@ -826,8 +897,8 @@ mod tests {
             pools[1].allocated_bytes, 2000.0,
             "allocation never exceeds size"
         );
-        let objset = "31 1 0x01 7 2160 1 2\nname type data\ndataset_name 7 rpool/ROOT\nwrites 4 10\nnwritten 4 2048\nreads 4 3\nnread 4 4096\n";
-        assert_eq!(parse_objset(objset), Some((4096, 2048)));
+        let pool_io = "13 1 0x01 9 432 0 0\nname type data\nnread 4 4096\nnwritten 4 2048\nreads 4 3\nwrites 4 10\n";
+        assert_eq!(parse_pool_io(pool_io), Some((4096, 2048)));
         let root = Root {
             device: None,
             pool: Some("rpool".into()),

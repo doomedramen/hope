@@ -144,12 +144,11 @@ pub fn read_snapshot() -> Option<ChildSnapshot> {
     })
 }
 
-pub fn collector_status() -> Option<hope_protocol::CollectorStatus> {
+pub fn collector_status(
+    snapshot: Option<&ChildSnapshot>,
+) -> Option<hope_protocol::CollectorStatus> {
     pvesh_binary()?;
-    let snapshot = read_snapshot();
-    let available = snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.inventory_complete);
+    let available = snapshot.is_some_and(|snapshot| snapshot.inventory_complete);
     let detail = if available {
         None
     } else if snapshot.is_none() {
@@ -248,16 +247,8 @@ pub async fn collect() -> Result<()> {
             Value::Array(vec![])
         }
     };
-    let qemu = qemu.as_array().cloned().unwrap_or_else(|| {
-        complete = false;
-        eprintln!("Proxmox QEMU inventory is not a JSON array");
-        vec![]
-    });
-    let lxc = lxc.as_array().cloned().unwrap_or_else(|| {
-        complete = false;
-        eprintln!("Proxmox LXC inventory is not a JSON array");
-        vec![]
-    });
+    let qemu = take_array_or_partial(qemu, "QEMU", &mut complete);
+    let lxc = take_array_or_partial(lxc, "LXC", &mut complete);
     let mut global_members = HashMap::new();
     for resource in resources.iter().take(500) {
         let Some(vmid) = resource.get("vmid").and_then(Value::as_u64) else {
@@ -289,7 +280,7 @@ pub async fn collect() -> Result<()> {
     }
     let mut parsed = Vec::with_capacity(local_count.min(500));
     for (kind, list) in [("qemu", qemu), ("lxc", lxc)] {
-        for item in list.iter().take(500) {
+        for item in list.into_iter().take(500) {
             let Some(vmid) = item.get("vmid").and_then(Value::as_u64) else {
                 complete = false;
                 continue;
@@ -306,7 +297,7 @@ pub async fn collect() -> Result<()> {
                 complete = false;
                 continue;
             }
-            let mut resource = item.clone();
+            let mut resource = item;
             fill_missing_resource_fields(&mut resource, member, kind, &local_node);
             let Some(device) = resource_device(&resource, &cluster_id) else {
                 complete = false;
@@ -335,11 +326,18 @@ pub async fn collect() -> Result<()> {
     config_cache
         .entries
         .retain(|key, _| current_keys.contains(key));
-    let cached_configs = config_cache.entries.clone();
-    let mut tasks = stream::iter(parsed.into_iter().map(|mut device| {
-        let cached = config_key(&device).and_then(|key| cached_configs.get(&key).cloned());
-        async move {
+    let candidates = parsed
+        .into_iter()
+        .map(|device| {
             let key = config_key(&device);
+            let cached = key
+                .as_ref()
+                .and_then(|key| config_cache.entries.remove(key));
+            (device, key, cached)
+        })
+        .collect::<Vec<_>>();
+    let mut tasks = stream::iter(candidates.into_iter().map(
+        |(mut device, key, cached)| async move {
             let should_refresh = cached.as_ref().is_none_or(|entry| {
                 now.saturating_sub(entry.observed_at) >= CONFIG_REFRESH_SECONDS
             });
@@ -361,8 +359,8 @@ pub async fn collect() -> Result<()> {
                 return (device, key, Some(config));
             }
             (device, None, None)
-        }
-    }))
+        },
+    ))
     .buffer_unordered(MAX_GUEST_CONFIG_CONCURRENCY);
     let mut devices = vec![];
     while let Some((device, key, config)) = tasks.next().await {
@@ -373,8 +371,13 @@ pub async fn collect() -> Result<()> {
     }
     drop(tasks);
     devices.sort_by(|a, b| {
-        format!("{:?}", a.identity.kind)
-            .cmp(&format!("{:?}", b.identity.kind))
+        let order = |kind| match kind {
+            ChildDeviceKind::DockerContainer => 0,
+            ChildDeviceKind::ProxmoxLxc => 1,
+            ChildDeviceKind::ProxmoxVm => 2,
+        };
+        order(a.identity.kind)
+            .cmp(&order(b.identity.kind))
             .then_with(|| a.identity.key.cmp(&b.identity.key))
     });
     refresh_guest_enrichment(&mut devices, &mut config_cache, observed_at).await;
@@ -398,6 +401,17 @@ pub async fn collect() -> Result<()> {
         devices,
         inventory_complete: complete,
     })
+}
+
+fn take_array_or_partial(value: Value, source: &str, complete: &mut bool) -> Vec<Value> {
+    match value {
+        Value::Array(items) => items,
+        _ => {
+            *complete = false;
+            eprintln!("Proxmox {source} inventory is not a JSON array");
+            vec![]
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -871,11 +885,11 @@ async fn guest_config(device: &ChildDeviceReport) -> Option<Value> {
         ChildDeviceKind::DockerContainer => return None,
     };
     let path = format!("/etc/pve/nodes/{node}/{kind}/{vmid}.conf");
-    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    let metadata = tokio::fs::symlink_metadata(&path).await.ok()?;
     if !metadata.file_type().is_file() || metadata.len() > 256 * 1024 {
         return None;
     }
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = tokio::fs::read_to_string(path).await.ok()?;
     let mut safe = serde_json::Map::new();
     for line in text.lines().take(2048) {
         let Some((key, value)) = line.split_once(':') else {

@@ -17,8 +17,10 @@ use std::{
 };
 #[cfg(target_os = "linux")]
 use std::{ffi::CString, mem::MaybeUninit};
-use sysinfo::{Disks, Networks, System};
+use sysinfo::{DiskRefreshKind, Disks, Networks, System};
 use tokio::{io::AsyncReadExt, process::Command, time::timeout};
+
+const SLOW_STORAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 fn clean_option(value: Option<&str>, max: usize) -> Option<String> {
     value
@@ -249,12 +251,12 @@ fn apply_docker_api_stats(
         let mut has_read = false;
         let mut has_write = false;
         for entry in entries {
-            match entry.op.as_deref().map(str::to_ascii_lowercase).as_deref() {
-                Some("read") => {
+            match entry.op.as_deref() {
+                Some(operation) if operation.eq_ignore_ascii_case("read") => {
                     read = read.saturating_add(entry.value.unwrap_or_default());
                     has_read = true;
                 }
-                Some("write") => {
+                Some(operation) if operation.eq_ignore_ascii_case("write") => {
                     write = write.saturating_add(entry.value.unwrap_or_default());
                     has_write = true;
                 }
@@ -462,9 +464,13 @@ pub struct Collector {
     networks: Networks,
     disks: DiskProbe,
     disk_inventory: Vec<Disk>,
+    disk_inventory_at: Option<Instant>,
+    disk_inventory_available: bool,
+    pool_capacities: Option<Vec<extras::PoolCapacity>>,
+    pool_capacities_at: Option<Instant>,
     last: Instant,
     previous_network: HashMap<String, (u64, u64, String)>,
-    previous_disk: Option<(u64, u64)>,
+    previous_disk: Option<extras::DiskByteCounters>,
     gpus: Vec<Gpu>,
     gpu_at: Instant,
     first: bool,
@@ -476,6 +482,7 @@ pub struct Collector {
     docker_scope: Option<String>,
     child_devices: Vec<ChildDeviceReport>,
     child_inventory_complete: bool,
+    proxmox_snapshot: Option<ChildSnapshot>,
 }
 
 struct DiskProbe {
@@ -569,7 +576,9 @@ impl DiskProbe {
             collect: std::sync::Arc::new(|| {
                 // A single detached worker may wait on a remote filesystem. It cannot
                 // accumulate further workers or prevent process shutdown.
-                let disks = Disks::new_with_refreshed_list();
+                let disks = Disks::new_with_refreshed_list_specifics(
+                    DiskRefreshKind::nothing().with_storage(),
+                );
                 let collected = disks
                     .iter()
                     .take(128)
@@ -616,6 +625,9 @@ impl DiskProbe {
             Err(_) => None,
         }
     }
+    fn has_pending_sample(&self) -> bool {
+        self.receiver.is_some()
+    }
 }
 
 pub fn rate(previous: u64, current: u64, seconds: f64) -> Option<f64> {
@@ -638,6 +650,7 @@ impl Collector {
             docker_scope: None,
             child_devices: vec![],
             child_inventory_complete: false,
+            proxmox_snapshot: None,
             costs: Vec::with_capacity(20),
             system,
             memory_total_bytes: 0.0,
@@ -646,6 +659,10 @@ impl Collector {
             networks: Networks::new_with_refreshed_list(),
             disks: DiskProbe::new(),
             disk_inventory: vec![],
+            disk_inventory_at: None,
+            disk_inventory_available: false,
+            pool_capacities: None,
+            pool_capacities_at: None,
             last: Instant::now(),
             previous_network: HashMap::new(),
             previous_disk: None,
@@ -703,10 +720,22 @@ impl Collector {
         self.networks = Networks::new_with_refreshed_list();
         self.cost("network_refresh", started);
         let started = Instant::now();
-        let disk_sample = self.disks.sample(Duration::from_millis(500)).await;
+        let refresh_disk_inventory = self
+            .disk_inventory_at
+            .is_none_or(|at| at.elapsed() >= SLOW_STORAGE_REFRESH_INTERVAL)
+            || self.disks.has_pending_sample();
+        let disk_sample = if refresh_disk_inventory {
+            self.disks.sample(Duration::from_millis(500)).await
+        } else {
+            None
+        };
         self.cost("filesystems", started);
-        if let Some(disks) = &disk_sample {
-            self.disk_inventory = disks.clone();
+        if let Some(disks) = disk_sample {
+            self.disk_inventory = disks;
+            self.disk_inventory_at = Some(Instant::now());
+            self.disk_inventory_available = true;
+        } else if refresh_disk_inventory {
+            self.disk_inventory_available = false;
         }
         let started = Instant::now();
         let docker = docker_containers().await;
@@ -776,14 +805,17 @@ impl Collector {
         network_interfaces.sort_by(|a, b| a.name.cmp(&b.name));
         self.previous_network = current_network;
         self.cost("network_counters", started);
-        let disks = disk_sample.clone().unwrap_or_default();
+        let disks = self.disk_inventory.clone();
         let started = Instant::now();
-        let io = disk_counters().await;
+        let disk_io_sample = extras::disk_snapshot().await;
+        let io = disk_io_sample.as_ref().and_then(|sample| sample.aggregate);
         self.cost("disk_io", started);
-        let disk_rate = self
-            .previous_disk
-            .zip(io)
-            .map(|(old, new)| (rate(old.0, new.0, elapsed), rate(old.1, new.1, elapsed)));
+        let disk_rate = self.previous_disk.zip(io).map(|(old, new)| {
+            (
+                rate(old.read_bytes, new.read_bytes, elapsed),
+                rate(old.write_bytes, new.write_bytes, elapsed),
+            )
+        });
         self.previous_disk = io;
         if self.gpu_at.elapsed() > Duration::from_secs(3600) {
             let started = Instant::now();
@@ -807,23 +839,35 @@ impl Collector {
         self.cost("temperatures", started);
         let started = Instant::now();
         let root = extras::root().await;
-        let devices = extras::device_counters().await;
+        let devices = disk_io_sample
+            .map(|sample| sample.devices)
+            .unwrap_or_default();
         let disk_io = extras::device_rates(&self.previous_devices, &devices, elapsed, &root);
         self.previous_devices = devices;
         self.cost("disk_devices", started);
         let started = Instant::now();
-        let capacities = extras::pool_capacities().await;
-        let pools = match &capacities {
+        if self
+            .pool_capacities_at
+            .is_none_or(|at| at.elapsed() >= SLOW_STORAGE_REFRESH_INTERVAL)
+        {
+            self.pool_capacities = extras::pool_capacities().await;
+            self.pool_capacities_at = Some(Instant::now());
+        }
+        let storage_available = self.pool_capacities.is_some();
+        let (pools, pool_io_available) = match self.pool_capacities.as_deref() {
             Some(capacities) => {
                 let counters = extras::pool_counters(capacities).await;
+                let io_available = capacities
+                    .iter()
+                    .all(|pool| counters.contains_key(&pool.name));
                 let pools =
                     extras::pools(capacities, &self.previous_pools, &counters, elapsed, &root);
                 self.previous_pools = counters;
-                pools
+                (pools, Some(io_available))
             }
             None => {
                 self.previous_pools.clear();
-                vec![]
+                (vec![], None)
             }
         };
         self.cost("storage_pools", started);
@@ -857,7 +901,7 @@ impl Collector {
             status("network", true, None),
             status(
                 "storage",
-                disk_sample.is_some(),
+                self.disk_inventory_available,
                 Some(
                     "Filesystem collector is unavailable or still waiting; last inventory is retained",
                 ),
@@ -901,7 +945,7 @@ impl Collector {
             ),
             status(
                 "storage_pools",
-                capacities.is_some(),
+                storage_available,
                 Some("No ZFS pools: zpool is missing or not permitted for this user"),
             ),
             status(
@@ -921,8 +965,16 @@ impl Collector {
                 },
             },
         ];
-        if let Some(status) = crate::proxmox::collector_status() {
+        self.proxmox_snapshot = crate::proxmox::read_snapshot();
+        if let Some(status) = crate::proxmox::collector_status(self.proxmox_snapshot.as_ref()) {
             collectors.push(status);
+        }
+        if let Some(available) = pool_io_available {
+            collectors.push(status(
+                "storage_pool_io",
+                available,
+                Some("Pool throughput requires readable OpenZFS /proc/spl/kstat/zfs/<pool>/io counters"),
+            ));
         }
         if self.monitors.configured() > 0 {
             collectors.push(status(
@@ -991,9 +1043,10 @@ impl Collector {
         inventory.collectors = collectors.clone();
         (inventory, metrics, collectors)
     }
-    pub fn child_snapshots(&self) -> Vec<ChildSnapshot> {
+    /// Transfer the completed child snapshot into the reporting queue without cloning it.
+    pub fn take_child_snapshots(&mut self) -> Vec<ChildSnapshot> {
         let mut snapshots = vec![];
-        if let Some(source_scope) = self.docker_scope.clone() {
+        if let Some(source_scope) = self.docker_scope.take() {
             snapshots.push(ChildSnapshot {
                 source: hope_protocol::ChildSourceKind::Docker,
                 source_scope,
@@ -1005,11 +1058,11 @@ impl Collector {
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs_f64(),
-                devices: self.child_devices.clone(),
+                devices: std::mem::take(&mut self.child_devices),
                 inventory_complete: self.child_inventory_complete,
             });
         }
-        snapshots.extend(crate::proxmox::read_snapshot());
+        snapshots.extend(self.proxmox_snapshot.take());
         snapshots
     }
 }
@@ -1052,11 +1105,14 @@ async fn default_gateway() -> Option<(String, String)> {
     if cfg!(target_os = "linux") {
         let text = tokio::fs::read_to_string("/proc/net/route").await.ok()?;
         for line in text.lines().skip(1) {
-            let parts: Vec<_> = line.split_whitespace().collect();
-            if parts.len() > 3 && parts[1] == "00000000" {
-                let value = u32::from_str_radix(parts[2], 16).ok()?;
+            let mut fields = line.split_whitespace();
+            let interface = fields.next()?;
+            let destination = fields.next()?;
+            let gateway = fields.next()?;
+            if destination == "00000000" {
+                let value = u32::from_str_radix(gateway, 16).ok()?;
                 return Some((
-                    parts[0].into(),
+                    interface.into(),
                     std::net::Ipv4Addr::from(value.to_le_bytes()).to_string(),
                 ));
             }
@@ -1071,38 +1127,6 @@ async fn default_gateway() -> Option<(String, String)> {
         };
         Some((field("interface:")?, field("gateway:")?))
     }
-}
-async fn disk_counters() -> Option<(u64, u64)> {
-    if !cfg!(target_os = "linux") {
-        return None;
-    }
-    let data = tokio::fs::read_to_string("/proc/diskstats").await.ok()?;
-    let mut read = 0u64;
-    let mut write = 0u64;
-    let mut found = false;
-    for line in data.lines() {
-        let p: Vec<_> = line.split_whitespace().collect();
-        if p.len() < 14 {
-            continue;
-        }
-        if p[2].starts_with("loop")
-            || p[2].starts_with("ram")
-            || p[2].starts_with("dm-")
-            || p[2].starts_with("md")
-            || p[2].starts_with("zram")
-        {
-            continue;
-        }
-        if tokio::fs::try_exists(format!("/sys/block/{}", p[2]))
-            .await
-            .unwrap_or(false)
-        {
-            read = read.saturating_add(p[5].parse::<u64>().ok()?.saturating_mul(512));
-            write = write.saturating_add(p[9].parse::<u64>().ok()?.saturating_mul(512));
-            found = true;
-        }
-    }
-    found.then_some((read, write))
 }
 pub(crate) async fn command(binary: &str, args: &[&str], seconds: u64) -> Option<String> {
     let mut cmd = Command::new(binary);
