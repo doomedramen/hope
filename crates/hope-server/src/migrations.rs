@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 19;
+const LATEST: i64 = 20;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
@@ -168,6 +168,14 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     }
+    if version < 20 {
+        sqlx::raw_sql(include_str!("migrations/0020_retention_time_indexes.sql"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("PRAGMA user_version = 20")
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -326,7 +334,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 19);
+        assert_eq!(version, 20);
         let source_cleanup_index: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='source_metrics_cleanup'",
         )
@@ -334,6 +342,16 @@ mod tests {
         .await
         .expect("source retention index");
         assert_eq!(source_cleanup_index, 1);
+        for index in ["source_observations_expiry", "child_batches_expiry"] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?",
+            )
+            .bind(index)
+            .fetch_one(&db)
+            .await
+            .expect("retention index");
+            assert_eq!(exists, 1, "missing retention index {index}");
+        }
         for table in [
             "child_batch_heads",
             "child_batches",
