@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 
 /// Version 5 is a data cleanup; version 6 resumes ordered SQL migrations.
-const LATEST: i64 = 25;
+const LATEST: i64 = 26;
 
 pub async fn run(db: &SqlitePool) -> Result<()> {
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
@@ -226,6 +226,16 @@ pub async fn run(db: &SqlitePool) -> Result<()> {
             .execute(&mut *tx)
             .await?;
     }
+    if version < 26 {
+        sqlx::raw_sql(include_str!(
+            "migrations/0026_completed_scans_network_time.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("PRAGMA user_version = 26")
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     Ok(())
 }
@@ -384,7 +394,7 @@ mod tests {
             .fetch_one(&db)
             .await
             .expect("database version");
-        assert_eq!(version, 25);
+        assert_eq!(version, 26);
         let source_cleanup_index: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='source_metrics_cleanup'",
         )

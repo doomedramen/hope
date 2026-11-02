@@ -239,13 +239,14 @@ pub async fn new_device(state: &State, host: &Host, network_id: &str) {
     if !settings.ntfy_enabled || !settings.notify_new_devices {
         return;
     }
-    let scanned_before: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM scans WHERE network_id=? AND status='completed'")
-            .bind(network_id)
-            .fetch_one(&state.0.db)
-            .await
-            .unwrap_or(0);
-    if scanned_before == 0 {
+    let scanned_before: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM scans WHERE network_id=? AND status='completed')",
+    )
+    .bind(network_id)
+    .fetch_one(&state.0.db)
+    .await
+    .unwrap_or(false);
+    if !scanned_before {
         return;
     }
     let address = host.addresses.first().cloned().unwrap_or_default();
