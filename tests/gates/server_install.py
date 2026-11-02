@@ -236,7 +236,7 @@ def validate_running(container):
 
 def validate_data(container):
     output = docker_exec(container, "python3", "-c", DB_SCRIPT).stdout.strip().split()
-    if len(output) != 3 or output[0] != "19" or output[1:] != ["1", "1"]:
+    if len(output) != 3 or output[0] != "26" or output[1:] != ["1", "1"]:
         raise RuntimeError(f"server database/data did not survive activation: {output}")
     return output
 
